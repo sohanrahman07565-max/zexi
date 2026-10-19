@@ -1,0 +1,30 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[build.environment]
+  SECRETS_SCAN_ENABLED = "false"
+  SECRETS_SCAN_OMIT_KEYS = "ADMIN_PASSWORD,ROOT_ADMIN_ID,SESSION_SECRET,TELEGRAM_BOT_TOKEN"
+  SECRETS_SCAN_OMIT_PATHS = ".data/**,scripts/**,dist/**"
+
+[functions]
+  node_bundler = "esbuild"
+
+# Telegram Webhook redirect
+[[redirects]]
+  from = "/api/telegram-webhook"
+  to = "/.netlify/functions/telegram-webhook"
+  status = 200
+
+# API endpoints
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+
+# SPA fallback
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

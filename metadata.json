@@ -1,0 +1,6 @@
+{
+  "name": "Telegram Group File & Link Manager",
+  "description": "Mobile-first Telegram group file and link delivery system with exact trigger matching, deep-link private delivery, and Netlify Blobs administration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
