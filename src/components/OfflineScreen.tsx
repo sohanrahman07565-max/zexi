@@ -328,16 +328,16 @@ export const OfflineScreen: React.FC<OfflineScreenProps> = ({
           <h2 className="text-xl sm:text-2xl font-black tracking-wider text-white uppercase drop-shadow-md">
             No Internet Connection
           </h2>
-          <p className="text-xs sm:text-sm text-slate-400 max-w-[280px] mx-auto leading-relaxed">
+          <p className="text-xs sm:text-sm text-zinc-400 max-w-[280px] mx-auto leading-relaxed">
             Your device is currently offline. Please check your Wi-Fi or mobile data connection and try again.
           </p>
 
-          <div className="flex items-center justify-center gap-2 pt-1 text-[11px] text-slate-500">
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-900 border border-slate-800">
+          <div className="flex items-center justify-center gap-2 pt-1 text-[11px] text-zinc-500">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-zinc-900 border border-zinc-800">
               <Radio className="w-3 h-3 text-red-400" />
               <span>Wi-Fi / Mobile Data</span>
             </span>
-            <span className="text-slate-600">•</span>
+            <span className="text-zinc-600">•</span>
             <span className="text-red-400 font-medium">Disconnected</span>
           </div>
         </div>
@@ -394,7 +394,7 @@ export const OfflineScreen: React.FC<OfflineScreenProps> = ({
           </button>
         </div>
 
-        <div className="mt-4 text-[10px] text-slate-500 tracking-wide">
+        <div className="mt-4 text-[10px] text-zinc-500 tracking-wide">
           App automatically returns to normal when network is back
         </div>
       </div>

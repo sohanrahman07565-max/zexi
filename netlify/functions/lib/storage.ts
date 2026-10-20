@@ -172,6 +172,8 @@ export interface BotUserRecord {
   firstSeenAt: string;
   lastActiveAt: string;
   interactionCount: number;
+  isBanned?: boolean;
+  bannedAt?: string;
 }
 
 export interface AppDatabase {
@@ -1025,6 +1027,49 @@ export class SharedStorageService {
     return Object.values(this.db.botUsers).sort((a, b) => 
       new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime()
     );
+  }
+
+  public async isUserBanned(userId: string | number): Promise<boolean> {
+    if (!userId) return false;
+    await this.loadLatest(false);
+    return Boolean(this.db.botUsers?.[String(userId).trim()]?.isBanned);
+  }
+
+  public async toggleBanUser(userId: string | number): Promise<BotUserRecord | null> {
+    if (!userId) return null;
+    const cleanId = String(userId).trim();
+    await this.loadLatest(true);
+    if (!this.db.botUsers) {
+      this.db.botUsers = {};
+    }
+
+    // Safety constraint: Admins must NEVER be bannable!
+    const admins = await this.getAdmins();
+    const settings = await this.getSettings();
+    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163');
+    const isAdmin = cleanId === rootAdminId || rootAdminId.includes(cleanId) || admins.some(a => String(a.telegramId) === cleanId || String(a.id) === cleanId);
+    if (isAdmin) {
+      throw new Error('Administrators cannot be banned');
+    }
+
+    let user = this.db.botUsers[cleanId];
+    if (!user) {
+      const now = new Date().toISOString();
+      user = {
+        id: cleanId,
+        firstSeenAt: now,
+        lastActiveAt: now,
+        interactionCount: 0,
+        isBanned: true,
+        bannedAt: now
+      };
+      this.db.botUsers[cleanId] = user;
+    } else {
+      user.isBanned = !user.isBanned;
+      user.bannedAt = user.isBanned ? new Date().toISOString() : undefined;
+    }
+    await this.persist();
+    return user;
   }
 
   // --- Design ---

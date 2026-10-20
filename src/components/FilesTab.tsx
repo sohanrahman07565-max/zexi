@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { ItemRecord, TriggerType, OpenMode, AdminUser, DesignConfig, api } from '../lib/api';
 import { 
   FileText, Link2, Plus, Search, Edit2, Trash2, ExternalLink, 
@@ -27,7 +27,7 @@ interface MultiFileEntry {
   previewUrl?: string;
 }
 
-export const FilesTab: React.FC<FilesTabProps> = ({
+const FilesTabComponent: React.FC<FilesTabProps> = ({
   items,
   currentUser,
   botUsername,
@@ -384,32 +384,34 @@ export const FilesTab: React.FC<FilesTabProps> = ({
     }
   };
 
-  const filteredItems = items.filter((item) => {
-    if (filter === 'file' && item.type !== 'file') return false;
-    if (filter === 'link' && item.type !== 'link') return false;
-    if (filter === 'temporary' && (item.type !== 'file' || item.retentionType !== 'temporary')) return false;
-    if (filter === 'permanent' && (item.type !== 'file' || item.retentionType === 'temporary')) return false;
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return (
-      item.name.toLowerCase().includes(q) ||
-      item.rawKeyword.toLowerCase().includes(q) ||
-      item.triggers.some((t) => t.toLowerCase().includes(q))
-    );
-  });
+  const filteredItems = useMemo(() => {
+    return items.filter((item) => {
+      if (filter === 'file' && item.type !== 'file') return false;
+      if (filter === 'link' && item.type !== 'link') return false;
+      if (filter === 'temporary' && (item.type !== 'file' || item.retentionType !== 'temporary')) return false;
+      if (filter === 'permanent' && (item.type !== 'file' || item.retentionType === 'temporary')) return false;
+      if (!search.trim()) return true;
+      const q = search.toLowerCase();
+      return (
+        item.name.toLowerCase().includes(q) ||
+        item.rawKeyword.toLowerCase().includes(q) ||
+        item.triggers.some((t) => t.toLowerCase().includes(q))
+      );
+    });
+  }, [items, filter, search]);
 
   return (
     <div className="space-y-4 pb-28">
       {/* Search and Unified Add Button */}
       <div className="flex items-center gap-2">
         <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search files, links, triggers..."
-            className="w-full bg-slate-900/90 border border-slate-800 rounded-xl py-2 pl-9 pr-3 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-sky-500 transition-colors"
+            className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl py-2 pl-9 pr-3 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
           />
         </div>
 
@@ -426,11 +428,11 @@ export const FilesTab: React.FC<FilesTabProps> = ({
       </div>
 
       {/* Segmented Filter */}
-      <div className="flex p-1 bg-slate-900/90 border border-slate-800/80 rounded-xl text-xs flex-wrap gap-1">
+      <div className="flex p-1 bg-zinc-900/90 border border-zinc-800/80 rounded-xl text-xs flex-wrap gap-1">
         <button
           onClick={() => setFilter('all')}
           className={`flex-1 min-w-[55px] py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-            filter === 'all' ? 'bg-slate-800 text-white shadow-xs' : 'text-slate-400 hover:text-slate-200'
+            filter === 'all' ? 'bg-zinc-800 text-white shadow-xs' : 'text-zinc-400 hover:text-zinc-200'
           }`}
         >
           All ({items.length})
@@ -438,7 +440,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
         <button
           onClick={() => setFilter('file')}
           className={`flex-1 min-w-[55px] py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-            filter === 'file' ? 'bg-sky-500/20 text-sky-300 shadow-xs' : 'text-slate-400 hover:text-slate-200'
+            filter === 'file' ? 'bg-red-500/20 text-sky-300 shadow-xs' : 'text-zinc-400 hover:text-zinc-200'
           }`}
         >
           Files ({items.filter((i) => i.type === 'file').length})
@@ -446,7 +448,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
         <button
           onClick={() => setFilter('temporary')}
           className={`flex-1 min-w-[80px] py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-            filter === 'temporary' ? 'bg-amber-500/20 text-amber-300 shadow-xs font-semibold' : 'text-slate-400 hover:text-slate-200'
+            filter === 'temporary' ? 'bg-amber-500/20 text-amber-300 shadow-xs font-semibold' : 'text-zinc-400 hover:text-zinc-200'
           }`}
         >
           ⏳ Temporary ({items.filter((i) => i.type === 'file' && i.retentionType === 'temporary').length})
@@ -454,7 +456,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
         <button
           onClick={() => setFilter('permanent')}
           className={`flex-1 min-w-[80px] py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-            filter === 'permanent' ? 'bg-emerald-500/20 text-emerald-300 shadow-xs font-semibold' : 'text-slate-400 hover:text-slate-200'
+            filter === 'permanent' ? 'bg-emerald-500/20 text-emerald-300 shadow-xs font-semibold' : 'text-zinc-400 hover:text-zinc-200'
           }`}
         >
           ♾️ Permanent ({items.filter((i) => i.type === 'file' && i.retentionType !== 'temporary').length})
@@ -462,7 +464,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
         <button
           onClick={() => setFilter('link')}
           className={`flex-1 min-w-[55px] py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-            filter === 'link' ? 'bg-indigo-500/20 text-indigo-300 shadow-xs' : 'text-slate-400 hover:text-slate-200'
+            filter === 'link' ? 'bg-indigo-500/20 text-indigo-300 shadow-xs' : 'text-zinc-400 hover:text-zinc-200'
           }`}
         >
           Links ({items.filter((i) => i.type === 'link').length})
@@ -472,7 +474,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
       {/* Items List */}
       <div className="space-y-3">
         {filteredItems.length === 0 ? (
-          <div className="glass-panel rounded-2xl p-8 text-center border border-slate-800 text-slate-400 text-xs">
+          <div className="glass-panel rounded-2xl p-8 text-center border border-zinc-800 text-zinc-400 text-xs">
             No matching items found.
           </div>
         ) : (
@@ -488,7 +490,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
             return (
               <div
                 key={item.id}
-                className="glass-panel rounded-2xl p-4 border border-slate-800/80 hover:border-slate-700/80 transition-all space-y-3 shadow-md"
+                className="glass-panel rounded-2xl p-4 border border-zinc-800/80 hover:border-zinc-700/80 transition-all space-y-3 shadow-md"
               >
                 {/* Header Row */}
                 <div className="flex items-start justify-between gap-3">
@@ -496,7 +498,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                     <div
                       className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
                         item.type === 'file'
-                          ? 'bg-sky-500/10 text-sky-400'
+                          ? 'bg-red-500/10 text-red-400'
                           : 'bg-indigo-500/10 text-indigo-400'
                       }`}
                     >
@@ -506,7 +508,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                       <div className="text-sm font-semibold text-white truncate">{item.name}</div>
                       
                       {/* Typographic metadata */}
-                      <div className="flex items-center gap-1.5 text-xs text-slate-400 mt-1 flex-wrap">
+                      <div className="flex items-center gap-1.5 text-xs text-zinc-400 mt-1 flex-wrap">
                         <button
                           type="button"
                           onClick={(e) => {
@@ -514,13 +516,13 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                             copySingleTag(primaryTrigger);
                           }}
                           title={`Click to copy ${primaryTrigger}`}
-                          className="font-mono text-sky-400 hover:text-sky-300 font-semibold flex items-center gap-1 cursor-pointer transition-colors group"
+                          className="font-mono text-red-400 hover:text-sky-300 font-semibold flex items-center gap-1 cursor-pointer transition-colors group"
                         >
                           <span>{primaryTrigger}</span>
                           {copiedTag === primaryTrigger ? (
                             <Check className="w-3 h-3 text-emerald-400" />
                           ) : (
-                            <Copy className="w-3 h-3 text-slate-500 group-hover:text-sky-400 opacity-60 group-hover:opacity-100" />
+                            <Copy className="w-3 h-3 text-zinc-500 group-hover:text-red-400 opacity-60 group-hover:opacity-100" />
                           )}
                         </button>
                         <span>·</span>
@@ -534,10 +536,10 @@ export const FilesTab: React.FC<FilesTabProps> = ({
 
                 {/* Content details snippet */}
                 {item.type === 'file' && (
-                  <div className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800/80 text-xs text-slate-300 space-y-1.5">
-                    <div className="flex items-center justify-between text-[11px] text-slate-400">
+                  <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80 text-xs text-zinc-300 space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px] text-zinc-400">
                       <span>File: {item.fileName || 'Telegram Media'}</span>
-                      <span className="font-mono text-[10px] bg-slate-950 px-1.5 py-0.5 rounded border border-slate-800 text-slate-400">
+                      <span className="font-mono text-[10px] bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800 text-zinc-400">
                         ID: {item.id}
                       </span>
                     </div>
@@ -573,16 +575,16 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                     </div>
 
                     {item.caption && (
-                      <div className="text-slate-300 italic pt-0.5 text-[11px]">"{item.caption}"</div>
+                      <div className="text-zinc-300 italic pt-0.5 text-[11px]">"{item.caption}"</div>
                     )}
                   </div>
                 )}
 
                 {item.type === 'link' && (
-                  <div className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800/80 text-xs text-slate-300 space-y-1.5">
-                    <div className="flex items-center justify-between text-[11px] text-slate-400">
-                      <span className="truncate max-w-[220px] text-slate-300 font-mono">{item.url}</span>
-                      <span className="font-mono text-[10px] bg-slate-950 px-1.5 py-0.5 rounded border border-slate-800 text-slate-400">
+                  <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80 text-xs text-zinc-300 space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px] text-zinc-400">
+                      <span className="truncate max-w-[220px] text-zinc-300 font-mono">{item.url}</span>
+                      <span className="font-mono text-[10px] bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800 text-zinc-400">
                         ID: {item.id}
                       </span>
                     </div>
@@ -590,7 +592,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                       <span className="text-indigo-400 font-medium">
                         {item.openMode === 'webapp' ? '📱 Telegram Mini App' : '🌐 Normal Browser'}
                       </span>
-                      <span className="text-slate-400">
+                      <span className="text-zinc-400">
                         Button: <strong className="text-white">{item.buttonText || 'Open Link'}</strong>
                       </span>
                     </div>
@@ -599,14 +601,14 @@ export const FilesTab: React.FC<FilesTabProps> = ({
 
                 {/* INLINE QUICK ACTIONS ON STORED FILES/LINKS LIST */}
                 {/* User Spec: Place quick-action options directly underneath each saved file/link card in the list view: [ Edit ] [ Delete ] [ Generated Link ] */}
-                <div className="pt-2.5 border-t border-slate-800/80 grid grid-cols-3 gap-1.5 sm:gap-2">
+                <div className="pt-2.5 border-t border-zinc-800/80 grid grid-cols-3 gap-1.5 sm:gap-2">
                   {/* Quick Option 1: Edit */}
                   <button
                     type="button"
                     onClick={() => openEditModal(item)}
-                    className="py-2 px-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-200 hover:text-white border border-slate-800 hover:border-sky-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-xs"
+                    className="py-2 px-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white border border-zinc-800 hover:border-red-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-xs"
                   >
-                    <Edit2 className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                    <Edit2 className="w-3.5 h-3.5 text-red-400 shrink-0" />
                     <span>Edit</span>
                   </button>
 
@@ -614,7 +616,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                   <button
                     type="button"
                     onClick={() => setDeleteConfirmId(item.id)}
-                    className="py-2 px-2 rounded-xl bg-slate-900 hover:bg-rose-950/40 text-slate-300 hover:text-rose-400 border border-slate-800 hover:border-rose-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-xs"
+                    className="py-2 px-2 rounded-xl bg-zinc-900 hover:bg-rose-950/40 text-zinc-300 hover:text-rose-400 border border-zinc-800 hover:border-rose-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-xs"
                   >
                     <Trash2 className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                     <span>Delete</span>
@@ -653,15 +655,15 @@ export const FilesTab: React.FC<FilesTabProps> = ({
       {/* Delete Confirmation Modal */}
       {deleteConfirmId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-          <div className="glass-panel w-full max-w-xs rounded-3xl p-5 border border-slate-700 shadow-2xl">
+          <div className="glass-panel w-full max-w-xs rounded-3xl p-5 border border-zinc-700 shadow-2xl">
             <h4 className="font-semibold text-white text-sm mb-1">Delete this item?</h4>
-            <p className="text-xs text-slate-400 mb-4">
+            <p className="text-xs text-zinc-400 mb-4">
               This will permanently remove the item, trigger mappings, and metadata.
             </p>
             <div className="flex gap-2">
               <button
                 onClick={() => setDeleteConfirmId(null)}
-                className="flex-1 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium cursor-pointer"
+                className="flex-1 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium cursor-pointer"
               >
                 Cancel
               </button>
@@ -680,22 +682,22 @@ export const FilesTab: React.FC<FilesTabProps> = ({
       {/* REDESIGNED STREAMLINED ADD / EDIT FORM MODAL */}
       {modalMode !== 'none' && (
         <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/80 backdrop-blur-md">
-          <div className="glass-panel w-full sm:max-w-md max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-3xl p-6 border border-slate-700 shadow-2xl space-y-4 animate-in slide-in-from-bottom sm:zoom-in-95 duration-200">
+          <div className="glass-panel w-full sm:max-w-md max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-3xl p-6 border border-zinc-700 shadow-2xl space-y-4 animate-in slide-in-from-bottom sm:zoom-in-95 duration-200">
             {/* Modal Header */}
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
               <div>
                 <h3 className="font-bold text-white text-base">
                   {modalMode === 'edit' ? 'Edit Stored Item' : 'Add New File / Link'}
                 </h3>
-                <div className="flex items-center gap-2 mt-0.5 text-[11px] text-slate-400">
-                  <span className="font-mono text-sky-400 font-semibold">ID: {autoGeneratedId}</span>
-                  <span className="text-slate-600">•</span>
+                <div className="flex items-center gap-2 mt-0.5 text-[11px] text-zinc-400">
+                  <span className="font-mono text-red-400 font-semibold">ID: {autoGeneratedId}</span>
+                  <span className="text-zinc-600">•</span>
                   <span>Auto-Generated</span>
                 </div>
               </div>
               <button
                 onClick={() => setModalMode('none')}
-                className="p-1 rounded-lg text-slate-400 hover:text-white cursor-pointer"
+                className="p-1 rounded-lg text-zinc-400 hover:text-white cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -710,7 +712,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
 
             {/* Type Switcher for Add Mode (File vs Link) */}
             {modalMode === 'add' && (
-              <div className="grid grid-cols-2 gap-2 p-1 bg-slate-900 border border-slate-800 rounded-xl">
+              <div className="grid grid-cols-2 gap-2 p-1 bg-zinc-900 border border-zinc-800 rounded-xl">
                 <button
                   type="button"
                   onClick={() => {
@@ -721,8 +723,8 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                   }}
                   className={`py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
                     itemType === 'file'
-                      ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40 shadow-xs'
-                      : 'text-slate-400 hover:text-white'
+                      ? 'bg-red-500/20 text-sky-300 border border-red-500/40 shadow-xs'
+                      : 'text-zinc-400 hover:text-white'
                   }`}
                 >
                   <FileText className="w-3.5 h-3.5" />
@@ -740,7 +742,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                   className={`py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
                     itemType === 'link'
                       ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-xs'
-                      : 'text-slate-400 hover:text-white'
+                      : 'text-zinc-400 hover:text-white'
                   }`}
                 >
                   <Link2 className="w-3.5 h-3.5" />
@@ -752,7 +754,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
             <form onSubmit={handleSave} className="space-y-4">
               {/* 1. File / Link Name field */}
               <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                <label className="block text-xs font-semibold text-zinc-300 mb-1">
                   {itemType === 'file' ? 'File Name *' : 'Link Title / Name *'}
                 </label>
                 <input
@@ -761,17 +763,17 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder={itemType === 'file' ? 'e.g. Free Fire Mod APK' : 'e.g. Official Community Link'}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl py-2 px-3 text-sm text-white focus:outline-none focus:border-sky-500 transition-colors"
+                  className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-sm text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
                 />
               </div>
 
               {/* 2. File Trigger field & Trigger Type Selection */}
               <div>
                 <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs font-semibold text-slate-300">
+                  <label className="text-xs font-semibold text-zinc-300">
                     File Trigger *
                   </label>
-                  <span className="text-xs font-mono text-sky-400 font-bold">
+                  <span className="text-xs font-mono text-red-400 font-bold">
                     Active: {previewTrigger()}
                   </span>
                 </div>
@@ -783,8 +785,8 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                     onClick={() => setTriggerType('hashtag')}
                     className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
                       triggerType === 'hashtag'
-                        ? 'bg-sky-500/20 border-sky-500 text-sky-300 font-semibold'
-                        : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'
+                        ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
+                        : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
                     }`}
                   >
                     # Hashtag
@@ -794,8 +796,8 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                     onClick={() => setTriggerType('slash')}
                     className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
                       triggerType === 'slash'
-                        ? 'bg-sky-500/20 border-sky-500 text-sky-300 font-semibold'
-                        : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'
+                        ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
+                        : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
                     }`}
                   >
                     / Slash
@@ -805,8 +807,8 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                     onClick={() => setTriggerType('normal')}
                     className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
                       triggerType === 'normal'
-                        ? 'bg-sky-500/20 border-sky-500 text-sky-300 font-semibold'
-                        : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'
+                        ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
+                        : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
                     }`}
                   >
                     🔤 Normal
@@ -819,33 +821,33 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                   value={rawKeyword}
                   onChange={(e) => setRawKeyword(e.target.value)}
                   placeholder="e.g. ff (without prefix)"
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl py-2 px-3 text-sm text-white font-mono focus:outline-none focus:border-sky-500 transition-colors"
+                  className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-sm text-white font-mono focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
                 />
               </div>
 
               {/* 3. Upload from Gallery with Multi-File support */}
               {itemType === 'file' && (
-                <div className="p-3.5 rounded-2xl bg-gradient-to-b from-slate-900 via-slate-900 to-slate-950 border border-slate-700/80 space-y-3">
+                <div className="p-3.5 rounded-2xl bg-gradient-to-b from-zinc-900 via-zinc-900 to-zinc-950 border border-zinc-700/80 space-y-3">
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-bold text-white flex items-center gap-1.5">
-                      <Upload className="w-4 h-4 text-sky-400" />
+                      <Upload className="w-4 h-4 text-red-400" />
                       <span>Upload from Gallery / Files</span>
                     </label>
-                    <span className="text-[10px] text-sky-300 bg-sky-950/60 border border-sky-500/30 px-2 py-0.5 rounded-full font-semibold">
+                    <span className="text-[10px] text-sky-300 bg-sky-950/60 border border-red-500/30 px-2 py-0.5 rounded-full font-semibold">
                       Multi-File Supported
                     </span>
                   </div>
 
-                  <p className="text-[11px] text-slate-400">
+                  <p className="text-[11px] text-zinc-400">
                     Select one or multiple files (Photos, Videos, APK, ZIP, Documents).
                   </p>
 
-                  <label className="w-full py-3 px-4 rounded-xl border border-dashed border-sky-500/40 hover:border-sky-400 bg-sky-500/10 hover:bg-sky-500/15 flex flex-col items-center justify-center gap-1 cursor-pointer transition-all">
-                    <Paperclip className="w-5 h-5 text-sky-400" />
+                  <label className="w-full py-3 px-4 rounded-xl border border-dashed border-red-500/40 hover:border-sky-400 bg-red-500/10 hover:bg-red-500/15 flex flex-col items-center justify-center gap-1 cursor-pointer transition-all">
+                    <Paperclip className="w-5 h-5 text-red-400" />
                     <span className="text-xs font-semibold text-white">
                       Browse &amp; Select Multiple Files
                     </span>
-                    <span className="text-[10px] text-slate-400">
+                    <span className="text-[10px] text-zinc-400">
                       Tap to select from Gallery or Storage
                     </span>
                     <input
@@ -859,7 +861,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                   {/* Selected Files Preview List with (X) Remove icon on each */}
                   {selectedFiles.length > 0 && (
                     <div className="space-y-1.5 pt-1">
-                      <div className="text-[11px] font-semibold text-slate-300 flex items-center justify-between">
+                      <div className="text-[11px] font-semibold text-zinc-300 flex items-center justify-between">
                         <span>Selected Files ({selectedFiles.length}):</span>
                         <button
                           type="button"
@@ -874,7 +876,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                         {selectedFiles.map((f) => (
                           <div
                             key={f.id}
-                            className="flex items-center justify-between p-2 rounded-xl bg-slate-950/90 border border-slate-800 text-xs group hover:border-slate-700 transition-colors"
+                            className="flex items-center justify-between p-2 rounded-xl bg-zinc-950/90 border border-zinc-800 text-xs group hover:border-zinc-700 transition-colors"
                           >
                             <div className="flex items-center gap-2 min-w-0 pr-2">
                               {f.previewUrl ? (
@@ -888,13 +890,13 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                               ) : f.type === 'audio' ? (
                                 <Music className="w-4 h-4 text-emerald-400 shrink-0" />
                               ) : (
-                                <FileText className="w-4 h-4 text-sky-400 shrink-0" />
+                                <FileText className="w-4 h-4 text-red-400 shrink-0" />
                               )}
                               <div className="min-w-0">
                                 <div className="text-xs font-medium text-white truncate max-w-[200px]">
                                   {f.name}
                                 </div>
-                                <div className="text-[10px] text-slate-500">
+                                <div className="text-[10px] text-zinc-500">
                                   {(f.size / (1024 * 1024)).toFixed(2)} MB · {f.type}
                                 </div>
                               </div>
@@ -905,7 +907,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                               type="button"
                               onClick={() => handleRemoveFile(f.id)}
                               title={`Remove ${f.name}`}
-                              className="w-6 h-6 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 flex items-center justify-center transition-colors cursor-pointer shrink-0"
+                              className="w-6 h-6 rounded-lg bg-zinc-800 hover:bg-rose-500/20 text-zinc-400 hover:text-rose-400 flex items-center justify-center transition-colors cursor-pointer shrink-0"
                             >
                               <X className="w-3.5 h-3.5" />
                             </button>
@@ -916,7 +918,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                   )}
 
                   {uploadStatus && (
-                    <div className="text-[11px] text-sky-400 font-mono flex items-center gap-1.5 pt-1">
+                    <div className="text-[11px] text-red-400 font-mono flex items-center gap-1.5 pt-1">
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
                       <span>{uploadStatus}</span>
                     </div>
@@ -928,19 +930,19 @@ export const FilesTab: React.FC<FilesTabProps> = ({
               {itemType === 'link' && (
                 <div className="space-y-3">
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1">Target URL *</label>
+                    <label className="block text-xs font-semibold text-zinc-300 mb-1">Target URL *</label>
                     <input
                       type="url"
                       required
                       value={url}
                       onChange={(e) => setUrl(e.target.value)}
                       placeholder="https://example.com"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-xl py-2 px-3 text-sm text-white focus:outline-none focus:border-sky-500"
+                      className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-sm text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
                     />
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">Open Mode *</label>
+                    <label className="block text-xs font-semibold text-zinc-300 mb-1.5">Open Mode *</label>
                     <div className="grid grid-cols-2 gap-2">
                       <button
                         type="button"
@@ -948,12 +950,12 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                         className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
                           openMode === 'browser'
                             ? 'bg-indigo-500/20 border-indigo-500 text-indigo-300'
-                            : 'bg-slate-900 border-slate-700 text-slate-400'
+                            : 'bg-zinc-900 border-zinc-700 text-zinc-400'
                         }`}
                       >
                         <Globe className="w-4 h-4 mb-1 text-indigo-400" />
                         <div className="text-xs font-semibold text-white">Web Browser</div>
-                        <div className="text-[10px] text-slate-400">External browser</div>
+                        <div className="text-[10px] text-zinc-400">External browser</div>
                       </button>
 
                       <button
@@ -961,13 +963,13 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                         onClick={() => setOpenMode('webapp')}
                         className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
                           openMode === 'webapp'
-                            ? 'bg-sky-500/20 border-sky-500 text-sky-300'
-                            : 'bg-slate-900 border-slate-700 text-slate-400'
+                            ? 'bg-red-500/20 border-red-500 text-sky-300'
+                            : 'bg-zinc-900 border-zinc-700 text-zinc-400'
                         }`}
                       >
-                        <Smartphone className="w-4 h-4 mb-1 text-sky-400" />
+                        <Smartphone className="w-4 h-4 mb-1 text-red-400" />
                         <div className="text-xs font-semibold text-white">Telegram Mini App</div>
-                        <div className="text-[10px] text-slate-400">Embedded view</div>
+                        <div className="text-[10px] text-zinc-400">Embedded view</div>
                       </button>
                     </div>
                   </div>
@@ -977,7 +979,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
               {/* 4. Private Delivery Message & Inline Button Text (Pre-filled with default texts, fully editable) */}
               <div className="grid grid-cols-1 gap-3 pt-1">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  <label className="block text-xs font-semibold text-zinc-300 mb-1">
                     Private Delivery Message
                   </label>
                   <textarea
@@ -985,12 +987,12 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                     value={caption}
                     onChange={(e) => setCaption(e.target.value)}
                     placeholder="Message sent in private DM when user triggers this item"
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-sky-500"
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  <label className="block text-xs font-semibold text-zinc-300 mb-1">
                     Inline Button Text
                   </label>
                   <input
@@ -998,7 +1000,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                     value={buttonText}
                     onChange={(e) => setButtonText(e.target.value)}
                     placeholder="e.g. 📥 Download File or 🌐 Open Link"
-                    className="w-full bg-slate-900 border border-slate-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-sky-500"
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
                   />
                 </div>
               </div>
@@ -1006,17 +1008,17 @@ export const FilesTab: React.FC<FilesTabProps> = ({
               {/* Auto-generated File ID / Link ID */}
               <div>
                 <div className="flex items-center justify-between mb-1">
-                  <label className="text-xs font-semibold text-slate-300">
+                  <label className="text-xs font-semibold text-zinc-300">
                     {itemType === 'file' ? 'Auto-generated File ID' : 'Auto-generated Link ID'}
                   </label>
-                  <span className="text-[10px] text-slate-500">Auto-assigned identifier</span>
+                  <span className="text-[10px] text-zinc-500">Auto-assigned identifier</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
                     readOnly
                     value={autoGeneratedId}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl py-2 px-3 text-xs text-sky-400 font-mono font-semibold focus:outline-none select-all cursor-default"
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl py-2 px-3 text-xs text-red-400 font-mono font-semibold focus:outline-none select-all cursor-default"
                   />
                   <button
                     type="button"
@@ -1026,19 +1028,19 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                       setTimeout(() => setCopiedTag((p) => (p === autoGeneratedId ? null : p)), 1800);
                     }}
                     title="Copy ID"
-                    className="p-2 rounded-xl bg-slate-900 border border-slate-700/80 hover:bg-slate-800 text-slate-300 hover:text-white transition-colors cursor-pointer shrink-0"
+                    className="p-2 rounded-xl bg-zinc-900 border border-zinc-700/80 hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors cursor-pointer shrink-0"
                   >
                     {copiedTag === autoGeneratedId ? (
                       <Check className="w-4 h-4 text-emerald-400" />
                     ) : (
-                      <Copy className="w-4 h-4 text-slate-400" />
+                      <Copy className="w-4 h-4 text-zinc-400" />
                     )}
                   </button>
                 </div>
               </div>
 
               {/* 5. Permanent vs. Temporary Storage Toggle with expiration days */}
-              <div className="p-3.5 rounded-2xl bg-gradient-to-b from-slate-900 to-slate-950 border border-slate-700/80 space-y-3">
+              <div className="p-3.5 rounded-2xl bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-700/80 space-y-3">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-bold text-white flex items-center gap-1.5">
                     <Clock className="w-4 h-4 text-amber-400" />
@@ -1060,14 +1062,14 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                     className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
                       retentionType === 'permanent'
                         ? 'bg-emerald-500/15 border-emerald-500 text-emerald-300 ring-1 ring-emerald-500/40'
-                        : 'bg-slate-900/90 border-slate-800 text-slate-400 hover:text-white'
+                        : 'bg-zinc-900/90 border-zinc-800 text-zinc-400 hover:text-white'
                     }`}
                   >
                     <div className="flex items-center gap-1.5 font-semibold text-xs text-white">
                       <span>♾️</span>
                       <span>Permanent</span>
                     </div>
-                    <div className="text-[10px] text-slate-400 mt-0.5">
+                    <div className="text-[10px] text-zinc-400 mt-0.5">
                       Never deleted automatically
                     </div>
                   </button>
@@ -1078,14 +1080,14 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                     className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
                       retentionType === 'temporary'
                         ? 'bg-amber-500/15 border-amber-500 text-amber-300 ring-1 ring-amber-500/40'
-                        : 'bg-slate-900/90 border-slate-800 text-slate-400 hover:text-white'
+                        : 'bg-zinc-900/90 border-zinc-800 text-zinc-400 hover:text-white'
                     }`}
                   >
                     <div className="flex items-center gap-1.5 font-semibold text-xs text-white">
                       <span>⏳</span>
                       <span>Temporary</span>
                     </div>
-                    <div className="text-[10px] text-slate-400 mt-0.5">
+                    <div className="text-[10px] text-zinc-400 mt-0.5">
                       Auto-delete after set days
                     </div>
                   </button>
@@ -1093,12 +1095,12 @@ export const FilesTab: React.FC<FilesTabProps> = ({
 
                 {/* Expiration Days option */}
                 {retentionType === 'temporary' && (
-                  <div className="pt-2 border-t border-slate-800/80 space-y-2.5 animate-in fade-in duration-150">
+                  <div className="pt-2 border-t border-zinc-800/80 space-y-2.5 animate-in fade-in duration-150">
                     <div className="flex items-center justify-between">
                       <label className="text-xs font-semibold text-amber-300">
                         Expiration Duration (Days)
                       </label>
-                      <span className="text-[11px] text-slate-400">
+                      <span className="text-[11px] text-zinc-400">
                         {retentionDays} Days
                       </span>
                     </div>
@@ -1113,9 +1115,9 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                           const val = Math.max(1, parseInt(e.target.value, 10) || 1);
                           setRetentionDays(val);
                         }}
-                        className="w-20 bg-slate-950 border border-amber-500/40 rounded-xl py-1.5 px-3 text-sm text-white font-mono font-bold focus:outline-none focus:border-amber-400"
+                        className="w-20 bg-zinc-950 border border-amber-500/40 rounded-xl py-1.5 px-3 text-sm text-white font-mono font-bold focus:outline-none focus:border-amber-400"
                       />
-                      <span className="text-xs text-slate-400">Days</span>
+                      <span className="text-xs text-zinc-400">Days</span>
 
                       {/* Quick day presets */}
                       <div className="flex items-center gap-1 flex-wrap">
@@ -1126,8 +1128,8 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                             onClick={() => setRetentionDays(d)}
                             className={`px-2 py-1 rounded-lg text-[10px] font-semibold border transition-all cursor-pointer ${
                               retentionDays === d
-                                ? 'bg-amber-500 text-slate-950 border-amber-400 font-bold'
-                                : 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700'
+                                ? 'bg-amber-500 text-zinc-950 border-amber-400 font-bold'
+                                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-zinc-700'
                             }`}
                           >
                             {d}d
@@ -1151,7 +1153,7 @@ export const FilesTab: React.FC<FilesTabProps> = ({
                 <button
                   type="button"
                   onClick={() => setModalMode('none')}
-                  className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer transition-colors"
+                  className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold cursor-pointer transition-colors"
                 >
                   Cancel
                 </button>
@@ -1180,3 +1182,5 @@ export const FilesTab: React.FC<FilesTabProps> = ({
     </div>
   );
 };
+
+export const FilesTab = React.memo(FilesTabComponent);

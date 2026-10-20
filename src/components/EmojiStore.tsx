@@ -196,10 +196,10 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
   return (
     <div className="space-y-4 pb-28">
       {/* Header bar */}
-      <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+      <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
         <button
           onClick={onBack}
-          className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white transition-colors cursor-pointer"
+          className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white transition-colors cursor-pointer"
         >
           <ChevronLeft className="w-4 h-4" />
           <span>Back to Menu</span>
@@ -216,29 +216,29 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
       </div>
 
       {/* Description banner */}
-      <div className="glass-panel rounded-2xl p-3.5 border border-pink-500/20 bg-gradient-to-r from-pink-500/10 via-slate-900 to-indigo-500/10 text-xs text-slate-300 space-y-1">
+      <div className="glass-panel rounded-2xl p-3.5 border border-pink-500/20 bg-gradient-to-r from-pink-500/10 via-zinc-900 to-indigo-500/10 text-xs text-zinc-300 space-y-1">
         <p className="font-semibold text-white flex items-center gap-1.5">
           <span>💡 One-Tap Copy</span>
         </p>
-        <p className="text-[11px] text-slate-400">
+        <p className="text-[11px] text-zinc-400">
           Tap any emoji to copy it to your clipboard immediately. Use these to style your bot messages, buttons, and trigger keywords.
         </p>
       </div>
 
       {/* Search Input */}
       <div className="relative">
-        <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+        <Search className="w-4 h-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
         <input
           type="text"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search emojis..."
-          className="w-full bg-slate-900 border border-slate-700/80 rounded-xl py-2 pl-10 pr-10 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-pink-500 transition-all"
+          className="w-full bg-zinc-900 border border-zinc-700/80 rounded-xl py-2 pl-10 pr-10 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-pink-500 transition-all"
         />
         {search && (
           <button
             onClick={() => setSearch('')}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white p-1"
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white p-1"
           >
             <X className="w-3.5 h-3.5" />
           </button>
@@ -252,7 +252,7 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
           className={`py-1.5 px-3 rounded-xl font-medium shrink-0 flex items-center gap-1.5 transition-all cursor-pointer ${
             activeCategory === 'all'
               ? 'bg-pink-500 text-white shadow-md shadow-pink-500/20 font-bold'
-              : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+              : 'bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800'
           }`}
         >
           <Layers className="w-3.5 h-3.5" />
@@ -269,7 +269,7 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
               className={`py-1.5 px-3 rounded-xl font-medium shrink-0 flex items-center gap-1.5 transition-all cursor-pointer ${
                 isActive
                   ? 'bg-pink-500 text-white shadow-md shadow-pink-500/20 font-bold'
-                  : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
+                  : 'bg-zinc-900 text-zinc-400 hover:text-white border border-zinc-800'
               }`}
             >
               <Icon className="w-3.5 h-3.5" />
@@ -280,14 +280,14 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
       </div>
 
       {/* Emoji Matrix */}
-      <div className="glass-panel rounded-2xl p-3.5 border border-slate-800/80">
+      <div className="glass-panel rounded-2xl p-3.5 border border-zinc-800/80">
         <div className="grid grid-cols-6 sm:grid-cols-8 md:grid-cols-10 gap-2">
           {filteredEmojis.map((emoji, index) => (
             <button
               key={`${emoji}-${index}`}
               type="button"
               onClick={() => handleCopy(emoji)}
-              className="h-12 rounded-xl bg-slate-900/90 border border-slate-800 hover:border-pink-500/60 hover:bg-slate-800/90 text-2xl flex items-center justify-center transition-all active:scale-90 hover:scale-105 cursor-pointer shadow-xs group relative"
+              className="h-12 rounded-xl bg-zinc-900/90 border border-zinc-800 hover:border-pink-500/60 hover:bg-zinc-800/90 text-2xl flex items-center justify-center transition-all active:scale-90 hover:scale-105 cursor-pointer shadow-xs group relative"
               title={`Tap to copy ${emoji}`}
             >
               <span>{emoji}</span>
@@ -297,9 +297,9 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
       </div>
 
       {/* Floating Collector / Multi-Copy Box */}
-      <div className="glass-panel rounded-2xl p-3 border border-slate-800 bg-slate-950/90 space-y-2">
+      <div className="glass-panel rounded-2xl p-3 border border-zinc-800 bg-zinc-950/90 space-y-2">
         <div className="flex items-center justify-between text-xs">
-          <span className="text-slate-400 font-medium">Emoji Collector:</span>
+          <span className="text-zinc-400 font-medium">Emoji Collector:</span>
           {collectedEmojis && (
             <button
               onClick={() => setCollectedEmojis('')}
@@ -312,8 +312,8 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
         </div>
 
         <div className="flex items-center gap-2">
-          <div className="flex-1 bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-base text-white tracking-widest min-h-10 flex items-center overflow-x-auto">
-            {collectedEmojis || <span className="text-slate-500 text-xs tracking-normal">Tap emojis above to collect...</span>}
+          <div className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-base text-white tracking-widest min-h-10 flex items-center overflow-x-auto">
+            {collectedEmojis || <span className="text-zinc-500 text-xs tracking-normal">Tap emojis above to collect...</span>}
           </div>
 
           <button
@@ -329,7 +329,7 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
 
       {/* Floating Copy Toast */}
       {toastEmoji && (
-        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 bg-slate-900/95 text-white border border-pink-500/40 shadow-2xl px-4 py-2 rounded-2xl flex items-center gap-2 text-xs font-semibold backdrop-blur-xl animate-in fade-in zoom-in-95 duration-150">
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 bg-zinc-900/95 text-white border border-pink-500/40 shadow-2xl px-4 py-2 rounded-2xl flex items-center gap-2 text-xs font-semibold backdrop-blur-xl animate-in fade-in zoom-in-95 duration-150">
           <Check className="w-4 h-4 text-emerald-400" />
           <span>Copied:</span>
           <span className="text-base">{toastEmoji}</span>

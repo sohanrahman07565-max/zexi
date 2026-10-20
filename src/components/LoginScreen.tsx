@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { api, AdminUser } from '../lib/api';
-import { AlertCircle, Eye, EyeOff, ShieldCheck, Lock, CheckCircle2 } from 'lucide-react';
-import { ZexiLogo } from './ZexiLogo';
+import { AlertCircle, Eye, EyeOff, ShieldCheck } from 'lucide-react';
 
 interface LoginScreenProps {
   onSuccess: (admin: AdminUser) => void;
@@ -16,76 +15,100 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Real-time verification state
-  const [isVerifying, setIsVerifying] = useState(false);
-  const [isValidCredentials, setIsValidCredentials] = useState(false);
+  // Validation state: button is strictly clickable ONLY when correct credentials / password are provided
+  const [isCredentialsValid, setIsCredentialsValid] = useState(false);
 
   // Successful Login Exit Animation state
   const [isSuccessExiting, setIsSuccessExiting] = useState(false);
 
-  const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // Debounced real-time credential validation without exposing any "Verifying" text
+  const validationTimerRef = useRef<any>(null);
 
-  // Real-time validation as user types
   useEffect(() => {
-    if (debounceTimerRef.current) {
-      clearTimeout(debounceTimerRef.current);
-    }
-
     const cleanUser = username.trim();
     const cleanPass = password.trim();
 
-    // If either field is empty, disable button immediately
+    if (validationTimerRef.current) {
+      clearTimeout(validationTimerRef.current);
+    }
+
+    // Reset error when user changes inputs
+    if (error) {
+      setError(null);
+    }
+
+    // If either field is empty, credentials are immediately not valid
     if (!cleanUser || !cleanPass) {
-      setIsValidCredentials(false);
-      setIsVerifying(false);
+      setIsCredentialsValid(false);
       return;
     }
 
-    setIsVerifying(true);
-
-    debounceTimerRef.current = setTimeout(async () => {
+    // Debounce verification by 100ms for instantaneous touch response without UI freeze
+    validationTimerRef.current = setTimeout(async () => {
       try {
-        const result = await api.validateCredentials(cleanUser, cleanPass);
-        if (result.valid) {
-          setIsValidCredentials(true);
-          setError(null);
-        } else {
-          setIsValidCredentials(false);
-        }
+        const res = await api.validateCredentials(cleanUser, cleanPass);
+        setIsCredentialsValid(Boolean(res && res.valid));
       } catch {
-        setIsValidCredentials(false);
-      } finally {
-        setIsVerifying(false);
+        setIsCredentialsValid(false);
       }
-    }, 280);
+    }, 100);
 
     return () => {
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
+      if (validationTimerRef.current) {
+        clearTimeout(validationTimerRef.current);
       }
     };
   }, [username, password]);
 
   const handleLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!isValidCredentials || loading || isSuccessExiting) return;
+    if (loading || isSuccessExiting) return;
+
+    const cleanUser = username.trim();
+    const cleanPass = password.trim();
+
+    if (!cleanUser || !cleanPass) {
+      setError('Please enter your Admin Name and Password');
+      return;
+    }
+
+    // Double check credentials validity if user pressed Enter quickly
+    if (!isCredentialsValid) {
+      setLoading(true);
+      try {
+        const check = await api.validateCredentials(cleanUser, cleanPass);
+        if (!check || !check.valid) {
+          setError('Incorrect password. Please enter the correct password.');
+          setIsCredentialsValid(false);
+          setLoading(false);
+          return;
+        }
+        setIsCredentialsValid(true);
+      } catch {
+        setError('Incorrect password. Please enter the correct password.');
+        setIsCredentialsValid(false);
+        setLoading(false);
+        return;
+      }
+    }
 
     setLoading(true);
     setError(null);
 
     try {
-      const res = await api.login(username.trim(), password);
+      const res = await api.login(cleanUser, cleanPass);
 
       // Trigger sleek Zoom-In / Scale-Out exit animation before redirecting to dashboard
       setIsSuccessExiting(true);
 
       setTimeout(() => {
         onSuccess(res.admin);
-      }, 550);
+      }, 480);
     } catch (err: any) {
       setError(err.message || 'Login failed. Please check your credentials.');
       setLoading(false);
       setIsSuccessExiting(false);
+      setIsCredentialsValid(false);
     }
   };
 
@@ -100,6 +123,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
   const passPlaceholder = design?.loginPassPlaceholder || 'Enter password';
   const buttonText = design?.loginButtonText || 'SIGN IN';
   const accentColor = design?.loginAccentColor || '#ef4444';
+
+  const hasInput = Boolean(username.trim() && password.trim());
+  const isButtonClickable = isCredentialsValid && !loading && !isSuccessExiting;
 
   return (
     <div className="min-h-screen w-full flex items-center justify-center p-4 relative overflow-hidden bg-[#060608] selection:bg-red-500 selection:text-white">
@@ -136,10 +162,10 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
         <div 
           className="rounded-3xl p-7 sm:p-8 bg-[#0c0c13]/95 border shadow-2xl backdrop-blur-2xl transition-all duration-300 relative overflow-hidden"
           style={{
-            borderColor: isValidCredentials ? `${accentColor}80` : `${accentColor}38`,
-            boxShadow: isValidCredentials 
-              ? `0 0 65px -10px ${accentColor}66, 0 20px 45px -15px rgba(0,0,0,0.85)`
-              : `0 0 50px -10px ${accentColor}44, 0 20px 40px -15px rgba(0,0,0,0.8)`
+            borderColor: isCredentialsValid ? `${accentColor}99` : (hasInput ? `${accentColor}55` : `${accentColor}33`),
+            boxShadow: isCredentialsValid
+              ? `0 0 65px -8px ${accentColor}77, 0 20px 45px -15px rgba(0,0,0,0.85)`
+              : `0 0 45px -12px ${accentColor}33, 0 20px 40px -15px rgba(0,0,0,0.8)`
           }}
         >
           {/* Subtle top card border glow accent */}
@@ -147,7 +173,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
             className="absolute top-0 left-1/2 -translate-x-1/2 w-48 h-[1.5px] transition-all duration-300"
             style={{
               background: `linear-gradient(90deg, transparent, ${accentColor}, transparent)`,
-              opacity: isValidCredentials ? 1 : 0.6
+              opacity: isCredentialsValid ? 1 : 0.6
             }}
           />
 
@@ -158,9 +184,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
               className="w-16 h-16 rounded-full flex items-center justify-center mb-3.5 transition-all duration-300 hover:scale-105 cursor-default overflow-hidden relative shadow-lg p-0.5"
               style={{
                 background: `radial-gradient(circle, #2a0814 0%, #0c0408 100%)`,
-                boxShadow: isValidCredentials 
+                boxShadow: isCredentialsValid 
                   ? `0 0 32px ${accentColor}aa, inset 0 1px 3px rgba(255,255,255,0.45)`
-                  : `0 0 24px ${accentColor}88, inset 0 1px 3px rgba(255,255,255,0.45)`,
+                  : `0 0 22px ${accentColor}66, inset 0 1px 3px rgba(255,255,255,0.45)`,
                 border: `2px solid ${accentColor}`
               }}
             >
@@ -190,26 +216,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
             <p className="text-[10px] font-bold tracking-[0.28em] text-zinc-400 uppercase mt-1">
               {subtitle}
             </p>
-
-            {/* Real-time verification badge */}
-            <div className="h-5 mt-2 flex items-center justify-center">
-              {isVerifying ? (
-                <span className="inline-flex items-center gap-1.5 text-[10px] font-mono text-zinc-400">
-                  <div className="w-2.5 h-2.5 border-2 border-red-500/40 border-t-red-500 rounded-full animate-spin" />
-                  <span>Verifying credentials...</span>
-                </span>
-              ) : isValidCredentials ? (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-semibold bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 animate-in fade-in duration-200">
-                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                  <span>Credentials Verified</span>
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1 text-[10px] font-mono text-zinc-500">
-                  <Lock className="w-3 h-3 text-zinc-600" />
-                  <span>Enter credentials to unlock</span>
-                </span>
-              )}
-            </div>
           </div>
 
           {error && (
@@ -276,17 +282,17 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
               </div>
             </div>
 
-            {/* Action Button: Dynamic SIGN IN Button (Greyed out by default, enabled when verified) */}
+            {/* Action Button: Dynamic SIGN IN Button - strictly disabled & unclickable until correct password is typed */}
             <button
               type="submit"
-              disabled={!isValidCredentials || loading || isSuccessExiting}
+              disabled={!isButtonClickable}
               className={`w-full mt-5 py-3.5 px-6 rounded-xl font-black uppercase tracking-widest text-sm flex items-center justify-center gap-2 transition-all duration-300 ${
-                isValidCredentials
+                isButtonClickable
                   ? 'text-white cursor-pointer active:scale-[0.98] hover:brightness-110 shadow-lg'
                   : 'bg-zinc-900/80 border border-zinc-800/80 text-zinc-500 opacity-40 cursor-not-allowed select-none'
               }`}
               style={
-                isValidCredentials
+                isButtonClickable
                   ? {
                       background: `linear-gradient(90deg, #dc2626, ${accentColor}, #e11d48)`,
                       boxShadow: `0 8px 30px ${accentColor}66, 0 0 20px ${accentColor}44`
@@ -295,15 +301,12 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
               }
             >
               {loading || isSuccessExiting ? (
-                <div className="flex items-center gap-2">
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  <span className="font-mono text-xs tracking-wider">
-                    {isSuccessExiting ? 'ACCESS GRANTED' : 'AUTHENTICATING...'}
-                  </span>
+                <div className="flex items-center justify-center py-0.5">
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 </div>
               ) : (
                 <div className="flex items-center gap-2">
-                  {isValidCredentials && <ShieldCheck className="w-4 h-4 text-white" />}
+                  {isCredentialsValid && <ShieldCheck className="w-4 h-4 text-white" />}
                   <span className="font-black tracking-widest text-sm drop-shadow-sm">{buttonText}</span>
                 </div>
               )}

@@ -7,7 +7,7 @@ interface BottomNavProps {
   accentColor?: string;
 }
 
-export const BottomNav: React.FC<BottomNavProps> = ({
+const BottomNavComponent: React.FC<BottomNavProps> = ({
   currentTab,
   onSelectTab,
   accentColor = '#ef4444'
@@ -290,4 +290,6 @@ export const BottomNav: React.FC<BottomNavProps> = ({
     </div>
   );
 };
+
+export const BottomNav = React.memo(BottomNavComponent);
 

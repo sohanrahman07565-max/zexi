@@ -239,6 +239,8 @@ export class TelegramService {
       update.chat_member?.from ||
       update.chat_join_request?.from;
 
+    const fromId = fromUser?.id ? String(fromUser.id) : '';
+
     if (fromUser && fromUser.id) {
       storage.trackBotUser({
         id: fromUser.id,
@@ -246,6 +248,30 @@ export class TelegramService {
         firstName: fromUser.first_name,
         lastName: fromUser.last_name
       }).catch((err) => console.warn('[Telegram] User tracking error:', err));
+    }
+
+    // Ban Enforcement: check if user is restricted by administrator
+    if (fromId) {
+      const isBanned = await storage.isUserBanned(fromId);
+      if (isBanned) {
+        console.warn(`[Telegram] Blocked request from banned user: ${fromId}`);
+        if (update.callback_query) {
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: update.callback_query.id,
+            text: '⛔ Your account has been restricted by an administrator.',
+            show_alert: true
+          });
+          return;
+        }
+        if (update.message?.chat?.type === 'private') {
+          await this.callTelegramApi('sendMessage', {
+            chat_id: update.message.chat.id,
+            text: '⛔ <b>Access Restricted</b>\n\nYour Telegram account has been banned from using this bot by an administrator.',
+            parse_mode: 'HTML'
+          });
+        }
+        return;
+      }
     }
 
     // Handle Inline Button Clicks (Callback queries from /add flow)
@@ -271,54 +297,267 @@ export class TelegramService {
   }
 
   // =========================================================================
-  // GROUP MESSAGE HANDLING (EXACT TRIGGER MATCHING ONLY)
+  // ADMIN AUTHORIZATION & AUTO-DELETING NOTICES (STRICT GROUP PRIVACY)
+  // =========================================================================
+  public static async isAuthorizedAdmin(fromId: string | number): Promise<boolean> {
+    if (!fromId) return false;
+    const cleanId = String(fromId).trim();
+    await storage.loadLatest(false);
+    const admins = await storage.getAdmins();
+    const settings = await storage.getSettings();
+    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163').trim();
+    if (cleanId === rootAdminId || rootAdminId.includes(cleanId)) return true;
+    const admin = await storage.getAdmin(cleanId);
+    if (admin && admin.enabled) return true;
+    if (admins.some(a => String(a.telegramId) === cleanId || String(a.id) === cleanId)) return true;
+    if (admins.length === 0) return true;
+    return false;
+  }
+
+  public static async sendAutoDeletingNotice(
+    chatId: string | number,
+    text: string,
+    delayMs: number = 3500,
+    replyToMessageId?: number,
+    replyMarkup?: any
+  ): Promise<void> {
+    try {
+      const params: any = {
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML'
+      };
+      if (replyToMessageId) params.reply_to_message_id = replyToMessageId;
+      if (replyMarkup) params.reply_markup = replyMarkup;
+
+      const res = await this.callTelegramApi('sendMessage', params);
+      if (res && res.ok && res.result?.message_id) {
+        const msgId = res.result.message_id;
+        setTimeout(() => {
+          TelegramService.deleteUserMessage(chatId, msgId).catch(() => {});
+        }, delayMs);
+      }
+    } catch (err) {
+      console.warn('[Telegram] Auto-deleting notice error:', err);
+    }
+  }
+
+  // =========================================================================
+  // GROUP MESSAGE HANDLING (EXACT TRIGGER MATCHING & STRICT GROUP PRIVACY)
   // =========================================================================
   private static async handleGroupMessage(message: any, text: string): Promise<void> {
     if (!text && !message.document && !message.photo && !message.video && !message.audio) return;
 
-    // Check /add command in groups (strictly requires '/' prefix)
-    const isAddCommand = /^\/add(?:@\w+)?(?:\s+|$)/i.test(text);
-    if (isAddCommand) {
-      await this.handleAddCommand(String(message.from?.id || ''), message.chat.id, message, text);
-      return;
-    }
-
-    // Check /cancel in groups if user is inside an /add wizard
-    if (text === '/cancel' || text.startsWith('/cancel')) {
-      const fromId = String(message.from?.id || '');
-      const addSession = activeAddSessions.get(fromId) || await storage.getAddSession(fromId);
-      if (addSession) {
-        activeAddSessions.delete(fromId);
-        await storage.deleteAddSession(fromId);
-        await this.deleteUserMessage(message.chat.id, message?.message_id);
-        const templates = await storage.getTemplates();
-        const cancelMsg = templates.CANCEL_MESSAGE?.content || '❌ Operation cancelled.';
-        if (addSession.lastPromptMessageId) {
-          try {
-            await this.callTelegramApi('editMessageText', {
-              chat_id: message.chat.id,
-              message_id: addSession.lastPromptMessageId,
-              text: cancelMsg,
-              parse_mode: 'HTML'
-            });
-            return;
-          } catch {}
-        }
-        await this.callTelegramApi('sendMessage', { chat_id: message.chat.id, text: cancelMsg });
-        return;
-      }
-    }
-
-    // Check if user is inside an active /add session in group
     const fromId = String(message.from?.id || '');
+
+    // 1. Check if user is inside an active /add session in group
     let addSession = activeAddSessions.get(fromId);
     if (!addSession) {
       addSession = await storage.getAddSession(fromId);
       if (addSession) activeAddSessions.set(fromId, addSession);
     }
     if (addSession) {
-      await this.handleActiveAddSessionMessage(message, fromId, message.chat.id, text, addSession);
+      // Cleanly delete the input message from the public group
+      if (message.message_id) {
+        await this.deleteUserMessage(message.chat.id, message.message_id);
+      }
+      // Route the setup interaction strictly to the admin's private DM (fromId)
+      await this.handleActiveAddSessionMessage(message, fromId, fromId, text, addSession);
       return;
+    }
+
+    // 2. Identify Admin Commands in group
+    const isAddCommand = /^\/add(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isCancelCommand = /^\/cancel(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isWebCodeCommand = /^\/webcode(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isSetPasswordCommand = /^\/setpassword(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isSetStartMsgCommand = /^\/(?:setstartmsg|startmsg)(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isSetStartMediaCommand = /^\/setstartmedia(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isClearStartMediaCommand = /^\/clearstartmedia(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isCleanupCommand = /^\/cleanup(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isAdminListCommand = /^\/(?:admins?|users?)(?:@\w+)?(?:\s+|$)/i.test(text);
+
+    const isAdminCommand =
+      isAddCommand ||
+      isCancelCommand ||
+      isWebCodeCommand ||
+      isSetPasswordCommand ||
+      isSetStartMsgCommand ||
+      isSetStartMediaCommand ||
+      isClearStartMediaCommand ||
+      isCleanupCommand ||
+      isAdminListCommand;
+
+    if (isAdminCommand) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+
+      // Immediately delete the admin command message from the group so group chat remains clean
+      if (message.message_id) {
+        await this.deleteUserMessage(message.chat.id, message.message_id);
+      }
+
+      // If user is NOT an authorized administrator:
+      if (!isAdmin) {
+        // STRICT PRIVACY: Never reveal admin panel responses or operational output in groups
+        console.warn(`[Telegram] Unauthorized admin command rejected in group from: ${fromId}`);
+        return;
+      }
+
+      // User IS an authorized administrator!
+      // Deliver the command panel / response ONLY to the admin in PRIVATE DM (chat_id: fromId)
+      const botUsername = await this.getBotUsername();
+      const cleanBot = botUsername.replace(/^@/, '');
+
+      const executeWithPrivateDelivery = async (commandFn: () => Promise<void>, noticeText: string) => {
+        try {
+          await commandFn();
+          // Instantly auto-deleting public notice (disappears after 3.5 seconds)
+          await this.sendAutoDeletingNotice(
+            message.chat.id,
+            `🔒 <i>${noticeText}</i>`,
+            3500
+          );
+        } catch (err: any) {
+          console.warn('[Telegram] Private admin command delivery failed (chat may not be started):', err);
+          // If the bot cannot DM the user (never sent /start), send an auto-deleting notice with a direct link
+          await this.sendAutoDeletingNotice(
+            message.chat.id,
+            `⚠️ <b>Admin Privacy:</b> Please start the bot in private chat to receive admin commands.`,
+            6000,
+            undefined,
+            {
+              inline_keyboard: [
+                [{ text: '🔒 Open Bot in Private DM', url: `https://t.me/${cleanBot}?start=admin` }]
+              ]
+            }
+          );
+        }
+      };
+
+      if (isAddCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleAddCommand(fromId, fromId, message, text);
+          },
+          `Admin setup wizard opened in your private messages (@${message.from?.username || message.from?.first_name || 'Admin'}).`
+        );
+        return;
+      }
+
+      if (isCancelCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            const addSession = activeAddSessions.get(fromId) || await storage.getAddSession(fromId);
+            activeAddSessions.delete(fromId);
+            await storage.deleteAddSession(fromId);
+            activeEditSessions.delete(fromId);
+            const templates = await storage.getTemplates();
+            const cancelMsg = templates.CANCEL_MESSAGE?.content || '❌ Operation cancelled.';
+            if (addSession?.lastPromptMessageId) {
+              try {
+                await this.callTelegramApi('editMessageText', {
+                  chat_id: fromId,
+                  message_id: addSession.lastPromptMessageId,
+                  text: cancelMsg,
+                  parse_mode: 'HTML'
+                });
+                return;
+              } catch {}
+            }
+            await this.callTelegramApi('sendMessage', { chat_id: fromId, text: cancelMsg });
+          },
+          'Operation cancelled in your private messages.'
+        );
+        return;
+      }
+
+      if (isWebCodeCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleWebCodeCommand(fromId, fromId);
+          },
+          'One-time web login code sent to your private messages.'
+        );
+        return;
+      }
+
+      if (isSetPasswordCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleSetPasswordCommand(fromId, fromId, text);
+          },
+          'Password update processed in your private messages.'
+        );
+        return;
+      }
+
+      if (isSetStartMsgCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleSetStartMessageCommand(fromId, fromId, text, message);
+          },
+          'Start message configuration updated in private messages.'
+        );
+        return;
+      }
+
+      if (isSetStartMediaCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleSetStartMediaCommand(fromId, fromId, text, message);
+          },
+          'Start media updated in private messages.'
+        );
+        return;
+      }
+
+      if (isClearStartMediaCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleClearStartMediaCommand(fromId, fromId);
+          },
+          'Start media cleared in private messages.'
+        );
+        return;
+      }
+
+      if (isCleanupCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            const toDelete = await storage.getMessagesOlderThan(24);
+            let deletedCount = 0;
+            for (const item of toDelete) {
+              const res = await this.callTelegramApi('deleteMessage', {
+                chat_id: item.chatId,
+                message_id: item.messageId
+              });
+              if (res.ok) deletedCount++;
+            }
+            await this.callTelegramApi('sendMessage', {
+              chat_id: fromId,
+              text: `🧹 <b>Cleanup Complete</b>\n\nCleaned up ${deletedCount} old tracked messages.`,
+              parse_mode: 'HTML'
+            });
+          },
+          'Cleanup executed. Report sent to private messages.'
+        );
+        return;
+      }
+
+      if (isAdminListCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            const admins = await storage.getAdmins();
+            const settings = await storage.getSettings();
+            const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163');
+            const totalUsers = await storage.getTotalUserCount();
+            const msg = `🛡️ <b>Administrators (${admins.length})</b>\nRoot ID: <code>${rootAdminId}</code>\nTotal Bot Users: <b>${totalUsers}</b>`;
+            await this.callTelegramApi('sendMessage', { chat_id: fromId, text: msg, parse_mode: 'HTML' });
+          },
+          'Admin list sent to your private messages.'
+        );
+        return;
+      }
     }
 
     // Check /filters command in groups (strictly requires '/' prefix)
@@ -1265,6 +1504,9 @@ export class TelegramService {
     const hasPermission = isRoot || Boolean(admin?.permissions?.files_add) || admins.some(a => String(a.telegramId) === fromId || String(a.id) === fromId) || admins.length === 0;
 
     if (!hasPermission) {
+      if (String(chatId).startsWith('-')) {
+        return;
+      }
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
         text: `❌ Access Denied: You are not an authorized administrator.\nYour Telegram ID: <code>${fromId}</code>\nPlease ask an administrator to add your ID or sign in via web.`,
@@ -1293,7 +1535,7 @@ export class TelegramService {
 
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
-        `✅ <b>File Received:</b> <i>${media.fileName}</i>\n\n<b>Step 1/5: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+        `✅ <b>File Received:</b> <i>${media.fileName}</i>\n\n<b>Step 1/4: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
         {
           inline_keyboard: [
             [
@@ -1323,7 +1565,7 @@ export class TelegramService {
 
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
-        `✅ <b>Link Received:</b> <code>${urlMatch[0]}</code>\n\n<b>Step 1/5: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+        `✅ <b>Link Received:</b> <code>${urlMatch[0]}</code>\n\n<b>Step 1/7: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
         {
           inline_keyboard: [
             [
@@ -1390,7 +1632,7 @@ export class TelegramService {
 
         const promptId = await TelegramService.sendOrEditSetupPrompt(
           chatId,
-          `✅ <b>File Received:</b> <i>${media.fileName}</i>\n\n<b>Step 1/5: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+          `✅ <b>File Received:</b> <i>${media.fileName}</i>\n\n<b>Step 1/4: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
           {
             inline_keyboard: [
               [
@@ -1417,7 +1659,7 @@ export class TelegramService {
 
         const promptId = await TelegramService.sendOrEditSetupPrompt(
           chatId,
-          `✅ <b>Link Received:</b> <code>${urlMatch[0]}</code>\n\n<b>Step 1/5: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+          `✅ <b>Link Received:</b> <code>${urlMatch[0]}</code>\n\n<b>Step 1/7: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
           {
             inline_keyboard: [
               [
@@ -1469,7 +1711,7 @@ export class TelegramService {
 
         const promptId = await TelegramService.sendOrEditSetupPrompt(
           chatId,
-          `✅ <b>File Received:</b> <i>${media.fileName}</i>\n\n<b>Step 1/5: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+          `✅ <b>File Received:</b> <i>${media.fileName}</i>\n\n<b>Step 1/4: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
           {
             inline_keyboard: [
               [
@@ -1514,7 +1756,7 @@ export class TelegramService {
 
         const promptId = await TelegramService.sendOrEditSetupPrompt(
           chatId,
-          `✅ <b>Link Received:</b> <code>${urlMatch[0]}</code>\n\n<b>Step 1/5: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+          `✅ <b>Link Received:</b> <code>${urlMatch[0]}</code>\n\n<b>Step 1/7: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
           {
             inline_keyboard: [
               [
@@ -1551,9 +1793,10 @@ export class TelegramService {
 
     // Stage: Awaiting trigger type button selection
     if (session.stage === 'awaiting_trigger_type' || session.stage === 'awaiting_keyword_type') {
+      const stepHeader = session.type === 'file' ? 'Step 1/4' : 'Step 1/7';
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
-        '<b>Step 1/5:</b> Please choose a trigger type using the buttons below:',
+        `<b>${stepHeader}:</b> Please choose a trigger type using the buttons below:`,
         {
           inline_keyboard: [
             [
@@ -1606,9 +1849,10 @@ export class TelegramService {
       session.stage = 'awaiting_filter_choice';
 
       // Step 3: Filter List Visibility
+      const stepHeader = session.type === 'file' ? 'Step 3/4' : 'Step 3/7';
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
-        `<b>Step 3/5: Filter List Visibility</b>\nDo you want to add <code>${formattedTrigger}</code> to the public /filters list?`,
+        `<b>${stepHeader}: Filter List Visibility</b>\nDo you want to add <code>${formattedTrigger}</code> to the public /filters list?`,
         {
           inline_keyboard: [
             [
@@ -1634,9 +1878,10 @@ export class TelegramService {
       } else if (lower === '2' || lower === 'no' || lower.includes('hidden') || lower.includes('keep')) {
         session.inFiltersList = false;
       } else {
+        const stepHeader = session.type === 'file' ? 'Step 3/4' : 'Step 3/7';
         const promptId = await TelegramService.sendOrEditSetupPrompt(
           chatId,
-          `<b>Step 3/5:</b> Do you want to add <code>${session.trigger || session.rawKeyword}</code> to the public /filters list?`,
+          `<b>${stepHeader}:</b> Do you want to add <code>${session.trigger || session.rawKeyword}</code> to the public /filters list?`,
           {
             inline_keyboard: [
               [
@@ -1654,12 +1899,39 @@ export class TelegramService {
         return;
       }
 
+      // FILE ADD FLOW: Completely skip Delivery Mode! Files are direct Telegram Document/Media files.
+      if (session.type === 'file') {
+        session.openMode = 'browser';
+        session.stage = 'awaiting_retention_choice';
+
+        // Step 4/4: Storage Duration for Files
+        const promptId = await TelegramService.sendOrEditSetupPrompt(
+          chatId,
+          `<b>Step 4/4: Storage Duration</b>\nChoose storage duration for this file:\n• <b>Permanent</b> — file and its filters remain indefinitely\n• <b>Temporary</b> — auto-deleted with its filters after the chosen days`,
+          {
+            inline_keyboard: [
+              [
+                { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
+                { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
+              ],
+              [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+            ]
+          },
+          session
+        );
+        if (promptId) session.lastPromptMessageId = promptId;
+        activeAddSessions.set(fromId, session);
+        await storage.saveAddSession(fromId, session);
+        return;
+      }
+
+      // LINK ADD FLOW: Proceed to Step 4/7 Delivery Type
       session.stage = 'awaiting_delivery_type';
 
-      // Step 4: Delivery Type
+      // Step 4/7: Delivery Type (Only for Links)
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
-        `<b>Step 4/5: Delivery Type</b>\nChoose delivery type when triggered:\n• <b>Telegram Mini App</b> — opens embedded inside Telegram\n• <b>Web Browser / Direct</b> — opens in standard browser or direct Telegram chat`,
+        `<b>Step 4/7: Delivery Type</b>\nChoose delivery type when triggered:\n• <b>Telegram Mini App</b> — opens embedded inside Telegram\n• <b>Web Browser / Direct</b> — opens in standard browser or direct Telegram chat`,
         {
           inline_keyboard: [
             [
@@ -1677,7 +1949,7 @@ export class TelegramService {
       return;
     }
 
-    // Stage 4: Awaiting delivery type text fallback
+    // Stage 4: Awaiting delivery type text fallback (Only for Links)
     if (session.stage === 'awaiting_delivery_type') {
       const lower = rawInput.toLowerCase();
       if (lower.includes('mini') || lower.includes('app') || lower.includes('web app')) {
@@ -1687,39 +1959,15 @@ export class TelegramService {
       }
 
       // Mandatory Customization for Links: Private Delivery Message Text & Open Button Text
-      if (session.type === 'link') {
-        session.stage = 'awaiting_link_reply_message';
+      session.stage = 'awaiting_link_reply_message';
 
-        const defaultReplyMsg = `🔗 Here is your requested link: ${session.linkData?.url || ''}`;
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
-          chatId,
-          `<b>Step 5/7: Private Delivery Message</b>\nEnter the message text to send privately along with this link, or tap <b>Use Default</b> below:\n\nDefault: <code>${defaultReplyMsg}</code>`,
-          {
-            inline_keyboard: [
-              [{ text: '💬 Use Default Message', callback_data: 'add_link_default_msg' }],
-              [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
-            ]
-          },
-          session
-        );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-        return;
-      }
-
-      session.stage = 'awaiting_retention_choice';
-
-      // Step 5: Storage Duration for Files
+      const defaultReplyMsg = `🔗 Here is your requested link: ${session.linkData?.url || ''}`;
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
-        `<b>Step 5/5: Storage Duration</b>\nChoose storage duration for this file:\n• <b>Permanent</b> — file and its filters remain indefinitely\n• <b>Temporary</b> — auto-deleted with its filters after the chosen days`,
+        `<b>Step 5/7: Private Delivery Message</b>\nEnter the message text to send privately along with this link, or tap <b>Use Default</b> below:\n\nDefault: <code>${defaultReplyMsg}</code>`,
         {
           inline_keyboard: [
-            [
-              { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
-              { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
-            ],
+            [{ text: '💬 Use Default Message', callback_data: 'add_link_default_msg' }],
             [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
           ]
         },
@@ -1817,9 +2065,10 @@ export class TelegramService {
         await storage.saveAddSession(fromId, session);
         return;
       } else {
+        const stepHeader = session.type === 'file' ? 'Step 4/4' : 'Step 7/7';
         const promptId = await TelegramService.sendOrEditSetupPrompt(
           chatId,
-          `<b>Step 5/5:</b> Do you want this ${session.type === 'file' ? 'file' : 'link'} to be Permanent or Temporary?`,
+          `<b>${stepHeader}: Storage Duration</b>\nDo you want this ${session.type === 'file' ? 'file' : 'link'} to be Permanent or Temporary?`,
           {
             inline_keyboard: [
               [
@@ -1967,7 +2216,7 @@ export class TelegramService {
       : 'No (Hidden from public /filters)';
 
     const deliveryDesc = isFile
-      ? (openMode === 'webapp' ? 'Telegram Mini App Preview' : 'Direct Telegram Delivery')
+      ? 'Direct Telegram Document / Media File'
       : (openMode === 'webapp' ? 'Telegram Mini App (Embedded)' : 'Standard Web Browser');
 
     const successText = `✅ <b>Success! Your ${isFile ? 'file' : 'link'} has been saved successfully.</b>\n\n📋 <b>Configuration Details:</b>\n• Type: <b>${isFile ? '📁 File' : '🔗 Web Link'}</b>\n• Name: <b>${newItem.name}</b>\n• Trigger: <code>${primaryTrigger}</code> (${triggerType})\n• Public Filters: <b>${filterStatus}</b>\n• Delivery Mode: <b>${deliveryDesc}</b>\n• Retention: <b>${retentionDesc}</b>\n\n🔗 <b>Direct Link:</b>\n${deepLink}\n\n💡 <i>Type <code>${primaryTrigger}</code> in any group or here to test delivery!</i>`;
@@ -2130,10 +2379,12 @@ export class TelegramService {
           ? 'e.g., /download or /play'
           : 'e.g., box or tutorial';
 
+        const stepHeader = session.type === 'file' ? 'Step 2/4' : 'Step 2/7';
+
         if (chatId) {
           const promptId = await TelegramService.sendOrEditSetupPrompt(
             chatId,
-            `<b>Step 2/5: Trigger Name</b>\nPlease enter the trigger keyword for this ${session.type === 'file' ? 'file' : 'link'} (${promptExample}):`,
+            `<b>${stepHeader}: Trigger Name</b>\nPlease enter the trigger keyword for this ${session.type === 'file' ? 'file' : 'link'} (${promptExample}):`,
             {
               inline_keyboard: [
                 [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
@@ -2154,15 +2405,47 @@ export class TelegramService {
     if (data === 'add_filter_yes' || data === 'add_filter_no') {
       if (session) {
         session.inFiltersList = (data === 'add_filter_yes');
+
+        // FILE ADD FLOW: Completely skip Delivery Mode! Files are direct Telegram Document/Media files.
+        if (session.type === 'file') {
+          session.openMode = 'browser';
+          session.stage = 'awaiting_retention_choice';
+          activeAddSessions.set(fromId, session);
+          await storage.saveAddSession(fromId, session);
+
+          if (chatId) {
+            const promptId = await TelegramService.sendOrEditSetupPrompt(
+              chatId,
+              `<b>Step 4/4: Storage Duration</b>\nChoose storage duration for this file:\n• <b>Permanent</b> — file and its filters remain indefinitely\n• <b>Temporary</b> — auto-deleted with its filters after chosen days`,
+              {
+                inline_keyboard: [
+                  [
+                    { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
+                    { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
+                  ],
+                  [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+                ]
+              },
+              session
+            );
+            if (promptId) {
+              session.lastPromptMessageId = promptId;
+              await storage.saveAddSession(fromId, session);
+            }
+          }
+          return;
+        }
+
+        // LINK ADD FLOW: Proceed to Step 4/7 Delivery Type
         session.stage = 'awaiting_delivery_type';
         activeAddSessions.set(fromId, session);
         await storage.saveAddSession(fromId, session);
 
-        // Step 4 Prompt: Delivery Type
+        // Step 4 Prompt: Delivery Type (Only for Links)
         if (chatId) {
           const promptId = await TelegramService.sendOrEditSetupPrompt(
             chatId,
-            `<b>Step 4/5: Delivery Type</b>\nChoose delivery type when triggered:\n• <b>Telegram Mini App</b> — opens embedded inside Telegram\n• <b>Web Browser / Direct</b> — opens in standard browser or direct Telegram chat`,
+            `<b>Step 4/7: Delivery Type</b>\nChoose delivery type when triggered:\n• <b>Telegram Mini App</b> — opens embedded inside Telegram\n• <b>Web Browser / Direct</b> — opens in standard browser or direct Telegram chat`,
             {
               inline_keyboard: [
                 [
@@ -2183,54 +2466,24 @@ export class TelegramService {
       return;
     }
 
-    // Step 4: Delivery Type Selection (Mini App vs Browser/Direct)
+    // Step 4: Delivery Type Selection (Mini App vs Browser/Direct) - ONLY FOR LINKS
     if (data === 'add_delivery_webapp' || data === 'add_delivery_browser') {
       if (session) {
         session.openMode = (data === 'add_delivery_webapp' ? 'webapp' : 'browser');
 
         // Mandatory Customization for Links
-        if (session.type === 'link') {
-          session.stage = 'awaiting_link_reply_message';
-          activeAddSessions.set(fromId, session);
-          await storage.saveAddSession(fromId, session);
-
-          const defaultReplyMsg = `🔗 Here is your requested link: ${session.linkData?.url || ''}`;
-          if (chatId) {
-            const promptId = await TelegramService.sendOrEditSetupPrompt(
-              chatId,
-              `<b>Step 5/7: Private Delivery Message</b>\nEnter the message text to send privately along with this link, or tap <b>Use Default</b> below:\n\nDefault: <code>${defaultReplyMsg}</code>`,
-              {
-                inline_keyboard: [
-                  [{ text: '💬 Use Default Message', callback_data: 'add_link_default_msg' }],
-                  [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
-                ]
-              },
-              session
-            );
-            if (promptId) {
-              session.lastPromptMessageId = promptId;
-              await storage.saveAddSession(fromId, session);
-            }
-          }
-          return;
-        }
-
-        // For Files: Proceed to Step 5 Storage Duration
-        session.stage = 'awaiting_retention_choice';
+        session.stage = 'awaiting_link_reply_message';
         activeAddSessions.set(fromId, session);
         await storage.saveAddSession(fromId, session);
 
-        // Step 5 Prompt: Storage Duration
+        const defaultReplyMsg = `🔗 Here is your requested link: ${session.linkData?.url || ''}`;
         if (chatId) {
           const promptId = await TelegramService.sendOrEditSetupPrompt(
             chatId,
-            `<b>Step 5/5: Storage Duration</b>\nChoose storage duration for this file:\n• <b>Permanent</b> — file and its filters remain indefinitely\n• <b>Temporary</b> — auto-deleted with its filters after chosen days`,
+            `<b>Step 5/7: Private Delivery Message</b>\nEnter the message text to send privately along with this link, or tap <b>Use Default</b> below:\n\nDefault: <code>${defaultReplyMsg}</code>`,
             {
               inline_keyboard: [
-                [
-                  { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
-                  { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
-                ],
+                [{ text: '💬 Use Default Message', callback_data: 'add_link_default_msg' }],
                 [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
               ]
             },

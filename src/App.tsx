@@ -81,7 +81,7 @@ export default function App() {
     }
   };
 
-  const refreshAllData = async () => {
+  const refreshAllData = useCallback(async () => {
     try {
       const [loadedItems, loadedTemplates, loadedSettings, loadedDesign, loadedAdmins, loadedCleanup, loadedStats] = await Promise.all([
         api.getItems().catch(() => []),
@@ -103,7 +103,11 @@ export default function App() {
     } catch (err) {
       console.error('Error loading app data:', err);
     }
-  };
+  }, []);
+
+  const handleNavigate = useCallback((tab: string) => {
+    setCurrentTab(tab);
+  }, []);
 
   // Continuous Automatic Network Monitoring
   const checkNetworkConnection = async (): Promise<boolean> => {
@@ -160,11 +164,11 @@ export default function App() {
     };
   }, [isOnline]);
 
-  const handleLogout = async () => {
+  const handleLogout = useCallback(async () => {
     await api.logout();
     setCurrentUser(null);
     setCurrentTab('dashboard');
-  };
+  }, []);
 
   const handleSplashComplete = useCallback(() => {
     setShowSplash(false);
@@ -220,7 +224,41 @@ export default function App() {
 
   // Authenticated Android Mobile View
   return (
-    <div className="relative min-h-screen bg-slate-950 text-white selection:bg-sky-500 selection:text-white flex justify-center">
+    <div className="relative min-h-screen bg-[#060608] text-white selection:bg-red-500 selection:text-white flex justify-center">
+      {/* Hardware-Accelerated Floating Ambient Red Glow Layer (Matching Login Aesthetic) */}
+      <div 
+        className="fixed inset-0 pointer-events-none z-0 overflow-hidden"
+        style={{
+          background: `radial-gradient(circle at 50% 12%, rgba(239,68,68,0.14) 0%, rgba(220,38,38,0.06) 45%, rgba(6,6,8,0.98) 85%)`,
+          contain: 'strict',
+          transform: 'translate3d(0, 0, 0)'
+        }}
+      >
+        {/* Upper Floating Glowing Orb */}
+        <div 
+          className="absolute -top-24 left-1/4 w-[420px] h-[420px] rounded-full blur-[100px] pointer-events-none animate-ambient-1"
+          style={{ background: 'rgba(239, 68, 68, 0.16)', willChange: 'transform, opacity' }}
+        />
+        {/* Lower Floating Glowing Orb */}
+        <div 
+          className="absolute bottom-12 -right-24 w-[380px] h-[380px] rounded-full blur-[90px] pointer-events-none animate-ambient-2"
+          style={{ background: 'rgba(225, 29, 72, 0.14)', willChange: 'transform, opacity' }}
+        />
+        {/* Central Floating Ambient Glow */}
+        <div 
+          className="absolute top-1/2 left-1/3 -translate-x-1/2 -translate-y-1/2 w-[340px] h-[340px] rounded-full blur-[80px] pointer-events-none animate-ambient-3"
+          style={{ background: 'rgba(220, 38, 38, 0.12)', willChange: 'transform, opacity' }}
+        />
+        {/* Subtle tech background grid with red accent matching Login */}
+        <div 
+          className="absolute inset-0 opacity-[0.035] pointer-events-none"
+          style={{
+            backgroundImage: `linear-gradient(to right, rgba(239,68,68,0.6) 1px, transparent 1px), linear-gradient(to bottom, rgba(239,68,68,0.6) 1px, transparent 1px)`,
+            backgroundSize: '36px 36px'
+          }}
+        />
+      </div>
+
       {/* Background canvas effects */}
       <BackgroundEffects
         styleName={design.backgroundStyle}
@@ -228,19 +266,20 @@ export default function App() {
         opacity={design.animationOpacity}
         density={design.animationDensity}
         enabled={design.animationEnabled}
-        primaryColor={design.primaryColor}
-        accentColor={design.accentColor}
+        primaryColor={design.primaryColor || '#ef4444'}
+        accentColor={design.accentColor || '#dc2626'}
       />
 
       {/* Mobile Screen Container */}
       <div className="relative z-10 w-full max-w-md min-h-screen flex flex-col px-4 pt-4">
         {/* Top App Bar (Android Material 3 Clean Header) */}
-        <header className="flex items-center justify-between pb-4 mb-2 border-b border-slate-800/60 shrink-0">
+        <header className="flex items-center justify-between pb-4 mb-2 border-b border-zinc-800/80 shrink-0">
           <div className="flex items-center gap-2.5">
             <div
               className="w-8 h-8 rounded-xl flex items-center justify-center text-white font-bold shadow-md overflow-hidden shrink-0 relative"
               style={{
-                background: `linear-gradient(135deg, ${design.primaryColor}, ${design.accentColor})`
+                background: `linear-gradient(135deg, #ef4444, #dc2626)`,
+                boxShadow: '0 0 16px rgba(239, 68, 68, 0.35)'
               }}
             >
               {design.loginLogoUrl ? (
@@ -277,8 +316,8 @@ export default function App() {
                   ? 'App Design'
                   : 'More Options'}
               </h1>
-              <div className="flex items-center gap-1.5 text-[10px] text-slate-400">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <div className="flex items-center gap-1.5 text-[10px] text-zinc-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.8)]" />
                 <span>Exact Match Active</span>
               </div>
             </div>
@@ -287,72 +326,76 @@ export default function App() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => setCurrentTab('more')}
-              className="w-8 h-8 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-center text-slate-400 hover:text-white transition-colors cursor-pointer"
+              className="w-8 h-8 rounded-xl bg-[#13131c] border border-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white hover:border-red-500/40 transition-colors cursor-pointer touch-press"
             >
               <span className="text-xs font-semibold">{currentUser.name.charAt(0)}</span>
             </button>
           </div>
         </header>
 
-        {/* Tab Content Views with Smooth Sliding Page Transitions */}
-        <main className="flex-1 overflow-y-auto">
-          <div key={currentTab} className="animate-in fade-in duration-250 slide-in-from-bottom-2">
-            {currentTab === 'dashboard' && (
-              <DashboardTab
-                items={items}
-                adminsCount={adminsCount}
-                trackedCount={trackedCount}
-                totalUsers={totalUsers}
-                settings={settings}
-                onNavigate={(tab) => setCurrentTab(tab)}
-                onOpenAddModal={() => setCurrentTab('files')}
-              />
-            )}
+        {/* Tab Content Views with Zero-Delay Native Speed Transitions */}
+        <main className="flex-1 overflow-y-auto overscroll-contain">
+          {/* Dashboard Tab */}
+          <div className={currentTab === 'dashboard' ? 'block animate-tab-fade-in' : 'hidden'}>
+            <DashboardTab
+              items={items}
+              adminsCount={adminsCount}
+              trackedCount={trackedCount}
+              totalUsers={totalUsers}
+              settings={settings}
+              onNavigate={handleNavigate}
+              onOpenAddModal={() => setCurrentTab('files')}
+              onRefresh={refreshAllData}
+            />
+          </div>
 
-            {currentTab === 'files' && (
-              <FilesTab
-                items={items}
-                currentUser={currentUser}
-                botUsername={settings?.botUsername}
-                design={design}
-                onRefresh={refreshAllData}
-              />
-            )}
+          {/* Files Tab */}
+          <div className={currentTab === 'files' ? 'block animate-tab-fade-in' : 'hidden'}>
+            <FilesTab
+              items={items}
+              currentUser={currentUser}
+              botUsername={settings?.botUsername}
+              design={design}
+              onRefresh={refreshAllData}
+            />
+          </div>
 
-            {currentTab === 'filters' && (
-              <FiltersTab
-                items={items}
-                currentUser={currentUser}
-                botUsername={settings?.botUsername}
-                design={design}
-                onRefresh={refreshAllData}
-              />
-            )}
+          {/* Filters Tab */}
+          <div className={currentTab === 'filters' ? 'block animate-tab-fade-in' : 'hidden'}>
+            <FiltersTab
+              items={items}
+              currentUser={currentUser}
+              botUsername={settings?.botUsername}
+              design={design}
+              onRefresh={refreshAllData}
+            />
+          </div>
 
-            {currentTab === 'design' && (
-              <DesignTab
-                currentDesign={design}
-                onUpdate={(newDesign) => setDesign(newDesign)}
-              />
-            )}
+          {/* Design Tab */}
+          <div className={currentTab === 'design' ? 'block animate-tab-fade-in' : 'hidden'}>
+            <DesignTab
+              currentDesign={design}
+              onUpdate={(newDesign) => setDesign(newDesign)}
+            />
+          </div>
 
-            {currentTab === 'more' && (
-              <MoreTab
-                currentUser={currentUser}
-                templates={templates}
-                settings={settings}
-                onRefreshTemplates={refreshAllData}
-                onRefreshSettings={refreshAllData}
-                onLogout={handleLogout}
-              />
-            )}
+          {/* More Tab */}
+          <div className={currentTab === 'more' ? 'block animate-tab-fade-in' : 'hidden'}>
+            <MoreTab
+              currentUser={currentUser}
+              templates={templates}
+              settings={settings}
+              onRefreshTemplates={refreshAllData}
+              onRefreshSettings={refreshAllData}
+              onLogout={handleLogout}
+            />
           </div>
         </main>
 
         {/* Modern Mobile Bottom Navigation */}
         <BottomNav
           currentTab={currentTab}
-          onSelectTab={(tab) => setCurrentTab(tab)}
+          onSelectTab={handleNavigate}
           accentColor={design.primaryColor}
         />
       </div>

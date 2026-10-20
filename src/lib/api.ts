@@ -108,10 +108,47 @@ export interface BotSettings {
   hasToken?: boolean;
 }
 
+export interface BotUserRecord {
+  id: string; // telegram user id
+  username?: string;
+  firstName?: string;
+  lastName?: string;
+  firstSeenAt: string;
+  lastActiveAt: string;
+  interactionCount: number;
+  isBanned?: boolean;
+  bannedAt?: string;
+  isAdmin?: boolean;
+}
+
+const TOKEN_KEY = 'tg_admin_token';
+
+function getStoredToken(): string | null {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return localStorage.getItem(TOKEN_KEY);
+    }
+  } catch {}
+  return null;
+}
+
+export function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  const token = getStoredToken();
+  const headers = new Headers(options.headers || {});
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  return fetch(url, {
+    ...options,
+    headers,
+    credentials: 'include'
+  });
+}
+
 export const api = {
   async getMe(): Promise<{ admin: AdminUser } | null> {
     try {
-      const res = await fetch('/api/auth/me', { credentials: 'include' });
+      const res = await authFetch('/api/auth/me');
       if (!res.ok) return null;
       return await res.json();
     } catch {
@@ -119,21 +156,27 @@ export const api = {
     }
   },
 
-  async login(telegramId: string, password: string):Promise<{ success: boolean; admin: AdminUser; error?: string }> {
-    const res = await fetch('/api/auth/login', {
+  async login(telegramId: string, password: string): Promise<{ success: boolean; admin: AdminUser; token?: string; error?: string }> {
+    const res = await authFetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify({ telegramId, username: telegramId, password })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Login failed');
+    if (data.token) {
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          localStorage.setItem(TOKEN_KEY, data.token);
+        }
+      } catch {}
+    }
     return data;
   },
 
   async validateCredentials(username: string, password: string): Promise<{ valid: boolean }> {
     try {
-      const res = await fetch('/api/auth/validate-credentials', {
+      const res = await authFetch('/api/auth/validate-credentials', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, telegramId: username, password })
@@ -146,7 +189,12 @@ export const api = {
   },
 
   async logout(): Promise<void> {
-    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localStorage.removeItem(TOKEN_KEY);
+      }
+    } catch {}
+    await authFetch('/api/auth/logout', { method: 'POST' });
   },
 
   async forgotPassword(telegramId: string, code: string, newPassword: string): Promise<{ success: boolean; message: string }> {
@@ -178,16 +226,15 @@ export const api = {
 
   // Items
   async getItems(): Promise<ItemRecord[]> {
-    const res = await fetch('/api/items', { credentials: 'include' });
+    const res = await authFetch('/api/items');
     if (!res.ok) throw new Error('Failed to fetch items');
     return await res.json();
   },
 
   async createItem(item: Partial<ItemRecord>): Promise<{ success: boolean; item: ItemRecord }> {
-    const res = await fetch('/api/items', {
+    const res = await authFetch('/api/items', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify(item)
     });
     const data = await res.json();
@@ -196,10 +243,9 @@ export const api = {
   },
 
   async updateItem(id: string, item: Partial<ItemRecord>): Promise<{ success: boolean; item: ItemRecord }> {
-    const res = await fetch(`/api/items/${id}`, {
+    const res = await authFetch(`/api/items/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify(item)
     });
     const data = await res.json();
@@ -208,9 +254,8 @@ export const api = {
   },
 
   async deleteItem(id: string): Promise<{ success: boolean }> {
-    const res = await fetch(`/api/items/${id}`, {
-      method: 'DELETE',
-      credentials: 'include'
+    const res = await authFetch(`/api/items/${id}`, {
+      method: 'DELETE'
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to delete item');
@@ -224,10 +269,9 @@ export const api = {
     caption?: string;
   }): Promise<{ success: boolean; fileId: string; uploadedFileId?: string; fileUniqueId?: string; fileName: string; fileSize: number; warning?: string }> {
     const isFormData = payload instanceof FormData;
-    const res = await fetch('/api/items/upload', {
+    const res = await authFetch('/api/items/upload', {
       method: 'POST',
       headers: isFormData ? undefined : { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: isFormData ? payload : JSON.stringify(payload)
     });
     const data = await res.json();
@@ -237,7 +281,7 @@ export const api = {
 
   // Templates
   async getTemplates(): Promise<Record<string, MessageTemplate>> {
-    const res = await fetch('/api/templates', { credentials: 'include' });
+    const res = await authFetch('/api/templates');
     if (!res.ok) throw new Error('Failed to load templates');
     return await res.json();
   },
@@ -247,10 +291,9 @@ export const api = {
     content: string,
     extra?: { mediaType?: 'none' | 'photo' | 'video'; mediaUrl?: string; buttons?: TemplateButton[] }
   ): Promise<{ success: boolean; template?: MessageTemplate }> {
-    const res = await fetch(`/api/templates/${key}`, {
+    const res = await authFetch(`/api/templates/${key}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify({ content, ...extra })
     });
     const data = await res.json();
@@ -259,9 +302,8 @@ export const api = {
   },
 
   async resetTemplates(): Promise<any> {
-    const res = await fetch('/api/templates-reset', {
-      method: 'PUT',
-      credentials: 'include'
+    const res = await authFetch('/api/templates-reset', {
+      method: 'PUT'
     });
     return await res.json();
   },
@@ -274,23 +316,22 @@ export const api = {
     trackedCount: number;
     adminsCount: number;
   }> {
-    const res = await fetch('/api/stats', { credentials: 'include' });
+    const res = await authFetch('/api/stats');
     if (!res.ok) throw new Error('Failed to load stats');
     return await res.json();
   },
 
   // Admins
   async getAdmins(): Promise<Omit<AdminUser, 'passwordHash'>[]> {
-    const res = await fetch('/api/admins', { credentials: 'include' });
+    const res = await authFetch('/api/admins');
     if (!res.ok) throw new Error('Failed to load admins');
     return await res.json();
   },
 
   async createAdmin(payload: any): Promise<any> {
-    const res = await fetch('/api/admins', {
+    const res = await authFetch('/api/admins', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify(payload)
     });
     const data = await res.json();
@@ -299,10 +340,9 @@ export const api = {
   },
 
   async updateAdmin(id: string, payload: any): Promise<any> {
-    const res = await fetch(`/api/admins/${id}`, {
+    const res = await authFetch(`/api/admins/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify(payload)
     });
     const data = await res.json();
@@ -311,9 +351,8 @@ export const api = {
   },
 
   async deleteAdmin(id: string): Promise<any> {
-    const res = await fetch(`/api/admins/${id}`, {
-      method: 'DELETE',
-      credentials: 'include'
+    const res = await authFetch(`/api/admins/${id}`, {
+      method: 'DELETE'
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to delete admin');
@@ -322,16 +361,15 @@ export const api = {
 
   // Design
   async getDesign(): Promise<DesignConfig> {
-    const res = await fetch('/api/design', { credentials: 'include' });
+    const res = await authFetch('/api/design');
     if (!res.ok) throw new Error('Failed to load design');
     return await res.json();
   },
 
   async updateDesign(design: Partial<DesignConfig>): Promise<{ success: boolean; design: DesignConfig }> {
-    const res = await fetch('/api/design', {
+    const res = await authFetch('/api/design', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify(design)
     });
     const data = await res.json();
@@ -341,16 +379,15 @@ export const api = {
 
   // Settings
   async getSettings(): Promise<BotSettings> {
-    const res = await fetch('/api/settings', { credentials: 'include' });
+    const res = await authFetch('/api/settings');
     if (!res.ok) throw new Error('Failed to load settings');
     return await res.json();
   },
 
   async updateSettings(settings: Partial<BotSettings>): Promise<{ success: boolean; settings: BotSettings }> {
-    const res = await fetch('/api/settings', {
+    const res = await authFetch('/api/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify(settings)
     });
     const data = await res.json();
@@ -359,31 +396,29 @@ export const api = {
   },
 
   async setWebhook(appUrl: string): Promise<any> {
-    const res = await fetch('/api/bot/set-webhook', {
+    const res = await authFetch('/api/bot/set-webhook', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify({ appUrl })
     });
     return await res.json();
   },
 
   async getBotInfo(): Promise<any> {
-    const res = await fetch('/api/bot/info', { credentials: 'include' });
+    const res = await authFetch('/api/bot/info');
     return await res.json();
   },
 
   // Cleanup
   async getCleanupStatus(): Promise<any> {
-    const res = await fetch('/api/cleanup/status', { credentials: 'include' });
+    const res = await authFetch('/api/cleanup/status');
     return await res.json();
   },
 
   async runCleanup(hours?: number): Promise<any> {
-    const res = await fetch('/api/cleanup/run', {
+    const res = await authFetch('/api/cleanup/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify({ hours })
     });
     return await res.json();
@@ -391,12 +426,27 @@ export const api = {
 
   // Simulator
   async simulate(input: string, chatType: 'group' | 'private' = 'group'): Promise<any> {
-    const res = await fetch('/api/simulate', {
+    const res = await authFetch('/api/simulate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
       body: JSON.stringify({ input, chatType })
     });
     return await res.json();
+  },
+
+  // Users Management
+  async getUsers(): Promise<BotUserRecord[]> {
+    const res = await authFetch('/api/users');
+    if (!res.ok) throw new Error('Failed to load users');
+    return await res.json();
+  },
+
+  async toggleBanUser(userId: string): Promise<{ success: boolean; user: BotUserRecord }> {
+    const res = await authFetch(`/api/users/${userId}/ban`, {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to update ban status');
+    return data;
   }
 };

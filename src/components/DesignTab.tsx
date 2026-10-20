@@ -66,9 +66,9 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-bold text-white flex items-center gap-2">
-            <Palette className="w-4 h-4 text-sky-400" /> Design &amp; Animations
+            <Palette className="w-4 h-4 text-red-400" /> Design &amp; Animations
           </h2>
-          <p className="text-xs text-slate-400">Android appearance &amp; visual styles</p>
+          <p className="text-xs text-zinc-400">Android appearance &amp; visual styles</p>
         </div>
         <button
           onClick={handleSave}
@@ -89,10 +89,10 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
       </div>
 
       {/* 1. Background Animation Section */}
-      <div className="glass-panel rounded-2xl p-4 border border-slate-800 space-y-4">
+      <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs font-semibold text-white">
-            <Sparkles className="w-4 h-4 text-sky-400" />
+            <Sparkles className="w-4 h-4 text-red-400" />
             <span>Background Animation Style</span>
           </div>
           <label className="relative inline-flex items-center cursor-pointer">
@@ -102,7 +102,7 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
               onChange={(e) => setDesign({ ...design, animationEnabled: e.target.checked })}
               className="sr-only peer"
             />
-            <div className="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-sky-500" />
+            <div className="w-9 h-5 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-sky-500" />
           </label>
         </div>
 
@@ -115,8 +115,8 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
               onClick={() => setDesign({ ...design, backgroundStyle: opt.id as any })}
               className={`p-2.5 rounded-xl text-xs font-medium text-left border transition-all cursor-pointer ${
                 design.backgroundStyle === opt.id
-                  ? 'bg-sky-500/20 border-sky-500 text-sky-300 shadow-sm'
-                  : 'bg-slate-900/80 border-slate-800 text-slate-400 hover:text-white'
+                  ? 'bg-red-500/20 border-red-500 text-sky-300 shadow-sm'
+                  : 'bg-zinc-900/80 border-zinc-800 text-zinc-400 hover:text-white'
               }`}
             >
               {opt.label}
@@ -125,10 +125,10 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
         </div>
 
         {/* Animation Adjustments */}
-        <div className="pt-2 border-t border-slate-800/80 space-y-3">
+        <div className="pt-2 border-t border-zinc-800/80 space-y-3">
           {/* Speed */}
           <div>
-            <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
+            <div className="flex items-center justify-between text-xs text-zinc-400 mb-1">
               <span>Animation Speed</span>
               <span className="font-mono text-white">{design.animationSpeed}x</span>
             </div>
@@ -145,7 +145,7 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
 
           {/* Opacity */}
           <div>
-            <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
+            <div className="flex items-center justify-between text-xs text-zinc-400 mb-1">
               <span>Animation Opacity</span>
               <span className="font-mono text-white">{Math.round(design.animationOpacity * 100)}%</span>
             </div>
@@ -162,7 +162,7 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
 
           {/* Density */}
           <div>
-            <div className="flex items-center justify-between text-xs text-slate-400 mb-1">
+            <div className="flex items-center justify-between text-xs text-zinc-400 mb-1">
               <span>Particle Density</span>
               <span className="font-mono text-white">{design.animationDensity}</span>
             </div>
@@ -180,17 +180,17 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
       </div>
 
       {/* 2. Button Tap & Typing Animation Style (Orbit, Neon Pulse, Cyber Sheen, Mechanical Typing, Ripple) */}
-      <div className="glass-panel rounded-2xl p-4 border border-slate-800 space-y-4">
+      <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs font-semibold text-white">
-            <Sparkles className="w-4 h-4 text-sky-400" />
+            <Sparkles className="w-4 h-4 text-red-400" />
             <span>Button Tap & Typing Animation</span>
           </div>
-          <span className="text-[10px] px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30">
+          <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/15 text-sky-300 border border-red-500/30">
             {design.buttonAnimationStyle || 'orbit'}
           </span>
         </div>
-        <p className="text-[11px] text-slate-400">
+        <p className="text-[11px] text-zinc-400">
           Choose an interactive effect when buttons are pressed, focused, or tapped.
         </p>
 
@@ -229,21 +229,21 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
               onClick={() => setDesign({ ...design, buttonAnimationStyle: opt.id as any })}
               className={`p-3 rounded-xl text-left border transition-all cursor-pointer ${
                 (design.buttonAnimationStyle || 'orbit') === opt.id
-                  ? 'bg-sky-500/20 border-sky-500 text-sky-300 shadow-md shadow-sky-500/10 ring-1 ring-sky-500/50'
-                  : 'bg-slate-900/80 border-slate-800 text-slate-400 hover:text-white'
+                  ? 'bg-red-500/20 border-red-500 text-sky-300 shadow-md shadow-sky-500/10 ring-1 ring-sky-500/50'
+                  : 'bg-zinc-900/80 border-zinc-800 text-zinc-400 hover:text-white'
               }`}
             >
               <div className="flex items-center justify-between mb-1">
                 <span className="text-xs font-semibold text-white">{opt.label}</span>
                 {(design.buttonAnimationStyle || 'orbit') === opt.id && (
-                  <Check className="w-3.5 h-3.5 text-sky-400" />
+                  <Check className="w-3.5 h-3.5 text-red-400" />
                 )}
               </div>
-              <p className="text-[10px] text-slate-400 leading-relaxed">{opt.desc}</p>
+              <p className="text-[10px] text-zinc-400 leading-relaxed">{opt.desc}</p>
 
               {/* Interactive Test Button Preview right inside the card */}
-              <div className="mt-2 pt-2 border-t border-slate-800/80 flex items-center justify-between">
-                <span className="text-[9px] text-slate-500 font-mono">Tap to test:</span>
+              <div className="mt-2 pt-2 border-t border-zinc-800/80 flex items-center justify-between">
+                <span className="text-[9px] text-zinc-500 font-mono">Tap to test:</span>
                 <span
                   className={`text-[10px] px-2.5 py-1 rounded-lg bg-sky-500 text-white font-medium shadow-sm transition-all select-none btn-anim-${opt.id}`}
                 >
@@ -256,7 +256,7 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
       </div>
 
       {/* 3. Color Palette */}
-      <div className="glass-panel rounded-2xl p-4 border border-slate-800 space-y-3">
+      <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-3">
         <div className="text-xs font-semibold text-white">Accent Theme Color</div>
         <div className="grid grid-cols-6 gap-2">
           {primaryColors.map((c) => (
@@ -266,7 +266,7 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
               onClick={() => setDesign({ ...design, primaryColor: c.hex })}
               style={{ backgroundColor: c.hex }}
               className={`h-9 rounded-xl flex items-center justify-center transition-transform active:scale-90 cursor-pointer ${
-                design.primaryColor === c.hex ? 'ring-2 ring-white ring-offset-2 ring-offset-slate-900 scale-105' : ''
+                design.primaryColor === c.hex ? 'ring-2 ring-white ring-offset-2 ring-offset-zinc-900 scale-105' : ''
               }`}
             >
               {design.primaryColor === c.hex && <Check className="w-4 h-4 text-white drop-shadow" />}
@@ -276,7 +276,7 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
       </div>
 
       {/* 3. Login Screen Full Customization & Branding */}
-      <div className="glass-panel rounded-2xl p-4 border border-slate-800 space-y-4">
+      <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-4">
         <div className="text-xs font-semibold text-white flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Shield className="w-4 h-4 text-rose-500" />
@@ -299,24 +299,24 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
                 loginAccentColor: '#ef4444'
               }));
             }}
-            className="text-[10px] px-2.5 py-1 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700/60 flex items-center gap-1 cursor-pointer transition-colors"
+            className="text-[10px] px-2.5 py-1 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 border border-zinc-700/60 flex items-center gap-1 cursor-pointer transition-colors"
             title="Reset login screen to dark red theme"
           >
             <RotateCcw className="w-3 h-3 text-rose-400" />
             <span>Reset to Default</span>
           </button>
         </div>
-        <p className="text-[11px] text-slate-400">
+        <p className="text-[11px] text-zinc-400">
           Changes made here immediately apply to the Admin Panel login screen in real-time.
         </p>
 
         {/* Live Real-Time Mini Preview of Login Card */}
-        <div className="p-4 rounded-2xl bg-[#060608] border border-slate-800/90 relative overflow-hidden">
-          <div className="text-[10px] uppercase font-bold tracking-wider text-slate-400 mb-3 flex items-center justify-between">
-            <span className="flex items-center gap-1.5 text-slate-300">
+        <div className="p-4 rounded-2xl bg-[#060608] border border-zinc-800/90 relative overflow-hidden">
+          <div className="text-[10px] uppercase font-bold tracking-wider text-zinc-400 mb-3 flex items-center justify-between">
+            <span className="flex items-center gap-1.5 text-zinc-300">
               <Eye className="w-3.5 h-3.5 text-rose-400" /> Live Card Preview
             </span>
-            <span className="text-[9px] px-2 py-0.5 rounded-full bg-slate-900 border border-slate-800 text-rose-400 font-mono">
+            <span className="text-[9px] px-2 py-0.5 rounded-full bg-zinc-900 border border-zinc-800 text-rose-400 font-mono">
               Live Sync
             </span>
           </div>
@@ -394,9 +394,9 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
         </div>
 
         {/* 1. Accent & Neon Glow Color Theme */}
-        <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2.5">
+        <div className="p-3.5 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-2.5">
           <div className="flex items-center justify-between">
-            <label className="text-[11px] font-semibold text-slate-300 flex items-center gap-1.5">
+            <label className="text-[11px] font-semibold text-zinc-300 flex items-center gap-1.5">
               <Palette className="w-3.5 h-3.5 text-rose-400" />
               <span>Login Screen Accent / Glow Color</span>
             </label>
@@ -405,9 +405,9 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
                 type="color"
                 value={design.loginAccentColor || '#ef4444'}
                 onChange={(e) => setDesign({ ...design, loginAccentColor: e.target.value })}
-                className="w-6 h-6 rounded-md border border-slate-700 bg-transparent cursor-pointer p-0"
+                className="w-6 h-6 rounded-md border border-zinc-700 bg-transparent cursor-pointer p-0"
               />
-              <span className="text-[10px] font-mono text-slate-400">{design.loginAccentColor || '#ef4444'}</span>
+              <span className="text-[10px] font-mono text-zinc-400">{design.loginAccentColor || '#ef4444'}</span>
             </div>
           </div>
 
@@ -428,7 +428,7 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
                 className={`py-1.5 px-2 rounded-lg text-[10px] font-medium border text-center transition-all cursor-pointer truncate ${
                   (design.loginAccentColor || '#ef4444').toLowerCase() === col.hex.toLowerCase()
                     ? 'border-white text-white shadow-sm ring-1 ring-white/50'
-                    : 'border-slate-800 text-slate-400 hover:text-white'
+                    : 'border-zinc-800 text-zinc-400 hover:text-white'
                 }`}
                 style={{
                   backgroundColor: `${col.hex}22`,
@@ -442,9 +442,9 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
         </div>
 
         {/* 2. Top Icon: Kanji / Symbol / Image Logo */}
-        <div className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800 space-y-3">
+        <div className="p-3.5 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-3">
           <div className="flex items-center justify-between">
-            <label className="text-[11px] font-semibold text-slate-300 flex items-center gap-1.5">
+            <label className="text-[11px] font-semibold text-zinc-300 flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-rose-400" />
               <span>Top Icon or Kanji Symbol (Kanji / Symbol / Icon)</span>
             </label>
@@ -463,7 +463,7 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {/* Symbol / Kanji Text Input */}
             <div>
-              <label className="block text-[10px] text-slate-400 mb-1">
+              <label className="block text-[10px] text-zinc-400 mb-1">
                 Inner Symbol or Kanji Character
               </label>
               <input
@@ -472,17 +472,17 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
                 onChange={(e) => setDesign({ ...design, loginLogoSymbol: e.target.value })}
                 placeholder="e.g. 惡, ⚡, 🛡️"
                 maxLength={4}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl py-2 px-3 text-sm text-white font-mono text-center focus:outline-none focus:border-rose-500"
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl py-2 px-3 text-sm text-white font-mono text-center focus:outline-none focus:border-rose-500"
               />
               {/* Quick Kanji / Symbol Presets */}
               <div className="flex items-center gap-1.5 mt-2 flex-wrap">
-                <span className="text-[10px] text-slate-500">Presets:</span>
+                <span className="text-[10px] text-zinc-500">Presets:</span>
                 {['惡', '⚡', '🛡️', '🔥', '👑', '💀', '🤖', '💎'].map((sym) => (
                   <button
                     key={sym}
                     type="button"
                     onClick={() => setDesign({ ...design, loginLogoSymbol: sym, loginLogoUrl: '' })}
-                    className="w-7 h-7 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-white text-xs border border-slate-700/50 flex items-center justify-center cursor-pointer transition-all active:scale-95"
+                    className="w-7 h-7 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-white text-xs border border-zinc-700/50 flex items-center justify-center cursor-pointer transition-all active:scale-95"
                   >
                     {sym}
                   </button>
@@ -492,7 +492,7 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
 
             {/* Custom Picture / Logo URL & Upload (Optional) */}
             <div>
-              <label className="block text-[10px] text-slate-400 mb-1">
+              <label className="block text-[10px] text-zinc-400 mb-1">
                 Or Custom Image URL / Upload
               </label>
               <div className="flex gap-2">
@@ -501,9 +501,9 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
                   value={design.loginLogoUrl || ''}
                   onChange={(e) => setDesign({ ...design, loginLogoUrl: e.target.value })}
                   placeholder="https://... (Image link)"
-                  className="flex-1 bg-slate-950 border border-slate-800 rounded-xl py-1.5 px-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-rose-500"
+                  className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl py-1.5 px-3 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-rose-500"
                 />
-                <label className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-rose-400 border border-slate-700 text-xs font-medium flex items-center gap-1.5 cursor-pointer shrink-0 transition-colors">
+                <label className="px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-rose-400 border border-zinc-700 text-xs font-medium flex items-center gap-1.5 cursor-pointer shrink-0 transition-colors">
                   <Upload className="w-3.5 h-3.5" />
                   <span>Upload</span>
                   <input
@@ -536,24 +536,24 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
         {/* 3. Titles & Branding Texts */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
           <div>
-            <label className="block text-[11px] text-slate-300 mb-1 font-medium">Main Title</label>
+            <label className="block text-[11px] text-zinc-300 mb-1 font-medium">Main Title</label>
             <input
               type="text"
               value={design.loginTitle || ''}
               onChange={(e) => setDesign({ ...design, loginTitle: e.target.value })}
               placeholder="ADMIN PANEL"
-              className="w-full bg-slate-900 border border-slate-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-rose-500"
+              className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-rose-500"
             />
           </div>
 
           <div>
-            <label className="block text-[11px] text-slate-300 mb-1 font-medium">Subtitle</label>
+            <label className="block text-[11px] text-zinc-300 mb-1 font-medium">Subtitle</label>
             <input
               type="text"
               value={design.loginSubtitle || ''}
               onChange={(e) => setDesign({ ...design, loginSubtitle: e.target.value })}
               placeholder="SECURE ACCESS"
-              className="w-full bg-slate-900 border border-slate-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-rose-500"
+              className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-rose-500"
             />
           </div>
         </div>
@@ -561,49 +561,49 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
         {/* 4. Input Fields Labels & Placeholders */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {/* Admin Name */}
-          <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+          <div className="p-3 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-2">
             <div>
-              <label className="block text-[10px] text-slate-400 mb-1 font-medium">Username / Admin Name Label</label>
+              <label className="block text-[10px] text-zinc-400 mb-1 font-medium">Username / Admin Name Label</label>
               <input
                 type="text"
                 value={design.loginIdLabel || ''}
                 onChange={(e) => setDesign({ ...design, loginIdLabel: e.target.value })}
                 placeholder="ADMIN NAME"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg py-1.5 px-2.5 text-xs text-white focus:outline-none focus:border-rose-500"
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg py-1.5 px-2.5 text-xs text-white focus:outline-none focus:border-rose-500"
               />
             </div>
             <div>
-              <label className="block text-[10px] text-slate-400 mb-1 font-medium">Username Placeholder</label>
+              <label className="block text-[10px] text-zinc-400 mb-1 font-medium">Username Placeholder</label>
               <input
                 type="text"
                 value={design.loginIdPlaceholder || ''}
                 onChange={(e) => setDesign({ ...design, loginIdPlaceholder: e.target.value })}
                 placeholder="Enter admin name"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg py-1.5 px-2.5 text-xs text-white focus:outline-none focus:border-rose-500"
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg py-1.5 px-2.5 text-xs text-white focus:outline-none focus:border-rose-500"
               />
             </div>
           </div>
 
           {/* Password */}
-          <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 space-y-2">
+          <div className="p-3 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-2">
             <div>
-              <label className="block text-[10px] text-slate-400 mb-1 font-medium">Password Field Label</label>
+              <label className="block text-[10px] text-zinc-400 mb-1 font-medium">Password Field Label</label>
               <input
                 type="text"
                 value={design.loginPassLabel || ''}
                 onChange={(e) => setDesign({ ...design, loginPassLabel: e.target.value })}
                 placeholder="PASSWORD"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg py-1.5 px-2.5 text-xs text-white focus:outline-none focus:border-rose-500"
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg py-1.5 px-2.5 text-xs text-white focus:outline-none focus:border-rose-500"
               />
             </div>
             <div>
-              <label className="block text-[10px] text-slate-400 mb-1 font-medium">Password Placeholder</label>
+              <label className="block text-[10px] text-zinc-400 mb-1 font-medium">Password Placeholder</label>
               <input
                 type="text"
                 value={design.loginPassPlaceholder || ''}
                 onChange={(e) => setDesign({ ...design, loginPassPlaceholder: e.target.value })}
                 placeholder="Enter password"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg py-1.5 px-2.5 text-xs text-white focus:outline-none focus:border-rose-500"
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg py-1.5 px-2.5 text-xs text-white focus:outline-none focus:border-rose-500"
               />
             </div>
           </div>
@@ -611,13 +611,13 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
 
         {/* 5. Button Text */}
         <div className="pt-1">
-          <label className="block text-[11px] text-slate-300 mb-1 font-medium">Sign In Button Text</label>
+          <label className="block text-[11px] text-zinc-300 mb-1 font-medium">Sign In Button Text</label>
           <input
             type="text"
             value={design.loginButtonText || ''}
             onChange={(e) => setDesign({ ...design, loginButtonText: e.target.value })}
             placeholder="SIGN IN"
-            className="w-full bg-slate-900 border border-slate-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-rose-500"
+            className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-rose-500"
           />
         </div>
 
