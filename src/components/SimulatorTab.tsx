@@ -47,6 +47,7 @@ export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '#f
   // Quick preset triggers for convenience
   const samplePresets = [
     '/filters',
+    '/add',
     '#driver',
     '#ff',
     '#carrom',
@@ -100,7 +101,7 @@ export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '#f
         <button
           onClick={() => handleSimulate()}
           disabled={loading || !inputText.trim()}
-          className="py-2.5 px-4 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-medium text-xs flex items-center gap-1.5 shadow-lg shadow-sky-500/20 active:scale-95 transition-all disabled:opacity-50 cursor-pointer"
+          className="py-2.5 px-4 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs flex items-center gap-1.5 shadow-md shadow-blue-600/30 active:scale-95 transition-all disabled:opacity-50 cursor-pointer"
         >
           {loading ? (
             <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -241,10 +242,21 @@ export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '#f
                           </div>
                         )}
 
-                        {/* Deep Link Buttons */}
+                        {/* Deep Link Buttons & Interactive Inline Buttons */}
                         {simulationResult.botResponse?.buttons?.map((btn: any, idx: number) => {
-                          const isTagBtn = btn.text?.startsWith('📥 ');
-                          const tag = isTagBtn ? btn.text.replace(/^📥\s*/, '') : '';
+                          const rawText = btn.text || '';
+                          const isTagBtn = rawText.startsWith('📥 ');
+                          const tag = isTagBtn ? rawText.replace(/^📥\s*/, '') : '';
+                          // Completely remove any leading bullet emojis, dots, or icons (such as 🔵, 🔴, etc.)
+                          const cleanText = rawText
+                            .replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{200D}🔴🔵🟢🟡🟣⚫⚪🔘❌✅⭕🛑🔹🔷🔸🔶▪️▫️•🔒📥\s]+/gu, '')
+                            .replace(/[🔴🔵🟢🟡🟣⚫⚪🔘❌✅⭕🛑🔹🔷🔸🔶▪️▫️]/gu, '')
+                            .trim() || rawText;
+
+                          const textLower = cleanText.toLowerCase();
+                          // Solid Red for Cancel, Delete, Stop
+                          const isDanger = /cancel|delete|stop/i.test(textLower);
+
                           return (
                             <button
                               key={idx}
@@ -252,15 +264,19 @@ export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '#f
                                 if (isTagBtn && tag) {
                                   setInputText(tag);
                                   handleSimulate(tag);
+                                } else if (isDanger) {
+                                  alert('Operation cancelled.');
                                 } else {
                                   startPrivateDelivery();
                                 }
                               }}
-                              className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-sky-500/20 to-indigo-500/20 hover:from-sky-500/30 hover:to-indigo-500/30 border border-red-500/30 text-sky-300 text-xs font-semibold flex items-center justify-center gap-1.5 active:scale-[0.98] transition-all cursor-pointer"
+                              className={`w-full py-2.5 px-3.5 rounded-xl text-white text-xs font-semibold flex items-center justify-center active:scale-[0.98] transition-all cursor-pointer shadow-md ${
+                                isDanger
+                                  ? 'bg-red-600 hover:bg-red-500 shadow-red-600/30 border border-red-500'
+                                  : 'bg-blue-600 hover:bg-blue-500 shadow-blue-600/30 border border-blue-500'
+                              }`}
                             >
-                              <Lock className="w-3.5 h-3.5" />
-                              <span>{btn.text}</span>
-                              <ArrowRight className="w-3 h-3 text-red-400" />
+                              <span>{cleanText}</span>
                             </button>
                           );
                         })}
@@ -352,19 +368,14 @@ export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '#f
                               href={simulationResult.privateDeliveryPreview?.url || '#'}
                               target="_blank"
                               rel="noreferrer"
-                              className="py-2.5 px-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center justify-center gap-2 transition-all block text-center"
+                              className="py-2.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center justify-center transition-all block text-center shadow-md shadow-blue-600/30 border border-blue-500"
                             >
-                              {simulationResult.privateDeliveryPreview?.openMode === 'webapp' ? (
-                                <>
-                                  <Smartphone className="w-4 h-4" />
-                                  <span>{simulationResult.privateDeliveryPreview?.buttonText || '📱 Launch Mini App'}</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Globe className="w-4 h-4" />
-                                  <span>{simulationResult.privateDeliveryPreview?.buttonText || '🌐 Open Link'}</span>
-                                </>
-                              )}
+                              <span>
+                                {(simulationResult.privateDeliveryPreview?.buttonText || (simulationResult.privateDeliveryPreview?.openMode === 'webapp' ? 'Launch Mini App' : 'Open Link'))
+                                  .replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{200D}🔴🔵🟢🟡🟣⚫⚪🔘❌✅⭕🛑🔹🔷🔸🔶▪️▫️•📱🌐🛠️\s]+/gu, '')
+                                  .replace(/[🔴🔵🟢🟡🟣⚫⚪🔘❌✅⭕🛑🔹🔷🔸🔶▪️▫️]/gu, '')
+                                  .trim() || 'Open Link'}
+                              </span>
                             </a>
 
                             <div className="text-[9px] text-zinc-400 text-right">12:30 PM</div>

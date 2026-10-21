@@ -285,7 +285,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
           {canEdit && (
             <button
               onClick={openAddModal}
-              className="py-2 px-3.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-bold text-xs flex items-center gap-1.5 shadow-lg shadow-amber-500/20 cursor-pointer active:scale-95 transition-all"
+              className="py-2 px-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-blue-600/30 cursor-pointer active:scale-95 transition-all"
             >
               <Plus className="w-4 h-4 stroke-[2.5]" />
               <span>Add Filter</span>
@@ -710,14 +710,14 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
                 <button
                   type="button"
                   onClick={() => setIsAddModalOpen(false)}
-                  className="py-2 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-semibold text-xs cursor-pointer transition-colors"
+                  className="py-2 px-4 rounded-xl bg-red-600 hover:bg-red-500 text-white font-semibold text-xs cursor-pointer shadow-md shadow-red-600/30 transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={loading}
-                  className="py-2 px-5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-bold text-xs flex items-center gap-1.5 shadow-lg shadow-amber-500/20 cursor-pointer disabled:opacity-50 transition-all"
+                  className="py-2 px-5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-blue-600/30 cursor-pointer disabled:opacity-50 transition-all"
                 >
                   {loading ? (
                     <span>Saving...</span>
@@ -885,14 +885,14 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
                     setIsEditModalOpen(false);
                     setSelectedItem(null);
                   }}
-                  className="py-2 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-semibold text-xs cursor-pointer transition-colors"
+                  className="py-2 px-4 rounded-xl bg-red-600 hover:bg-red-500 text-white font-semibold text-xs cursor-pointer shadow-md shadow-red-600/30 transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={loading}
-                  className="py-2 px-5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-bold text-xs flex items-center gap-1.5 shadow-lg shadow-amber-500/20 cursor-pointer disabled:opacity-50 transition-all"
+                  className="py-2 px-5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-blue-600/30 cursor-pointer disabled:opacity-50 transition-all"
                 >
                   {loading ? (
                     <span>Saving...</span>
@@ -933,7 +933,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
               <button
                 type="button"
                 onClick={() => setDeleteConfirmItem(null)}
-                className="py-2 px-3.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-semibold text-xs cursor-pointer transition-colors"
+                className="py-2 px-3.5 rounded-xl bg-red-600 hover:bg-red-500 text-white font-semibold text-xs cursor-pointer shadow-md shadow-red-600/30 transition-colors"
               >
                 Cancel
               </button>
@@ -941,7 +941,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
                 type="button"
                 onClick={handleDeleteItem}
                 disabled={loading}
-                className="py-2 px-4 rounded-xl bg-rose-500 hover:bg-rose-400 text-white font-bold text-xs flex items-center gap-1.5 shadow-lg shadow-rose-500/20 cursor-pointer disabled:opacity-50 transition-all"
+                className="py-2 px-4 rounded-xl bg-red-700 hover:bg-red-600 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-red-700/30 cursor-pointer disabled:opacity-50 transition-all"
               >
                 {loading ? 'Deleting...' : 'Delete Filter'}
               </button>

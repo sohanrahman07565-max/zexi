@@ -661,14 +661,14 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               <div className="flex gap-2 pt-2">
                 <button
                   onClick={() => setEditingTemplate(null)}
-                  className="flex-1 py-2 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-medium"
+                  className="flex-1 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-red-600/30 transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleSaveTemplate}
                   disabled={templateSaving}
-                  className="flex-1 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-white text-xs font-medium disabled:opacity-50"
+                  className="flex-1 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-blue-600/30 disabled:opacity-50 transition-colors"
                 >
                   {templateSaving ? 'Saving...' : 'Save Template'}
                 </button>
@@ -696,7 +696,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {currentUser.role === 'owner' && (
             <button
               onClick={() => setShowAddAdmin(true)}
-              className="py-1.5 px-3 rounded-xl bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 text-xs font-medium flex items-center gap-1 cursor-pointer"
+              className="py-1.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-600/30 text-xs font-semibold flex items-center gap-1 cursor-pointer transition-colors"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Add Sub-Admin</span>
@@ -837,13 +837,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   <button
                     type="button"
                     onClick={() => setShowAddAdmin(false)}
-                    className="flex-1 py-2 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-medium"
+                    className="flex-1 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-red-600/30 transition-colors"
                   >
                     Cancel
                   </button>
                   <button
                     type="submit"
-                    className="flex-1 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-medium"
+                    className="flex-1 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-blue-600/30 transition-colors"
                   >
                     Create Admin
                   </button>
@@ -1090,7 +1090,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             <button
               type="submit"
               disabled={settingSaving}
-              className="w-full py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-white text-xs font-semibold cursor-pointer disabled:opacity-50"
+              className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-blue-600/30 disabled:opacity-50 transition-colors"
             >
               {settingSaving ? 'Saving...' : 'Save Configuration & Password'}
             </button>

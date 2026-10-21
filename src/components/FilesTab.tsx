@@ -419,7 +419,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
         {(canAddFile || canAddLink) && (
           <button
             onClick={() => openAddModal('file')}
-            className="py-2 px-3.5 rounded-xl bg-gradient-to-r from-red-600 via-rose-600 to-red-500 hover:from-red-500 hover:to-rose-500 text-white shadow-[0_0_15px_rgba(239,68,68,0.4)] text-xs font-semibold flex items-center gap-1.5 cursor-pointer active:scale-95 transition-all shrink-0"
+            className="py-2 px-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-600/30 text-xs font-semibold flex items-center gap-1.5 cursor-pointer active:scale-95 transition-all shrink-0"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>Add File/Link</span>
@@ -663,14 +663,14 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
             <div className="flex gap-2">
               <button
                 onClick={() => setDeleteConfirmId(null)}
-                className="flex-1 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium cursor-pointer"
+                className="flex-1 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-red-600/30 transition-colors"
               >
                 Cancel
               </button>
               <button
                 onClick={() => handleDelete(deleteConfirmId)}
                 disabled={loading}
-                className="flex-1 py-2 rounded-xl bg-rose-500 hover:bg-rose-600 text-white text-xs font-medium cursor-pointer disabled:opacity-50"
+                className="flex-1 py-2 rounded-xl bg-red-700 hover:bg-red-600 text-white text-xs font-semibold cursor-pointer shadow-md shadow-red-700/30 disabled:opacity-50 transition-colors"
               >
                 {loading ? 'Deleting...' : 'Delete'}
               </button>
@@ -1153,14 +1153,14 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                 <button
                   type="button"
                   onClick={() => setModalMode('none')}
-                  className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold cursor-pointer transition-colors"
+                  className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-red-600/30 transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={loading || uploading}
-                  className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-red-600 via-rose-600 to-red-500 hover:brightness-110 text-white text-xs font-semibold shadow-[0_0_20px_rgba(239,68,68,0.4)] cursor-pointer disabled:opacity-50 transition-all flex items-center justify-center gap-1.5"
+                  className="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-600/30 cursor-pointer disabled:opacity-50 transition-all flex items-center justify-center gap-1.5"
                 >
                   {loading ? (
                     <>

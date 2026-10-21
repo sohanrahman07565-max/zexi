@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { BotUserRecord, api } from '../lib/api';
 import {
   Users,
@@ -124,10 +125,13 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
 
   if (!isOpen) return null;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
+  const modalContent = (
+    <div 
+      onClick={onClose}
+      className="fixed inset-0 z-50 flex items-center justify-center p-3.5 sm:p-5 pb-24 sm:pb-28 bg-black/85 backdrop-blur-md animate-in fade-in duration-200 overscroll-contain select-none"
+    >
       <div 
-        className="w-full max-w-xl max-h-[88vh] flex flex-col rounded-3xl bg-[#0c0c13]/98 border border-red-500/25 shadow-[0_0_60px_-10px_rgba(239,68,68,0.3),0_20px_45px_rgba(0,0,0,0.9)] overflow-hidden relative"
+        className="w-full max-w-lg max-h-[80vh] sm:max-h-[82vh] flex flex-col rounded-3xl bg-[#0c0c13]/98 border border-red-500/30 shadow-[0_0_60px_-10px_rgba(239,68,68,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] overflow-hidden relative animate-in zoom-in-95 duration-200 select-text"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Subtle top card border glow accent */}
@@ -139,7 +143,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
         />
 
         {/* Modal Header */}
-        <div className="p-4 sm:p-5 border-b border-zinc-800/80 flex items-center justify-between bg-[#0e0e16]/80">
+        <div className="shrink-0 p-4 sm:p-5 border-b border-zinc-800/80 flex items-center justify-between bg-[#0e0e16]/80">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-red-500/15 border border-red-500/30 text-red-400 flex items-center justify-center shadow-[0_0_15px_rgba(239,68,68,0.2)]">
               <Users className="w-5 h-5" />
@@ -182,7 +186,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
         {/* Feedback Alert */}
         {feedback && (
           <div
-            className={`px-4 py-2.5 text-xs flex items-center justify-between border-b ${
+            className={`shrink-0 px-4 py-2.5 text-xs flex items-center justify-between border-b ${
               feedback.type === 'success'
                 ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/20'
                 : 'bg-red-500/10 text-red-300 border-red-500/20'
@@ -206,7 +210,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
         )}
 
         {/* Search Bar */}
-        <div className="p-3 sm:p-4 border-b border-zinc-800/80 bg-[#0a0a10]">
+        <div className="shrink-0 p-3 sm:p-4 border-b border-zinc-800/80 bg-[#0a0a10]">
           <div className="relative">
             <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
@@ -227,8 +231,8 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
           </div>
         </div>
 
-        {/* Users List Body */}
-        <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-2.5 min-h-[220px]">
+        {/* Users List Body (Scrollable Middle Area) */}
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-4 space-y-2.5">
           {loading && users.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-zinc-400">
               <RefreshCw className="w-6 h-6 animate-spin text-red-500 mb-2" />
@@ -345,8 +349,8 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
                         disabled={isProcessing}
                         className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 disabled:opacity-50 ${
                           isBanned
-                            ? 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 border border-emerald-500/30'
-                            : 'bg-red-500/15 hover:bg-red-500/25 text-red-400 border border-red-500/30 hover:shadow-[0_0_12px_rgba(239,68,68,0.3)]'
+                            ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-600/30'
+                            : 'bg-red-600 hover:bg-red-500 text-white shadow-md shadow-red-600/30'
                         }`}
                       >
                         {isProcessing ? (
@@ -371,15 +375,15 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
           )}
         </div>
 
-        {/* Modal Footer */}
-        <div className="p-3 sm:p-4 border-t border-zinc-800/80 bg-[#0a0a10] flex items-center justify-between text-xs text-zinc-500">
+        {/* Modal Footer (Pinned at bottom) */}
+        <div className="shrink-0 p-3 sm:p-4 border-t border-zinc-800/80 bg-[#0a0a10] flex items-center justify-between text-xs text-zinc-500">
           <div className="flex items-center gap-1.5">
             <Sparkles className="w-3.5 h-3.5 text-red-400" />
             <span>Automatic dynamic UID capture</span>
           </div>
           <button
             onClick={onClose}
-            className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium transition-colors cursor-pointer"
+            className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold transition-colors cursor-pointer shadow-md shadow-red-600/30"
           >
             Close
           </button>
@@ -387,4 +391,10 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
       </div>
     </div>
   );
+
+  if (typeof document !== 'undefined') {
+    return createPortal(modalContent, document.body);
+  }
+
+  return modalContent;
 };

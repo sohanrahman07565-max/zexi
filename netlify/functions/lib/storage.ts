@@ -171,9 +171,11 @@ export interface BotUserRecord {
   lastName?: string;
   firstSeenAt: string;
   lastActiveAt: string;
+  isOnline?: boolean;
   interactionCount: number;
   isBanned?: boolean;
   bannedAt?: string;
+  isAdmin?: boolean;
 }
 
 export interface AppDatabase {
@@ -469,6 +471,7 @@ export class SharedStorageService {
         scheduledDeletions: Array.isArray(loadedData.scheduledDeletions) ? loadedData.scheduledDeletions : [],
         uploadedFilesIndex: loadedData.uploadedFilesIndex || {},
         addSessions: loadedData.addSessions || {},
+        botUsers: loadedData.botUsers || {},
         design: { ...DEFAULT_DESIGN, ...(loadedData.design || {}) },
         settings: {
           ...DEFAULT_SETTINGS,
@@ -977,56 +980,138 @@ export class SharedStorageService {
     return Object.values(this.db.trackedMessages).reduce((acc, list) => acc + list.length, 0);
   }
 
-  // --- Bot Unique Users Tracking ---
+  // --- Bot Unique Users Tracking & Database Saving Middleware ---
   public async trackBotUser(user: {
     id: string | number;
     username?: string;
     firstName?: string;
     lastName?: string;
-  }): Promise<void> {
-    if (!user || !user.id) return;
+  }): Promise<BotUserRecord | null> {
+    if (!user || !user.id) return null;
     const userId = String(user.id).trim();
-    if (!userId) return;
+    if (!userId) return null;
 
-    await this.loadLatest(false);
+    await this.loadLatest(true);
     if (!this.db.botUsers) {
       this.db.botUsers = {};
     }
 
     const now = new Date().toISOString();
-    const existing = this.db.botUsers[userId];
-    if (existing) {
-      existing.lastActiveAt = now;
-      existing.interactionCount = (existing.interactionCount || 1) + 1;
-      if (user.username) existing.username = user.username;
-      if (user.firstName) existing.firstName = user.firstName;
-      if (user.lastName) existing.lastName = user.lastName;
+    const cleanUsername = user.username
+      ? `@${user.username.replace(/^@+/, '').trim()}`
+      : undefined;
+    const cleanFirstName = user.firstName ? String(user.firstName).trim() : undefined;
+    const cleanLastName = user.lastName ? String(user.lastName).trim() : undefined;
+
+    // Check if this user has admin privileges
+    const admins = await this.getAdmins();
+    const settings = await this.getSettings();
+    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163').trim();
+    const isAdmin = userId === rootAdminId || rootAdminId.includes(userId) || admins.some(a => String(a.telegramId).trim() === userId || String(a.id).trim() === userId);
+
+    let record = this.db.botUsers[userId];
+    if (record) {
+      // User exists: update last active timestamp and live online status
+      record.lastActiveAt = now;
+      record.isOnline = true;
+      record.interactionCount = (record.interactionCount || 0) + 1;
+      if (cleanUsername) record.username = cleanUsername;
+      if (cleanFirstName) record.firstName = cleanFirstName;
+      if (cleanLastName) record.lastName = cleanLastName;
+      if (isAdmin) record.isAdmin = true;
     } else {
-      this.db.botUsers[userId] = {
+      // User does NOT exist: save them instantly as a new user
+      record = {
         id: userId,
-        username: user.username,
-        firstName: user.firstName,
-        lastName: user.lastName,
+        username: cleanUsername,
+        firstName: cleanFirstName || (isAdmin ? 'Admin' : undefined),
+        lastName: cleanLastName,
         firstSeenAt: now,
         lastActiveAt: now,
-        interactionCount: 1
+        isOnline: true,
+        interactionCount: 1,
+        isAdmin: isAdmin
       };
+      this.db.botUsers[userId] = record;
+      console.info(`[Storage] Registered new bot user: ${userId} (${record.username || record.firstName || 'User'})`);
     }
+
     await this.persist();
+    return record;
   }
 
   public async getTotalUserCount(): Promise<number> {
-    await this.loadLatest(false);
-    if (!this.db.botUsers) return 0;
-    return Object.keys(this.db.botUsers).length;
+    const users = await this.getBotUsers();
+    return users.length;
   }
 
   public async getBotUsers(): Promise<BotUserRecord[]> {
-    await this.loadLatest(false);
-    if (!this.db.botUsers) return [];
-    return Object.values(this.db.botUsers).sort((a, b) => 
-      new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime()
-    );
+    await this.loadLatest(true);
+    if (!this.db.botUsers) this.db.botUsers = {};
+
+    const admins = await this.getAdmins();
+    const settings = await this.getSettings();
+    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163').trim();
+
+    const adminIds = new Set<string>();
+    if (rootAdminId) adminIds.add(rootAdminId);
+    for (const a of admins) {
+      if (a.telegramId) adminIds.add(String(a.telegramId).trim());
+      if (a.id) adminIds.add(String(a.id).trim());
+    }
+
+    // Requirement 2: Ensure all registered admins are included in the user list even before initial telegram interaction
+    let changed = false;
+    const now = new Date().toISOString();
+
+    for (const admin of admins) {
+      const adminId = String(admin.telegramId || admin.id).trim();
+      if (adminId && !this.db.botUsers[adminId]) {
+        this.db.botUsers[adminId] = {
+          id: adminId,
+          username: admin.name ? `@${admin.name.replace(/^@+/, '').trim()}` : undefined,
+          firstName: admin.name || 'Admin',
+          firstSeenAt: admin.createdAt || now,
+          lastActiveAt: admin.lastLoginAt || admin.createdAt || now,
+          isOnline: admin.lastLoginAt ? (Date.now() - new Date(admin.lastLoginAt).getTime() < 15 * 60 * 1000) : false,
+          interactionCount: 1,
+          isAdmin: true
+        };
+        changed = true;
+      }
+    }
+
+    if (rootAdminId && !this.db.botUsers[rootAdminId]) {
+      this.db.botUsers[rootAdminId] = {
+        id: rootAdminId,
+        username: process.env.ADMIN_NAME ? `@${process.env.ADMIN_NAME.replace(/^@+/, '').trim()}` : '@sohan',
+        firstName: process.env.ADMIN_NAME || 'Owner Admin',
+        firstSeenAt: now,
+        lastActiveAt: now,
+        isOnline: true,
+        interactionCount: 1,
+        isAdmin: true
+      };
+      changed = true;
+    }
+
+    if (changed) {
+      await this.persist();
+    }
+
+    const nowMs = Date.now();
+    return Object.values(this.db.botUsers)
+      .map((u) => {
+        const lastActiveMs = u.lastActiveAt ? new Date(u.lastActiveAt).getTime() : 0;
+        // User is considered online if active within last 10 minutes
+        const isOnline = lastActiveMs > 0 && (nowMs - lastActiveMs < 10 * 60 * 1000);
+        return {
+          ...u,
+          isOnline,
+          isAdmin: adminIds.has(String(u.id).trim()) || Boolean(u.isAdmin)
+        };
+      })
+      .sort((a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime());
   }
 
   public async isUserBanned(userId: string | number): Promise<boolean> {

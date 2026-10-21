@@ -1137,6 +1137,24 @@ apiRouter.post('/simulate', authenticate, async (req: Request, res: Response) =>
   const botUsername = await TelegramService.getBotUsername();
 
   if (!matchedItem) {
+    if (cleanInput.toLowerCase() === '/add' || cleanInput.toLowerCase().startsWith('/add@')) {
+      return res.json({
+        matched: true,
+        input: cleanInput,
+        chatType,
+        item: null,
+        botResponse: {
+          isReplyToMessage: false,
+          text: '📥 <b>Interactive Bot Menu: What would you like to add?</b>\n\nChoose an option below or send your file or link directly:\n• <b>File:</b> Document, Photo, Video, Audio\n• <b>Link:</b> Web Link (URL)',
+          buttons: [
+            { text: 'Add File', callback_data: 'add_choose_file' },
+            { text: 'Add Link', callback_data: 'add_choose_link' },
+            { text: 'Cancel', callback_data: 'cancel_add' }
+          ]
+        }
+      });
+    }
+
     if (chatType === 'private' && (cleanInput.toLowerCase() === '/start' || cleanInput.toLowerCase().startsWith('/start@'))) {
       let startMsg = templates.START_MESSAGE?.content || '👋 Welcome {user_name}! Use configured group triggers to receive files and links privately.';
       startMsg = startMsg

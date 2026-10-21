@@ -222,32 +222,77 @@ export class TelegramService {
     }
   }
 
-  // Process incoming webhook update
-  public static async handleUpdate(update: any): Promise<void> {
-    if (!update) return;
+  // Comprehensive extraction of Telegram User from ANY update type
+  public static extractUserFromUpdate(update: any): {
+    id: string | number;
+    username?: string;
+    firstName?: string;
+    lastName?: string;
+  } | null {
+    if (!update) return null;
 
-    // 1. AUTOMATIC UNIQUE UID TRACKING (Requirement 1):
-    // Whenever any user interacts with or requests/takes anything from the bot for the first time,
-    // automatically capture and register their unique Telegram User ID (UID).
-    const fromUser = 
+    const rawUser = 
       update.message?.from || 
       update.edited_message?.from || 
       update.callback_query?.from ||
       update.inline_query?.from ||
       update.chosen_inline_result?.from ||
+      update.channel_post?.from ||
+      update.edited_channel_post?.from ||
+      update.shipping_query?.from ||
+      update.pre_checkout_query?.from ||
+      update.poll_answer?.user ||
       update.my_chat_member?.from ||
       update.chat_member?.from ||
-      update.chat_join_request?.from;
+      update.chat_join_request?.from ||
+      update.message_reaction?.user ||
+      update.message?.forward_from;
 
-    const fromId = fromUser?.id ? String(fromUser.id) : '';
+    if (rawUser && rawUser.id) {
+      return {
+        id: rawUser.id,
+        username: rawUser.username ? `@${rawUser.username.replace(/^@+/, '').trim()}` : undefined,
+        firstName: rawUser.first_name,
+        lastName: rawUser.last_name
+      };
+    }
 
-    if (fromUser && fromUser.id) {
-      storage.trackBotUser({
-        id: fromUser.id,
-        username: fromUser.username ? `@${fromUser.username.replace(/^@+/, '')}` : undefined,
-        firstName: fromUser.first_name,
-        lastName: fromUser.last_name
-      }).catch((err) => console.warn('[Telegram] User tracking error:', err));
+    // Fallback: If sent in a private chat, chat object contains user info
+    const chat = update.message?.chat || update.edited_message?.chat || update.callback_query?.message?.chat;
+    if (chat && chat.type === 'private' && chat.id) {
+      return {
+        id: chat.id,
+        username: chat.username ? `@${chat.username.replace(/^@+/, '').trim()}` : undefined,
+        firstName: chat.first_name,
+        lastName: chat.last_name
+      };
+    }
+
+    return null;
+  }
+
+  // Process incoming webhook or polling update
+  public static async handleUpdate(update: any): Promise<void> {
+    if (!update) return;
+
+    // 1. AUTOMATIC UNIQUE UID TRACKING & DATABASE SAVING (Requirement 1 & 2):
+    // Intercept every incoming update (message, command like /start, callback query, etc.) from any user.
+    // Extract their Telegram User ID, First Name, Last Name, and @username.
+    // Immediately check if this User ID exists in the database. If not, save instantly; if so, update lastActive and online status.
+    const userPayload = this.extractUserFromUpdate(update);
+    const fromId = userPayload?.id ? String(userPayload.id).trim() : '';
+
+    if (userPayload && userPayload.id) {
+      try {
+        await storage.trackBotUser({
+          id: userPayload.id,
+          username: userPayload.username,
+          firstName: userPayload.firstName,
+          lastName: userPayload.lastName
+        });
+      } catch (err: any) {
+        console.warn('[Telegram] User tracking error:', err.message || err);
+      }
     }
 
     // Ban Enforcement: check if user is restricted by administrator
@@ -898,7 +943,11 @@ export class TelegramService {
 
     // Automatically register recipient UID whenever a user receives/takes anything from the bot
     if (chatId) {
-      storage.trackBotUser({ id: chatId }).catch((err) => console.warn('[Telegram] User tracking in delivery error:', err));
+      try {
+        await storage.trackBotUser({ id: chatId });
+      } catch (err: any) {
+        console.warn('[Telegram] User tracking in delivery error:', err.message || err);
+      }
     }
 
     // Deduplication check for retried webhooks
@@ -1543,7 +1592,7 @@ export class TelegramService {
               { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
               { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
             ],
-            [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add' }]
           ]
         },
         sessionData
@@ -1573,7 +1622,7 @@ export class TelegramService {
               { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
               { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
             ],
-            [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add' }]
           ]
         },
         sessionData
@@ -1592,10 +1641,10 @@ export class TelegramService {
       {
         inline_keyboard: [
           [
-            { text: '📁 Add File', callback_data: 'add_choose_file' },
-            { text: '🔗 Add Link', callback_data: 'add_choose_link' }
+            { text: 'Add File', callback_data: 'add_choose_file' },
+            { text: 'Add Link', callback_data: 'add_choose_link' }
           ],
-          [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+          [{ text: 'Cancel', callback_data: 'cancel_add' }]
         ]
       },
       sessionData
@@ -1640,7 +1689,7 @@ export class TelegramService {
                 { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
                 { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
               ],
-              [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add' }]
             ]
           },
           session
@@ -1667,7 +1716,7 @@ export class TelegramService {
                 { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
                 { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
               ],
-              [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add' }]
             ]
           },
           session
@@ -1684,10 +1733,10 @@ export class TelegramService {
         {
           inline_keyboard: [
             [
-              { text: '📁 Add File', callback_data: 'add_choose_file' },
-              { text: '🔗 Add Link', callback_data: 'add_choose_link' }
+              { text: 'Add File', callback_data: 'add_choose_file' },
+              { text: 'Add Link', callback_data: 'add_choose_link' }
             ],
-            [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add' }]
           ]
         },
         session
@@ -1719,7 +1768,7 @@ export class TelegramService {
                 { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
                 { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
               ],
-              [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add' }]
             ]
           },
           session
@@ -1735,7 +1784,7 @@ export class TelegramService {
         '❌ No file detected. Please send a Document, Photo, Video, or Audio, or type /cancel to abort.',
         {
           inline_keyboard: [
-            [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add' }]
           ]
         },
         session
@@ -1764,7 +1813,7 @@ export class TelegramService {
                 { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
                 { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
               ],
-              [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add' }]
             ]
           },
           session
@@ -1780,7 +1829,7 @@ export class TelegramService {
         '❌ Invalid URL. Please send a valid web link starting with https:// or http:// (or type /cancel):',
         {
           inline_keyboard: [
-            [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add' }]
           ]
         },
         session
@@ -1804,7 +1853,7 @@ export class TelegramService {
               { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
               { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
             ],
-            [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add' }]
           ]
         },
         session
@@ -1825,7 +1874,7 @@ export class TelegramService {
           '❌ Please enter a valid trigger keyword name (or send /cancel to abort):',
           {
             inline_keyboard: [
-              [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add' }]
             ]
           },
           session
@@ -1859,7 +1908,7 @@ export class TelegramService {
               { text: '1. Yes, Add to Filters', callback_data: 'add_filter_yes' },
               { text: '2. No, Keep Hidden', callback_data: 'add_filter_no' }
             ],
-            [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add' }]
           ]
         },
         session
@@ -1888,7 +1937,7 @@ export class TelegramService {
                 { text: '1. Yes, Add to Filters', callback_data: 'add_filter_yes' },
                 { text: '2. No, Keep Hidden', callback_data: 'add_filter_no' }
               ],
-              [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add' }]
             ]
           },
           session
@@ -1914,7 +1963,7 @@ export class TelegramService {
                 { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
                 { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
               ],
-              [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add' }]
             ]
           },
           session
@@ -1938,7 +1987,7 @@ export class TelegramService {
               { text: '📱 Telegram Mini App', callback_data: 'add_delivery_webapp' },
               { text: '🌐 Web Browser / Direct', callback_data: 'add_delivery_browser' }
             ],
-            [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add' }]
           ]
         },
         session
@@ -1968,7 +2017,7 @@ export class TelegramService {
         {
           inline_keyboard: [
             [{ text: '💬 Use Default Message', callback_data: 'add_link_default_msg' }],
-            [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add' }]
           ]
         },
         session
@@ -1994,7 +2043,7 @@ export class TelegramService {
         {
           inline_keyboard: [
             [{ text: '🛠️ Use Default (OPEN 🛠️)', callback_data: 'add_link_default_btn' }],
-            [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add' }]
           ]
         },
         session
@@ -2022,7 +2071,7 @@ export class TelegramService {
               { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
               { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
             ],
-            [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add' }]
           ]
         },
         session
@@ -2055,7 +2104,7 @@ export class TelegramService {
                 { text: '7 Days', callback_data: 'add_days_7' },
                 { text: '30 Days', callback_data: 'add_days_30' }
               ],
-              [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add' }]
             ]
           },
           session
@@ -2075,7 +2124,7 @@ export class TelegramService {
                 { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
                 { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
               ],
-              [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add' }]
             ]
           },
           session
@@ -2101,7 +2150,7 @@ export class TelegramService {
                 { text: '7 Days', callback_data: 'add_days_7' },
                 { text: '30 Days', callback_data: 'add_days_30' }
               ],
-              [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add' }]
             ]
           },
           session
@@ -2224,7 +2273,7 @@ export class TelegramService {
     const successMarkup = {
       inline_keyboard: [
         [
-          { text: '🚀 Test Delivery', callback_data: `test_delivery_${newItem.id}` }
+          { text: 'Test Delivery', callback_data: `test_delivery_${newItem.id}` }
         ]
       ]
     };
@@ -2324,7 +2373,7 @@ export class TelegramService {
             '📤 Please send the <b>File</b> you want to add (Document, Photo, Video, or Audio):\n\n<i>Or send /cancel to abort.</i>',
             {
               inline_keyboard: [
-                [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add' }]
               ]
             },
             session
@@ -2351,7 +2400,7 @@ export class TelegramService {
             '🔗 Please enter or paste the <b>Web Link (URL)</b> you want to add (e.g., https://example.com):\n\n<i>Or send /cancel to abort.</i>',
             {
               inline_keyboard: [
-                [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add' }]
               ]
             },
             session
@@ -2387,7 +2436,7 @@ export class TelegramService {
             `<b>${stepHeader}: Trigger Name</b>\nPlease enter the trigger keyword for this ${session.type === 'file' ? 'file' : 'link'} (${promptExample}):`,
             {
               inline_keyboard: [
-                [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add' }]
               ]
             },
             session
@@ -2423,7 +2472,7 @@ export class TelegramService {
                     { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
                     { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
                   ],
-                  [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+                  [{ text: 'Cancel', callback_data: 'cancel_add' }]
                 ]
               },
               session
@@ -2452,7 +2501,7 @@ export class TelegramService {
                   { text: '📱 Telegram Mini App', callback_data: 'add_delivery_webapp' },
                   { text: '🌐 Web Browser / Direct', callback_data: 'add_delivery_browser' }
                 ],
-                [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add' }]
               ]
             },
             session
@@ -2484,7 +2533,7 @@ export class TelegramService {
             {
               inline_keyboard: [
                 [{ text: '💬 Use Default Message', callback_data: 'add_link_default_msg' }],
-                [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add' }]
               ]
             },
             session
@@ -2515,7 +2564,7 @@ export class TelegramService {
             {
               inline_keyboard: [
                 [{ text: '🛠️ Use Default (OPEN 🛠️)', callback_data: 'add_link_default_btn' }],
-                [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add' }]
               ]
             },
             session
@@ -2549,7 +2598,7 @@ export class TelegramService {
                   { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
                   { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
                 ],
-                [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add' }]
               ]
             },
             session
@@ -2591,7 +2640,7 @@ export class TelegramService {
                   { text: '7 Days', callback_data: 'add_days_7' },
                   { text: '30 Days', callback_data: 'add_days_30' }
                 ],
-                [{ text: '❌ Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add' }]
               ]
             },
             session
@@ -3137,6 +3186,77 @@ export class TelegramService {
     } catch (err: any) {
       console.warn('[Telegram] Error in processDueScheduledDeletions:', err);
       return 0;
+    }
+  }
+
+  // =========================================================================
+  // TELEGRAM POLLING & WEBHOOK HYBRID WORKER
+  // =========================================================================
+  private static pollingActive = false;
+  private static pollingOffset = 0;
+
+  public static async initPollingWorker(): Promise<void> {
+    if (this.pollingActive) return;
+
+    const token = await this.getBotToken();
+    if (!token) {
+      console.info('[Telegram] No bot token configured, polling worker waiting.');
+      return;
+    }
+
+    try {
+      const webhookInfo = await this.callTelegramApi('getWebhookInfo', {});
+      if (webhookInfo?.result?.url) {
+        console.info(`[Telegram] Webhook is active (${webhookInfo.result.url}). Webhook ingress handles updates.`);
+        return;
+      }
+    } catch (err: any) {
+      console.warn('[Telegram] Could not check webhook status:', err.message);
+    }
+
+    this.pollingActive = true;
+    console.info('[Telegram] Starting background polling worker for live updates.');
+    this.runPollingLoop().catch((err) => {
+      console.warn('[Telegram] Polling loop stopped:', err);
+      this.pollingActive = false;
+    });
+  }
+
+  public static stopPolling(): void {
+    this.pollingActive = false;
+  }
+
+  private static async runPollingLoop(): Promise<void> {
+    while (this.pollingActive) {
+      try {
+        const res = await this.callTelegramApi('getUpdates', {
+          offset: this.pollingOffset,
+          timeout: 20,
+          allowed_updates: [
+            'message', 'edited_message', 'channel_post', 'edited_channel_post',
+            'inline_query', 'chosen_inline_result', 'callback_query',
+            'my_chat_member', 'chat_member', 'chat_join_request'
+          ]
+        });
+
+        if (res && res.ok && Array.isArray(res.result)) {
+          for (const update of res.result) {
+            this.pollingOffset = Math.max(this.pollingOffset, update.update_id + 1);
+            try {
+              await this.handleUpdate(update);
+            } catch (updateErr) {
+              console.error('[Telegram Polling] Error handling update:', updateErr);
+            }
+          }
+        }
+      } catch (err: any) {
+        if (err.message && err.message.includes('409')) {
+          console.info('[Telegram Polling] Webhook set; stopping polling loop.');
+          this.pollingActive = false;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 4000));
+      }
     }
   }
 }

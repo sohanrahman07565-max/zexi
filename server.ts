@@ -27,6 +27,9 @@ async function startServer() {
   // Initialize scheduled file auto-delete worker (10-minute delivery timeout)
   await TelegramService.initScheduledDeletionWorker();
 
+  // Initialize Telegram polling worker (receives live updates when webhook is not set)
+  await TelegramService.initPollingWorker();
+
   // Mount API Router
   app.use('/api', apiRouter);
 
