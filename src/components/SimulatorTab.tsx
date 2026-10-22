@@ -254,8 +254,8 @@ export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '#f
                             .trim() || rawText;
 
                           const textLower = cleanText.toLowerCase();
-                          // Solid Red for Cancel, Delete, Stop
-                          const isDanger = /cancel|delete|stop/i.test(textLower);
+                          const isDanger = btn.style === 'danger' || /cancel|delete|remove|block|reject|stop/i.test(textLower);
+                          const isSuccess = btn.style === 'success' || (!isDanger && /start|confirm|approve|yes/i.test(textLower));
 
                           return (
                             <button
@@ -273,6 +273,8 @@ export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '#f
                               className={`w-full py-2.5 px-3.5 rounded-xl text-white text-xs font-semibold flex items-center justify-center active:scale-[0.98] transition-all cursor-pointer shadow-md ${
                                 isDanger
                                   ? 'bg-red-600 hover:bg-red-500 shadow-red-600/30 border border-red-500'
+                                  : isSuccess
+                                  ? 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-600/30 border border-emerald-500'
                                   : 'bg-blue-600 hover:bg-blue-500 shadow-blue-600/30 border border-blue-500'
                               }`}
                             >

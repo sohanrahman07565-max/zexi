@@ -472,7 +472,7 @@ export class TelegramService {
             undefined,
             {
               inline_keyboard: [
-                [{ text: '🔒 Open Bot in Private DM', url: `https://t.me/${cleanBot}?start=admin` }]
+                [{ text: 'Open Bot in Private DM', url: `https://t.me/${cleanBot}?start=admin`, style: 'primary' }]
               ]
             }
           );
@@ -646,8 +646,9 @@ export class TelegramService {
           inline_keyboard: [
             [
               {
-                text: buttonTemplate.content,
-                url: deepLink
+                text: (buttonTemplate.content || 'Get File Privately').replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\s🔒]+/u, '').trim() || 'Get File Privately',
+                url: deepLink,
+                style: 'primary'
               }
             ]
           ]
@@ -659,7 +660,7 @@ export class TelegramService {
       }
     } else if (matchedItem.type === 'link') {
       const template = templates.GROUP_LINK_REPLY || { content: "👇 Tap below — I'll send the link privately." };
-      const buttonTemplate = templates.GET_LINK_BUTTON || { content: '🔒 Open Privately' };
+      const buttonTemplate = templates.GET_LINK_BUTTON || { content: 'Open Privately' };
 
       const replyText = template.content
         .replace('{user_name}', userName)
@@ -679,8 +680,9 @@ export class TelegramService {
           inline_keyboard: [
             [
               {
-                text: buttonTemplate.content,
-                url: deepLink
+                text: (buttonTemplate.content || 'Open Privately').replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\s🔒]+/u, '').trim() || 'Open Privately',
+                url: deepLink,
+                style: 'primary'
               }
             ]
           ]
@@ -1240,12 +1242,13 @@ export class TelegramService {
         }
       } else if (item.type === 'link') {
         const messageText = item.replyMessage || `🔗 ${item.name}`;
-        const buttonText = item.buttonText || (item.openMode === 'webapp' ? '📱 Launch App' : 'OPEN 🛠️');
+        const rawButtonText = item.buttonText || (item.openMode === 'webapp' ? 'Launch App' : 'Open Link');
+        const buttonText = rawButtonText.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '').trim() || 'Open Link';
 
         const isHttps = /^https:\/\//i.test(item.url || '');
         const canUseWebApp = item.openMode === 'webapp' && isHttps;
 
-        const inlineButton: any = { text: buttonText };
+        const inlineButton: any = { text: buttonText, style: 'primary' };
         if (canUseWebApp) {
           inlineButton.web_app = { url: item.url };
         } else {
@@ -1267,7 +1270,7 @@ export class TelegramService {
             chat_id: chatId,
             text: messageText,
             reply_markup: {
-              inline_keyboard: [[{ text: buttonText, url: item.url }]]
+              inline_keyboard: [[{ text: buttonText, url: item.url, style: 'primary' }]]
             }
           });
         }
@@ -1588,11 +1591,11 @@ export class TelegramService {
         {
           inline_keyboard: [
             [
-              { text: '#️⃣ Hashtag (#)', callback_data: 'add_kw_hashtag' },
-              { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
-              { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
+              { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
+              { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
+              { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
             ],
-            [{ text: 'Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
           ]
         },
         sessionData
@@ -1618,11 +1621,11 @@ export class TelegramService {
         {
           inline_keyboard: [
             [
-              { text: '#️⃣ Hashtag (#)', callback_data: 'add_kw_hashtag' },
-              { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
-              { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
+              { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
+              { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
+              { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
             ],
-            [{ text: 'Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
           ]
         },
         sessionData
@@ -1641,10 +1644,10 @@ export class TelegramService {
       {
         inline_keyboard: [
           [
-            { text: 'Add File', callback_data: 'add_choose_file' },
-            { text: 'Add Link', callback_data: 'add_choose_link' }
+            { text: 'Add File', callback_data: 'add_choose_file', style: 'primary' },
+            { text: 'Add Link', callback_data: 'add_choose_link', style: 'primary' }
           ],
-          [{ text: 'Cancel', callback_data: 'cancel_add' }]
+          [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
         ]
       },
       sessionData
@@ -1685,11 +1688,11 @@ export class TelegramService {
           {
             inline_keyboard: [
               [
-                { text: '#️⃣ Hashtag (#)', callback_data: 'add_kw_hashtag' },
-                { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
-                { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
+                { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
+                { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
+                { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
               ],
-              [{ text: 'Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
             ]
           },
           session
@@ -1712,11 +1715,11 @@ export class TelegramService {
           {
             inline_keyboard: [
               [
-                { text: '#️⃣ Hashtag (#)', callback_data: 'add_kw_hashtag' },
-                { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
-                { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
+                { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
+                { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
+                { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
               ],
-              [{ text: 'Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
             ]
           },
           session
@@ -1733,10 +1736,10 @@ export class TelegramService {
         {
           inline_keyboard: [
             [
-              { text: 'Add File', callback_data: 'add_choose_file' },
-              { text: 'Add Link', callback_data: 'add_choose_link' }
+              { text: 'Add File', callback_data: 'add_choose_file', style: 'primary' },
+              { text: 'Add Link', callback_data: 'add_choose_link', style: 'primary' }
             ],
-            [{ text: 'Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
           ]
         },
         session
@@ -1764,11 +1767,11 @@ export class TelegramService {
           {
             inline_keyboard: [
               [
-                { text: '#️⃣ Hashtag (#)', callback_data: 'add_kw_hashtag' },
-                { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
-                { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
+                { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
+                { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
+                { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
               ],
-              [{ text: 'Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
             ]
           },
           session
@@ -1784,7 +1787,7 @@ export class TelegramService {
         '❌ No file detected. Please send a Document, Photo, Video, or Audio, or type /cancel to abort.',
         {
           inline_keyboard: [
-            [{ text: 'Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
           ]
         },
         session
@@ -1809,11 +1812,11 @@ export class TelegramService {
           {
             inline_keyboard: [
               [
-                { text: '#️⃣ Hashtag (#)', callback_data: 'add_kw_hashtag' },
-                { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
-                { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
+                { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
+                { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
+                { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
               ],
-              [{ text: 'Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
             ]
           },
           session
@@ -1829,7 +1832,7 @@ export class TelegramService {
         '❌ Invalid URL. Please send a valid web link starting with https:// or http:// (or type /cancel):',
         {
           inline_keyboard: [
-            [{ text: 'Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
           ]
         },
         session
@@ -1849,11 +1852,11 @@ export class TelegramService {
         {
           inline_keyboard: [
             [
-              { text: '#️⃣ Hashtag (#)', callback_data: 'add_kw_hashtag' },
-              { text: '/️⃣ Slash Command (/)', callback_data: 'add_kw_slash' },
-              { text: '🔤 Normal Text', callback_data: 'add_kw_normal' }
+              { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
+              { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
+              { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
             ],
-            [{ text: 'Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
           ]
         },
         session
@@ -1874,7 +1877,7 @@ export class TelegramService {
           '❌ Please enter a valid trigger keyword name (or send /cancel to abort):',
           {
             inline_keyboard: [
-              [{ text: 'Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
             ]
           },
           session
@@ -1905,10 +1908,10 @@ export class TelegramService {
         {
           inline_keyboard: [
             [
-              { text: '1. Yes, Add to Filters', callback_data: 'add_filter_yes' },
-              { text: '2. No, Keep Hidden', callback_data: 'add_filter_no' }
+              { text: '1. Yes, Add to Filters', callback_data: 'add_filter_yes', style: 'success' },
+              { text: '2. No, Keep Hidden', callback_data: 'add_filter_no', style: 'danger' }
             ],
-            [{ text: 'Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
           ]
         },
         session
@@ -1934,10 +1937,10 @@ export class TelegramService {
           {
             inline_keyboard: [
               [
-                { text: '1. Yes, Add to Filters', callback_data: 'add_filter_yes' },
-                { text: '2. No, Keep Hidden', callback_data: 'add_filter_no' }
+                { text: '1. Yes, Add to Filters', callback_data: 'add_filter_yes', style: 'success' },
+                { text: '2. No, Keep Hidden', callback_data: 'add_filter_no', style: 'danger' }
               ],
-              [{ text: 'Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
             ]
           },
           session
@@ -1960,10 +1963,10 @@ export class TelegramService {
           {
             inline_keyboard: [
               [
-                { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
-                { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
+                { text: 'Permanent', callback_data: 'add_ret_perm', style: 'primary' },
+                { text: 'Temporary', callback_data: 'add_ret_temp', style: 'primary' }
               ],
-              [{ text: 'Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
             ]
           },
           session
@@ -1984,10 +1987,10 @@ export class TelegramService {
         {
           inline_keyboard: [
             [
-              { text: '📱 Telegram Mini App', callback_data: 'add_delivery_webapp' },
-              { text: '🌐 Web Browser / Direct', callback_data: 'add_delivery_browser' }
+              { text: 'Telegram Mini App', callback_data: 'add_delivery_webapp', style: 'primary' },
+              { text: 'Web Browser / Direct', callback_data: 'add_delivery_browser', style: 'primary' }
             ],
-            [{ text: 'Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
           ]
         },
         session
@@ -2016,8 +2019,8 @@ export class TelegramService {
         `<b>Step 5/7: Private Delivery Message</b>\nEnter the message text to send privately along with this link, or tap <b>Use Default</b> below:\n\nDefault: <code>${defaultReplyMsg}</code>`,
         {
           inline_keyboard: [
-            [{ text: '💬 Use Default Message', callback_data: 'add_link_default_msg' }],
-            [{ text: 'Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Use Default Message', callback_data: 'add_link_default_msg', style: 'primary' }],
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
           ]
         },
         session
@@ -2039,11 +2042,11 @@ export class TelegramService {
       // Step 6: Open Button Text
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
-        `<b>Step 6/7: Open Button Text</b>\nEnter the inline button text to open the link, or tap <b>Use Default</b> below:\n\nDefault: <code>OPEN 🛠️</code>`,
+        `<b>Step 6/7: Open Button Text</b>\nEnter the inline button text to open the link, or tap <b>Use Default</b> below:\n\nDefault: <code>Open Link</code>`,
         {
           inline_keyboard: [
-            [{ text: '🛠️ Use Default (OPEN 🛠️)', callback_data: 'add_link_default_btn' }],
-            [{ text: 'Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Use Default', callback_data: 'add_link_default_btn', style: 'primary' }],
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
           ]
         },
         session
@@ -2057,7 +2060,7 @@ export class TelegramService {
     // Stage 6 (Link Mandatory Step 2): Awaiting Open Button Text
     if (session.stage === 'awaiting_link_button_text') {
       const customBtn = rawInput.trim();
-      session.buttonText = customBtn || 'OPEN 🛠️';
+      session.buttonText = customBtn ? customBtn.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '').trim() : 'Open Link';
       if (session.linkData) session.linkData.buttonText = session.buttonText;
       session.stage = 'awaiting_retention_choice';
 
@@ -2068,10 +2071,10 @@ export class TelegramService {
         {
           inline_keyboard: [
             [
-              { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
-              { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
+              { text: 'Permanent', callback_data: 'add_ret_perm', style: 'primary' },
+              { text: 'Temporary', callback_data: 'add_ret_temp', style: 'primary' }
             ],
-            [{ text: 'Cancel', callback_data: 'cancel_add' }]
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
           ]
         },
         session
@@ -2100,11 +2103,11 @@ export class TelegramService {
           {
             inline_keyboard: [
               [
-                { text: '1 Day', callback_data: 'add_days_1' },
-                { text: '7 Days', callback_data: 'add_days_7' },
-                { text: '30 Days', callback_data: 'add_days_30' }
+                { text: '1 Day', callback_data: 'add_days_1', style: 'primary' },
+                { text: '7 Days', callback_data: 'add_days_7', style: 'primary' },
+                { text: '30 Days', callback_data: 'add_days_30', style: 'primary' }
               ],
-              [{ text: 'Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
             ]
           },
           session
@@ -2121,10 +2124,10 @@ export class TelegramService {
           {
             inline_keyboard: [
               [
-                { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
-                { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
+                { text: 'Permanent', callback_data: 'add_ret_perm', style: 'primary' },
+                { text: 'Temporary', callback_data: 'add_ret_temp', style: 'primary' }
               ],
-              [{ text: 'Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
             ]
           },
           session
@@ -2146,11 +2149,11 @@ export class TelegramService {
           {
             inline_keyboard: [
               [
-                { text: '1 Day', callback_data: 'add_days_1' },
-                { text: '7 Days', callback_data: 'add_days_7' },
-                { text: '30 Days', callback_data: 'add_days_30' }
+                { text: '1 Day', callback_data: 'add_days_1', style: 'primary' },
+                { text: '7 Days', callback_data: 'add_days_7', style: 'primary' },
+                { text: '30 Days', callback_data: 'add_days_30', style: 'primary' }
               ],
-              [{ text: 'Cancel', callback_data: 'cancel_add' }]
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
             ]
           },
           session
@@ -2223,8 +2226,9 @@ export class TelegramService {
     } else {
       const url = session.linkData?.url || 'https://';
       const name = session.linkData?.name || `Link (${rawKeyword})`;
-      const defaultBtn = openMode === 'webapp' ? '📱 Launch App' : 'OPEN 🛠️';
-      const buttonText = session.buttonText || session.linkData?.buttonText || defaultBtn;
+      const defaultBtn = openMode === 'webapp' ? 'Launch App' : 'Open Link';
+      const rawBtn = session.buttonText || session.linkData?.buttonText || defaultBtn;
+      const buttonText = rawBtn.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '').trim() || 'Open Link';
       const defaultReply = `🔗 Here is your requested link: ${url}`;
       const replyMessage = session.replyMessage || session.linkData?.replyMessage || defaultReply;
       newItem = {
@@ -2273,7 +2277,7 @@ export class TelegramService {
     const successMarkup = {
       inline_keyboard: [
         [
-          { text: 'Test Delivery', callback_data: `test_delivery_${newItem.id}` }
+          { text: 'Test Delivery', callback_data: `test_delivery_${newItem.id}`, style: 'primary' }
         ]
       ]
     };
@@ -2373,7 +2377,7 @@ export class TelegramService {
             '📤 Please send the <b>File</b> you want to add (Document, Photo, Video, or Audio):\n\n<i>Or send /cancel to abort.</i>',
             {
               inline_keyboard: [
-                [{ text: 'Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
               ]
             },
             session
@@ -2400,7 +2404,7 @@ export class TelegramService {
             '🔗 Please enter or paste the <b>Web Link (URL)</b> you want to add (e.g., https://example.com):\n\n<i>Or send /cancel to abort.</i>',
             {
               inline_keyboard: [
-                [{ text: 'Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
               ]
             },
             session
@@ -2436,7 +2440,7 @@ export class TelegramService {
             `<b>${stepHeader}: Trigger Name</b>\nPlease enter the trigger keyword for this ${session.type === 'file' ? 'file' : 'link'} (${promptExample}):`,
             {
               inline_keyboard: [
-                [{ text: 'Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
               ]
             },
             session
@@ -2469,10 +2473,10 @@ export class TelegramService {
               {
                 inline_keyboard: [
                   [
-                    { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
-                    { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
+                    { text: 'Permanent', callback_data: 'add_ret_perm', style: 'primary' },
+                    { text: 'Temporary', callback_data: 'add_ret_temp', style: 'primary' }
                   ],
-                  [{ text: 'Cancel', callback_data: 'cancel_add' }]
+                  [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
                 ]
               },
               session
@@ -2498,10 +2502,10 @@ export class TelegramService {
             {
               inline_keyboard: [
                 [
-                  { text: '📱 Telegram Mini App', callback_data: 'add_delivery_webapp' },
-                  { text: '🌐 Web Browser / Direct', callback_data: 'add_delivery_browser' }
+                  { text: 'Telegram Mini App', callback_data: 'add_delivery_webapp', style: 'primary' },
+                  { text: 'Web Browser / Direct', callback_data: 'add_delivery_browser', style: 'primary' }
                 ],
-                [{ text: 'Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
               ]
             },
             session
@@ -2532,8 +2536,8 @@ export class TelegramService {
             `<b>Step 5/7: Private Delivery Message</b>\nEnter the message text to send privately along with this link, or tap <b>Use Default</b> below:\n\nDefault: <code>${defaultReplyMsg}</code>`,
             {
               inline_keyboard: [
-                [{ text: '💬 Use Default Message', callback_data: 'add_link_default_msg' }],
-                [{ text: 'Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Use Default Message', callback_data: 'add_link_default_msg', style: 'primary' }],
+                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
               ]
             },
             session
@@ -2560,11 +2564,11 @@ export class TelegramService {
         if (chatId) {
           const promptId = await TelegramService.sendOrEditSetupPrompt(
             chatId,
-            `<b>Step 6/7: Open Button Text</b>\nEnter the inline button text to open the link, or tap <b>Use Default</b> below:\n\nDefault: <code>OPEN 🛠️</code>`,
+            `<b>Step 6/7: Open Button Text</b>\nEnter the inline button text to open the link, or tap <b>Use Default</b> below:\n\nDefault: <code>Open Link</code>`,
             {
               inline_keyboard: [
-                [{ text: '🛠️ Use Default (OPEN 🛠️)', callback_data: 'add_link_default_btn' }],
-                [{ text: 'Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Use Default', callback_data: 'add_link_default_btn', style: 'primary' }],
+                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
               ]
             },
             session
@@ -2581,7 +2585,7 @@ export class TelegramService {
     // Step 6 (Link Mandatory Step 2): Default Open Button Text selection
     if (data === 'add_link_default_btn') {
       if (session) {
-        session.buttonText = 'OPEN 🛠️';
+        session.buttonText = 'Open Link';
         if (session.linkData) session.linkData.buttonText = session.buttonText;
         session.stage = 'awaiting_retention_choice';
         activeAddSessions.set(fromId, session);
@@ -2595,10 +2599,10 @@ export class TelegramService {
             {
               inline_keyboard: [
                 [
-                  { text: '♾️ Permanent', callback_data: 'add_ret_perm' },
-                  { text: '⏳ Temporary', callback_data: 'add_ret_temp' }
+                  { text: 'Permanent', callback_data: 'add_ret_perm', style: 'primary' },
+                  { text: 'Temporary', callback_data: 'add_ret_temp', style: 'primary' }
                 ],
-                [{ text: 'Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
               ]
             },
             session
@@ -2636,11 +2640,11 @@ export class TelegramService {
             {
               inline_keyboard: [
                 [
-                  { text: '1 Day', callback_data: 'add_days_1' },
-                  { text: '7 Days', callback_data: 'add_days_7' },
-                  { text: '30 Days', callback_data: 'add_days_30' }
+                  { text: '1 Day', callback_data: 'add_days_1', style: 'primary' },
+                  { text: '7 Days', callback_data: 'add_days_7', style: 'primary' },
+                  { text: '30 Days', callback_data: 'add_days_30', style: 'primary' }
                 ],
-                [{ text: 'Cancel', callback_data: 'cancel_add' }]
+                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
               ]
             },
             session

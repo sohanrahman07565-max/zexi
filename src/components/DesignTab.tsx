@@ -179,83 +179,7 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
         </div>
       </div>
 
-      {/* 2. Button Tap & Typing Animation Style (Orbit, Neon Pulse, Cyber Sheen, Mechanical Typing, Ripple) */}
-      <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-xs font-semibold text-white">
-            <Sparkles className="w-4 h-4 text-red-400" />
-            <span>Button Tap & Typing Animation</span>
-          </div>
-          <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/15 text-sky-300 border border-red-500/30">
-            {design.buttonAnimationStyle || 'orbit'}
-          </span>
-        </div>
-        <p className="text-[11px] text-zinc-400">
-          Choose an interactive effect when buttons are pressed, focused, or tapped.
-        </p>
-
-        {/* 5 Animation Options */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          {[
-            {
-              id: 'orbit',
-              label: '💫 Border Orbit Comet',
-              desc: 'A glowing particle orbits around the button border on interaction'
-            },
-            {
-              id: 'neon',
-              label: '💠 Neon Pulse Ring',
-              desc: 'Shockwave neon ring emits from button on tap'
-            },
-            {
-              id: 'cyber',
-              label: '⚡ Cyber Flash Sheen',
-              desc: 'Dynamic high-tech sheen sweeps across the button'
-            },
-            {
-              id: 'typing',
-              label: '⌨️ Mechanical Typing Click',
-              desc: 'Satisfying tactile press effect with glowing highlight'
-            },
-            {
-              id: 'ripple',
-              label: '🌊 Smooth Ripple Wave',
-              desc: 'Expanding fluid ripple radiates from tap location'
-            }
-          ].map((opt) => (
-            <button
-              key={opt.id}
-              type="button"
-              onClick={() => setDesign({ ...design, buttonAnimationStyle: opt.id as any })}
-              className={`p-3 rounded-xl text-left border transition-all cursor-pointer ${
-                (design.buttonAnimationStyle || 'orbit') === opt.id
-                  ? 'bg-red-500/20 border-red-500 text-sky-300 shadow-md shadow-sky-500/10 ring-1 ring-sky-500/50'
-                  : 'bg-zinc-900/80 border-zinc-800 text-zinc-400 hover:text-white'
-              }`}
-            >
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-semibold text-white">{opt.label}</span>
-                {(design.buttonAnimationStyle || 'orbit') === opt.id && (
-                  <Check className="w-3.5 h-3.5 text-red-400" />
-                )}
-              </div>
-              <p className="text-[10px] text-zinc-400 leading-relaxed">{opt.desc}</p>
-
-              {/* Interactive Test Button Preview right inside the card */}
-              <div className="mt-2 pt-2 border-t border-zinc-800/80 flex items-center justify-between">
-                <span className="text-[9px] text-zinc-500 font-mono">Tap to test:</span>
-                <span
-                  className={`text-[10px] px-2.5 py-1 rounded-lg bg-sky-500 text-white font-medium shadow-sm transition-all select-none btn-anim-${opt.id}`}
-                >
-                  Test Tap
-                </span>
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* 3. Color Palette */}
+      {/* 2. Color Palette */}
       <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-3">
         <div className="text-xs font-semibold text-white">Accent Theme Color</div>
         <div className="grid grid-cols-6 gap-2">
@@ -441,12 +365,12 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
           </div>
         </div>
 
-        {/* 2. Top Icon: Kanji / Symbol / Image Logo */}
+        {/* 2. Top Icon / Media URL */}
         <div className="p-3.5 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-3">
           <div className="flex items-center justify-between">
             <label className="text-[11px] font-semibold text-zinc-300 flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-rose-400" />
-              <span>Top Icon or Kanji Symbol (Kanji / Symbol / Icon)</span>
+              <span>Top Icon &amp; Logo Media URL</span>
             </label>
             {design.loginLogoUrl && (
               <button
@@ -455,81 +379,52 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
                 className="text-[10px] text-rose-400 hover:text-rose-300 flex items-center gap-1 cursor-pointer transition-colors"
               >
                 <Trash2 className="w-3 h-3" />
-                <span>Remove Image & Use Symbol</span>
+                <span>Clear Media</span>
               </button>
             )}
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {/* Symbol / Kanji Text Input */}
-            <div>
-              <label className="block text-[10px] text-zinc-400 mb-1">
-                Inner Symbol or Kanji Character
-              </label>
+          <div>
+            <label className="block text-[10px] text-zinc-400 mb-1.5">
+              Custom Photo / Media Link or Upload Image
+            </label>
+            <div className="flex gap-2">
               <input
                 type="text"
-                value={design.loginLogoSymbol || '惡'}
-                onChange={(e) => setDesign({ ...design, loginLogoSymbol: e.target.value })}
-                placeholder="e.g. 惡, ⚡, 🛡️"
-                maxLength={4}
-                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl py-2 px-3 text-sm text-white font-mono text-center focus:outline-none focus:border-rose-500"
+                value={design.loginLogoUrl || ''}
+                onChange={(e) => setDesign({ ...design, loginLogoUrl: e.target.value })}
+                placeholder="https://... (Direct Photo/Media link or Telegram File ID)"
+                className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl py-2 px-3 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-rose-500"
               />
-              {/* Quick Kanji / Symbol Presets */}
-              <div className="flex items-center gap-1.5 mt-2 flex-wrap">
-                <span className="text-[10px] text-zinc-500">Presets:</span>
-                {['惡', '⚡', '🛡️', '🔥', '👑', '💀', '🤖', '💎'].map((sym) => (
-                  <button
-                    key={sym}
-                    type="button"
-                    onClick={() => setDesign({ ...design, loginLogoSymbol: sym, loginLogoUrl: '' })}
-                    className="w-7 h-7 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-white text-xs border border-zinc-700/50 flex items-center justify-center cursor-pointer transition-all active:scale-95"
-                  >
-                    {sym}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Custom Picture / Logo URL & Upload (Optional) */}
-            <div>
-              <label className="block text-[10px] text-zinc-400 mb-1">
-                Or Custom Image URL / Upload
-              </label>
-              <div className="flex gap-2">
+              <label className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-rose-400 border border-zinc-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer shrink-0 transition-colors">
+                <Upload className="w-3.5 h-3.5" />
+                <span>Upload</span>
                 <input
-                  type="text"
-                  value={design.loginLogoUrl || ''}
-                  onChange={(e) => setDesign({ ...design, loginLogoUrl: e.target.value })}
-                  placeholder="https://... (Image link)"
-                  className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl py-1.5 px-3 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-rose-500"
-                />
-                <label className="px-2.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-rose-400 border border-zinc-700 text-xs font-medium flex items-center gap-1.5 cursor-pointer shrink-0 transition-colors">
-                  <Upload className="w-3.5 h-3.5" />
-                  <span>Upload</span>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (!file) return;
-                      if (file.size > 2 * 1024 * 1024) {
-                        alert('Image size must be under 2MB.');
-                        return;
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    if (file.size > 2 * 1024 * 1024) {
+                      alert('Image size must be under 2MB.');
+                      return;
+                    }
+                    const reader = new FileReader();
+                    reader.onload = (loadEvent) => {
+                      const result = loadEvent.target?.result as string;
+                      if (result) {
+                        setDesign({ ...design, loginLogoUrl: result });
                       }
-                      const reader = new FileReader();
-                      reader.onload = (loadEvent) => {
-                        const result = loadEvent.target?.result as string;
-                        if (result) {
-                          setDesign({ ...design, loginLogoUrl: result });
-                        }
-                      };
-                      reader.readAsDataURL(file);
-                    }}
-                  />
-                </label>
-              </div>
+                    };
+                    reader.readAsDataURL(file);
+                  }}
+                />
+              </label>
             </div>
+            <p className="text-[10px] text-zinc-500 mt-1.5">
+              Enter a direct image URL or upload any photo to display as the primary brand logo across the application.
+            </p>
           </div>
         </div>
 

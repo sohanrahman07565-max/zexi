@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   AdminUser, MessageTemplate, BotSettings, api 
 } from '../lib/api';
@@ -33,6 +34,33 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [templateMediaType, setTemplateMediaType] = useState<'none' | 'photo' | 'video'>('none');
   const [templateMediaUrl, setTemplateMediaUrl] = useState('');
   const [templateSaving, setTemplateSaving] = useState(false);
+
+  // Auto-focus and scroll to top refs for seamless editing
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const modalScrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (editingTemplate) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      const timer = setTimeout(() => {
+        if (modalScrollRef.current) {
+          modalScrollRef.current.scrollTop = 0;
+        }
+        if (textareaRef.current) {
+          textareaRef.current.focus();
+        }
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [editingTemplate]);
+
+  const handleOpenStartMessageEdit = () => {
+    if (!templates.START_MESSAGE) return;
+    setEditingTemplate(templates.START_MESSAGE);
+    setTemplateContent(templates.START_MESSAGE.content);
+    setTemplateMediaType(templates.START_MESSAGE.mediaType || 'none');
+    setTemplateMediaUrl(templates.START_MESSAGE.mediaUrl || '');
+  };
 
   // Admins state
   const [adminsList, setAdminsList] = useState<any[]>([]);
@@ -143,6 +171,180 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     } finally {
       setTemplateSaving(false);
     }
+  };
+
+  const renderTemplateEditModal = () => {
+    if (!editingTemplate) return null;
+
+    return createPortal(
+      <div
+        ref={modalScrollRef}
+        onClick={() => setEditingTemplate(null)}
+        className="fixed inset-0 z-50 flex items-start justify-center p-3 sm:p-5 pt-3 sm:pt-6 pb-28 bg-black/85 backdrop-blur-md overflow-y-auto overscroll-contain animate-in fade-in duration-200"
+      >
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="glass-panel w-full max-w-lg rounded-3xl p-5 border border-red-500/35 shadow-[0_0_50px_-10px_rgba(239,68,68,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-2 relative animate-in zoom-in-95 duration-200"
+        >
+          {/* Subtle top border glow */}
+          <div
+            className="absolute top-0 left-1/2 -translate-x-1/2 w-48 h-[1.5px] pointer-events-none"
+            style={{ background: 'linear-gradient(90deg, transparent, #ef4444, transparent)' }}
+          />
+
+          <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center">
+                <Edit2 className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="font-bold text-white text-sm">{editingTemplate.name}</h4>
+                <p className="text-[11px] text-zinc-400">{editingTemplate.description || 'Edit bot message template'}</p>
+              </div>
+            </div>
+            <button
+              onClick={() => setEditingTemplate(null)}
+              className="w-8 h-8 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-xs font-semibold text-zinc-300">Message Text (HTML format)</label>
+              <span className="text-[10px] text-zinc-500">Supports &lt;b&gt;, &lt;i&gt;, &lt;code&gt;</span>
+            </div>
+            <textarea
+              ref={textareaRef}
+              rows={5}
+              value={templateContent}
+              onChange={(e) => setTemplateContent(e.target.value)}
+              className="w-full bg-[#101018] border border-zinc-700/80 rounded-2xl p-3.5 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
+              placeholder="Type your bot message..."
+            />
+          </div>
+
+          {/* Rich Media Attachment for /start Welcome Message */}
+          {editingTemplate.key === 'START_MESSAGE' && (
+            <div className="p-3.5 rounded-2xl bg-[#0f0f18] border border-zinc-800 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-white">Attached Media Header</label>
+                <span className="text-[10px] text-zinc-400">Optional Photo or Video</span>
+              </div>
+
+              <div className="grid grid-cols-3 gap-1.5">
+                {(['none', 'photo', 'video'] as const).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => setTemplateMediaType(m)}
+                    className={`py-2 px-2 rounded-xl text-xs font-semibold capitalize border transition-all cursor-pointer ${
+                      templateMediaType === m
+                        ? 'bg-blue-600/20 text-sky-300 border-blue-500/60 shadow-sm'
+                        : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-white'
+                    }`}
+                  >
+                    {m === 'none' ? 'None' : m === 'photo' ? '📸 Photo' : '🎥 Video'}
+                  </button>
+                ))}
+              </div>
+
+              {templateMediaType !== 'none' && (
+                <div className="space-y-2 pt-1">
+                  <input
+                    type="text"
+                    value={templateMediaUrl}
+                    onChange={(e) => setTemplateMediaUrl(e.target.value)}
+                    placeholder={
+                      templateMediaType === 'photo'
+                        ? 'https://example.com/banner.jpg, Telegram file_id, or upload'
+                        : 'https://example.com/video.mp4, Telegram file_id, or upload'
+                    }
+                    className="w-full bg-zinc-950 border border-zinc-700/80 rounded-xl py-2 px-3 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
+                  />
+
+                  <div className="flex items-center gap-2">
+                    <label className="flex-1 py-2 px-3 rounded-xl border border-dashed border-red-500/40 hover:border-red-400 bg-red-500/10 hover:bg-red-500/15 flex items-center justify-center gap-1.5 cursor-pointer text-xs text-red-300 font-semibold transition-all">
+                      <span>📁 Choose {templateMediaType === 'photo' ? 'Photo' : 'Video'} from Device</span>
+                      <input
+                        type="file"
+                        accept={templateMediaType === 'photo' ? 'image/*' : 'video/*'}
+                        className="hidden"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          try {
+                            const formData = new FormData();
+                            formData.append('file', file);
+                            formData.append('fileType', templateMediaType);
+                            formData.append('fileName', file.name);
+                            const data = await api.uploadFile(formData);
+                            if (data.success && (data.fileId || data.uploadedFileId)) {
+                              setTemplateMediaUrl(data.uploadedFileId || data.fileId);
+                            } else {
+                              alert('Upload failed');
+                            }
+                          } catch (err: any) {
+                            alert(err.message || 'Upload error');
+                          }
+                          e.target.value = '';
+                        }}
+                      />
+                    </label>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Available Placeholders / Variables */}
+          <div className="text-[11px] text-zinc-400">
+            <span className="font-medium text-zinc-300">Quick Variables (Tap to insert):</span>
+            <div className="flex flex-wrap gap-1.5 mt-1.5">
+              {editingTemplate.key === 'START_MESSAGE' && (
+                <button
+                  type="button"
+                  onClick={() => setTemplateContent((prev) => `${prev} @username`)}
+                  className="bg-indigo-950/70 border border-indigo-500/50 px-2 py-1 rounded-lg text-indigo-300 text-[10px] font-mono hover:bg-indigo-900/60 cursor-pointer font-bold transition-all active:scale-95"
+                >
+                  +@username
+                </button>
+              )}
+              {(editingTemplate.variables || ['user_name', 'user_id', 'bot_name']).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  onClick={() => setTemplateContent((prev) => `${prev} {${v}}`)}
+                  className="bg-zinc-800/90 border border-zinc-700/80 px-2 py-1 rounded-lg text-red-400 text-[10px] font-mono hover:bg-zinc-700 cursor-pointer transition-all active:scale-95"
+                >
+                  +{`{${v}}`}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex gap-2.5 pt-2">
+            <button
+              type="button"
+              onClick={() => setEditingTemplate(null)}
+              className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-red-600/30 transition-all active:scale-95"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleSaveTemplate}
+              disabled={templateSaving}
+              className="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-blue-600/30 disabled:opacity-50 transition-all active:scale-95"
+            >
+              {templateSaving ? 'Saving...' : 'Save Template'}
+            </button>
+          </div>
+        </div>
+      </div>,
+      document.body
+    );
   };
 
   // Add sub-admin
@@ -281,12 +483,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               </div>
             </div>
             <button
-              onClick={() => {
-                setSubView('templates');
-                setEditingTemplate(templates.START_MESSAGE);
-                setTemplateContent(templates.START_MESSAGE.content);
-              }}
-              className="px-3 py-1.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm shadow-sky-500/20"
+              onClick={handleOpenStartMessageEdit}
+              className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm shadow-blue-600/30 active:scale-95"
             >
               <Edit2 className="w-3.5 h-3.5" />
               <span>Edit</span>
@@ -406,8 +604,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         </div>
 
         {/* Logout */}
-
-        {/* Logout */}
         <button
           onClick={onLogout}
           className="w-full p-3.5 rounded-2xl glass-panel border border-rose-500/20 text-rose-400 hover:bg-rose-500/10 text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
@@ -415,6 +611,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           <LogOut className="w-4 h-4" />
           <span>Sign Out of Admin Portal</span>
         </button>
+
+        {renderTemplateEditModal()}
       </div>
     );
   }

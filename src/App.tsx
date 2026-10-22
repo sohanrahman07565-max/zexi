@@ -201,7 +201,7 @@ export default function App() {
   // If unauthenticated -> Render Main Login Screen
   if (!currentUser) {
     return (
-      <div className="relative min-h-screen bg-[#060608] text-white overflow-hidden selection:bg-red-500 selection:text-white">
+      <div className="relative min-h-screen w-full bg-[#060608] text-white overflow-x-hidden overflow-y-auto selection:bg-red-500 selection:text-white">
         <BackgroundEffects
           styleName={design.backgroundStyle}
           speed={design.animationSpeed}
@@ -224,7 +224,7 @@ export default function App() {
 
   // Authenticated Android Mobile View
   return (
-    <div className="relative min-h-screen bg-[#060608] text-white selection:bg-red-500 selection:text-white flex justify-center">
+    <div className="relative min-h-screen w-full bg-[#060608] text-white selection:bg-red-500 selection:text-white flex justify-center overflow-x-hidden overflow-y-auto">
       {/* Hardware-Accelerated Floating Ambient Red Glow Layer (Matching Login Aesthetic) */}
       <div 
         className="fixed inset-0 pointer-events-none z-0 overflow-hidden"
@@ -271,9 +271,9 @@ export default function App() {
       />
 
       {/* Mobile Screen Container */}
-      <div className="relative z-10 w-full max-w-md min-h-screen flex flex-col px-4 pt-4">
+      <div className="relative z-10 w-full max-w-md min-h-screen flex flex-col px-4 pt-1 pb-28 sm:pb-32">
         {/* Top App Bar (Android Material 3 Clean Header) */}
-        <header className="flex items-center justify-between pb-4 mb-2 border-b border-zinc-800/80 shrink-0">
+        <header className="sticky top-0 z-30 flex items-center justify-between py-3 mb-2 border-b border-zinc-800/80 bg-[#060608]/95 backdrop-blur-xl shrink-0">
           <div className="flex items-center gap-2.5">
             <div
               className="w-8 h-8 rounded-xl flex items-center justify-center text-white font-bold shadow-md overflow-hidden shrink-0 relative"
@@ -334,7 +334,7 @@ export default function App() {
         </header>
 
         {/* Tab Content Views with Zero-Delay Native Speed Transitions */}
-        <main className="flex-1 overflow-y-auto overscroll-contain">
+        <main className="flex-1 w-full overflow-y-auto overscroll-y-auto">
           {/* Dashboard Tab */}
           <div className={currentTab === 'dashboard' ? 'block animate-tab-fade-in' : 'hidden'}>
             <DashboardTab

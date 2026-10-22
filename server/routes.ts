@@ -1147,9 +1147,9 @@ apiRouter.post('/simulate', authenticate, async (req: Request, res: Response) =>
           isReplyToMessage: false,
           text: '📥 <b>Interactive Bot Menu: What would you like to add?</b>\n\nChoose an option below or send your file or link directly:\n• <b>File:</b> Document, Photo, Video, Audio\n• <b>Link:</b> Web Link (URL)',
           buttons: [
-            { text: 'Add File', callback_data: 'add_choose_file' },
-            { text: 'Add Link', callback_data: 'add_choose_link' },
-            { text: 'Cancel', callback_data: 'cancel_add' }
+            { text: 'Add File', callback_data: 'add_choose_file', style: 'primary' },
+            { text: 'Add Link', callback_data: 'add_choose_link', style: 'primary' },
+            { text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }
           ]
         }
       });
@@ -1210,9 +1210,10 @@ apiRouter.post('/simulate', authenticate, async (req: Request, res: Response) =>
         text: replyText,
         buttons: [
           {
-            text: btnTpl?.content || (matchedItem.type === 'file' ? '🔒 Get File Privately' : '🔒 Open Privately'),
+            text: (btnTpl?.content || (matchedItem.type === 'file' ? 'Get File Privately' : 'Open Privately')).replace(/^🔒\s*/, ''),
             url: deepLink,
-            deepLinkPayload: payload
+            deepLinkPayload: payload,
+            style: 'primary'
           }
         ]
       },

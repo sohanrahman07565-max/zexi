@@ -36,38 +36,6 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
 
   return (
     <div className="space-y-5 pb-28">
-      {/* Bot Status Banner */}
-      <div className="glass-panel rounded-2xl p-4 border border-zinc-800/80 bg-[#0c0c13]/90">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${hasToken ? 'bg-red-500/15 text-red-400 border border-red-500/25 shadow-[0_0_12px_rgba(239,68,68,0.25)]' : 'bg-zinc-800/80 text-zinc-400'}`}>
-              <Send className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold text-white">
-                  {hasToken ? `@${botUsername}` : 'Telegram Bot'}
-                </span>
-                <span className="flex items-center gap-1 text-[11px] text-zinc-400">
-                  <span className={`w-2 h-2 rounded-full ${hasToken ? 'bg-red-500 animate-pulse shadow-[0_0_6px_rgba(239,68,68,0.8)]' : 'bg-amber-400'}`} />
-                  {hasToken ? 'Active' : 'Missing Token'}
-                </span>
-              </div>
-              <p className="text-xs text-zinc-400 mt-0.5">
-                Exact trigger group response · Deep-link private delivery
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={() => onNavigate('filters')}
-            className="px-3 py-1.5 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/25 text-xs font-medium flex items-center gap-1 transition-all cursor-pointer"
-          >
-            <span>Filters</span>
-            <ArrowUpRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      </div>
-
       {/* Simple Clean User Counter Card */}
       <div className="glass-panel rounded-2xl p-4 border border-zinc-800/80 bg-[#0c0c13]/90 relative overflow-hidden">
         {/* Top: User Logo & Users Button */}

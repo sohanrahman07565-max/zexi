@@ -78,7 +78,7 @@ export const OfflineScreen: React.FC<OfflineScreenProps> = ({
   }, [isChecking, onRetry]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#060608] text-white selection:bg-red-500 selection:text-white overflow-hidden select-none">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#060608] text-white selection:bg-red-500 selection:text-white overflow-x-hidden overflow-y-auto select-none">
       {/* Background radial glow matching the admin panel aesthetics */}
       <div
         className="absolute w-[620px] h-[620px] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full blur-[140px] pointer-events-none transition-all duration-700"

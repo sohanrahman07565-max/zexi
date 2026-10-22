@@ -128,7 +128,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
   const isButtonClickable = isCredentialsValid && !loading && !isSuccessExiting;
 
   return (
-    <div className="min-h-screen w-full flex items-center justify-center p-4 relative overflow-hidden bg-[#060608] selection:bg-red-500 selection:text-white">
+    <div className="min-h-screen w-full flex items-center justify-center p-4 relative overflow-x-hidden overflow-y-auto bg-[#060608] selection:bg-red-500 selection:text-white">
       {/* Background: Deep dark/black with subtle neon red gradient */}
       <div 
         className="absolute inset-0 pointer-events-none transition-opacity duration-700"

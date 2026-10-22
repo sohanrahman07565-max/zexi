@@ -27,14 +27,14 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
   const safeIndex = activeIndex >= 0 ? activeIndex : 0;
   const tabCount = tabs.length;
 
-  // Track gliding and morphing state for organic spring physics
+  // Gliding and morphing spring states
   const [isGliding, setIsGliding] = useState(false);
   const [glideDir, setGlideDir] = useState<'left' | 'right' | null>(null);
   const [glideDistance, setGlideDistance] = useState(0);
   const prevIndexRef = useRef(safeIndex);
   const navContainerRef = useRef<HTMLElement | null>(null);
 
-  // Dragging gesture state (free sliding without snapping or page changes until drop)
+  // Dragging gesture state (smooth liquid dragging with release-to-select)
   const [isDragging, setIsDragging] = useState(false);
   const [dragPosition, setDragPosition] = useState<number | null>(null);
   const dragPosRef = useRef<number>(safeIndex);
@@ -44,7 +44,7 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
   const hasMovedRef = useRef(false);
   const justFinishedDragRef = useRef(false);
 
-  // Trigger organic spring morph on tab change
+  // Trigger silky liquid spring morph on tab change
   useEffect(() => {
     if (prevIndexRef.current !== safeIndex) {
       const dist = Math.abs(safeIndex - prevIndexRef.current);
@@ -54,8 +54,7 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
       setIsGliding(true);
       prevIndexRef.current = safeIndex;
 
-      // Spring settles smoothly
-      const animDuration = Math.min(480, Math.max(300, 270 + dist * 40));
+      const animDuration = Math.min(420, Math.max(260, 240 + dist * 35));
       const timer = setTimeout(() => {
         setIsGliding(false);
         setGlideDir(null);
@@ -66,9 +65,7 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
     }
   }, [safeIndex]);
 
-  // Handle Tab Select (silent, zero vibration)
   const handleTabClick = (tabId: string) => {
-    // If user just finished dragging, ignore the click to prevent double triggering
     if (justFinishedDragRef.current) {
       justFinishedDragRef.current = false;
       return;
@@ -78,7 +75,6 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
     }
   };
 
-  // Helper to compute continuous tab position from clientX
   const calculatePositionFromClientX = (clientX: number): number => {
     if (!navContainerRef.current) return safeIndex;
     const rect = navContainerRef.current.getBoundingClientRect();
@@ -88,7 +84,6 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
     return Math.max(0, Math.min(tabCount - 1, rawPos));
   };
 
-  // Pointer / Touch Gesture Handlers (Release-to-Select Logic)
   const handlePointerDown = (e: React.PointerEvent<HTMLElement>) => {
     isPointerDownRef.current = true;
     startXRef.current = e.clientX;
@@ -102,9 +97,8 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
     const dx = Math.abs(e.clientX - startXRef.current);
     const dy = Math.abs(e.clientY - startYRef.current);
 
-    // Only engage drag mode if horizontal displacement exceeds threshold
     if (!hasMovedRef.current) {
-      if (dx > 7 && dx > dy) {
+      if (dx > 6 && dx > dy) {
         hasMovedRef.current = true;
         setIsDragging(true);
         try {
@@ -115,7 +109,6 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
       }
     }
 
-    // While dragging: freely follow gesture, DO NOT change active tab or trigger page switch!
     const pos = calculatePositionFromClientX(e.clientX);
     dragPosRef.current = pos;
     setDragPosition(pos);
@@ -130,18 +123,14 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
     } catch {}
 
     if (hasMovedRef.current) {
-      // Release-to-select (drop): switch tab only now upon release
       hasMovedRef.current = false;
       setIsDragging(false);
       justFinishedDragRef.current = true;
       setTimeout(() => {
         justFinishedDragRef.current = false;
-      }, 120);
+      }, 100);
 
-      const targetIndex = Math.max(
-        0,
-        Math.min(tabCount - 1, Math.round(dragPosRef.current))
-      );
+      const targetIndex = Math.max(0, Math.min(tabCount - 1, Math.round(dragPosRef.current)));
       setDragPosition(null);
 
       const targetTab = tabs[targetIndex];
@@ -166,18 +155,16 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
     }
   };
 
-  // Compute organic spring duration based on travel distance
   const springDuration = isGliding
-    ? Math.min(480, Math.max(300, 260 + glideDistance * 40))
-    : 340;
+    ? Math.min(420, Math.max(260, 240 + glideDistance * 35))
+    : 300;
 
-  // Active indicator position: follows drag freely during gesture, snaps on release
   const displayPosition = isDragging && dragPosition !== null ? dragPosition : safeIndex;
   const nearestHoverIndex = isDragging && dragPosition !== null ? Math.round(displayPosition) : safeIndex;
 
   return (
-    <div className="fixed bottom-3.5 sm:bottom-4 inset-x-3 sm:inset-x-0 z-40 max-w-[420px] mx-auto pointer-events-none">
-      {/* Floating Capsule Container with dark/black background and glowing red outline */}
+    <div className="fixed bottom-3.5 sm:bottom-4 inset-x-3 sm:inset-x-0 z-40 max-w-[390px] mx-auto pointer-events-none">
+      {/* Modern Liquid Capsule Navigation Bar */}
       <nav
         ref={navContainerRef}
         aria-label="Bottom Navigation"
@@ -185,40 +172,40 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerCancel}
-        className="pointer-events-auto relative rounded-[28px] bg-[#07070a]/95 backdrop-blur-2xl border border-red-500/35 p-1.5 shadow-[0_12px_40px_-4px_rgba(0,0,0,0.9),0_0_24px_rgba(239,68,68,0.22),inset_0_1px_1px_rgba(255,255,255,0.14)] select-none transition-all duration-300 touch-pan-y"
+        className="pointer-events-auto relative h-13 sm:h-14 rounded-full bg-[#07070b]/92 backdrop-blur-2xl border border-red-500/30 p-1.5 shadow-[0_16px_40px_-6px_rgba(0,0,0,0.92),0_0_24px_rgba(239,68,68,0.22),inset_0_1px_1px_rgba(255,255,255,0.15)] select-none transition-all duration-300 touch-pan-y flex items-center"
       >
-        {/* Subtle Ambient Red Glow under the floating bar */}
+        {/* Ambient Red Glow under capsule */}
         <div
-          className="absolute -bottom-2 inset-x-6 h-5 rounded-full blur-xl pointer-events-none -z-10"
-          style={{ background: 'radial-gradient(ellipse at center, rgba(239,68,68,0.35) 0%, transparent 70%)' }}
+          className="absolute -bottom-2 inset-x-8 h-4 rounded-full blur-xl pointer-events-none -z-10"
+          style={{ background: 'radial-gradient(ellipse at center, rgba(239,68,68,0.38) 0%, transparent 70%)' }}
         />
 
-        {/* Tab Items Row with Sliding Indicator */}
-        <div className="relative flex items-center justify-between w-full">
+        {/* Tab Items Row with Sliding Liquid Capsule Bubble */}
+        <div className="relative flex items-center justify-between w-full h-full">
           {/* =========================================================================
-              FLUID SPRING SLIDING & MORPHING INDICATOR
-              Glides horizontally with silky physical spring dynamics and morphing stretch
+              FLUID LIQUID PILL / BUBBLE INDICATOR
+              Morphs smoothly with fluid spring physics across tabs
               ========================================================================= */}
           <div
-            className="absolute top-0 bottom-0 left-0 pointer-events-none z-0 will-change-transform"
+            className="absolute top-0 bottom-0 left-0 pointer-events-none z-0 will-change-transform flex items-center justify-center p-0.5"
             style={{
               width: `${100 / tabCount}%`,
-              transform: `translateX(${displayPosition * 100}%)`,
+              transform: `translate3d(${displayPosition * 100}%, 0, 0)`,
               transition: isDragging
                 ? 'none'
-                : `transform ${springDuration}ms cubic-bezier(0.34, 1.42, 0.64, 1)`
+                : `transform ${springDuration}ms cubic-bezier(0.34, 1.45, 0.64, 1)`
             }}
           >
-            {/* Surrounding Active Pill Capsule Glow with liquid stretch/squash morph */}
+            {/* Glowing Liquid Capsule Bubble */}
             <div
-              className={`relative h-full mx-1 rounded-2xl bg-gradient-to-b from-red-500/24 via-red-600/14 to-red-950/25 border border-red-500/40 shadow-[0_0_18px_rgba(239,68,68,0.38),inset_0_1px_1px_rgba(255,255,255,0.25)] flex flex-col justify-end items-center pb-1 transition-transform duration-300 ${
+              className={`relative w-full h-full rounded-full bg-gradient-to-r from-red-600 via-rose-600 to-red-600 border border-red-400/50 shadow-[0_0_20px_rgba(239,68,68,0.65),inset_0_1px_1.5px_rgba(255,255,255,0.45)] transition-transform duration-250 ${
                 isDragging
-                  ? 'scale-x-[1.08]'
+                  ? 'scale-x-[1.12] scale-y-[0.94]'
                   : isGliding
                   ? glideDir === 'right'
-                    ? 'scale-x-[1.14] skew-x-[-1.5deg]'
-                    : 'scale-x-[1.14] skew-x-[1.5deg]'
-                  : 'scale-x-100 skew-x-0'
+                    ? 'scale-x-[1.16] skew-x-[-2deg]'
+                    : 'scale-x-[1.16] skew-x-[2deg]'
+                  : 'scale-x-100 scale-y-100 skew-x-0'
               }`}
               style={{
                 transformOrigin: isDragging
@@ -228,15 +215,8 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
                   : 'right center'
               }}
             >
-              {/* Soft internal blur aura */}
-              <div className="absolute inset-0 rounded-2xl bg-red-500/12 blur-sm -z-10" />
-
-              {/* Vibrant Glowing Red Indicator Bar Underneath with liquid morphing length */}
-              <div
-                className={`h-[3px] rounded-full bg-gradient-to-r from-red-600 via-red-400 to-rose-500 shadow-[0_0_10px_#ef4444,0_0_20px_rgba(239,68,68,0.95)] transition-all duration-300 ease-out ${
-                  isDragging || isGliding ? 'w-10 opacity-90' : 'w-7 opacity-100'
-                }`}
-              />
+              {/* Internal ambient aura */}
+              <div className="absolute inset-0 rounded-full bg-red-400/20 blur-xs" />
             </div>
           </div>
 
@@ -251,37 +231,37 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
                 key={tab.id}
                 type="button"
                 onClick={() => handleTabClick(tab.id)}
-                className="relative z-10 flex-1 flex flex-col items-center justify-center py-2 px-1 rounded-2xl cursor-pointer transition-transform duration-150 active:scale-90 group focus:outline-none"
+                className="relative z-10 flex-1 h-full flex items-center justify-center rounded-full cursor-pointer transition-all duration-200 active:scale-95 group focus:outline-none"
                 aria-selected={isActive}
+                title={tab.label}
               >
-                {/* Icon with active bright red glow and spring pop bounce */}
-                <div className="relative flex items-center justify-center">
-                  <Icon
-                    className={`w-5 h-5 transition-all duration-300 ${
-                      isActive
-                        ? 'text-red-400 scale-110 drop-shadow-[0_0_10px_rgba(239,68,68,0.9)] animate-nav-spring'
-                        : isHovered
-                        ? 'text-zinc-200 scale-105'
-                        : 'text-zinc-400 group-hover:text-zinc-200 group-hover:scale-105'
-                    }`}
-                  />
-                  {isActive && (
-                    <span className="absolute inset-0 bg-red-500/20 blur-md rounded-full pointer-events-none -z-10" />
-                  )}
-                </div>
-
-                {/* Label with active highlighting */}
-                <span
-                  className={`text-[10px] mt-1 tracking-tight transition-colors duration-200 ${
+                {/* Active Inflated Pop Effect: Icon + Label seamlessly expand inside the liquid capsule */}
+                <div
+                  className={`flex items-center justify-center transition-all duration-250 ${
                     isActive
-                      ? 'text-white font-bold drop-shadow-[0_0_8px_rgba(239,68,68,0.6)]'
+                      ? 'scale-105 gap-1.5'
                       : isHovered
-                      ? 'text-zinc-200 font-medium'
-                      : 'text-zinc-400 group-hover:text-zinc-200 font-medium'
+                      ? 'scale-105'
+                      : 'scale-100'
                   }`}
                 >
-                  {tab.label}
-                </span>
+                  <Icon
+                    className={`w-4.5 h-4.5 transition-all duration-200 ${
+                      isActive
+                        ? 'text-white drop-shadow-[0_0_8px_rgba(255,255,255,0.8)]'
+                        : isHovered
+                        ? 'text-zinc-200'
+                        : 'text-zinc-400 group-hover:text-zinc-200'
+                    }`}
+                  />
+
+                  {/* Inflated label only for active item inside liquid bubble */}
+                  {isActive && (
+                    <span className="text-[11px] font-bold text-white tracking-tight drop-shadow-[0_1px_3px_rgba(0,0,0,0.5)] animate-in fade-in zoom-in-95 duration-200">
+                      {tab.label}
+                    </span>
+                  )}
+                </div>
               </button>
             );
           })}
@@ -292,4 +272,3 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
 };
 
 export const BottomNav = React.memo(BottomNavComponent);
-

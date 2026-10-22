@@ -243,14 +243,14 @@ export const DEFAULT_TEMPLATES: Record<string, MessageTemplate> = {
     key: 'GET_FILE_BUTTON',
     name: 'Get File Button Text',
     description: 'Text of the inline deep-link button in the group for files',
-    content: '🔒 Get File Privately',
+    content: 'Get File Privately',
     variables: []
   },
   GET_LINK_BUTTON: {
     key: 'GET_LINK_BUTTON',
     name: 'Get Link Button Text',
     description: 'Text of the inline deep-link button in the group for links',
-    content: '🔒 Open Privately',
+    content: 'Open Privately',
     variables: []
   },
   ADMIN_ADD_PROMPT: {
