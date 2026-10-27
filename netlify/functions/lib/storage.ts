@@ -62,6 +62,8 @@ export interface ItemRecord {
   openMode?: OpenMode;
   buttonText?: string;
   replyMessage?: string;
+  isTextOnly?: boolean;
+  fileEnabled?: boolean;
   createdAt: string;
   updatedAt: string;
   status: 'active' | 'disabled';
@@ -70,6 +72,13 @@ export interface ItemRecord {
   retentionType?: 'permanent' | 'temporary';
   retentionDays?: number;
   expiresAt?: string;
+  hasSetupVideo?: boolean;
+  setupVideoUrl?: string;
+  setupVideoType?: 'url' | 'upload';
+  setupVideoFileName?: string;
+  setupVideoButtonText?: string;
+  setupResourceButtonText?: string;
+  setupVideoMessage?: string;
 }
 
 export interface UploadedFileRecord {
@@ -127,6 +136,13 @@ export interface TrackedMessage {
   timestamp: number;
 }
 
+export interface ForceSubChannel {
+  id: string;
+  name: string;
+  chatId: string;
+  inviteLink: string;
+}
+
 export interface BotSettings {
   botToken: string;
   botUsername: string;
@@ -137,6 +153,10 @@ export interface BotSettings {
   autoDeleteDeliveryEnabled: boolean;
   deliveryTimeoutMinutes: number;
   autoDeleteNoticeEnabled: boolean;
+  maintenanceMode?: boolean;
+  maintenanceNotice?: string;
+  forceSubEnabled?: boolean;
+  requiredChannels?: ForceSubChannel[];
 }
 
 export interface ScheduledDeletion {
@@ -186,6 +206,7 @@ export interface AppDatabase {
   webcodes: WebCodeRecord[];
   trackedMessages: Record<string, TrackedMessage[]>;
   scheduledDeletions?: ScheduledDeletion[];
+  chatDeliveryMessages?: Record<string, number[]>;
   design: DesignConfig;
   settings: BotSettings;
   addSessions?: Record<string, any>;
@@ -346,7 +367,10 @@ export const DEFAULT_SETTINGS: BotSettings = {
   cleanupAgeHours: 24,
   autoDeleteDeliveryEnabled: true,
   deliveryTimeoutMinutes: 10,
-  autoDeleteNoticeEnabled: false
+  autoDeleteNoticeEnabled: false,
+  maintenanceMode: false,
+  forceSubEnabled: false,
+  requiredChannels: []
 };
 
 const BLOB_STORE_NAME = 'tg-bot-data';
@@ -478,7 +502,9 @@ export class SharedStorageService {
           ...(loadedData.settings || {}),
           botToken: process.env.TELEGRAM_BOT_TOKEN || loadedData.settings?.botToken || '',
           rootAdminId: process.env.ROOT_ADMIN_ID || loadedData.settings?.rootAdminId || '',
-          autoDeleteNoticeEnabled: loadedData.settings?.autoDeleteNoticeEnabled ?? false
+          autoDeleteNoticeEnabled: loadedData.settings?.autoDeleteNoticeEnabled ?? false,
+          forceSubEnabled: loadedData.settings?.forceSubEnabled ?? false,
+          requiredChannels: Array.isArray(loadedData.settings?.requiredChannels) ? loadedData.settings.requiredChannels : []
         }
       };
     }
@@ -1045,6 +1071,17 @@ export class SharedStorageService {
     return users.length;
   }
 
+  public async getUserStats(): Promise<{ totalUsers: number; onlineUsers: number; offlineUsers: number }> {
+    const users = await this.getBotUsers();
+    const onlineUsers = users.filter(u => u.isOnline).length;
+    const offlineUsers = Math.max(0, users.length - onlineUsers);
+    return {
+      totalUsers: users.length,
+      onlineUsers,
+      offlineUsers
+    };
+  }
+
   public async getBotUsers(): Promise<BotUserRecord[]> {
     await this.loadLatest(true);
     if (!this.db.botUsers) this.db.botUsers = {};
@@ -1173,12 +1210,25 @@ export class SharedStorageService {
   // --- Settings ---
   public async getSettings(): Promise<BotSettings> {
     await this.loadLatest(false);
+    if (this.db.settings.forceSubEnabled === undefined) {
+      this.db.settings.forceSubEnabled = false;
+    }
+    if (!Array.isArray(this.db.settings.requiredChannels)) {
+      this.db.settings.requiredChannels = [];
+    }
     return this.db.settings;
   }
 
   public async updateSettings(settings: Partial<BotSettings>): Promise<BotSettings> {
     await this.loadLatest(true);
-    this.db.settings = { ...this.db.settings, ...settings };
+    this.db.settings = { 
+      ...this.db.settings, 
+      ...settings,
+      forceSubEnabled: settings.forceSubEnabled !== undefined ? Boolean(settings.forceSubEnabled) : (this.db.settings.forceSubEnabled ?? false),
+      requiredChannels: settings.requiredChannels !== undefined && Array.isArray(settings.requiredChannels) 
+        ? settings.requiredChannels 
+        : (Array.isArray(this.db.settings.requiredChannels) ? this.db.settings.requiredChannels : [])
+    };
     await this.persist();
     return this.db.settings;
   }
@@ -1254,6 +1304,42 @@ export class SharedStorageService {
       return true;
     }
     return false;
+  }
+
+  // --- Chat Delivery Messages Tracking (Fresh Chat / Previous Delivery Auto-Cleanup) ---
+  public async recordChatDeliveryMessage(chatId: string | number, messageId: number): Promise<void> {
+    await this.loadLatest(true);
+    const key = String(chatId);
+    if (!this.db.chatDeliveryMessages) {
+      this.db.chatDeliveryMessages = {};
+    }
+    if (!Array.isArray(this.db.chatDeliveryMessages[key])) {
+      this.db.chatDeliveryMessages[key] = [];
+    }
+    this.db.chatDeliveryMessages[key].push(messageId);
+    // Keep at most 25 recent delivery IDs per chat
+    if (this.db.chatDeliveryMessages[key].length > 25) {
+      this.db.chatDeliveryMessages[key] = this.db.chatDeliveryMessages[key].slice(-25);
+    }
+    await this.persist();
+  }
+
+  public async getChatDeliveryMessages(chatId: string | number): Promise<number[]> {
+    await this.loadLatest(false);
+    const key = String(chatId);
+    return this.db.chatDeliveryMessages?.[key] || [];
+  }
+
+  public async clearChatDeliveryMessages(chatId: string | number): Promise<number[]> {
+    await this.loadLatest(true);
+    const key = String(chatId);
+    if (!this.db.chatDeliveryMessages || !this.db.chatDeliveryMessages[key]) {
+      return [];
+    }
+    const list = [...this.db.chatDeliveryMessages[key]];
+    this.db.chatDeliveryMessages[key] = [];
+    await this.persist();
+    return list;
   }
 
   // --- Uploaded Files Storage (Direct phone / storage upload support) ---

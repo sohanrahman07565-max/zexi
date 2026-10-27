@@ -1,4 +1,4 @@
-import { storage, ItemRecord, TriggerType, OpenMode, ScheduledDeletion } from './storage';
+import { storage, ItemRecord, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel } from './storage';
 import { hashPassword } from '../netlify/functions/lib/auth';
 
 // In-memory conversation state for interactive private chat commands (like /add)
@@ -271,6 +271,44 @@ export class TelegramService {
     return null;
   }
 
+  // Dynamically resolve placeholders inside Maintenance Notice:
+  // Supports Telegram Username (@username, {username}), User ID ({user_id}, {id}), Bot Name ({bot_name}, {bot}), and Name ({name}, {user_name})
+  public static resolveMaintenanceNotice(
+    template: string,
+    userPayload: { id: string | number; username?: string; firstName?: string; lastName?: string } | null,
+    fromId: string,
+    botUsername: string
+  ): string {
+    if (!template) return '⚠️ Bot is currently under maintenance. Please try again later.';
+
+    const rawUsername = userPayload?.username?.replace(/^@+/, '').trim() || '';
+    const userMention = rawUsername ? `@${rawUsername}` : (userPayload?.firstName || 'User');
+    const userDisplayName = [userPayload?.firstName, userPayload?.lastName].filter(Boolean).join(' ') || (rawUsername ? `@${rawUsername}` : 'User');
+    const firstName = userPayload?.firstName || (rawUsername ? `@${rawUsername}` : 'User');
+    const resolvedUserId = String(fromId || userPayload?.id || '').trim() || 'Unknown';
+    const cleanBotUsername = (botUsername || '').replace(/^@+/, '').trim() || 'Bot';
+    const botMention = `@${cleanBotUsername}`;
+
+    let result = template;
+
+    // 1. Bracketed tags (case-insensitive)
+    result = result.replace(/\{@?username\}/gi, userMention);
+    result = result.replace(/\{user_id\}|\{userid\}|\{id\}|\{chat_id\}|\{chatid\}/gi, resolvedUserId);
+    result = result.replace(/\{bot_name\}|\{botname\}|\{bot\}|\{bot_username\}|\{@bot_name\}|\{@bot\}/gi, botMention);
+    result = result.replace(/\{name\}|\{user_name\}|\{fullname\}/gi, userDisplayName);
+    result = result.replace(/\{first_name\}|\{firstname\}/gi, firstName);
+
+    // 2. Exact word tokens (e.g. @username without brackets)
+    result = result.replace(/(^|\s)@username\b/gi, `$1${userMention}`);
+    result = result.replace(/(^|\s)@bot_name\b/gi, `$1${botMention}`);
+    result = result.replace(/(^|\s)@bot\b/gi, `$1${botMention}`);
+
+    // Prevent duplicate @@ if template had @@username
+    result = result.replace(/@@+([a-zA-Z0-9_]+)/g, '@$1');
+
+    return result.trim();
+  }
+
   // Process incoming webhook or polling update
   public static async handleUpdate(update: any): Promise<void> {
     if (!update) return;
@@ -294,6 +332,9 @@ export class TelegramService {
         console.warn('[Telegram] User tracking error:', err.message || err);
       }
     }
+
+    // Auto-Deletion Check: Process any past-due message deletions promptly
+    TelegramService.processDueScheduledDeletions().catch(() => {});
 
     // Ban Enforcement: check if user is restricted by administrator
     if (fromId) {
@@ -319,7 +360,48 @@ export class TelegramService {
       }
     }
 
-    // Handle Inline Button Clicks (Callback queries from /add flow)
+    // Maintenance Mode Enforcement:
+    // When Maintenance Mode is ON, block responses to general commands, trigger keywords, and /start command.
+    // Immediately reply with customized notice supporting dynamic variables (@username, {user_id}, {bot_name}, {name}).
+    // Ensure admins can still access and use admin triggers/commands if needed.
+    const settings = await storage.getSettings();
+    if (settings.maintenanceMode) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      if (!isAdmin) {
+        const rawNotice = settings.maintenanceNotice?.trim() || '⚠️ Bot is currently under maintenance. Please try again later.';
+        const botUsername = await this.getBotUsername();
+        const parsedNotice = this.resolveMaintenanceNotice(rawNotice, userPayload, fromId, botUsername);
+
+        if (update.callback_query) {
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: update.callback_query.id,
+            text: parsedNotice.replace(/<[^>]+>/g, '').slice(0, 200), // strip HTML tags for alert popup (max 200 chars)
+            show_alert: true
+          });
+          return;
+        }
+
+        const msg = update.message || update.edited_message;
+        if (msg?.chat) {
+          if (msg.chat.type === 'private') {
+            await this.callTelegramApi('sendMessage', {
+              chat_id: msg.chat.id,
+              text: parsedNotice,
+              parse_mode: 'HTML'
+            });
+          } else if (msg.chat.type === 'group' || msg.chat.type === 'supergroup') {
+            const txt = (msg.text || msg.caption || '').trim();
+            // In groups, only respond if someone addressed the bot or used a slash command
+            if (txt.startsWith('/') || (botUsername && txt.toLowerCase().includes(`@${botUsername.toLowerCase()}`))) {
+              await this.sendAutoDeletingNotice(msg.chat.id, parsedNotice, 6000, msg.message_id);
+            }
+          }
+        }
+        return;
+      }
+    }
+
+    // Handle Inline Button Clicks (Callback queries from /add flow and setup video navigation)
     if (update.callback_query) {
       await this.handleCallbackQuery(update.callback_query);
       return;
@@ -385,6 +467,128 @@ export class TelegramService {
     } catch (err) {
       console.warn('[Telegram] Auto-deleting notice error:', err);
     }
+  }
+
+  // =========================================================================
+  // MANDATORY CHANNEL JOIN (FORCE SUB) SYSTEM
+  // =========================================================================
+  public static async checkUserForceSub(
+    userId: string | number
+  ): Promise<{ allJoined: boolean; unjoinedChannels: ForceSubChannel[] }> {
+    try {
+      const settings = await storage.getSettings();
+      if (!settings.forceSubEnabled || !settings.requiredChannels || settings.requiredChannels.length === 0) {
+        return { allJoined: true, unjoinedChannels: [] };
+      }
+
+      const cleanUserId = String(userId).trim();
+      if (!cleanUserId) return { allJoined: true, unjoinedChannels: [] };
+
+      // Exempt authorized administrators from force sub verification
+      const isAdmin = await this.isAuthorizedAdmin(cleanUserId);
+      if (isAdmin) {
+        return { allJoined: true, unjoinedChannels: [] };
+      }
+
+      const unjoined: ForceSubChannel[] = [];
+
+      for (const channel of settings.requiredChannels) {
+        const rawChatId = (channel.chatId || '').trim();
+        if (!rawChatId) continue;
+
+        try {
+          // getChatMember takes numeric ID or @channel_username
+          const res = await this.callTelegramApi('getChatMember', {
+            chat_id: rawChatId,
+            user_id: Number(cleanUserId) || cleanUserId
+          });
+
+          if (res && res.ok && res.result) {
+            const status = res.result.status;
+            // Member is active if status is creator, administrator, member, or restricted
+            const isMember = status === 'creator' || status === 'administrator' || status === 'member' || status === 'restricted';
+            if (!isMember) {
+              unjoined.push(channel);
+            }
+          } else {
+            console.info(`[ForceSub] Membership check not confirmed for user ${cleanUserId} in ${rawChatId}:`, res?.description);
+            unjoined.push(channel);
+          }
+        } catch (err: any) {
+          console.warn(`[ForceSub] Error querying getChatMember for ${cleanUserId} in ${rawChatId}:`, err?.message);
+          unjoined.push(channel);
+        }
+      }
+
+      return {
+        allJoined: unjoined.length === 0,
+        unjoinedChannels: unjoined
+      };
+    } catch (err: any) {
+      console.error('[ForceSub] Unexpected error in checkUserForceSub:', err);
+      return { allJoined: true, unjoinedChannels: [] };
+    }
+  }
+
+  public static async sendForceSubPrompt(
+    chatId: string | number,
+    unjoinedChannels: ForceSubChannel[],
+    targetPayload: string = 'start',
+    messageIdToEdit?: number
+  ): Promise<void> {
+    const keyboardRows: any[][] = [];
+
+    for (const ch of unjoinedChannels) {
+      let channelUrl = ch.inviteLink ? ch.inviteLink.trim() : '';
+      if (!channelUrl) {
+        if (ch.chatId && ch.chatId.startsWith('@')) {
+          channelUrl = `https://t.me/${ch.chatId.slice(1)}`;
+        } else {
+          channelUrl = 'https://t.me';
+        }
+      }
+      keyboardRows.push([
+        {
+          text: `📢 Join ${ch.name}`,
+          url: channelUrl
+        }
+      ]);
+    }
+
+    // "Verify / Try Again" callback button
+    keyboardRows.push([
+      {
+        text: '🔄 Verify / Try Again',
+        callback_data: `forcesub_verify:${targetPayload || 'start'}`
+      }
+    ]);
+
+    const channelNames = unjoinedChannels.map((c, i) => `${i + 1}. <b>${c.name}</b>`).join('\n');
+    const promptText =
+      `⚠️ <b>Mandatory Subscription Required!</b>\n\n` +
+      `To use this bot and access your requested content, please join our official channels & groups:\n\n` +
+      `${channelNames}\n\n` +
+      `<i>Tap each link above to join, then press <b>Verify / Try Again</b> below.</i>`;
+
+    if (messageIdToEdit) {
+      try {
+        const editRes = await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: messageIdToEdit,
+          text: promptText,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: keyboardRows }
+        });
+        if (editRes && editRes.ok) return;
+      } catch {}
+    }
+
+    await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: promptText,
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: keyboardRows }
+    });
   }
 
   // =========================================================================
@@ -625,8 +829,13 @@ export class TelegramService {
     const userId = String(message.from?.id || '');
 
     if (matchedItem.type === 'file') {
-      const template = templates.GROUP_FILE_REPLY || { content: "👇 Tap below — I'll send your file privately." };
-      const buttonTemplate = templates.GET_FILE_BUTTON || { content: '🔒 Get File Privately' };
+      const isTextOnly = Boolean(matchedItem.isTextOnly || matchedItem.fileEnabled === false);
+      const template = isTextOnly
+        ? { content: "👇 Tap below — I'll send the message privately." }
+        : (templates.GROUP_FILE_REPLY || { content: "👇 Tap below — I'll send your file privately." });
+      const buttonTemplate = isTextOnly
+        ? { content: '💬 View Message Privately' }
+        : (templates.GET_FILE_BUTTON || { content: '🔒 Get File Privately' });
 
       const replyText = template.content
         .replace('{user_name}', userName)
@@ -638,24 +847,18 @@ export class TelegramService {
       const payload = getItemPayload(matchedItem);
       const deepLink = `https://t.me/${cleanBotUsername}?start=${payload}`;
 
-      const res = await this.callTelegramApi('sendMessage', {
-        chat_id: message.chat.id,
-        reply_to_message_id: message.message_id,
-        text: replyText,
-        reply_markup: {
-          inline_keyboard: [
-            [
-              {
-                text: (buttonTemplate.content || 'Get File Privately').replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\s🔒]+/u, '').trim() || 'Get File Privately',
-                url: deepLink,
-                style: 'primary'
-              }
-            ]
-          ]
-        }
-      });
+      const buttonText = (buttonTemplate.content || (isTextOnly ? 'View Message Privately' : 'Get File Privately')).replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\s🔒💬]+/u, '').trim() || (isTextOnly ? 'View Message Privately' : 'Get File Privately');
+      const keyboard = [[{ text: buttonText, url: deepLink, style: 'primary' }]];
 
-      if (res.ok && res.result?.message_id) {
+      const res = await this.sendGroupTriggerReply(
+        message.chat.id,
+        replyText,
+        keyboard,
+        message.message_id,
+        message.message_thread_id
+      );
+
+      if (res && res.ok && res.result?.message_id) {
         await this.trackAndLimitMessage(message.chat.id, res.result.message_id);
       }
     } else if (matchedItem.type === 'link') {
@@ -672,26 +875,196 @@ export class TelegramService {
       const payload = getItemPayload(matchedItem);
       const deepLink = `https://t.me/${cleanBotUsername}?start=${payload}`;
 
-      const res = await this.callTelegramApi('sendMessage', {
-        chat_id: message.chat.id,
-        reply_to_message_id: message.message_id,
-        text: replyText,
-        reply_markup: {
-          inline_keyboard: [
-            [
-              {
-                text: (buttonTemplate.content || 'Open Privately').replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\s🔒]+/u, '').trim() || 'Open Privately',
-                url: deepLink,
-                style: 'primary'
-              }
-            ]
-          ]
-        }
-      });
+      const buttonText = (buttonTemplate.content || 'Open Privately').replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\s🔒]+/u, '').trim() || 'Open Privately';
+      const keyboard = [[{ text: buttonText, url: deepLink, style: 'primary' }]];
 
-      if (res.ok && res.result?.message_id) {
+      const res = await this.sendGroupTriggerReply(
+        message.chat.id,
+        replyText,
+        keyboard,
+        message.message_id,
+        message.message_thread_id
+      );
+
+      if (res && res.ok && res.result?.message_id) {
         await this.trackAndLimitMessage(message.chat.id, res.result.message_id);
       }
+    }
+  }
+
+  // Robust error-resilient sender for group trigger replies
+  private static async sendGroupTriggerReply(
+    chatId: string | number,
+    text: string,
+    inlineKeyboard: any[][],
+    replyToMessageId?: number,
+    threadId?: number
+  ): Promise<any> {
+    const params: any = {
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: inlineKeyboard }
+    };
+    if (replyToMessageId) params.reply_to_message_id = replyToMessageId;
+    if (threadId) params.message_thread_id = threadId;
+
+    let res = await this.callTelegramApi('sendMessage', params);
+    if (res && res.ok) return res;
+
+    // Retry 1: If failed with reply_to_message_id (e.g. original message deleted or permission restricted), try without it
+    if (params.reply_to_message_id) {
+      console.warn(`[Telegram Group] Reply with reply_to_message_id failed (${res?.description}), retrying without reply_to_message_id...`);
+      delete params.reply_to_message_id;
+      res = await this.callTelegramApi('sendMessage', params);
+      if (res && res.ok) return res;
+    }
+
+    // Retry 2: If failed with message_thread_id, try without it
+    if (params.message_thread_id) {
+      console.warn(`[Telegram Group] Reply with message_thread_id failed (${res?.description}), retrying without message_thread_id...`);
+      delete params.message_thread_id;
+      res = await this.callTelegramApi('sendMessage', params);
+      if (res && res.ok) return res;
+    }
+
+    // Retry 3: Remove custom style property if Telegram server rejected unknown field
+    try {
+      const cleanButtons = inlineKeyboard.map(row =>
+        row.map(btn => {
+          const { style, ...rest } = btn;
+          return rest;
+        })
+      );
+      params.reply_markup = { inline_keyboard: cleanButtons };
+      res = await this.callTelegramApi('sendMessage', params);
+      if (res && res.ok) return res;
+    } catch {}
+
+    // Retry 4: Plain text fallback if HTML parse mode or characters failed
+    if (params.parse_mode) {
+      delete params.parse_mode;
+      params.text = text.replace(/<[^>]+>/g, '');
+      res = await this.callTelegramApi('sendMessage', params);
+      if (res && res.ok) return res;
+    }
+
+    console.warn(`[Telegram Group] Group message delivery failed after retries:`, res?.description);
+    return res;
+  }
+
+  // =========================================================================
+  // WELCOME / START MESSAGE DISPATCHER
+  // =========================================================================
+  public static async sendStartWelcomeMessage(
+    chatId: string | number,
+    fromId: string,
+    message?: any
+  ): Promise<void> {
+    const templates = await storage.getTemplates();
+    const startTemplate = templates.START_MESSAGE;
+    let startMsg = startTemplate?.content || "👋 <b>Welcome {user_name}!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> {bot_name}\n\n✨ <i>Send any hashtag (e.g., #box, #crack) in your group or here to receive your files privately!</i>";
+    
+    // Comprehensive Username & Name variables
+    const cleanUsername = message?.from?.username ? `@${message.from.username.replace(/^@+/, '')}` : '';
+    const userDisplayName = [message?.from?.first_name, message?.from?.last_name].filter(Boolean).join(' ') || cleanUsername || 'User';
+    const userMention = cleanUsername || userDisplayName;
+    const botUsername = await this.getBotUsername();
+    const formattedBotName = botUsername ? `@${botUsername.replace(/^@/, '')}` : 'the bot';
+
+    // Replace all variations of @username, username, user_name, user_id, bot_name
+    startMsg = startMsg
+      .replace(/@?\{@?username\}/gi, userMention)
+      .replace(/@username\b/gi, userMention)
+      .replace(/\{user_name\}/gi, userDisplayName)
+      .replace(/\{name\}/gi, userDisplayName)
+      .replace(/\{user\}/gi, userDisplayName)
+      .replace(/\{user_id\}/gi, String(fromId))
+      .replace(/\{userId\}/gi, String(fromId))
+      .replace(/\{id\}/gi, String(fromId))
+      .replace(/@?\{@?bot_name\}/gi, formattedBotName)
+      .replace(/@?\{@?bot_username\}/gi, formattedBotName)
+      .replace(/@@([a-zA-Z0-9_]+)/g, '@$1'); // Avoid double @@
+
+    const mediaType = startTemplate?.mediaType || 'none';
+    const mediaUrl = startTemplate?.mediaUrl?.trim();
+    const replyMarkup = undefined;
+
+    let sent = false;
+
+    // Check if media is a locally stored uploaded file buffer
+    const isLocalUpload = Boolean(mediaUrl && (
+      mediaUrl.startsWith('upload_') ||
+      mediaUrl.startsWith('local_') ||
+      mediaUrl.startsWith('phone_')
+    ));
+
+    if (isLocalUpload && mediaUrl) {
+      try {
+        const up = await storage.getUploadedFile(mediaUrl);
+        if (up && up.buffer) {
+          const res = await TelegramService.uploadAndDeliverDirectly(chatId, {
+            buffer: up.buffer,
+            fileName: up.fileName || (mediaType === 'video' ? 'welcome.mp4' : 'welcome.jpg'),
+            mimeType: up.mimeType || (mediaType === 'video' ? 'video/mp4' : 'image/jpeg'),
+            fileType: mediaType === 'video' ? 'video' : 'photo'
+          }, startMsg);
+          if (res && res.ok) {
+            sent = true;
+            const realFileId = (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
+              res.result?.video?.file_id ||
+              res.result?.document?.file_id;
+            if (realFileId) {
+              await storage.updateTemplate('START_MESSAGE', startTemplate.content, {
+                mediaType: mediaType,
+                mediaUrl: realFileId
+              });
+            }
+          }
+        }
+      } catch (localErr) {
+        console.warn('[Telegram] Local upload delivery for start message error:', localErr);
+      }
+    }
+
+    // 1. Photo support: sendPhoto with formatted HTML caption
+    if (!sent && mediaUrl && (mediaType === 'photo' || (mediaType !== 'video' && /\.(jpe?g|png|webp|gif)$/i.test(mediaUrl)))) {
+      const res = await this.callTelegramApi('sendPhoto', {
+        chat_id: chatId,
+        photo: mediaUrl,
+        caption: startMsg,
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup
+      });
+      if (res.ok) {
+        sent = true;
+      } else {
+        console.warn('[Telegram] sendPhoto failed for /start, falling back to sendMessage:', res.description);
+      }
+    } else if (!sent && mediaUrl && (mediaType === 'video' || /\.(mp4|mov|webm|m4v)$/i.test(mediaUrl))) {
+      // 2. Video support: sendVideo with formatted HTML caption
+      const res = await this.callTelegramApi('sendVideo', {
+        chat_id: chatId,
+        video: mediaUrl,
+        caption: startMsg,
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup
+      });
+      if (res.ok) {
+        sent = true;
+      } else {
+        console.warn('[Telegram] sendVideo failed for /start, falling back to sendMessage:', res.description);
+      }
+    }
+
+    // 3. Fallback or Standard text message
+    if (!sent) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: startMsg,
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup
+      });
     }
   }
 
@@ -724,119 +1097,19 @@ export class TelegramService {
     const startMatch = text.match(/^\/start(?:@\w+)?(?:\s+(.+))?$/i);
     if (startMatch) {
       const rawPayload = startMatch[1]?.trim();
+
+      // Mandatory Channel Join (Force Sub) Check
+      const forceCheck = await this.checkUserForceSub(fromId);
+      if (!forceCheck.allJoined) {
+        await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, rawPayload || 'start');
+        return;
+      }
+
       if (rawPayload) {
         await this.handleDeepLinkDelivery(chatId, rawPayload);
         return;
       } else {
-        const templates = await storage.getTemplates();
-        const startTemplate = templates.START_MESSAGE;
-        let startMsg = startTemplate?.content || "👋 <b>Welcome {user_name}!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> {bot_name}\n\n✨ <i>Send any hashtag (e.g., #box, #crack) in your group or here to receive your files privately!</i>";
-        
-        // Comprehensive Username & Name variables
-        const cleanUsername = message.from?.username ? `@${message.from.username.replace(/^@+/, '')}` : '';
-        const userDisplayName = [message.from?.first_name, message.from?.last_name].filter(Boolean).join(' ') || cleanUsername || 'User';
-        const userMention = cleanUsername || userDisplayName;
-        const botUsername = await this.getBotUsername();
-        const formattedBotName = botUsername ? `@${botUsername.replace(/^@/, '')}` : 'the bot';
-
-        // Replace all variations of @username, username, user_name, user_id, bot_name
-        startMsg = startMsg
-          .replace(/@?\{@?username\}/gi, userMention)
-          .replace(/@username\b/gi, userMention)
-          .replace(/\{user_name\}/gi, userDisplayName)
-          .replace(/\{name\}/gi, userDisplayName)
-          .replace(/\{user\}/gi, userDisplayName)
-          .replace(/\{user_id\}/gi, String(fromId))
-          .replace(/\{userId\}/gi, String(fromId))
-          .replace(/\{id\}/gi, String(fromId))
-          .replace(/@?\{@?bot_name\}/gi, formattedBotName)
-          .replace(/@?\{@?bot_username\}/gi, formattedBotName)
-          .replace(/@@([a-zA-Z0-9_]+)/g, '@$1'); // Avoid double @@
-
-        const mediaType = startTemplate?.mediaType || 'none';
-        const mediaUrl = startTemplate?.mediaUrl?.trim();
-
-        // User Requirement: Completely remove the two inline buttons from the bottom of the start/welcome message.
-        // The start message displays only the media (photo/video) and formatted caption text with the @username placeholder, without any attached inline buttons below it.
-        const replyMarkup = undefined;
-
-        let sent = false;
-
-        // Check if media is a locally stored uploaded file buffer
-        const isLocalUpload = Boolean(mediaUrl && (
-          mediaUrl.startsWith('upload_') ||
-          mediaUrl.startsWith('local_') ||
-          mediaUrl.startsWith('phone_')
-        ));
-
-        if (isLocalUpload && mediaUrl) {
-          try {
-            const up = await storage.getUploadedFile(mediaUrl);
-            if (up && up.buffer) {
-              const res = await TelegramService.uploadAndDeliverDirectly(chatId, {
-                buffer: up.buffer,
-                fileName: up.fileName || (mediaType === 'video' ? 'welcome.mp4' : 'welcome.jpg'),
-                mimeType: up.mimeType || (mediaType === 'video' ? 'video/mp4' : 'image/jpeg'),
-                fileType: mediaType === 'video' ? 'video' : 'photo'
-              }, startMsg);
-              if (res && res.ok) {
-                sent = true;
-                // If a real Telegram file_id was returned, cache it in template for fast future sends
-                const realFileId = (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
-                  res.result?.video?.file_id ||
-                  res.result?.document?.file_id;
-                if (realFileId) {
-                  await storage.updateTemplate('START_MESSAGE', startTemplate.content, {
-                    mediaType: mediaType,
-                    mediaUrl: realFileId
-                  });
-                }
-              }
-            }
-          } catch (localErr) {
-            console.warn('[Telegram] Local upload delivery for start message error:', localErr);
-          }
-        }
-
-        // 1. Photo support: sendPhoto with formatted HTML caption
-        if (!sent && mediaUrl && (mediaType === 'photo' || (mediaType !== 'video' && /\.(jpe?g|png|webp|gif)$/i.test(mediaUrl)))) {
-          const res = await this.callTelegramApi('sendPhoto', {
-            chat_id: chatId,
-            photo: mediaUrl,
-            caption: startMsg,
-            parse_mode: 'HTML',
-            reply_markup: replyMarkup
-          });
-          if (res.ok) {
-            sent = true;
-          } else {
-            console.warn('[Telegram] sendPhoto failed for /start, falling back to sendMessage:', res.description);
-          }
-        } else if (!sent && mediaUrl && (mediaType === 'video' || /\.(mp4|mov|webm|m4v)$/i.test(mediaUrl))) {
-          // 2. Video support: sendVideo with formatted HTML caption
-          const res = await this.callTelegramApi('sendVideo', {
-            chat_id: chatId,
-            video: mediaUrl,
-            caption: startMsg,
-            parse_mode: 'HTML',
-            reply_markup: replyMarkup
-          });
-          if (res.ok) {
-            sent = true;
-          } else {
-            console.warn('[Telegram] sendVideo failed for /start, falling back to sendMessage:', res.description);
-          }
-        }
-
-        // 3. Fallback or Standard text message
-        if (!sent) {
-          await this.callTelegramApi('sendMessage', {
-            chat_id: chatId,
-            text: startMsg,
-            parse_mode: 'HTML',
-            reply_markup: replyMarkup
-          });
-        }
+        await this.sendStartWelcomeMessage(chatId, fromId, message);
         return;
       }
     }
@@ -929,18 +1202,35 @@ export class TelegramService {
       const matchedItem = await storage.findItemByTrigger(text);
       if (matchedItem) {
         const payload = getItemPayload(matchedItem);
+
+        // Check Force Sub
+        const forceCheck = await this.checkUserForceSub(fromId);
+        if (!forceCheck.allJoined) {
+          await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, payload);
+          return;
+        }
+
         await this.handleDeepLinkDelivery(chatId, payload);
         return;
       }
     }
 
-    // Other private text: silent or minimal response
+    // Check Force Sub on any other direct user interactions in private chat
+    const generalForceCheck = await this.checkUserForceSub(fromId);
+    if (!generalForceCheck.allJoined) {
+      await this.sendForceSubPrompt(chatId, generalForceCheck.unjoinedChannels, 'start');
+      return;
+    }
   }
 
   // =========================================================================
   // PRIVATE DELIVERY FLOW
   // =========================================================================
-  private static async handleDeepLinkDelivery(chatId: string | number, rawPayload: string): Promise<void> {
+  public static async handleDeepLinkDelivery(
+    chatId: string | number,
+    rawPayload: string,
+    options: { includeBackButton?: boolean; messageIdToEdit?: number } = {}
+  ): Promise<void> {
     if (!rawPayload) return;
 
     // Automatically register recipient UID whenever a user receives/takes anything from the bot
@@ -960,6 +1250,32 @@ export class TelegramService {
 
     // Force reload latest data from persistent storage (Netlify Blobs / disk)
     await storage.loadLatest(true);
+
+    // Mandatory Channel Join (Force Sub) Check
+    const forceCheck = await this.checkUserForceSub(chatId);
+    if (!forceCheck.allJoined) {
+      await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, rawPayload);
+      return;
+    }
+
+    // FRESH CHAT / PREVIOUS MESSAGE CLEANUP ON NEW DELIVERY:
+    // When a user requests a new file or link, automatically delete previous bot delivery messages/bubbles
+    // sent to that user to keep the chat screen completely clean and fresh with only the latest requested file.
+    try {
+      const prevMessageIds = await storage.clearChatDeliveryMessages(chatId);
+      if (prevMessageIds && prevMessageIds.length > 0) {
+        for (const oldMsgId of prevMessageIds) {
+          try {
+            await this.callTelegramApi('deleteMessage', {
+              chat_id: chatId,
+              message_id: oldMsgId
+            });
+          } catch {}
+        }
+      }
+    } catch (cleanErr) {
+      console.warn('[Telegram FreshChat] Could not purge previous deliveries:', cleanErr);
+    }
 
     const cleanPayload = rawPayload.trim();
     const normalizedId = cleanPayload.replace(/^(?:f_|l_)+/, '');
@@ -1005,9 +1321,37 @@ export class TelegramService {
       return;
     }
 
-    // 1. Progress indicator: ONLY send temporary status for files that need transfer
+    // SETUP VIDEO SYSTEM (Admin Panel & Bot Delivery):
+    // Strict Conditional Behavior:
+    // • When "Setup Video" toggle is OFF: Deliver file/link directly & normally as before (NO setup video buttons).
+    // • When "Setup Video" toggle is ON: Only then send the two inline menu buttons ([ 🎬 Setup Video ] | [ 📁 File / Link ]).
+    const isSetupVideoActive = Boolean(item.hasSetupVideo === true && item.setupVideoUrl && String(item.setupVideoUrl).trim().length > 0);
+
+    if (!options?.includeBackButton && isSetupVideoActive) {
+      await this.sendSetupVideoMenu(chatId, item, options?.messageIdToEdit);
+      return;
+    }
+
+    const backKeyboard = (options?.includeBackButton && isSetupVideoActive) ? {
+      inline_keyboard: [
+        [{ text: '⬅️ Back', callback_data: `sv_menu_${item.id}`, style: 'primary' }]
+      ]
+    } : undefined;
+
+    const isTextOnlyItem = Boolean(item.isTextOnly || (item.type === 'file' && item.fileEnabled === false));
+
+    // 1. Progress indicator: ONLY send temporary status for actual files that need transfer
     let deliveryStatusMsgId: number | null = null;
-    if (item.type === 'file') {
+    if (item.type === 'file' && !isTextOnlyItem) {
+      // If a previous menu message exists, remove it so the file cleanly replaces it
+      if (options?.messageIdToEdit) {
+        try {
+          await this.callTelegramApi('deleteMessage', {
+            chat_id: chatId,
+            message_id: options.messageIdToEdit
+          });
+        } catch {}
+      }
       try {
         const templates = await storage.getTemplates();
         let statusText = templates.DELIVERY_STATUS_MESSAGE?.content || '⏳ Delivering your file...';
@@ -1034,7 +1378,7 @@ export class TelegramService {
         console.warn('[Telegram] Could not send initial delivery progress message:', statusErr);
       }
     } else {
-      // For links: send typing action, deliver directly without temporary placeholder
+      // For links and only-text items: send typing action, deliver directly without temporary placeholder
       this.callTelegramApi('sendChatAction', {
         chat_id: chatId,
         action: 'typing'
@@ -1042,7 +1386,92 @@ export class TelegramService {
     }
 
     try {
-      if (item.type === 'file') {
+      if (isTextOnlyItem) {
+        // ONLY TEXT DELIVERY:
+        // Deliver pure text response directly without requiring any file upload/attachment
+        const messageText = item.replyMessage || item.caption || item.name;
+        let res: any = null;
+
+        if (options?.messageIdToEdit) {
+          try {
+            res = await this.callTelegramApi('editMessageText', {
+              chat_id: chatId,
+              message_id: options.messageIdToEdit,
+              text: messageText,
+              parse_mode: 'HTML',
+              ...(backKeyboard ? { reply_markup: backKeyboard } : {})
+            });
+            if (!res || !res.ok) {
+              res = await this.callTelegramApi('editMessageText', {
+                chat_id: chatId,
+                message_id: options.messageIdToEdit,
+                text: messageText,
+                ...(backKeyboard ? { reply_markup: backKeyboard } : {})
+              });
+            }
+          } catch {}
+        }
+
+        if (!res || !res.ok) {
+          res = await this.callTelegramApi('sendMessage', {
+            chat_id: chatId,
+            text: messageText,
+            parse_mode: 'HTML',
+            ...(backKeyboard ? { reply_markup: backKeyboard } : {})
+          });
+          if (!res || !res.ok) {
+            res = await this.callTelegramApi('sendMessage', {
+              chat_id: chatId,
+              text: messageText,
+              ...(backKeyboard ? { reply_markup: backKeyboard } : {})
+            });
+          }
+        }
+
+        if (res && res.ok) {
+          console.info('[Telegram] Successfully delivered Only-Text response to chat:', chatId, 'item:', item.id);
+          await storage.incrementItemDelivery(item.id);
+
+          const deliveredMessageId = res.result?.message_id;
+          if (deliveredMessageId) {
+            await storage.recordChatDeliveryMessage(chatId, deliveredMessageId);
+
+            try {
+              const settings = await storage.getSettings();
+              const autoDeleteEnabled = settings.autoDeleteDeliveryEnabled !== false;
+              const timeoutMinutes = settings.deliveryTimeoutMinutes || 10;
+
+              let companionNoticeId: number | undefined = undefined;
+              if (autoDeleteEnabled && settings.autoDeleteNoticeEnabled) {
+                const noticeRes = await this.callTelegramApi('sendMessage', {
+                  chat_id: chatId,
+                  text: `⏳ <i>This message will automatically self-destruct in ${timeoutMinutes} minutes.</i>`,
+                  parse_mode: 'HTML'
+                });
+                if (noticeRes && noticeRes.ok && noticeRes.result?.message_id) {
+                  companionNoticeId = Number(noticeRes.result.message_id);
+                  await storage.recordChatDeliveryMessage(chatId, companionNoticeId);
+                }
+              }
+
+              if (autoDeleteEnabled) {
+                const sched = await storage.scheduleMessageDeletion({
+                  chatId: String(chatId),
+                  messageId: deliveredMessageId,
+                  companionNoticeId,
+                  timeoutMinutes,
+                  itemTitle: item.name || 'text message'
+                });
+                TelegramService.armScheduledDeletionTimer(sched);
+              }
+            } catch (schedErr) {
+              console.warn('[Telegram] Could not schedule message auto-delete for text:', schedErr);
+            }
+          }
+        } else {
+          console.warn('[Telegram] Only-Text delivery failed:', res?.description);
+        }
+      } else if (item.type === 'file') {
         // RULE 6 & 7:
         // If admin adds ONLY file: send ONLY the file! No extra text!
         // If admin adds file + custom caption: send ONLY file + exact caption!
@@ -1105,7 +1534,7 @@ export class TelegramService {
         // Priority 1: If it's a local upload ID and we have the uploaded file buffer, deliver directly via multipart!
         if (isLocalIdentifier && uploadedFile) {
           console.info('[Telegram] Delivering uploaded file directly via multipart buffer to chat:', chatId, 'file:', uploadedFile.fileName);
-          res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, caption);
+          res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, caption, backKeyboard);
           if (res && res.ok) {
             // Save newly assigned Telegram file_id to item for fast future caching
             const realFileId = res.result?.document?.file_id || 
@@ -1125,53 +1554,60 @@ export class TelegramService {
             res = await this.callTelegramApi('sendPhoto', {
               chat_id: chatId,
               photo: fileIdOrUrl,
-              ...(caption ? { caption } : {})
+              ...(caption ? { caption } : {}),
+              ...(backKeyboard ? { reply_markup: backKeyboard } : {})
             });
             if (!res.ok) {
               res = await this.callTelegramApi('sendDocument', {
                 chat_id: chatId,
                 document: fileIdOrUrl,
-                ...(caption ? { caption } : {})
+                ...(caption ? { caption } : {}),
+                ...(backKeyboard ? { reply_markup: backKeyboard } : {})
               });
             }
           } else if (item.fileType === 'video') {
             res = await this.callTelegramApi('sendVideo', {
               chat_id: chatId,
               video: fileIdOrUrl,
-              ...(caption ? { caption } : {})
+              ...(caption ? { caption } : {}),
+              ...(backKeyboard ? { reply_markup: backKeyboard } : {})
             });
             if (!res.ok) {
               res = await this.callTelegramApi('sendDocument', {
                 chat_id: chatId,
                 document: fileIdOrUrl,
-                ...(caption ? { caption } : {})
+                ...(caption ? { caption } : {}),
+                ...(backKeyboard ? { reply_markup: backKeyboard } : {})
               });
             }
           } else if (item.fileType === 'audio') {
             res = await this.callTelegramApi('sendAudio', {
               chat_id: chatId,
               audio: fileIdOrUrl,
-              ...(caption ? { caption } : {})
+              ...(caption ? { caption } : {}),
+              ...(backKeyboard ? { reply_markup: backKeyboard } : {})
             });
             if (!res.ok) {
               res = await this.callTelegramApi('sendDocument', {
                 chat_id: chatId,
                 document: fileIdOrUrl,
-                ...(caption ? { caption } : {})
+                ...(caption ? { caption } : {}),
+                ...(backKeyboard ? { reply_markup: backKeyboard } : {})
               });
             }
           } else {
             res = await this.callTelegramApi('sendDocument', {
               chat_id: chatId,
               document: fileIdOrUrl,
-              ...(caption ? { caption } : {})
+              ...(caption ? { caption } : {}),
+              ...(backKeyboard ? { reply_markup: backKeyboard } : {})
             });
           }
 
           // Fallback if Telegram API rejected remote file_id (e.g. invalid/mock/expired) but we have the local uploaded file
           if ((!res || !res.ok) && uploadedFile) {
             console.warn('[Telegram] Remote file_id rejected by Telegram, falling back to direct buffer delivery:', res?.description);
-            res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, caption);
+            res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, caption, backKeyboard);
             if (res && res.ok) {
               const realFileId = res.result?.document?.file_id || 
                 (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
@@ -1187,7 +1623,7 @@ export class TelegramService {
         } else if (uploadedFile) {
           // Priority 3: No fileIdOrUrl specified but uploadedFile buffer is available
           console.info('[Telegram] Delivering uploaded file directly to chat:', chatId);
-          res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, caption);
+          res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, caption, backKeyboard);
           if (res && res.ok) {
             const realFileId = res.result?.document?.file_id || 
               (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
@@ -1210,23 +1646,40 @@ export class TelegramService {
           // =========================================================================
           const deliveredMessageId = res.result?.message_id;
           if (deliveredMessageId) {
+            // Fresh Chat: Record the delivered file message for auto-cleanup on future delivery
+            await storage.recordChatDeliveryMessage(chatId, deliveredMessageId);
+
             try {
               const settings = await storage.getSettings();
               const autoDeleteEnabled = settings.autoDeleteDeliveryEnabled !== false;
               const timeoutMinutes = settings.deliveryTimeoutMinutes || 10;
 
+              let companionNoticeId: number | undefined = undefined;
+              if (autoDeleteEnabled && settings.autoDeleteNoticeEnabled) {
+                const noticeRes = await this.callTelegramApi('sendMessage', {
+                  chat_id: chatId,
+                  text: `⏳ <i>This file will automatically self-destruct in ${timeoutMinutes} minutes. Please save or forward it now.</i>`,
+                  parse_mode: 'HTML'
+                });
+                if (noticeRes && noticeRes.ok && noticeRes.result?.message_id) {
+                  companionNoticeId = Number(noticeRes.result.message_id);
+                  await storage.recordChatDeliveryMessage(chatId, companionNoticeId);
+                }
+              }
+
               if (autoDeleteEnabled) {
-                // Persist scheduled deletion record so it survives restarts (completely silent, no notice message to anyone)
+                // Persist scheduled deletion record so it strictly survives restarts and process crashes
                 const sched = await storage.scheduleMessageDeletion({
                   chatId: String(chatId),
                   messageId: deliveredMessageId,
+                  companionNoticeId,
                   timeoutMinutes,
                   itemTitle: item.fileName || item.name || 'file'
                 });
 
                 // Arm immediate in-memory timer
                 TelegramService.armScheduledDeletionTimer(sched);
-                console.info(`[Telegram] Armed ${timeoutMinutes}-minute auto-delete timer for delivered file message ${deliveredMessageId} in chat ${chatId} (Silent: no notice message sent)`);
+                console.info(`[Telegram] Armed ${timeoutMinutes}-minute auto-delete timer for delivered file message ${deliveredMessageId} in chat ${chatId}`);
               }
             } catch (schedErr) {
               console.warn('[Telegram] Could not schedule message auto-delete:', schedErr);
@@ -1255,35 +1708,80 @@ export class TelegramService {
           inlineButton.url = item.url;
         }
 
-        let res = await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text: messageText,
-          reply_markup: {
-            inline_keyboard: [[inlineButton]]
-          }
-        });
+        const linkKeyboardRows: any[][] = [[inlineButton]];
+        if (options?.includeBackButton && isSetupVideoActive) {
+          linkKeyboardRows.push([{ text: '⬅️ Back', callback_data: `sv_menu_${item.id}`, style: 'primary' }]);
+        }
 
-        // If Telegram rejected web_app button, fallback immediately to regular url button
-        if ((!res || !res.ok) && canUseWebApp) {
-          console.warn('[Telegram] web_app button delivery rejected, falling back to regular url:', res?.description);
+        let res: any = null;
+        if (options?.messageIdToEdit) {
+          try {
+            res = await this.callTelegramApi('editMessageText', {
+              chat_id: chatId,
+              message_id: options.messageIdToEdit,
+              text: messageText,
+              reply_markup: {
+                inline_keyboard: linkKeyboardRows
+              }
+            });
+          } catch {}
+        }
+
+        if (!res || !res.ok) {
           res = await this.callTelegramApi('sendMessage', {
             chat_id: chatId,
             text: messageText,
             reply_markup: {
-              inline_keyboard: [[{ text: buttonText, url: item.url, style: 'primary' }]]
+              inline_keyboard: linkKeyboardRows
             }
           });
+        }
+
+        // If Telegram rejected web_app button, fallback immediately to regular url button
+        if ((!res || !res.ok) && canUseWebApp) {
+          console.warn('[Telegram] web_app button delivery rejected, falling back to regular url:', res?.description);
+          const fallbackRows: any[][] = [[{ text: buttonText, url: item.url, style: 'primary' }]];
+          if (options?.includeBackButton && isSetupVideoActive) {
+            fallbackRows.push([{ text: '⬅️ Back', callback_data: `sv_menu_${item.id}`, style: 'primary' }]);
+          }
+          if (options?.messageIdToEdit) {
+            try {
+              res = await this.callTelegramApi('editMessageText', {
+                chat_id: chatId,
+                message_id: options.messageIdToEdit,
+                text: messageText,
+                reply_markup: {
+                  inline_keyboard: fallbackRows
+                }
+              });
+            } catch {}
+          }
+          if (!res || !res.ok) {
+            res = await this.callTelegramApi('sendMessage', {
+              chat_id: chatId,
+              text: messageText,
+              reply_markup: {
+                inline_keyboard: fallbackRows
+              }
+            });
+          }
         }
 
         if (res && res.ok) {
           console.info('[Telegram] Successfully delivered link privately to chat:', chatId, 'item:', item.id);
           await storage.incrementItemDelivery(item.id);
+          if (res.result?.message_id) {
+            await storage.recordChatDeliveryMessage(chatId, res.result.message_id);
+          }
         } else {
           console.warn('[Telegram] Telegram link delivery API failed, sending fallback text:', res?.description);
-          await this.callTelegramApi('sendMessage', {
+          const fallbackRes = await this.callTelegramApi('sendMessage', {
             chat_id: chatId,
             text: `${messageText}\n\n👉 ${item.url}`
           });
+          if (fallbackRes && fallbackRes.ok && fallbackRes.result?.message_id) {
+            await storage.recordChatDeliveryMessage(chatId, fallbackRes.result.message_id);
+          }
           await storage.incrementItemDelivery(item.id);
         }
       }
@@ -1301,6 +1799,291 @@ export class TelegramService {
         }
       }
     }
+  }
+
+  // =========================================================================
+  // SETUP VIDEO SYSTEM (Two-Button Interactive Menu & Video Delivery)
+  // =========================================================================
+  public static async sendSetupVideoMenu(
+    chatId: string | number,
+    item: ItemRecord,
+    messageIdToEdit?: number
+  ): Promise<void> {
+    const defaultText = `🎬 <b>Setup Video & Resource Menu</b>\n\n📦 <b>${item.name}</b>\n\nChoose an option below to watch the setup tutorial or access your ${item.type === 'file' ? 'file' : 'link'}:`;
+    const text = item.setupVideoMessage?.trim() || defaultText;
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: item.setupVideoButtonText?.trim() || '🎬 Setup Video', callback_data: `sv_vid_${item.id}`, style: 'primary' },
+          { text: item.setupResourceButtonText?.trim() || (item.type === 'file' ? '📁 Get File' : '🔗 Open Link'), callback_data: `sv_item_${item.id}`, style: 'primary' }
+        ]
+      ]
+    };
+
+    if (messageIdToEdit) {
+      try {
+        const editRes = await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: messageIdToEdit,
+          text,
+          parse_mode: 'HTML',
+          reply_markup: keyboard
+        });
+        if (editRes && editRes.ok) return;
+        // If edit failed (for example, previous message was media), delete it before sending fresh message
+        await this.callTelegramApi('deleteMessage', {
+          chat_id: chatId,
+          message_id: messageIdToEdit
+        }).catch(() => {});
+      } catch {}
+    }
+
+    await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      reply_markup: keyboard
+    });
+  }
+
+  public static async deliverSetupVideo(
+    chatId: string | number,
+    item: ItemRecord,
+    messageIdToEdit?: number
+  ): Promise<void> {
+    const backKeyboard = {
+      inline_keyboard: [
+        [{ text: '⬅️ Back', callback_data: `sv_menu_${item.id}`, style: 'primary' }]
+      ]
+    };
+
+    if (!item.setupVideoUrl) {
+      if (messageIdToEdit) {
+        try {
+          const editRes = await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: messageIdToEdit,
+            text: `⚠️ No setup video configured for "${item.name}".`,
+            reply_markup: backKeyboard
+          });
+          if (editRes && editRes.ok) return;
+        } catch {}
+      }
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `⚠️ No setup video configured for "${item.name}".`,
+        reply_markup: backKeyboard
+      });
+      return;
+    }
+
+    const caption = `🎬 <b>Setup Video:</b> ${item.name}`;
+
+    // 1. Check if setup video is stored as an uploaded file
+    const isUpload = Boolean(
+      item.setupVideoType === 'upload' ||
+      item.setupVideoUrl.startsWith('upload_') ||
+      item.setupVideoUrl.startsWith('local_') ||
+      item.setupVideoUrl.startsWith('phone_')
+    );
+
+    let uploadedVideo = isUpload ? await storage.getUploadedFile(item.setupVideoUrl) : null;
+    if (!uploadedVideo && item.setupVideoFileName) {
+      uploadedVideo = await storage.getUploadedFile(item.setupVideoFileName);
+    }
+
+    if (uploadedVideo && uploadedVideo.buffer) {
+      if (messageIdToEdit) {
+        try {
+          await this.callTelegramApi('deleteMessage', { chat_id: chatId, message_id: messageIdToEdit });
+        } catch {}
+      }
+      const res = await TelegramService.uploadAndDeliverDirectly(chatId, {
+        buffer: uploadedVideo.buffer,
+        fileName: uploadedVideo.fileName || 'setup_video.mp4',
+        mimeType: uploadedVideo.mimeType || 'video/mp4',
+        fileType: 'video'
+      }, caption, backKeyboard);
+
+      if (res && res.ok) return;
+    }
+
+    // 2. If it's a URL or fileId: try sendVideo if it's direct video file or fileId
+    const isExternalUrl = /^https?:\/\//i.test(item.setupVideoUrl);
+    const isDirectVideoExt = /\.(mp4|mov|avi|mkv|webm)(\?.*)?$/i.test(item.setupVideoUrl);
+
+    if (!isExternalUrl || isDirectVideoExt) {
+      if (messageIdToEdit) {
+        try {
+          await this.callTelegramApi('deleteMessage', { chat_id: chatId, message_id: messageIdToEdit });
+        } catch {}
+      }
+      let res = await this.callTelegramApi('sendVideo', {
+        chat_id: chatId,
+        video: item.setupVideoUrl,
+        caption,
+        parse_mode: 'HTML',
+        reply_markup: backKeyboard
+      });
+
+      if (res && res.ok) return;
+    }
+
+    // 3. If external web link (e.g. YouTube, tutorial URL): edit existing message in place seamlessly!
+    const videoButtonRow: any[] = [];
+    if (isExternalUrl) {
+      videoButtonRow.push({ text: '▶️ Watch Setup Video', url: item.setupVideoUrl, style: 'primary' });
+    }
+    const inlineKeyboard = [
+      ...(videoButtonRow.length > 0 ? [videoButtonRow] : []),
+      [{ text: '⬅️ Back', callback_data: `sv_menu_${item.id}`, style: 'primary' }]
+    ];
+    const textMsg = `🎬 <b>Setup Video Tutorial</b>\n\n📦 <b>${item.name}</b>\n\n${item.setupVideoUrl}`;
+
+    if (messageIdToEdit) {
+      try {
+        const editRes = await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: messageIdToEdit,
+          text: textMsg,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: inlineKeyboard
+          }
+        });
+        if (editRes && editRes.ok) return;
+      } catch {}
+    }
+
+    await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: textMsg,
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: inlineKeyboard
+      }
+    });
+  }
+
+  // =========================================================================
+  // BROADCAST NOTIFICATION SYSTEM (Rich Media: Photo, Video, Audio, Voice, Text)
+  // =========================================================================
+  public static async sendBroadcastMessage(params: {
+    chatId: string | number;
+    message?: string;
+    mediaType: 'text' | 'photo' | 'video' | 'audio' | 'voice';
+    mediaUrl?: string; // URL or Telegram file_id
+    fileBuffer?: Buffer;
+    fileName?: string;
+    mimeType?: string;
+    pinMessage?: boolean;
+  }): Promise<{ ok: boolean; messageId?: number; fileId?: string; description?: string }> {
+    const token = await this.getBotToken();
+    if (!token) return { ok: false, description: 'No bot token configured' };
+
+    const chatId = String(params.chatId);
+    const caption = params.message?.trim() || undefined;
+    const mediaType = params.mediaType || 'text';
+
+    // 1. Text-Only Message
+    if (mediaType === 'text') {
+      const res = await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: params.message || '',
+        parse_mode: 'HTML'
+      });
+      if (res && res.ok && params.pinMessage && res.result?.message_id) {
+        await this.callTelegramApi('pinChatMessage', {
+          chat_id: chatId,
+          message_id: res.result.message_id
+        }).catch(() => {});
+      }
+      return { ok: Boolean(res && res.ok), messageId: res.result?.message_id, description: res.description };
+    }
+
+    // 2. Media via existing Telegram file_id or external URL
+    if (params.mediaUrl) {
+      let method = 'sendPhoto';
+      let field = 'photo';
+      if (mediaType === 'video') {
+        method = 'sendVideo';
+        field = 'video';
+      } else if (mediaType === 'audio') {
+        method = 'sendAudio';
+        field = 'audio';
+      } else if (mediaType === 'voice') {
+        method = 'sendVoice';
+        field = 'voice';
+      }
+
+      const res = await this.callTelegramApi(method, {
+        chat_id: chatId,
+        [field]: params.mediaUrl,
+        ...(caption ? { caption, parse_mode: 'HTML' } : {})
+      });
+
+      if (res && res.ok && params.pinMessage && res.result?.message_id) {
+        await this.callTelegramApi('pinChatMessage', {
+          chat_id: chatId,
+          message_id: res.result.message_id
+        }).catch(() => {});
+      }
+
+      const fileId = res.result?.photo ? res.result.photo[res.result.photo.length - 1]?.file_id :
+        res.result?.video?.file_id || res.result?.audio?.file_id || res.result?.voice?.file_id;
+
+      return { ok: Boolean(res && res.ok), messageId: res.result?.message_id, fileId, description: res.description };
+    }
+
+    // 3. Media via uploaded Buffer (multipart FormData)
+    if (params.fileBuffer) {
+      let method = 'sendPhoto';
+      let fieldName = 'photo';
+      if (mediaType === 'video') {
+        method = 'sendVideo';
+        fieldName = 'video';
+      } else if (mediaType === 'audio') {
+        method = 'sendAudio';
+        fieldName = 'audio';
+      } else if (mediaType === 'voice') {
+        method = 'sendVoice';
+        fieldName = 'voice';
+      }
+
+      const formData = new FormData();
+      formData.append('chat_id', chatId);
+      if (caption) {
+        formData.append('caption', caption);
+        formData.append('parse_mode', 'HTML');
+      }
+
+      const blob = new Blob([new Uint8Array(params.fileBuffer)] as any, {
+        type: params.mimeType || (mediaType === 'photo' ? 'image/jpeg' : mediaType === 'video' ? 'video/mp4' : mediaType === 'voice' ? 'audio/ogg' : 'audio/mpeg')
+      });
+      formData.append(fieldName, blob, params.fileName || (mediaType === 'photo' ? 'photo.jpg' : mediaType === 'video' ? 'video.mp4' : mediaType === 'voice' ? 'voice.ogg' : 'audio.mp3'));
+
+      try {
+        const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+        if (data.ok && params.pinMessage && data.result?.message_id) {
+          await this.callTelegramApi('pinChatMessage', {
+            chat_id: chatId,
+            message_id: data.result.message_id
+          }).catch(() => {});
+        }
+        const fileId = data.result?.photo ? data.result.photo[data.result.photo.length - 1]?.file_id :
+          data.result?.video?.file_id || data.result?.audio?.file_id || data.result?.voice?.file_id;
+
+        return { ok: Boolean(data.ok), messageId: data.result?.message_id, fileId, description: data.description };
+      } catch (err: any) {
+        return { ok: false, description: err.message };
+      }
+    }
+
+    return { ok: false, description: 'No media or message content specified' };
   }
 
   // =========================================================================
@@ -2328,7 +3111,80 @@ export class TelegramService {
     const data = cb.data;
     const chatId = cb.message?.chat?.id;
 
+    // MANDATORY FORCE SUB VERIFICATION CALLBACK
+    if (data && data.startsWith('forcesub_verify:')) {
+      const targetPayload = data.substring('forcesub_verify:'.length).trim() || 'start';
+      const forceCheck = await this.checkUserForceSub(fromId);
+
+      if (!forceCheck.allJoined) {
+        // Display Telegram pop-up alert: "Please join all channels or groups to use this bot."
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Please join all channels or groups to use this bot.',
+          show_alert: true
+        });
+        return;
+      }
+
+      // User has joined all required channels!
+      await this.callTelegramApi('answerCallbackQuery', {
+        callback_query_id: cb.id,
+        text: '✅ Membership verified! Unlocking access...',
+        show_alert: false
+      });
+
+      // Cleanly remove the force-sub prompt message
+      if (chatId && cb.message?.message_id) {
+        try {
+          await this.callTelegramApi('deleteMessage', {
+            chat_id: chatId,
+            message_id: cb.message.message_id
+          });
+        } catch {}
+      }
+
+      if (targetPayload && targetPayload !== 'start') {
+        await this.handleDeepLinkDelivery(chatId, targetPayload);
+      } else {
+        await this.sendStartWelcomeMessage(chatId, fromId, cb.message);
+      }
+      return;
+    }
+
     await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id });
+
+    // SETUP VIDEO NAVIGATION:
+    // [ 🎬 Setup Video ] button tap
+    if (data?.startsWith('sv_vid_')) {
+      const itemId = data.replace('sv_vid_', '').trim();
+      const item = await storage.getItem(itemId);
+      if (item && chatId) {
+        await this.deliverSetupVideo(chatId, item, cb.message?.message_id);
+      }
+      return;
+    }
+
+    // [ 📁 File / Link ] button tap
+    if (data?.startsWith('sv_item_')) {
+      const itemId = data.replace('sv_item_', '').trim();
+      if (chatId) {
+        await this.handleDeepLinkDelivery(chatId, itemId, {
+          includeBackButton: true,
+          messageIdToEdit: cb.message?.message_id
+        });
+      }
+      return;
+    }
+
+    // [ ⬅️ Back ] button tap returning to setup menu
+    if (data?.startsWith('sv_menu_')) {
+      const itemId = data.replace('sv_menu_', '').trim();
+      const item = await storage.getItem(itemId);
+      if (item && chatId) {
+        await this.sendSetupVideoMenu(chatId, item, cb.message?.message_id);
+      }
+      return;
+    }
 
     // Cancel Button
     if (data === 'cancel_add') {
@@ -3033,7 +3889,8 @@ export class TelegramService {
   public static async uploadAndDeliverDirectly(
     chatId: string | number,
     uploadedFile: { buffer: Buffer; fileName: string; mimeType: string; fileType: 'document' | 'photo' | 'video' | 'audio' },
-    caption?: string
+    caption?: string,
+    replyMarkup?: any
   ): Promise<any> {
     const token = await this.getBotToken();
     if (!token) {
@@ -3070,6 +3927,7 @@ export class TelegramService {
     const formData = new FormData();
     formData.append('chat_id', String(chatId));
     if (caption) formData.append('caption', caption);
+    if (replyMarkup) formData.append('reply_markup', typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup));
 
     const blob = new Blob([new Uint8Array(buf)] as any, { type: uploadedFile.mimeType || 'application/octet-stream' });
     formData.append(fieldName, blob, uploadedFile.fileName || 'file');
@@ -3087,6 +3945,7 @@ export class TelegramService {
         const docFormData = new FormData();
         docFormData.append('chat_id', String(chatId));
         if (caption) docFormData.append('caption', caption);
+        if (replyMarkup) docFormData.append('reply_markup', typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup));
         docFormData.append('document', blob, uploadedFile.fileName || 'file');
         const docRes = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
           method: 'POST',
@@ -3128,7 +3987,7 @@ export class TelegramService {
       }
       console.info(`[Telegram] Initialized scheduled auto-delete worker. (${pending.length} pending file self-destruct timers restored)`);
 
-      // 3. Periodic sweep every 30 seconds for bulletproof reliability
+      // 3. Periodic sweep every 15 seconds for strict timing
       setInterval(() => {
         TelegramService.processDueScheduledDeletions().catch(err => {
           console.warn('[Telegram] Interval auto-delete worker error:', err);
@@ -3136,7 +3995,7 @@ export class TelegramService {
         storage.checkAndCleanExpiredItems().catch(err => {
           console.warn('[Storage] Interval expired items cleanup error:', err);
         });
-      }, 30 * 1000);
+      }, 15 * 1000);
     } catch (err: any) {
       console.warn('[Telegram] Could not initialize scheduled deletion worker:', err);
     }
@@ -3145,11 +4004,16 @@ export class TelegramService {
   public static armScheduledDeletionTimer(sched: ScheduledDeletion): void {
     if (this.activeTimers.has(sched.id)) return;
     const remainingMs = Math.max(0, sched.deleteAt - Date.now());
+    const safeDelay = Math.min(remainingMs, 2147483647); // Max safe setTimeout delay
 
     const timer = setTimeout(async () => {
       this.activeTimers.delete(sched.id);
-      await this.executeScheduledDeletion(sched);
-    }, remainingMs);
+      try {
+        await this.executeScheduledDeletion(sched);
+      } catch (err: any) {
+        console.warn(`[Telegram] Scheduled deletion execution error for ${sched.id}:`, err?.message || err);
+      }
+    }, safeDelay);
 
     this.activeTimers.set(sched.id, timer);
   }
@@ -3158,23 +4022,32 @@ export class TelegramService {
     try {
       console.info(`[Telegram] Auto-deleting delivered file message ${sched.messageId} in chat ${sched.chatId} after ${sched.timeoutMinutes}m timeout`);
       
-      // Delete the delivered file message
-      await this.callTelegramApi('deleteMessage', {
-        chat_id: sched.chatId,
-        message_id: sched.messageId
-      });
+      // Delete the delivered file message safely
+      if (sched.chatId && sched.messageId) {
+        const res = await this.callTelegramApi('deleteMessage', {
+          chat_id: sched.chatId,
+          message_id: sched.messageId
+        });
+        if (!res.ok) {
+          console.info(`[Telegram] Scheduled deleteMessage result: ${res?.description || 'already removed'}`);
+        }
+      }
 
-      // Also delete the companion self-destruct notice if one was sent
-      if (sched.companionNoticeId) {
+      // Also delete companion notice if one was sent
+      if (sched.chatId && sched.companionNoticeId) {
         await this.callTelegramApi('deleteMessage', {
           chat_id: sched.chatId,
           message_id: sched.companionNoticeId
-        });
+        }).catch(() => {});
       }
     } catch (err: any) {
-      console.warn(`[Telegram] Error auto-deleting message ${sched.messageId}:`, err.message);
+      console.warn(`[Telegram] Error auto-deleting message ${sched.messageId}:`, err?.message || err);
     } finally {
-      await storage.removeScheduledDeletion(sched.id);
+      try {
+        await storage.removeScheduledDeletion(sched.id);
+      } catch (remErr: any) {
+        console.warn(`[Telegram] Error removing scheduled deletion ${sched.id}:`, remErr?.message);
+      }
     }
   }
 
@@ -3183,8 +4056,12 @@ export class TelegramService {
       const due = await storage.popDueScheduledDeletions();
       let count = 0;
       for (const sched of due) {
-        await this.executeScheduledDeletion(sched);
-        count++;
+        try {
+          await this.executeScheduledDeletion(sched);
+          count++;
+        } catch (itemErr: any) {
+          console.warn('[Telegram] Individual scheduled deletion failed:', itemErr?.message);
+        }
       }
       return count;
     } catch (err: any) {

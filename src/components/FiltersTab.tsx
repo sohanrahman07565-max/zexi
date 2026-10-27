@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { ItemRecord, TriggerType, AdminUser, DesignConfig, api } from '../lib/api';
+import { toast } from '../lib/toast';
 import { 
   Filter, Plus, Search, Edit2, Trash2, Copy, Check, Share2, 
   FileText, Link2, ExternalLink, Hash, Slash, Terminal,
@@ -91,13 +92,17 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
   };
 
   // Show / Hide Toggle handler
+  // Show / Hide Toggle handler
   const handleToggleVisibility = async (item: ItemRecord) => {
     const nextVal = !(item.inFiltersList === true);
     try {
       await api.updateItem(item.id, { inFiltersList: nextVal });
+      toast.success(nextVal ? 'Filter set to Visible in list' : 'Filter Hidden from list');
       onRefresh();
     } catch (err: any) {
-      setError(err.message || 'Failed to update filter visibility');
+      const msg = err.message || 'Failed to update filter visibility';
+      setError(msg);
+      toast.error(msg);
     }
   };
 
@@ -108,9 +113,12 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
     try {
       await api.deleteItem(deleteConfirmItem.id);
       setDeleteConfirmItem(null);
+      toast.success('Filter deleted successfully');
       onRefresh();
     } catch (err: any) {
-      setError(err.message || 'Failed to delete filter');
+      const msg = err.message || 'Failed to delete filter';
+      setError(msg);
+      toast.error(msg);
     } finally {
       setLoading(false);
     }
@@ -121,6 +129,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
     try {
       await navigator.clipboard.writeText(deepLink);
       setCopiedLink(itemId);
+      toast.info('Deep link copied to clipboard!');
       setTimeout(() => setCopiedLink((prev) => (prev === itemId ? null : prev)), 2000);
     } catch (err) {
       console.warn('Copy link error:', err);
@@ -132,6 +141,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
     try {
       await navigator.clipboard.writeText(tag);
       setCopiedTag(tag);
+      toast.info(`Keyword tag copied: ${tag}`);
       setTimeout(() => setCopiedTag((prev) => (prev === tag ? null : prev)), 2000);
     } catch (err) {
       console.warn('Copy keyword error:', err);
@@ -152,7 +162,9 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
     e.preventDefault();
     const cleanKeyword = formKeyword.replace(/^[#/]+/, '').trim();
     if (!cleanKeyword) {
-      setError('Please enter a keyword name.');
+      const msg = 'Please enter a keyword name.';
+      setError(msg);
+      toast.error(msg);
       return;
     }
 
@@ -196,9 +208,12 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
       }
 
       setIsAddModalOpen(false);
+      toast.success('Filter added successfully!');
       onRefresh();
     } catch (err: any) {
-      setError(err.message || 'Failed to add filter');
+      const msg = err.message || 'Failed to add filter';
+      setError(msg);
+      toast.error(msg);
     } finally {
       setLoading(false);
     }
@@ -210,7 +225,9 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
     if (!selectedItem) return;
     const cleanKeyword = formKeyword.replace(/^[#/]+/, '').trim();
     if (!cleanKeyword) {
-      setError('Please enter a keyword name.');
+      const msg = 'Please enter a keyword name.';
+      setError(msg);
+      toast.error(msg);
       return;
     }
 
@@ -235,9 +252,12 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
 
       setIsEditModalOpen(false);
       setSelectedItem(null);
+      toast.success('Filter updated successfully!');
       onRefresh();
     } catch (err: any) {
-      setError(err.message || 'Failed to update filter');
+      const msg = err.message || 'Failed to update filter';
+      setError(msg);
+      toast.error(msg);
     } finally {
       setLoading(false);
     }
@@ -554,7 +574,6 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-white">Add New Filter</h3>
-                  <p className="text-[11px] text-zinc-400">Configure trigger keyword &amp; visibility</p>
                 </div>
               </div>
               <button
@@ -631,7 +650,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
                     type="text"
                     value={formKeyword}
                     onChange={(e) => setFormKeyword(e.target.value)}
-                    placeholder={formType === 'hashtag' ? 'e.g., box, crack, movie' : formType === 'slash' ? 'e.g., download, play' : 'e.g., tutorial, info'}
+                    placeholder="Enter Filter Name"
                     className="w-full bg-zinc-900 border border-zinc-800 rounded-xl py-2.5 px-3 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors font-mono"
                     autoFocus
                   />
@@ -698,11 +717,6 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
                     <span>Hide (Hidden)</span>
                   </button>
                 </div>
-                <p className="text-[10px] text-zinc-400 mt-1">
-                  {formVisibility 
-                    ? 'Users can view this keyword when typing /filters in Telegram.'
-                    : 'Hidden from public /filters list (direct exact matching still works).'}
-                </p>
               </div>
 
               {/* 4. Action Buttons: [ Cancel ] and [ Save ] */}
@@ -748,7 +762,6 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-white">Edit Filter</h3>
-                  <p className="text-[11px] text-zinc-400">{selectedItem.name}</p>
                 </div>
               </div>
               <button
@@ -828,7 +841,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
                     type="text"
                     value={formKeyword}
                     onChange={(e) => setFormKeyword(e.target.value)}
-                    placeholder="e.g. box, crack, tutorial"
+                    placeholder="Enter Filter Name"
                     className="w-full bg-zinc-900 border border-zinc-800 rounded-xl py-2.5 px-3 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors font-mono"
                     autoFocus
                   />

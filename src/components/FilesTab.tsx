@@ -1,10 +1,12 @@
 import React, { useState, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { ItemRecord, TriggerType, OpenMode, AdminUser, DesignConfig, api } from '../lib/api';
+import { toast } from '../lib/toast';
 import { 
   FileText, Link2, Plus, Search, Edit2, Trash2, ExternalLink, 
-  Sparkles, Check, X, ShieldAlert, ArrowRight, Play, FileUp, Globe, Smartphone,
+  Sparkles, Check, X, ShieldAlert, ArrowRight, ArrowLeft, Play, FileUp, Globe, Smartphone,
   Copy, Hash, ChevronDown, ChevronUp, Share2, Upload, AlertTriangle, Paperclip, Loader2,
-  Clock, Calendar, RefreshCw, Image, Video, Music, CheckCircle2
+  Clock, Calendar, RefreshCw, Image, Video, Music, CheckCircle2, MessageSquare
 } from 'lucide-react';
 
 interface FilesTabProps {
@@ -57,11 +59,25 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
   const [openMode, setOpenMode] = useState<OpenMode>('browser');
   const [retentionType, setRetentionType] = useState<'permanent' | 'temporary'>('permanent');
   const [retentionDays, setRetentionDays] = useState<number>(7);
+  const [fileEnabled, setFileEnabled] = useState<boolean>(true);
 
   // Multi-File upload list
   const [selectedFiles, setSelectedFiles] = useState<MultiFileEntry[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
+
+  // Multi-step Flow State: Step 1 (Primary Details) -> Step 2 (Setup Video & Confirmation)
+  const [formStep, setFormStep] = useState<1 | 2>(1);
+
+  // Setup Video System State
+  const [hasSetupVideo, setHasSetupVideo] = useState<boolean>(false);
+  const [setupVideoChoice, setSetupVideoChoice] = useState<'url' | 'upload'>('url');
+  const [setupVideoUrl, setSetupVideoUrl] = useState<string>('');
+  const [setupVideoFile, setSetupVideoFile] = useState<File | null>(null);
+  const [setupVideoFileName, setSetupVideoFileName] = useState<string>('');
+  const [setupVideoButtonText, setSetupVideoButtonText] = useState<string>('🎬 Setup Video');
+  const [setupResourceButtonText, setSetupResourceButtonText] = useState<string>('📁 Get File');
+  const [setupVideoMessage, setSetupVideoMessage] = useState<string>('');
 
   // Quick Action feedback
   const [copiedLinkItemId, setCopiedLinkItemId] = useState<string | null>(null);
@@ -113,8 +129,18 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
     setOpenMode('browser');
     setRetentionType('permanent');
     setRetentionDays(7);
+    setFileEnabled(true);
     setSelectedFiles([]);
     setUploadStatus(null);
+    setHasSetupVideo(false);
+    setSetupVideoChoice('url');
+    setSetupVideoUrl('');
+    setSetupVideoFile(null);
+    setSetupVideoFileName('');
+    setSetupVideoButtonText('🎬 Setup Video');
+    setSetupResourceButtonText(initialType === 'file' ? '📁 Get File' : '🔗 Open Link');
+    setSetupVideoMessage('');
+    setFormStep(1);
     setModalMode('add');
   };
 
@@ -132,7 +158,19 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
     setOpenMode(item.openMode || 'browser');
     setRetentionType(item.retentionType || 'permanent');
     setRetentionDays(item.retentionDays || 7);
+    setFileEnabled(item.isTextOnly ? false : (item.fileEnabled !== false));
     
+    // Setup Video initialization
+    setHasSetupVideo(Boolean(item.hasSetupVideo));
+    setSetupVideoChoice(item.setupVideoType || 'url');
+    setSetupVideoUrl(item.setupVideoUrl || '');
+    setSetupVideoFile(null);
+    setSetupVideoFileName(item.setupVideoFileName || '');
+    setSetupVideoButtonText(item.setupVideoButtonText || '🎬 Setup Video');
+    setSetupResourceButtonText(item.setupResourceButtonText || (item.type === 'file' ? '📁 Get File' : '🔗 Open Link'));
+    setSetupVideoMessage(item.setupVideoMessage || '');
+    setFormStep(1);
+
     // Existing file preview
     if (item.type === 'file') {
       setSelectedFiles([
@@ -217,20 +255,83 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
     return clean;
   };
 
+  const handleNextToSetupVideo = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!name.trim()) {
+      const msg = 'Please enter a File or Link name';
+      setError(msg);
+      toast.error(msg);
+      return;
+    }
+    if (!rawKeyword.trim()) {
+      const msg = 'Please enter a trigger keyword';
+      setError(msg);
+      toast.error(msg);
+      return;
+    }
+    if (itemType === 'link' && !url.trim()) {
+      const msg = 'Please enter a valid target URL for this link';
+      setError(msg);
+      toast.error(msg);
+      return;
+    }
+    if (itemType === 'file' && selectedFiles.length === 0 && !selectedItem) {
+      const msg = 'Please select at least one file from Gallery / Device';
+      setError(msg);
+      toast.error(msg);
+      return;
+    }
+    setError(null);
+    setFormStep(2);
+  };
+
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !rawKeyword.trim()) {
-      setError('File/Link Name and Trigger keyword are required');
+      const msg = 'File/Link Name and Trigger keyword are required';
+      setError(msg);
+      toast.error(msg);
+      setFormStep(1);
       return;
     }
 
     if (itemType === 'link' && !url.trim()) {
-      setError('Valid Target URL is required for link');
+      const msg = 'Valid Target URL is required for link';
+      setError(msg);
+      toast.error(msg);
+      setFormStep(1);
       return;
     }
 
-    if (itemType === 'file' && selectedFiles.length === 0 && !selectedItem) {
-      setError('Please upload at least one file from Gallery / Device');
+    if (itemType === 'file' && fileEnabled && selectedFiles.length === 0 && !selectedItem) {
+      const msg = 'Please upload at least one file from Gallery / Device, or switch File toggle to OFF for text-only delivery';
+      setError(msg);
+      toast.error(msg);
+      setFormStep(1);
+      return;
+    }
+
+    if (itemType === 'file' && !fileEnabled && !caption.trim()) {
+      const msg = 'Please enter a response message for Only Text delivery';
+      setError(msg);
+      toast.error(msg);
+      setFormStep(1);
+      return;
+    }
+
+    if (hasSetupVideo && setupVideoChoice === 'url' && !setupVideoUrl.trim() && !setupVideoFile && !setupVideoFileName) {
+      const msg = 'Please enter a valid Setup Video URL or upload a video';
+      setError(msg);
+      toast.error(msg);
+      setFormStep(2);
+      return;
+    }
+
+    if (hasSetupVideo && setupVideoChoice === 'upload' && !setupVideoFile && !setupVideoFileName) {
+      const msg = 'Please select a video file to upload for Setup Video';
+      setError(msg);
+      toast.error(msg);
+      setFormStep(2);
       return;
     }
 
@@ -246,6 +347,22 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
         : cleanKeyword;
 
     try {
+      // Process Setup Video upload if configured
+      let finalSetupVideoUrl = setupVideoUrl.trim();
+      let finalSetupVideoFileName = setupVideoFileName;
+      if (hasSetupVideo) {
+        if (setupVideoChoice === 'upload' && setupVideoFile) {
+          setUploadStatus('Uploading setup video...');
+          const vFd = new FormData();
+          vFd.append('file', setupVideoFile);
+          vFd.append('fileName', setupVideoFile.name);
+          vFd.append('fileType', 'video');
+          const vRes = await api.uploadFile(vFd);
+          finalSetupVideoUrl = vRes.uploadedFileId || vRes.fileId;
+          finalSetupVideoFileName = setupVideoFile.name;
+        }
+      }
+
       if (selectedItem) {
         // Edit existing item
         let uploadedFileId = selectedItem.uploadedFileId;
@@ -256,7 +373,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
 
         // If a new file was uploaded to replace it
         const pendingFile = selectedFiles.find((f) => f.file);
-        if (pendingFile && pendingFile.file) {
+        if (pendingFile && pendingFile.file && fileEnabled) {
           const fd = new FormData();
           fd.append('file', pendingFile.file);
           fd.append('fileName', pendingFile.name);
@@ -275,22 +392,55 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
           triggerType,
           triggers: [primaryTrigger],
           caption: caption.trim() || undefined,
-          telegramFileId: telegramFileId || undefined,
-          uploadedFileId: uploadedFileId || undefined,
-          fileType,
-          fileName,
-          fileSize,
+          telegramFileId: fileEnabled ? (telegramFileId || undefined) : undefined,
+          uploadedFileId: fileEnabled ? (uploadedFileId || undefined) : undefined,
+          fileType: fileEnabled ? fileType : undefined,
+          fileName: fileEnabled ? fileName : undefined,
+          fileSize: fileEnabled ? fileSize : undefined,
+          isTextOnly: itemType === 'file' ? !fileEnabled : false,
+          fileEnabled: itemType === 'file' ? fileEnabled : false,
           url: itemType === 'link' ? url.trim() : undefined,
           openMode: itemType === 'link' ? openMode : undefined,
           buttonText: buttonText.trim() || undefined,
           replyMessage: caption.trim() || undefined,
           retentionType: itemType === 'file' ? retentionType : undefined,
-          retentionDays: itemType === 'file' && retentionType === 'temporary' ? retentionDays : undefined
+          retentionDays: itemType === 'file' && retentionType === 'temporary' ? retentionDays : undefined,
+          hasSetupVideo,
+          setupVideoUrl: hasSetupVideo ? finalSetupVideoUrl : undefined,
+          setupVideoType: hasSetupVideo ? setupVideoChoice : undefined,
+          setupVideoFileName: hasSetupVideo ? finalSetupVideoFileName : undefined,
+          setupVideoButtonText: hasSetupVideo ? (setupVideoButtonText.trim() || '🎬 Setup Video') : undefined,
+          setupResourceButtonText: hasSetupVideo ? (setupResourceButtonText.trim() || (itemType === 'file' ? (fileEnabled ? '📁 Get File' : '💬 View Message') : '🔗 Open Link')) : undefined,
+          setupVideoMessage: hasSetupVideo ? (setupVideoMessage.trim() || undefined) : undefined
         });
       } else {
-        // Create new item(s) - Supports Multi-File uploads!
-        if (itemType === 'file') {
-          // If multiple files selected, save all of them
+        // Create new item(s) - Supports Only-Text (File OFF) & Multi-File uploads (File ON)!
+        if (itemType === 'file' && !fileEnabled) {
+          // File OFF: Only Text delivery item (no file attachment required)
+          await api.createItem({
+            id: autoGeneratedId,
+            name: name.trim(),
+            type: 'file',
+            isTextOnly: true,
+            fileEnabled: false,
+            rawKeyword: cleanKeyword,
+            triggerType,
+            triggers: [primaryTrigger],
+            caption: caption.trim() || undefined,
+            buttonText: buttonText.trim() || undefined,
+            replyMessage: caption.trim() || undefined,
+            retentionType,
+            retentionDays: retentionType === 'temporary' ? retentionDays : undefined,
+            hasSetupVideo,
+            setupVideoUrl: hasSetupVideo ? finalSetupVideoUrl : undefined,
+            setupVideoType: hasSetupVideo ? setupVideoChoice : undefined,
+            setupVideoFileName: hasSetupVideo ? finalSetupVideoFileName : undefined,
+            setupVideoButtonText: hasSetupVideo ? (setupVideoButtonText.trim() || '🎬 Setup Video') : undefined,
+            setupResourceButtonText: hasSetupVideo ? (setupResourceButtonText.trim() || '💬 View Message') : undefined,
+            setupVideoMessage: hasSetupVideo ? (setupVideoMessage.trim() || undefined) : undefined
+          });
+        } else if (itemType === 'file') {
+          // File ON: If multiple files selected, save all of them
           for (let i = 0; i < selectedFiles.length; i++) {
             const entry = selectedFiles[i];
             let uploadedFileId: string | undefined = entry.uploadedFileId;
@@ -327,6 +477,8 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
               id: targetId,
               name: itemName,
               type: 'file',
+              isTextOnly: false,
+              fileEnabled: true,
               rawKeyword: itemKeyword,
               triggerType,
               triggers: [itemTrigger],
@@ -339,7 +491,14 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
               buttonText: buttonText.trim() || undefined,
               replyMessage: caption.trim() || undefined,
               retentionType,
-              retentionDays: retentionType === 'temporary' ? retentionDays : undefined
+              retentionDays: retentionType === 'temporary' ? retentionDays : undefined,
+              hasSetupVideo,
+              setupVideoUrl: hasSetupVideo ? finalSetupVideoUrl : undefined,
+              setupVideoType: hasSetupVideo ? setupVideoChoice : undefined,
+              setupVideoFileName: hasSetupVideo ? finalSetupVideoFileName : undefined,
+              setupVideoButtonText: hasSetupVideo ? (setupVideoButtonText.trim() || '🎬 Setup Video') : undefined,
+              setupResourceButtonText: hasSetupVideo ? (setupResourceButtonText.trim() || '📁 Get File') : undefined,
+              setupVideoMessage: hasSetupVideo ? (setupVideoMessage.trim() || undefined) : undefined
             });
           }
         } else {
@@ -356,15 +515,26 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
             buttonText: buttonText.trim() || (openMode === 'webapp' ? '📱 Launch App' : '🌐 Open Link'),
             replyMessage: caption.trim() || `🔗 Here is your requested link: ${url.trim()}`,
             retentionType,
-            retentionDays: retentionType === 'temporary' ? retentionDays : undefined
+            retentionDays: retentionType === 'temporary' ? retentionDays : undefined,
+            hasSetupVideo,
+            setupVideoUrl: hasSetupVideo ? finalSetupVideoUrl : undefined,
+            setupVideoType: hasSetupVideo ? setupVideoChoice : undefined,
+            setupVideoFileName: hasSetupVideo ? finalSetupVideoFileName : undefined,
+            setupVideoButtonText: hasSetupVideo ? (setupVideoButtonText.trim() || '🎬 Setup Video') : undefined,
+            setupResourceButtonText: hasSetupVideo ? (setupResourceButtonText.trim() || '🔗 Open Link') : undefined,
+            setupVideoMessage: hasSetupVideo ? (setupVideoMessage.trim() || undefined) : undefined
           });
         }
       }
 
+      const isEdit = Boolean(selectedItem);
       setModalMode('none');
+      toast.success(isEdit ? 'Item updated successfully!' : 'New File/Link created successfully!');
       onRefresh();
     } catch (err: any) {
-      setError(err.message || 'Failed to save item');
+      const msg = err.message || 'Failed to save item';
+      setError(msg);
+      toast.error(msg);
     } finally {
       setLoading(false);
       setUploadStatus(null);
@@ -376,9 +546,11 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
     try {
       await api.deleteItem(id);
       setDeleteConfirmId(null);
+      toast.success('Item deleted successfully!');
       onRefresh();
     } catch (err: any) {
-      alert(err.message || 'Failed to delete');
+      const msg = err.message || 'Failed to delete';
+      toast.error(msg);
     } finally {
       setLoading(false);
     }
@@ -497,12 +669,20 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                   <div className="flex items-start gap-3 min-w-0">
                     <div
                       className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
-                        item.type === 'file'
+                        item.isTextOnly
+                          ? 'bg-purple-500/10 text-purple-400'
+                          : item.type === 'file'
                           ? 'bg-red-500/10 text-red-400'
                           : 'bg-indigo-500/10 text-indigo-400'
                       }`}
                     >
-                      {item.type === 'file' ? <FileText className="w-5 h-5" /> : <Link2 className="w-5 h-5" />}
+                      {item.isTextOnly ? (
+                        <MessageSquare className="w-5 h-5" />
+                      ) : item.type === 'file' ? (
+                        <FileText className="w-5 h-5" />
+                      ) : (
+                        <Link2 className="w-5 h-5" />
+                      )}
                     </div>
                     <div className="min-w-0">
                       <div className="text-sm font-semibold text-white truncate">{item.name}</div>
@@ -529,6 +709,22 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                         <span className="capitalize">{item.triggerType} trigger</span>
                         <span>·</span>
                         <span>{item.deliveryCount || 0} deliveries</span>
+                        {item.isTextOnly && (
+                          <>
+                            <span>·</span>
+                            <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-purple-500/20 text-purple-300 border border-purple-500/40 font-semibold">
+                              💬 Only Text
+                            </span>
+                          </>
+                        )}
+                        {item.hasSetupVideo && (
+                          <>
+                            <span>·</span>
+                            <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-purple-500/20 text-purple-300 border border-purple-500/40 font-semibold">
+                              🎬 Setup Video
+                            </span>
+                          </>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -538,7 +734,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                 {item.type === 'file' && (
                   <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80 text-xs text-zinc-300 space-y-1.5">
                     <div className="flex items-center justify-between text-[11px] text-zinc-400">
-                      <span>File: {item.fileName || 'Telegram Media'}</span>
+                      <span>{item.isTextOnly ? 'Delivery: Only Text (No File Attachment)' : `File: ${item.fileName || 'Telegram Media'}`}</span>
                       <span className="font-mono text-[10px] bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800 text-zinc-400">
                         ID: {item.id}
                       </span>
@@ -680,504 +876,967 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
       )}
 
       {/* REDESIGNED STREAMLINED ADD / EDIT FORM MODAL */}
-      {modalMode !== 'none' && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/80 backdrop-blur-md">
-          <div className="glass-panel w-full sm:max-w-md max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-3xl p-6 border border-zinc-700 shadow-2xl space-y-4 animate-in slide-in-from-bottom sm:zoom-in-95 duration-200">
-            {/* Modal Header */}
-            <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+      {modalMode !== 'none' && createPortal(
+        <div 
+          onClick={() => setModalMode('none')}
+          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md overscroll-contain animate-in fade-in duration-200"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="glass-panel w-full sm:max-w-md max-h-[85vh] h-auto flex flex-col rounded-3xl border border-zinc-700/80 shadow-[0_0_50px_rgba(0,0,0,0.9),0_0_25px_rgba(6,182,212,0.18)] overflow-hidden animate-in zoom-in-95 duration-200 my-auto"
+          >
+            {/* Modal Header - Pinned at Top */}
+            <div className="shrink-0 p-4 sm:p-5 border-b border-zinc-800 bg-[#0e0e16]/95 flex items-center justify-between">
               <div>
                 <h3 className="font-bold text-white text-base">
                   {modalMode === 'edit' ? 'Edit Stored Item' : 'Add New File / Link'}
                 </h3>
                 <div className="flex items-center gap-2 mt-0.5 text-[11px] text-zinc-400">
-                  <span className="font-mono text-red-400 font-semibold">ID: {autoGeneratedId}</span>
+                  <span className="font-mono text-cyan-400 font-semibold">ID: {autoGeneratedId}</span>
                   <span className="text-zinc-600">•</span>
                   <span>Auto-Generated</span>
                 </div>
               </div>
               <button
                 onClick={() => setModalMode('none')}
-                className="p-1 rounded-lg text-zinc-400 hover:text-white cursor-pointer"
+                className="p-1.5 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white cursor-pointer transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            {error && (
-              <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-300 text-xs flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
-                <span>{error}</span>
-              </div>
-            )}
+            {/* Step Navigation Bar */}
+            <div className="shrink-0 px-4 sm:px-5 py-2.5 bg-zinc-900/90 border-b border-zinc-800/80 flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setFormStep(1)}
+                className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                  formStep === 1
+                    ? 'bg-blue-600/20 text-blue-300 border border-blue-500/40 shadow-xs'
+                    : 'bg-zinc-800/60 text-zinc-400 hover:text-white border border-transparent'
+                }`}
+              >
+                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border ${
+                  formStep === 1
+                    ? 'bg-blue-500/30 text-blue-300 border-blue-400/50'
+                    : 'bg-zinc-700/60 text-zinc-400 border-zinc-600/40'
+                }`}>1</span>
+                <span>Primary Details</span>
+              </button>
 
-            {/* Type Switcher for Add Mode (File vs Link) */}
-            {modalMode === 'add' && (
-              <div className="grid grid-cols-2 gap-2 p-1 bg-zinc-900 border border-zinc-800 rounded-xl">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setItemType('file');
-                    setAutoGeneratedId(generateRandomId('file'));
-                    setButtonText('📥 Download File');
-                    setCaption('Here is your requested file!');
-                  }}
-                  className={`py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                    itemType === 'file'
-                      ? 'bg-red-500/20 text-sky-300 border border-red-500/40 shadow-xs'
-                      : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  <FileText className="w-3.5 h-3.5" />
-                  <span>File / Document</span>
-                </button>
+              <ArrowRight className="w-3.5 h-3.5 text-zinc-600 shrink-0" />
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    setItemType('link');
-                    setAutoGeneratedId(generateRandomId('link'));
-                    setButtonText('🌐 Open Link');
-                    setCaption('🔗 Here is your requested link:');
-                  }}
-                  className={`py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                    itemType === 'link'
-                      ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-xs'
-                      : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  <Link2 className="w-3.5 h-3.5" />
-                  <span>Web Link</span>
-                </button>
-              </div>
-            )}
+              <button
+                type="button"
+                onClick={() => handleNextToSetupVideo()}
+                className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                  formStep === 2
+                    ? 'bg-purple-600/20 text-purple-300 border border-purple-500/40 shadow-xs'
+                    : 'bg-zinc-800/60 text-zinc-400 hover:text-white border border-transparent'
+                }`}
+              >
+                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border ${
+                  formStep === 2
+                    ? 'bg-purple-500/30 text-purple-300 border-purple-400/50'
+                    : 'bg-zinc-700/60 text-zinc-400 border-zinc-600/40'
+                }`}>2</span>
+                <span className="flex items-center gap-1.5">
+                  <span>Setup Video</span>
+                  {hasSetupVideo && (
+                    <span className="px-1.5 py-0.2 text-[9px] rounded-full bg-purple-500/30 text-purple-300 border border-purple-500/50 font-bold">ON</span>
+                  )}
+                </span>
+              </button>
+            </div>
 
-            <form onSubmit={handleSave} className="space-y-4">
-              {/* 1. File / Link Name field */}
-              <div>
-                <label className="block text-xs font-semibold text-zinc-300 mb-1">
-                  {itemType === 'file' ? 'File Name *' : 'Link Title / Name *'}
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder={itemType === 'file' ? 'e.g. Free Fire Mod APK' : 'e.g. Official Community Link'}
-                  className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-sm text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
-                />
-              </div>
-
-              {/* 2. File Trigger field & Trigger Type Selection */}
-              <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs font-semibold text-zinc-300">
-                    File Trigger *
-                  </label>
-                  <span className="text-xs font-mono text-red-400 font-bold">
-                    Active: {previewTrigger()}
-                  </span>
-                </div>
-
-                {/* Trigger Type Toggle */}
-                <div className="grid grid-cols-3 gap-1.5 mb-2">
-                  <button
-                    type="button"
-                    onClick={() => setTriggerType('hashtag')}
-                    className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
-                      triggerType === 'hashtag'
-                        ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
-                        : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    # Hashtag
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setTriggerType('slash')}
-                    className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
-                      triggerType === 'slash'
-                        ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
-                        : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    / Slash
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setTriggerType('normal')}
-                    className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
-                      triggerType === 'normal'
-                        ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
-                        : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    🔤 Normal
-                  </button>
-                </div>
-
-                <input
-                  type="text"
-                  required
-                  value={rawKeyword}
-                  onChange={(e) => setRawKeyword(e.target.value)}
-                  placeholder="e.g. ff (without prefix)"
-                  className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-sm text-white font-mono focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
-                />
-              </div>
-
-              {/* 3. Upload from Gallery with Multi-File support */}
-              {itemType === 'file' && (
-                <div className="p-3.5 rounded-2xl bg-gradient-to-b from-zinc-900 via-zinc-900 to-zinc-950 border border-zinc-700/80 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-bold text-white flex items-center gap-1.5">
-                      <Upload className="w-4 h-4 text-red-400" />
-                      <span>Upload from Gallery / Files</span>
-                    </label>
-                    <span className="text-[10px] text-sky-300 bg-sky-950/60 border border-red-500/30 px-2 py-0.5 rounded-full font-semibold">
-                      Multi-File Supported
-                    </span>
+            {/* Modal Scrollable Body - max-h 85vh & padding-bottom 120px ensures smooth scroll without cutoff */}
+            <form onSubmit={handleSave} className="flex-1 min-h-0 flex flex-col">
+              <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-5 space-y-4 pb-[120px]">
+                {error && (
+                  <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-300 text-xs flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
+                    <span>{error}</span>
                   </div>
+                )}
 
-                  <p className="text-[11px] text-zinc-400">
-                    Select one or multiple files (Photos, Videos, APK, ZIP, Documents).
-                  </p>
-
-                  <label className="w-full py-3 px-4 rounded-xl border border-dashed border-red-500/40 hover:border-sky-400 bg-red-500/10 hover:bg-red-500/15 flex flex-col items-center justify-center gap-1 cursor-pointer transition-all">
-                    <Paperclip className="w-5 h-5 text-red-400" />
-                    <span className="text-xs font-semibold text-white">
-                      Browse &amp; Select Multiple Files
-                    </span>
-                    <span className="text-[10px] text-zinc-400">
-                      Tap to select from Gallery or Storage
-                    </span>
-                    <input
-                      type="file"
-                      multiple
-                      className="hidden"
-                      onChange={handleMultiFileSelect}
-                    />
-                  </label>
-
-                  {/* Selected Files Preview List with (X) Remove icon on each */}
-                  {selectedFiles.length > 0 && (
-                    <div className="space-y-1.5 pt-1">
-                      <div className="text-[11px] font-semibold text-zinc-300 flex items-center justify-between">
-                        <span>Selected Files ({selectedFiles.length}):</span>
+                {/* STEP 1: PRIMARY FILE / LINK DETAILS */}
+                {formStep === 1 && (
+                  <div className="space-y-4 animate-in fade-in duration-150">
+                    {/* Type Switcher for Add Mode (File vs Link) */}
+                    {modalMode === 'add' && (
+                      <div className="grid grid-cols-2 gap-2 p-1 bg-zinc-900 border border-zinc-800 rounded-xl">
                         <button
                           type="button"
-                          onClick={() => setSelectedFiles([])}
-                          className="text-[10px] text-rose-400 hover:underline cursor-pointer"
+                          onClick={() => {
+                            setItemType('file');
+                            setAutoGeneratedId(generateRandomId('file'));
+                            setButtonText('📥 Download File');
+                            setCaption('Here is your requested file!');
+                          }}
+                          className={`py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                            itemType === 'file'
+                              ? 'bg-red-500/20 text-sky-300 border border-red-500/40 shadow-xs'
+                              : 'text-zinc-400 hover:text-white'
+                          }`}
                         >
-                          Clear All
+                          <FileText className="w-3.5 h-3.5" />
+                          <span>File / Document</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setItemType('link');
+                            setAutoGeneratedId(generateRandomId('link'));
+                            setButtonText('🌐 Open Link');
+                            setCaption('🔗 Here is your requested link:');
+                          }}
+                          className={`py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                            itemType === 'link'
+                              ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-xs'
+                              : 'text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          <Link2 className="w-3.5 h-3.5" />
+                          <span>Web Link</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {/* 1. File / Link Name field */}
+                    <div>
+                      <label className="block text-xs font-semibold text-zinc-300 mb-1">
+                        {itemType === 'file' ? 'File Name *' : 'Link Title / Name *'}
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        placeholder="Enter File Name"
+                        className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-sm text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
+                      />
+                    </div>
+
+                    {/* 2. File Trigger field & Trigger Type Selection */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="text-xs font-semibold text-zinc-300">
+                          File Trigger *
+                        </label>
+                        <span className="text-xs font-mono text-red-400 font-bold">
+                          Active: {previewTrigger()}
+                        </span>
+                      </div>
+
+                      {/* Trigger Type Toggle */}
+                      <div className="grid grid-cols-3 gap-1.5 mb-2">
+                        <button
+                          type="button"
+                          onClick={() => setTriggerType('hashtag')}
+                          className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
+                            triggerType === 'hashtag'
+                              ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
+                              : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          # Hashtag
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTriggerType('slash')}
+                          className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
+                            triggerType === 'slash'
+                              ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
+                              : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          / Slash
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTriggerType('normal')}
+                          className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
+                            triggerType === 'normal'
+                              ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
+                              : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          🔤 Normal
                         </button>
                       </div>
 
-                      <div className="max-h-36 overflow-y-auto space-y-1 pr-1">
-                        {selectedFiles.map((f) => (
-                          <div
-                            key={f.id}
-                            className="flex items-center justify-between p-2 rounded-xl bg-zinc-950/90 border border-zinc-800 text-xs group hover:border-zinc-700 transition-colors"
+                      <input
+                        type="text"
+                        required
+                        value={rawKeyword}
+                        onChange={(e) => setRawKeyword(e.target.value)}
+                        placeholder="Enter Trigger"
+                        className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-sm text-white font-mono focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
+                      />
+                    </div>
+
+                    {/* File Attachment Toggle (File ON / OFF) */}
+                    {itemType === 'file' && (
+                      <div className="p-3.5 rounded-2xl bg-zinc-900/95 border border-zinc-700/80 space-y-2.5">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2.5">
+                            <div className={`w-8 h-8 rounded-xl flex items-center justify-center transition-colors ${
+                              fileEnabled ? 'bg-red-500/15 text-red-400' : 'bg-purple-500/15 text-purple-400'
+                            }`}>
+                              {fileEnabled ? <FileText className="w-4 h-4" /> : <MessageSquare className="w-4 h-4" />}
+                            </div>
+                            <div>
+                              <div className="text-xs font-bold text-white flex items-center gap-2">
+                                <span>File Attachment</span>
+                                <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${
+                                  fileEnabled
+                                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 shadow-xs'
+                                    : 'bg-purple-500/20 text-purple-300 border-purple-500/40 shadow-xs'
+                                }`}>
+                                  {fileEnabled ? 'File ON' : 'File OFF (Only Text)'}
+                                </span>
+                              </div>
+                              <p className="text-[10px] text-zinc-400 mt-0.5">
+                                {fileEnabled
+                                  ? 'Upload and deliver a file/document along with message'
+                                  : 'Deliver only the text response without any file attachment'}
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Toggle Switch */}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nextVal = !fileEnabled;
+                              setFileEnabled(nextVal);
+                              if (!nextVal) {
+                                if (!caption || caption === 'Here is your requested file!') {
+                                  setCaption('Here is your response message.');
+                                }
+                              } else {
+                                if (!caption || caption === 'Here is your response message.') {
+                                  setCaption('Here is your requested file!');
+                                }
+                              }
+                            }}
+                            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                              fileEnabled ? 'bg-red-500' : 'bg-zinc-700'
+                            }`}
+                            role="switch"
+                            aria-checked={fileEnabled}
+                            title={fileEnabled ? 'Switch to Only Text (File OFF)' : 'Switch to File Attachment (File ON)'}
                           >
-                            <div className="flex items-center gap-2 min-w-0 pr-2">
-                              {f.previewUrl ? (
-                                <img
-                                  src={f.previewUrl}
-                                  alt={f.name}
-                                  className="w-7 h-7 rounded object-cover shrink-0"
-                                />
-                              ) : f.type === 'video' ? (
-                                <Video className="w-4 h-4 text-purple-400 shrink-0" />
-                              ) : f.type === 'audio' ? (
-                                <Music className="w-4 h-4 text-emerald-400 shrink-0" />
-                              ) : (
-                                <FileText className="w-4 h-4 text-red-400 shrink-0" />
-                              )}
-                              <div className="min-w-0">
-                                <div className="text-xs font-medium text-white truncate max-w-[200px]">
-                                  {f.name}
+                            <span
+                              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                                fileEnabled ? 'translate-x-5' : 'translate-x-0'
+                              }`}
+                            />
+                          </button>
+                        </div>
+
+                        {/* Side-by-side Segmented Selector */}
+                        <div className="grid grid-cols-2 gap-1.5 p-1 bg-zinc-950/70 border border-zinc-800 rounded-xl">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setFileEnabled(true);
+                              if (!caption || caption === 'Here is your response message.') {
+                                setCaption('Here is your requested file!');
+                              }
+                            }}
+                            className={`py-1.5 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                              fileEnabled
+                                ? 'bg-red-500/20 text-sky-300 border border-red-500/50 shadow-xs'
+                                : 'text-zinc-400 hover:text-white border border-transparent'
+                            }`}
+                          >
+                            <Paperclip className="w-3.5 h-3.5" />
+                            <span>File ON</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setFileEnabled(false);
+                              if (!caption || caption === 'Here is your requested file!') {
+                                setCaption('Here is your response message.');
+                              }
+                            }}
+                            className={`py-1.5 px-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                              !fileEnabled
+                                ? 'bg-purple-500/20 text-purple-300 border border-purple-500/50 shadow-xs'
+                                : 'text-zinc-400 hover:text-white border border-transparent'
+                            }`}
+                          >
+                            <MessageSquare className="w-3.5 h-3.5" />
+                            <span>File OFF (Only Text)</span>
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 3. Upload from Gallery (Rendered only when File ON) */}
+                    {itemType === 'file' && fileEnabled && (
+                      <div className="p-3.5 rounded-2xl bg-gradient-to-b from-zinc-900 via-zinc-900 to-zinc-950 border border-zinc-700/80 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <label className="text-xs font-bold text-white flex items-center gap-1.5">
+                            <Upload className="w-4 h-4 text-red-400" />
+                            <span>Upload from Gallery / Files</span>
+                          </label>
+                          <span className="text-[10px] text-sky-300 bg-sky-950/60 border border-red-500/30 px-2 py-0.5 rounded-full font-semibold">
+                            Multi-File Supported
+                          </span>
+                        </div>
+
+                        <label className="w-full py-3 px-4 rounded-xl border border-dashed border-red-500/40 hover:border-sky-400 bg-red-500/10 hover:bg-red-500/15 flex flex-col items-center justify-center gap-1 cursor-pointer transition-all">
+                          <Paperclip className="w-5 h-5 text-red-400" />
+                          <span className="text-xs font-semibold text-white">
+                            Browse &amp; Select Multiple Files
+                          </span>
+                          <input
+                            type="file"
+                            multiple
+                            className="hidden"
+                            onChange={handleMultiFileSelect}
+                          />
+                        </label>
+
+                        {/* Selected Files Preview List with (X) Remove icon on each */}
+                        {selectedFiles.length > 0 && (
+                          <div className="space-y-1.5 pt-1">
+                            <div className="text-[11px] font-semibold text-zinc-300 flex items-center justify-between">
+                              <span>Selected Files ({selectedFiles.length}):</span>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedFiles([])}
+                                className="text-[10px] text-rose-400 hover:underline cursor-pointer"
+                              >
+                                Clear All
+                              </button>
+                            </div>
+
+                            <div className="max-h-36 overflow-y-auto space-y-1 pr-1">
+                              {selectedFiles.map((f) => (
+                                <div
+                                  key={f.id}
+                                  className="flex items-center justify-between p-2 rounded-xl bg-zinc-950/90 border border-zinc-800 text-xs group hover:border-zinc-700 transition-colors"
+                                >
+                                  <div className="flex items-center gap-2 min-w-0 pr-2">
+                                    {f.previewUrl ? (
+                                      <img
+                                        src={f.previewUrl}
+                                        alt={f.name}
+                                        className="w-7 h-7 rounded object-cover shrink-0"
+                                      />
+                                    ) : f.type === 'video' ? (
+                                      <Video className="w-4 h-4 text-purple-400 shrink-0" />
+                                    ) : f.type === 'audio' ? (
+                                      <Music className="w-4 h-4 text-emerald-400 shrink-0" />
+                                    ) : (
+                                      <FileText className="w-4 h-4 text-red-400 shrink-0" />
+                                    )}
+                                    <div className="min-w-0">
+                                      <div className="text-xs font-medium text-white truncate max-w-[200px]">
+                                        {f.name}
+                                      </div>
+                                      <div className="text-[10px] text-zinc-500">
+                                        {(f.size / (1024 * 1024)).toFixed(2)} MB · {f.type}
+                                      </div>
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => handleRemoveFile(f.id)}
+                                    title={`Remove ${f.name}`}
+                                    className="w-6 h-6 rounded-lg bg-zinc-800 hover:bg-rose-500/20 text-zinc-400 hover:text-rose-400 flex items-center justify-center transition-colors cursor-pointer shrink-0"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                  </button>
                                 </div>
-                                <div className="text-[10px] text-zinc-500">
-                                  {(f.size / (1024 * 1024)).toFixed(2)} MB · {f.type}
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {uploadStatus && (
+                          <div className="text-[11px] text-red-400 font-mono flex items-center gap-1.5 pt-1">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>{uploadStatus}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Informational Callout when File is OFF (Only Text) */}
+                    {itemType === 'file' && !fileEnabled && (
+                      <div className="p-3.5 rounded-2xl bg-purple-500/10 border border-purple-500/25 space-y-1.5">
+                        <div className="flex items-center gap-2 text-purple-300 font-bold text-xs">
+                          <MessageSquare className="w-4 h-4 text-purple-400" />
+                          <span>Only Text Mode Active</span>
+                        </div>
+                        <p className="text-[11px] text-zinc-300 leading-relaxed">
+                          No file attachment required. Users triggering this keyword will receive pure text delivery with your response message below.
+                        </p>
+                      </div>
+                    )}
+
+                    {/* Link Target URL field */}
+                    {itemType === 'link' && (
+                      <div className="space-y-3">
+                        <div>
+                          <label className="block text-xs font-semibold text-zinc-300 mb-1">Target URL *</label>
+                          <input
+                            type="url"
+                            required
+                            value={url}
+                            onChange={(e) => setUrl(e.target.value)}
+                            placeholder="https://example.com"
+                            className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-sm text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-semibold text-zinc-300 mb-1.5">Open Mode *</label>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setOpenMode('browser')}
+                              className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                                openMode === 'browser'
+                                    ? 'bg-indigo-500/20 border-indigo-500 text-indigo-300'
+                                    : 'bg-zinc-900 border-zinc-700 text-zinc-400'
+                              }`}
+                            >
+                              <Globe className="w-4 h-4 mb-1 text-indigo-400" />
+                              <div className="text-xs font-semibold text-white">Web Browser</div>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => setOpenMode('webapp')}
+                              className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                                openMode === 'webapp'
+                                  ? 'bg-red-500/20 border-red-500 text-sky-300'
+                                  : 'bg-zinc-900 border-zinc-700 text-zinc-400'
+                              }`}
+                            >
+                              <Smartphone className="w-4 h-4 mb-1 text-red-400" />
+                              <div className="text-xs font-semibold text-white">Telegram Mini App</div>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 4. Private Delivery Message & Inline Button Text */}
+                    <div className="grid grid-cols-1 gap-3 pt-1">
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-xs font-semibold text-zinc-300">
+                            {itemType === 'file' && !fileEnabled 
+                              ? 'Response Message * (Text to Deliver)' 
+                              : 'Private Delivery Message'}
+                          </label>
+                          {itemType === 'file' && !fileEnabled && (
+                            <span className="text-[10px] text-purple-400 font-semibold">Required for Only Text</span>
+                          )}
+                        </div>
+                        <textarea
+                          rows={3}
+                          value={caption}
+                          onChange={(e) => setCaption(e.target.value)}
+                          placeholder={itemType === 'file' && !fileEnabled ? 'Enter text response to send when triggered' : 'e.g. Here is your requested file!'}
+                          className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-zinc-300 mb-1">
+                          Inline Button Text (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={buttonText}
+                          onChange={(e) => setButtonText(e.target.value)}
+                          placeholder={itemType === 'file' && !fileEnabled ? 'e.g. 💬 Read More (Optional)' : 'e.g. 📥 Download File'}
+                          className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Auto-generated File ID / Link ID */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-xs font-semibold text-zinc-300">
+                          {itemType === 'file' ? 'Auto-generated File ID' : 'Auto-generated Link ID'}
+                        </label>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          readOnly
+                          value={autoGeneratedId}
+                          className="w-full bg-zinc-950 border border-zinc-800 rounded-xl py-2 px-3 text-xs text-red-400 font-mono font-semibold focus:outline-none select-all cursor-default"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(autoGeneratedId);
+                            setCopiedTag(autoGeneratedId);
+                            setTimeout(() => setCopiedTag((p) => (p === autoGeneratedId ? null : p)), 1800);
+                          }}
+                          title="Copy ID"
+                          className="p-2 rounded-xl bg-zinc-900 border border-zinc-700/80 hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors cursor-pointer shrink-0"
+                        >
+                          {copiedTag === autoGeneratedId ? (
+                            <Check className="w-4 h-4 text-emerald-400" />
+                          ) : (
+                            <Copy className="w-4 h-4 text-zinc-400" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 5. Permanent vs. Temporary Storage Toggle with expiration days */}
+                    <div className="p-3.5 rounded-2xl bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-700/80 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-bold text-white flex items-center gap-1.5">
+                          <Clock className="w-4 h-4 text-amber-400" />
+                          <span>Storage Duration</span>
+                        </label>
+                        <span className={`text-[10px] px-2 py-0.5 rounded-md font-semibold border ${
+                          retentionType === 'temporary'
+                            ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                            : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        }`}>
+                          {retentionType === 'temporary' ? '⏳ Temporary' : '♾️ Permanent'}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setRetentionType('permanent')}
+                          className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                            retentionType === 'permanent'
+                              ? 'bg-emerald-500/15 border-emerald-500 text-emerald-300 ring-1 ring-emerald-500/40'
+                              : 'bg-zinc-900/90 border-zinc-800 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          <div className="flex items-center gap-1.5 font-semibold text-xs text-white">
+                            <span>♾️</span>
+                            <span>Permanent</span>
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setRetentionType('temporary')}
+                          className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                            retentionType === 'temporary'
+                              ? 'bg-amber-500/15 border-amber-500 text-amber-300 ring-1 ring-amber-500/40'
+                              : 'bg-zinc-900/90 border-zinc-800 text-zinc-400 hover:text-white'
+                          }`}
+                        >
+                          <div className="flex items-center gap-1.5 font-semibold text-xs text-white">
+                            <span>⏳</span>
+                            <span>Temporary</span>
+                          </div>
+                        </button>
+                      </div>
+
+                      {/* Expiration Days option */}
+                      {retentionType === 'temporary' && (
+                        <div className="pt-2 border-t border-zinc-800/80 space-y-2.5 animate-in fade-in duration-150">
+                          <div className="flex items-center justify-between">
+                            <label className="text-xs font-semibold text-amber-300">
+                              Expiration Duration (Days)
+                            </label>
+                            <span className="text-[11px] text-zinc-400">
+                              {retentionDays} Days
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              min="1"
+                              max="3650"
+                              value={retentionDays}
+                              onChange={(e) => {
+                                const val = Math.max(1, parseInt(e.target.value, 10) || 1);
+                                setRetentionDays(val);
+                              }}
+                              className="w-20 bg-zinc-950 border border-amber-500/40 rounded-xl py-1.5 px-3 text-sm text-white font-mono font-bold focus:outline-none focus:border-amber-400"
+                            />
+                            <span className="text-xs text-zinc-400">Days</span>
+
+                            {/* Quick day presets */}
+                            <div className="flex items-center gap-1 flex-wrap">
+                              {[1, 3, 7, 15, 30].map((d) => (
+                                <button
+                                  key={d}
+                                  type="button"
+                                  onClick={() => setRetentionDays(d)}
+                                  className={`px-2 py-1 rounded-lg text-[10px] font-semibold border transition-all cursor-pointer ${
+                                    retentionDays === d
+                                      ? 'bg-amber-500 text-zinc-950 border-amber-400 font-bold'
+                                      : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-zinc-700'
+                                  }`}
+                                >
+                                  {d}d
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+
+                          <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200 flex items-center gap-2">
+                            <Calendar className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                            <span>
+                              Expires: <strong className="text-white">{new Date(Date.now() + (retentionDays || 1) * 86400000).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })}</strong>
+                            </span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Step 1 Actions: Cancel or Next to Setup Video */}
+                    <div className="flex gap-2 pt-3">
+                      <button
+                        type="button"
+                        onClick={() => setModalMode('none')}
+                        className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs font-semibold cursor-pointer border border-zinc-700 transition-colors"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleNextToSetupVideo}
+                        className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-semibold shadow-md shadow-blue-600/30 cursor-pointer transition-all flex items-center justify-center gap-1.5"
+                      >
+                        <span>Next: Setup Video</span>
+                        <ArrowRight className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* STEP 2: SETUP VIDEO CONFIGURATION & FINAL CONFIRMATION */}
+                {formStep === 2 && (
+                  <div className="space-y-4 animate-in fade-in duration-150">
+                    {/* Step 2 Header Banner */}
+                    <div className="p-3 rounded-2xl bg-purple-950/25 border border-purple-500/30 flex items-start gap-2.5">
+                      <div className="w-8 h-8 rounded-xl bg-purple-500/20 border border-purple-500/40 flex items-center justify-center text-purple-300 shrink-0 mt-0.5">
+                        <Video className="w-4 h-4" />
+                      </div>
+                      <div className="text-xs">
+                        <div className="font-bold text-white">Setup Video Configuration (Step 2 of 2)</div>
+                        <div className="text-zinc-400 text-[11px] leading-relaxed mt-0.5">
+                          Attach an optional setup video/tutorial. When enabled, users are first presented with the video before retrieving the file or link.
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* SETUP VIDEO MAIN CARD */}
+                    <div className="p-4 rounded-2xl bg-gradient-to-b from-purple-950/20 via-zinc-900 to-zinc-950 border border-purple-500/35 space-y-3.5 shadow-sm">
+                      {/* Interactive Toggle */}
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2.5">
+                          <div className={`w-8 h-8 rounded-xl flex items-center justify-center transition-colors ${
+                            hasSetupVideo ? 'bg-purple-500/25 text-purple-300 border border-purple-500/50' : 'bg-zinc-800 text-zinc-500 border border-zinc-700'
+                          }`}>
+                            <Video className="w-4 h-4" />
+                          </div>
+                          <div>
+                            <div className="text-xs font-bold text-white flex items-center gap-2">
+                              <span>Setup Video Feature</span>
+                              <span className={`text-[10px] px-2 py-0.5 rounded font-bold border transition-colors ${
+                                hasSetupVideo 
+                                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/40 shadow-xs' 
+                                  : 'bg-zinc-800/80 text-zinc-400 border-zinc-700'
+                              }`}>
+                                {hasSetupVideo ? 'ENABLED' : 'DISABLED'}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-zinc-400">
+                              {hasSetupVideo ? 'Video tutorial will be delivered first' : 'Direct delivery without setup video'}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Toggle Switch */}
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={hasSetupVideo}
+                            onChange={(e) => setHasSetupVideo(e.target.checked)}
+                            className="sr-only peer"
+                          />
+                          <div className="w-11 h-6 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600"></div>
+                        </label>
+                      </div>
+
+                      {hasSetupVideo && (
+                        <div className="pt-3 border-t border-purple-500/20 space-y-3.5 animate-in fade-in duration-200">
+                          {/* Video Source Selection */}
+                          <div>
+                            <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
+                              Setup Video Source *
+                            </label>
+                            <div className="grid grid-cols-2 gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setSetupVideoChoice('url')}
+                                className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                                  setupVideoChoice === 'url'
+                                    ? 'bg-purple-500/20 border-purple-500 text-purple-200 shadow-xs ring-1 ring-purple-500/40'
+                                    : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
+                                }`}
+                              >
+                                <div className="flex items-center gap-1.5 font-semibold text-xs text-white">
+                                  <Link2 className="w-3.5 h-3.5 text-purple-400" />
+                                  <span>Video URL Link</span>
+                                </div>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => setSetupVideoChoice('upload')}
+                                className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                                  setupVideoChoice === 'upload'
+                                    ? 'bg-purple-500/20 border-purple-500 text-purple-200 shadow-xs ring-1 ring-purple-500/40'
+                                    : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
+                                }`}
+                              >
+                                <div className="flex items-center gap-1.5 font-semibold text-xs text-white">
+                                  <Upload className="w-3.5 h-3.5 text-purple-400" />
+                                  <span>Upload Video</span>
+                                </div>
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Choice 1: Video URL Link Box */}
+                          {setupVideoChoice === 'url' && (
+                            <div className="space-y-1.5">
+                              <label className="block text-xs font-semibold text-zinc-300">
+                                Setup Video URL *
+                              </label>
+                              <input
+                                type="url"
+                                value={setupVideoUrl}
+                                onChange={(e) => setSetupVideoUrl(e.target.value)}
+                                placeholder="https://youtube.com/watch?v=... or direct mp4 link"
+                                className="w-full bg-zinc-900 border border-purple-500/40 rounded-xl py-2 px-3 text-xs text-white font-mono focus:outline-none focus:border-purple-400"
+                              />
+                            </div>
+                          )}
+
+                          {/* Choice 2: Upload from Gallery */}
+                          {setupVideoChoice === 'upload' && (
+                            <div className="space-y-2">
+                              <label className="block text-xs font-semibold text-zinc-300">
+                                Upload Video File *
+                              </label>
+                              <label className="w-full py-3 px-4 rounded-xl border border-dashed border-purple-500/40 hover:border-purple-400 bg-purple-500/10 hover:bg-purple-500/15 flex flex-col items-center justify-center gap-1 cursor-pointer transition-all">
+                                <Video className="w-5 h-5 text-purple-400" />
+                                <span className="text-xs font-semibold text-white">
+                                  {setupVideoFile ? setupVideoFile.name : setupVideoFileName ? `Current: ${setupVideoFileName}` : 'Browse & Upload Setup Video'}
+                                </span>
+                                <input
+                                  type="file"
+                                  accept="video/*"
+                                  className="hidden"
+                                  onChange={(e) => {
+                                    const f = e.target.files?.[0];
+                                    if (f) {
+                                      setSetupVideoFile(f);
+                                      setSetupVideoFileName(f.name);
+                                    }
+                                  }}
+                                />
+                              </label>
+
+                              {(setupVideoFile || setupVideoFileName) && (
+                                <div className="flex items-center justify-between p-2 rounded-xl bg-zinc-950 border border-purple-500/30 text-xs">
+                                  <div className="flex items-center gap-2 min-w-0 pr-2">
+                                    <Video className="w-4 h-4 text-purple-400 shrink-0" />
+                                    <div className="truncate text-white font-medium">
+                                      {setupVideoFile?.name || setupVideoFileName}
+                                    </div>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSetupVideoFile(null);
+                                      setSetupVideoFileName('');
+                                      setSetupVideoUrl('');
+                                    }}
+                                    className="text-rose-400 hover:text-rose-300 text-[11px] font-semibold cursor-pointer shrink-0"
+                                  >
+                                    Remove
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Custom Delivery Message Input */}
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="block text-xs font-semibold text-zinc-300">
+                                Custom Delivery Message
+                              </label>
+                              <span className="text-[10px] text-zinc-400">Optional Fallback</span>
+                            </div>
+                            <textarea
+                              rows={2}
+                              value={setupVideoMessage}
+                              onChange={(e) => setSetupVideoMessage(e.target.value)}
+                              placeholder="e.g. 🎬 Please watch the setup instructions before accessing your file:"
+                              className="w-full bg-zinc-900 border border-purple-500/40 rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-purple-400 placeholder:text-zinc-600"
+                            />
+                            <div className="text-[10px] text-zinc-400 mt-1">
+                              * If left blank, automatically falls back to: <em className="text-zinc-300 font-sans">"🎬 Click below to watch the video instructions or get your item!"</em>
+                            </div>
+                          </div>
+
+                          {/* Custom Button Labels for Bot Inline Delivery (2 Separate Inputs) */}
+                          <div className="pt-2 border-t border-purple-500/20 space-y-2">
+                            <div className="text-xs font-semibold text-white flex items-center justify-between">
+                              <span>Custom Delivery Button Texts</span>
+                              <span className="text-[10px] text-purple-300 font-mono">Telegram Inline</span>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                              <div>
+                                <label className="block text-[11px] font-medium text-zinc-300 mb-1">
+                                  Setup Video Button Text
+                                </label>
+                                <input
+                                  type="text"
+                                  value={setupVideoButtonText}
+                                  onChange={(e) => setSetupVideoButtonText(e.target.value)}
+                                  placeholder="🎬 Setup Video"
+                                  className="w-full bg-zinc-900 border border-purple-500/40 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-purple-400 placeholder:text-zinc-600"
+                                />
+                              </div>
+
+                              <div>
+                                <label className="block text-[11px] font-medium text-zinc-300 mb-1">
+                                  {itemType === 'file' ? 'File Button Text' : 'Link Button Text'}
+                                </label>
+                                <input
+                                  type="text"
+                                  value={setupResourceButtonText}
+                                  onChange={(e) => setSetupResourceButtonText(e.target.value)}
+                                  placeholder={itemType === 'file' ? '📁 Get File' : '🔗 Open Link'}
+                                  className="w-full bg-zinc-900 border border-purple-500/40 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-purple-400 placeholder:text-zinc-600"
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Live Telegram Inline Button Mockup Preview */}
+                          <div className="p-3 rounded-xl bg-zinc-950/80 border border-purple-500/25 space-y-2">
+                            <div className="text-[10px] font-semibold text-purple-300 flex items-center gap-1.5 uppercase tracking-wider">
+                              <Sparkles className="w-3 h-3" />
+                              <span>Telegram Bot Live Button Preview</span>
+                            </div>
+                            <div className="p-2.5 rounded-lg bg-zinc-900/90 border border-zinc-800 text-[11px] text-zinc-300 space-y-2">
+                              <div className="text-zinc-200 italic font-mono text-[11px] whitespace-pre-wrap">
+                                {setupVideoMessage.trim() || '🎬 Click below to watch the video instructions or get your item!'}
+                              </div>
+                              <div className="space-y-1.5 pt-1">
+                                <div className="w-full py-1.5 px-3 rounded-lg bg-purple-600/30 border border-purple-500/50 text-purple-200 text-xs font-semibold flex items-center justify-center gap-2 shadow-xs">
+                                  <Video className="w-3.5 h-3.5 text-purple-300" />
+                                  <span>{setupVideoButtonText.trim() || '🎬 Setup Video'}</span>
+                                </div>
+                                <div className="w-full py-1.5 px-3 rounded-lg bg-blue-600/30 border border-blue-500/50 text-blue-200 text-xs font-semibold flex items-center justify-center gap-2 shadow-xs">
+                                  {itemType === 'file' ? (
+                                    <>
+                                      <FileText className="w-3.5 h-3.5 text-blue-300" />
+                                      <span>{setupResourceButtonText.trim() || '📁 Get File'}</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Link2 className="w-3.5 h-3.5 text-blue-300" />
+                                      <span>{setupResourceButtonText.trim() || '🔗 Open Link'}</span>
+                                    </>
+                                  )}
                                 </div>
                               </div>
                             </div>
-
-                            {/* Small Cross (X) icon on its side to easily remove individual files before saving */}
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveFile(f.id)}
-                              title={`Remove ${f.name}`}
-                              className="w-6 h-6 rounded-lg bg-zinc-800 hover:bg-rose-500/20 text-zinc-400 hover:text-rose-400 flex items-center justify-center transition-colors cursor-pointer shrink-0"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </button>
                           </div>
-                        ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Summary Review Card */}
+                    <div className="p-3 rounded-xl bg-zinc-900/80 border border-zinc-800 text-xs space-y-2">
+                      <div className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">
+                        Summary Review
                       </div>
-                    </div>
-                  )}
-
-                  {uploadStatus && (
-                    <div className="text-[11px] text-red-400 font-mono flex items-center gap-1.5 pt-1">
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>{uploadStatus}</span>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Link Target URL field */}
-              {itemType === 'link' && (
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-zinc-300 mb-1">Target URL *</label>
-                    <input
-                      type="url"
-                      required
-                      value={url}
-                      onChange={(e) => setUrl(e.target.value)}
-                      placeholder="https://example.com"
-                      className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-sm text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-semibold text-zinc-300 mb-1.5">Open Mode *</label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setOpenMode('browser')}
-                        className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                          openMode === 'browser'
-                            ? 'bg-indigo-500/20 border-indigo-500 text-indigo-300'
-                            : 'bg-zinc-900 border-zinc-700 text-zinc-400'
-                        }`}
-                      >
-                        <Globe className="w-4 h-4 mb-1 text-indigo-400" />
-                        <div className="text-xs font-semibold text-white">Web Browser</div>
-                        <div className="text-[10px] text-zinc-400">External browser</div>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => setOpenMode('webapp')}
-                        className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                          openMode === 'webapp'
-                            ? 'bg-red-500/20 border-red-500 text-sky-300'
-                            : 'bg-zinc-900 border-zinc-700 text-zinc-400'
-                        }`}
-                      >
-                        <Smartphone className="w-4 h-4 mb-1 text-red-400" />
-                        <div className="text-xs font-semibold text-white">Telegram Mini App</div>
-                        <div className="text-[10px] text-zinc-400">Embedded view</div>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* 4. Private Delivery Message & Inline Button Text (Pre-filled with default texts, fully editable) */}
-              <div className="grid grid-cols-1 gap-3 pt-1">
-                <div>
-                  <label className="block text-xs font-semibold text-zinc-300 mb-1">
-                    Private Delivery Message
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={caption}
-                    onChange={(e) => setCaption(e.target.value)}
-                    placeholder="Message sent in private DM when user triggers this item"
-                    className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-zinc-300 mb-1">
-                    Inline Button Text
-                  </label>
-                  <input
-                    type="text"
-                    value={buttonText}
-                    onChange={(e) => setButtonText(e.target.value)}
-                    placeholder="e.g. 📥 Download File or 🌐 Open Link"
-                    className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
-                  />
-                </div>
-              </div>
-
-              {/* Auto-generated File ID / Link ID */}
-              <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="text-xs font-semibold text-zinc-300">
-                    {itemType === 'file' ? 'Auto-generated File ID' : 'Auto-generated Link ID'}
-                  </label>
-                  <span className="text-[10px] text-zinc-500">Auto-assigned identifier</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    readOnly
-                    value={autoGeneratedId}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl py-2 px-3 text-xs text-red-400 font-mono font-semibold focus:outline-none select-all cursor-default"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      navigator.clipboard.writeText(autoGeneratedId);
-                      setCopiedTag(autoGeneratedId);
-                      setTimeout(() => setCopiedTag((p) => (p === autoGeneratedId ? null : p)), 1800);
-                    }}
-                    title="Copy ID"
-                    className="p-2 rounded-xl bg-zinc-900 border border-zinc-700/80 hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors cursor-pointer shrink-0"
-                  >
-                    {copiedTag === autoGeneratedId ? (
-                      <Check className="w-4 h-4 text-emerald-400" />
-                    ) : (
-                      <Copy className="w-4 h-4 text-zinc-400" />
-                    )}
-                  </button>
-                </div>
-              </div>
-
-              {/* 5. Permanent vs. Temporary Storage Toggle with expiration days */}
-              <div className="p-3.5 rounded-2xl bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-700/80 space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-bold text-white flex items-center gap-1.5">
-                    <Clock className="w-4 h-4 text-amber-400" />
-                    <span>Storage Duration</span>
-                  </label>
-                  <span className={`text-[10px] px-2 py-0.5 rounded-md font-semibold border ${
-                    retentionType === 'temporary'
-                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                      : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                  }`}>
-                    {retentionType === 'temporary' ? '⏳ Temporary' : '♾️ Permanent'}
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setRetentionType('permanent')}
-                    className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                      retentionType === 'permanent'
-                        ? 'bg-emerald-500/15 border-emerald-500 text-emerald-300 ring-1 ring-emerald-500/40'
-                        : 'bg-zinc-900/90 border-zinc-800 text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 font-semibold text-xs text-white">
-                      <span>♾️</span>
-                      <span>Permanent</span>
-                    </div>
-                    <div className="text-[10px] text-zinc-400 mt-0.5">
-                      Never deleted automatically
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setRetentionType('temporary')}
-                    className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                      retentionType === 'temporary'
-                        ? 'bg-amber-500/15 border-amber-500 text-amber-300 ring-1 ring-amber-500/40'
-                        : 'bg-zinc-900/90 border-zinc-800 text-zinc-400 hover:text-white'
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 font-semibold text-xs text-white">
-                      <span>⏳</span>
-                      <span>Temporary</span>
-                    </div>
-                    <div className="text-[10px] text-zinc-400 mt-0.5">
-                      Auto-delete after set days
-                    </div>
-                  </button>
-                </div>
-
-                {/* Expiration Days option */}
-                {retentionType === 'temporary' && (
-                  <div className="pt-2 border-t border-zinc-800/80 space-y-2.5 animate-in fade-in duration-150">
-                    <div className="flex items-center justify-between">
-                      <label className="text-xs font-semibold text-amber-300">
-                        Expiration Duration (Days)
-                      </label>
-                      <span className="text-[11px] text-zinc-400">
-                        {retentionDays} Days
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        min="1"
-                        max="3650"
-                        value={retentionDays}
-                        onChange={(e) => {
-                          const val = Math.max(1, parseInt(e.target.value, 10) || 1);
-                          setRetentionDays(val);
-                        }}
-                        className="w-20 bg-zinc-950 border border-amber-500/40 rounded-xl py-1.5 px-3 text-sm text-white font-mono font-bold focus:outline-none focus:border-amber-400"
-                      />
-                      <span className="text-xs text-zinc-400">Days</span>
-
-                      {/* Quick day presets */}
-                      <div className="flex items-center gap-1 flex-wrap">
-                        {[1, 3, 7, 15, 30].map((d) => (
-                          <button
-                            key={d}
-                            type="button"
-                            onClick={() => setRetentionDays(d)}
-                            className={`px-2 py-1 rounded-lg text-[10px] font-semibold border transition-all cursor-pointer ${
-                              retentionDays === d
-                                ? 'bg-amber-500 text-zinc-950 border-amber-400 font-bold'
-                                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-zinc-700'
-                            }`}
-                          >
-                            {d}d
-                          </button>
-                        ))}
+                      <div className="grid grid-cols-2 gap-2 text-[11px]">
+                        <div>
+                          <span className="text-zinc-500">Item: </span>
+                          <strong className="text-white">{name || 'Unnamed'}</strong> ({itemType})
+                        </div>
+                        <div>
+                          <span className="text-zinc-500">Trigger: </span>
+                          <strong className="font-mono text-red-400">{previewTrigger()}</strong>
+                        </div>
+                        <div>
+                          <span className="text-zinc-500">Storage: </span>
+                          <span className="text-zinc-300">{retentionType === 'temporary' ? `${retentionDays}d (Temp)` : 'Permanent'}</span>
+                        </div>
+                        <div>
+                          <span className="text-zinc-500">Setup Video: </span>
+                          <strong className={hasSetupVideo ? 'text-purple-400 font-bold' : 'text-zinc-400'}>
+                            {hasSetupVideo ? 'Enabled' : 'Disabled'}
+                          </strong>
+                        </div>
                       </div>
                     </div>
 
-                    <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200 flex items-center gap-2">
-                      <Calendar className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                      <span>
-                        Expires: <strong className="text-white">{new Date(Date.now() + (retentionDays || 1) * 86400000).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })}</strong>
-                      </span>
+                    {/* Confirmation Flow Action Buttons */}
+                    <div className="flex gap-2 pt-3 pb-2">
+                      <button
+                        type="button"
+                        onClick={() => setFormStep(1)}
+                        className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs font-semibold cursor-pointer border border-zinc-700 transition-colors flex items-center justify-center gap-1.5"
+                      >
+                        <ArrowLeft className="w-3.5 h-3.5" />
+                        <span>Back to Details</span>
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={loading || uploading}
+                        className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-semibold shadow-md shadow-emerald-600/30 cursor-pointer disabled:opacity-50 transition-all flex items-center justify-center gap-1.5"
+                      >
+                        {loading ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>Saving...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Check className="w-3.5 h-3.5" />
+                            <span>{modalMode === 'edit' ? 'Confirm & Update Item' : 'Confirm & Save Item'}</span>
+                          </>
+                        )}
+                      </button>
                     </div>
                   </div>
                 )}
               </div>
-
-              {/* Form Action Buttons */}
-              <div className="flex gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setModalMode('none')}
-                  className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-red-600/30 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={loading || uploading}
-                  className="flex-1 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md shadow-blue-600/30 cursor-pointer disabled:opacity-50 transition-all flex items-center justify-center gap-1.5"
-                >
-                  {loading ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Saving...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Check className="w-3.5 h-3.5" />
-                      <span>{modalMode === 'edit' ? 'Update Item' : 'Save Item'}</span>
-                    </>
-                  )}
-                </button>
-              </div>
             </form>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

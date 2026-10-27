@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { DesignConfig, api } from '../lib/api';
-import { Palette, Sparkles, Check, Sliders, Layout, Layers, Shield, Eye, Image, Upload, Trash2, RotateCcw } from 'lucide-react';
+import { Palette, Sparkles, Check, Shield, Eye, Upload, Trash2, RotateCcw } from 'lucide-react';
 
 interface DesignTabProps {
   currentDesign: DesignConfig;
@@ -24,26 +24,6 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState(false);
 
-  const animationOptions = [
-    { id: 'cyber-grid', label: '🌐 Cyber Grid' },
-    { id: 'light-rain', label: '🌧 Light Rain' },
-    { id: 'particles', label: '✨ Particle Flow' },
-    { id: 'digital-space', label: '🌌 Digital Space' },
-    { id: 'neon-waves', label: '💠 Neon Waves' },
-    { id: 'floating-orbs', label: '🔵 Floating Orbs' },
-    { id: 'aurora', label: '🟣 Aurora' },
-    { id: 'cyber-lines', label: '⚡ Cyber Lines' }
-  ];
-
-  const primaryColors = [
-    { label: 'Sky Cyan', hex: '#38bdf8' },
-    { label: 'Indigo', hex: '#6366f1' },
-    { label: 'Emerald', hex: '#10b981' },
-    { label: 'Violet', hex: '#8b5cf6' },
-    { label: 'Rose Pink', hex: '#f43f5e' },
-    { label: 'Amber Gold', hex: '#f59e0b' }
-  ];
-
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
@@ -66,9 +46,9 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-sm font-bold text-white flex items-center gap-2">
-            <Palette className="w-4 h-4 text-red-400" /> Design &amp; Animations
+            <Palette className="w-4 h-4 text-rose-500" /> App Branding &amp; Login Design
           </h2>
-          <p className="text-xs text-zinc-400">Android appearance &amp; visual styles</p>
+          <p className="text-xs text-zinc-400">Login appearance &amp; branding</p>
         </div>
         <button
           onClick={handleSave}
@@ -88,118 +68,7 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
         </button>
       </div>
 
-      {/* 1. Background Animation Section */}
-      <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-4">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-xs font-semibold text-white">
-            <Sparkles className="w-4 h-4 text-red-400" />
-            <span>Background Animation Style</span>
-          </div>
-          <label className="relative inline-flex items-center cursor-pointer">
-            <input
-              type="checkbox"
-              checked={design.animationEnabled}
-              onChange={(e) => setDesign({ ...design, animationEnabled: e.target.checked })}
-              className="sr-only peer"
-            />
-            <div className="w-9 h-5 bg-zinc-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-sky-500" />
-          </label>
-        </div>
-
-        {/* 8 Animation Styles Grid */}
-        <div className="grid grid-cols-2 gap-2">
-          {animationOptions.map((opt) => (
-            <button
-              key={opt.id}
-              type="button"
-              onClick={() => setDesign({ ...design, backgroundStyle: opt.id as any })}
-              className={`p-2.5 rounded-xl text-xs font-medium text-left border transition-all cursor-pointer ${
-                design.backgroundStyle === opt.id
-                  ? 'bg-red-500/20 border-red-500 text-sky-300 shadow-sm'
-                  : 'bg-zinc-900/80 border-zinc-800 text-zinc-400 hover:text-white'
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-
-        {/* Animation Adjustments */}
-        <div className="pt-2 border-t border-zinc-800/80 space-y-3">
-          {/* Speed */}
-          <div>
-            <div className="flex items-center justify-between text-xs text-zinc-400 mb-1">
-              <span>Animation Speed</span>
-              <span className="font-mono text-white">{design.animationSpeed}x</span>
-            </div>
-            <input
-              type="range"
-              min="0.2"
-              max="2.5"
-              step="0.1"
-              value={design.animationSpeed}
-              onChange={(e) => setDesign({ ...design, animationSpeed: parseFloat(e.target.value) })}
-              className="w-full accent-sky-400 cursor-pointer"
-            />
-          </div>
-
-          {/* Opacity */}
-          <div>
-            <div className="flex items-center justify-between text-xs text-zinc-400 mb-1">
-              <span>Animation Opacity</span>
-              <span className="font-mono text-white">{Math.round(design.animationOpacity * 100)}%</span>
-            </div>
-            <input
-              type="range"
-              min="0.1"
-              max="1.0"
-              step="0.05"
-              value={design.animationOpacity}
-              onChange={(e) => setDesign({ ...design, animationOpacity: parseFloat(e.target.value) })}
-              className="w-full accent-sky-400 cursor-pointer"
-            />
-          </div>
-
-          {/* Density */}
-          <div>
-            <div className="flex items-center justify-between text-xs text-zinc-400 mb-1">
-              <span>Particle Density</span>
-              <span className="font-mono text-white">{design.animationDensity}</span>
-            </div>
-            <input
-              type="range"
-              min="10"
-              max="100"
-              step="5"
-              value={design.animationDensity}
-              onChange={(e) => setDesign({ ...design, animationDensity: parseInt(e.target.value) })}
-              className="w-full accent-sky-400 cursor-pointer"
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* 2. Color Palette */}
-      <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-3">
-        <div className="text-xs font-semibold text-white">Accent Theme Color</div>
-        <div className="grid grid-cols-6 gap-2">
-          {primaryColors.map((c) => (
-            <button
-              key={c.hex}
-              type="button"
-              onClick={() => setDesign({ ...design, primaryColor: c.hex })}
-              style={{ backgroundColor: c.hex }}
-              className={`h-9 rounded-xl flex items-center justify-center transition-transform active:scale-90 cursor-pointer ${
-                design.primaryColor === c.hex ? 'ring-2 ring-white ring-offset-2 ring-offset-zinc-900 scale-105' : ''
-              }`}
-            >
-              {design.primaryColor === c.hex && <Check className="w-4 h-4 text-white drop-shadow" />}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* 3. Login Screen Full Customization & Branding */}
+      {/* Login Screen Full Customization & Branding */}
       <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-4">
         <div className="text-xs font-semibold text-white flex items-center justify-between">
           <div className="flex items-center gap-2">

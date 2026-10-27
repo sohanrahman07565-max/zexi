@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from 'react';
-import { ItemRecord, BotSettings } from '../lib/api';
+import React, { useState, useMemo, useEffect } from 'react';
+import { ItemRecord, BotSettings, api } from '../lib/api';
 import { FileText, Link2, Hash, Users, Sparkles, Send, ShieldCheck, CheckCircle2, AlertTriangle, ArrowUpRight } from 'lucide-react';
 import { UsersModal } from './UsersModal';
 
@@ -8,6 +8,8 @@ interface DashboardTabProps {
   adminsCount: number;
   trackedCount: number;
   totalUsers?: number;
+  onlineUsers?: number;
+  offlineUsers?: number;
   settings: BotSettings | null;
   onNavigate: (tab: string) => void;
   onOpenAddModal: (type: 'file' | 'link') => void;
@@ -19,12 +21,51 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
   adminsCount,
   trackedCount,
   totalUsers = 0,
+  onlineUsers = 0,
+  offlineUsers = 0,
   settings,
   onNavigate,
   onOpenAddModal,
   onRefresh,
 }) => {
   const [showUsersModal, setShowUsersModal] = useState<boolean>(false);
+  const [liveTotal, setLiveTotal] = useState<number>(totalUsers);
+  const [liveOnline, setLiveOnline] = useState<number>(onlineUsers);
+  const [liveOffline, setLiveOffline] = useState<number>(offlineUsers);
+
+  // Sync state whenever parent props update
+  useEffect(() => {
+    setLiveTotal(totalUsers);
+    setLiveOnline(onlineUsers);
+    setLiveOffline(offlineUsers);
+  }, [totalUsers, onlineUsers, offlineUsers]);
+
+  // Real-time automatic polling every 4 seconds for live user activity
+  useEffect(() => {
+    let isMounted = true;
+
+    const pollLiveStats = async () => {
+      try {
+        const stats = await api.getStats();
+        if (isMounted && stats) {
+          setLiveTotal(stats.totalUsers || 0);
+          setLiveOnline(stats.onlineUsers || 0);
+          setLiveOffline(stats.offlineUsers || 0);
+        }
+      } catch {
+        // Silently continue on background poll
+      }
+    };
+
+    // Immediate initial poll to ensure latest stats on tab mount
+    pollLiveStats();
+    const interval = setInterval(pollLiveStats, 4000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
 
   const fileItems = useMemo(() => items.filter((i) => i.type === 'file'), [items]);
   const linkItems = useMemo(() => items.filter((i) => i.type === 'link'), [items]);
@@ -34,35 +75,100 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
   const hasToken = useMemo(() => settings?.hasToken || Boolean(settings?.botToken), [settings]);
   const botUsername = settings?.botUsername || 'Not connected';
 
+  const onlinePercent = liveTotal > 0 ? Math.round((liveOnline / liveTotal) * 100) : 0;
+  const offlinePercent = liveTotal > 0 ? Math.round((liveOffline / liveTotal) * 100) : 0;
+
   return (
     <div className="space-y-5 pb-28">
-      {/* Simple Clean User Counter Card */}
-      <div className="glass-panel rounded-2xl p-4 border border-zinc-800/80 bg-[#0c0c13]/90 relative overflow-hidden">
-        {/* Top: User Logo & Users Button */}
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2.5">
+      {/* Sleek Compact Real-Time User Counter Card */}
+      <div className="glass-panel rounded-2xl p-4 border border-zinc-800/80 bg-[#0c0c13]/90 relative overflow-hidden group hover:border-red-500/30 transition-all shadow-[0_10px_25px_-15px_rgba(0,0,0,0.7)]">
+        {/* Subtle ambient background glow */}
+        <div className="absolute -top-10 -right-10 w-28 h-28 bg-emerald-500/10 rounded-full blur-2xl pointer-events-none transition-opacity duration-500" />
+        <div className="absolute -bottom-8 -left-8 w-24 h-24 bg-red-500/10 rounded-full blur-2xl pointer-events-none" />
+
+        {/* Top: User Logo, Users Modal trigger & Real-time Pulsing Badge */}
+        <div className="flex items-center justify-between mb-2.5 relative z-10">
+          <div className="flex items-center gap-2">
             <div 
               onClick={() => setShowUsersModal(true)}
-              className="w-8 h-8 rounded-xl bg-red-500/15 border border-red-500/30 flex items-center justify-center text-red-400 shrink-0 cursor-pointer hover:bg-red-500/25 transition-colors shadow-[0_0_12px_rgba(239,68,68,0.25)]"
+              title="Open Users Management"
+              className="w-7 h-7 rounded-lg bg-red-500/15 border border-red-500/30 flex items-center justify-center text-red-400 shrink-0 cursor-pointer hover:bg-red-500/25 transition-colors shadow-[0_0_10px_rgba(239,68,68,0.2)]"
             >
-              <Users className="w-4 h-4" />
+              <Users className="w-3.5 h-3.5" />
             </div>
             <button
               type="button"
               onClick={() => setShowUsersModal(true)}
-              className="px-2.5 py-1 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 hover:text-red-300 border border-red-500/25 text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95"
+              className="px-2 py-0.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 hover:text-red-300 border border-red-500/25 text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer active:scale-95 shadow-xs"
             >
-              <span>Users</span>
-              <ArrowUpRight className="w-3.5 h-3.5" />
+              <span>Bot Users</span>
+              <ArrowUpRight className="w-3 h-3" />
             </button>
+          </div>
+
+          {/* Real-time live activity pill */}
+          <div 
+            onClick={() => setShowUsersModal(true)}
+            className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.12)] cursor-pointer hover:bg-emerald-500/20 transition-all"
+            title="Real-time live user activity"
+          >
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.9)]" />
+            </span>
+            <span className="text-[10px] font-bold uppercase tracking-wider">Live</span>
           </div>
         </div>
 
-        {/* Bottom: Counter */}
-        <div>
-          <span className="text-3xl font-black text-white tracking-tight drop-shadow-[0_0_10px_rgba(239,68,68,0.2)]">
-            {Number(totalUsers).toLocaleString()}
-          </span>
+        {/* Content Row: Total Users on Left & Sleek Side-by-Side Online/Offline indicators on Right */}
+        <div className="flex items-end justify-between gap-3 relative z-10">
+          <div 
+            onClick={() => setShowUsersModal(true)}
+            className="cursor-pointer group/total"
+            title="Click to view all users"
+          >
+            <div className="text-3xl sm:text-4xl font-black text-white tracking-tight font-mono leading-none drop-shadow-[0_0_12px_rgba(239,68,68,0.25)]">
+              {Number(liveTotal).toLocaleString()}
+            </div>
+            <div className="text-[10px] font-semibold text-zinc-400 uppercase tracking-wider mt-1.5 flex items-center gap-1 group-hover/total:text-zinc-300 transition-colors">
+              <span>Total Users</span>
+            </div>
+          </div>
+
+          {/* Sleek Side-by-Side Online / Offline Indicator Capsule */}
+          <div 
+            onClick={() => setShowUsersModal(true)}
+            className="flex items-center gap-2.5 p-1.5 px-3 rounded-xl bg-zinc-900/90 border border-zinc-800/90 cursor-pointer hover:border-zinc-700 hover:bg-zinc-900 transition-all active:scale-[0.98] shadow-sm"
+            title="Click to view detailed user status breakdown"
+          >
+            {/* Online Indicator */}
+            <div className="flex items-center gap-1.5">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.9)]" />
+              </span>
+              <span className="text-xs font-black text-emerald-400 font-mono tracking-tight">
+                {Number(liveOnline).toLocaleString()}
+              </span>
+              <span className="text-[10px] font-bold text-emerald-400/90 uppercase tracking-wider">
+                Online
+              </span>
+            </div>
+
+            {/* Subtle Divider */}
+            <span className="w-px h-3.5 bg-zinc-700/80" />
+
+            {/* Offline Indicator */}
+            <div className="flex items-center gap-1.5">
+              <span className="inline-flex rounded-full h-2 w-2 bg-zinc-500 shadow-[0_0_4px_rgba(161,161,170,0.4)]" />
+              <span className="text-xs font-black text-zinc-300 font-mono tracking-tight">
+                {Number(liveOffline).toLocaleString()}
+              </span>
+              <span className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">
+                Offline
+              </span>
+            </div>
+          </div>
         </div>
       </div>
 

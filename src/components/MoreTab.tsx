@@ -3,9 +3,11 @@ import { createPortal } from 'react-dom';
 import { 
   AdminUser, MessageTemplate, BotSettings, api 
 } from '../lib/api';
+import { toast } from '../lib/toast';
 import { 
   MessageSquare, Users, Trash2, Settings, Smartphone, LogOut, 
-  ChevronRight, Edit2, Check, RefreshCw, Plus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi, WifiOff
+  ChevronRight, Edit2, Check, RefreshCw, Plus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi, WifiOff,
+  Megaphone, Image as ImageIcon, Video as VideoIcon, Music, Mic, Pin, Paperclip, Loader2, Radio
 } from 'lucide-react';
 import { EmojiStore } from './EmojiStore';
 
@@ -26,7 +28,77 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   onRefreshSettings,
   onLogout
 }) => {
-  const [subView, setSubView] = useState<'menu' | 'templates' | 'admins' | 'cleanup' | 'settings' | 'apk' | 'emoji'>('menu');
+  const [subView, setSubView] = useState<'menu' | 'templates' | 'admins' | 'cleanup' | 'settings' | 'webhook' | 'broadcast' | 'apk' | 'emoji'>('menu');
+
+  // Webhook standalone state
+  const [webhookAppUrl, setWebhookAppUrl] = useState<string>(
+    typeof window !== 'undefined' ? window.location.origin : ''
+  );
+  const [webhookLoading, setWebhookLoading] = useState<boolean>(false);
+  const [webhookStatusMsg, setWebhookStatusMsg] = useState<{ type: 'success' | 'error'; text: string; details?: any } | null>(null);
+
+  // Broadcast state
+  const [broadcastUsersCount, setBroadcastUsersCount] = useState<number>(0);
+  const [broadcastMediaType, setBroadcastMediaType] = useState<'text' | 'photo' | 'video' | 'audio' | 'voice'>('text');
+  const [broadcastMessage, setBroadcastMessage] = useState<string>('');
+  const [broadcastMediaSource, setBroadcastMediaSource] = useState<'upload' | 'url'>('upload');
+  const [broadcastMediaUrl, setBroadcastMediaUrl] = useState<string>('');
+  const [broadcastFile, setBroadcastFile] = useState<File | null>(null);
+  const [broadcastPin, setBroadcastPin] = useState<boolean>(false);
+  const [broadcastSending, setBroadcastSending] = useState<boolean>(false);
+  const [broadcastTesting, setBroadcastTesting] = useState<boolean>(false);
+  const [broadcastResult, setBroadcastResult] = useState<{
+    type: 'success' | 'error';
+    text: string;
+    details?: { total: number; sent: number; failed: number };
+  } | null>(null);
+
+  // Secret 7-tap quick action gesture on Header Card to automatically set up Webhook
+  const tapCountRef = useRef(0);
+  const lastTapTimeRef = useRef(0);
+  const [gestureFeedback, setGestureFeedback] = useState(false);
+
+  const handleHeaderSecretTap = async () => {
+    const now = Date.now();
+    // Reset if more than 2 seconds between taps
+    if (now - lastTapTimeRef.current > 2000) {
+      tapCountRef.current = 1;
+    } else {
+      tapCountRef.current += 1;
+    }
+    lastTapTimeRef.current = now;
+
+    if (tapCountRef.current === 7) {
+      tapCountRef.current = 0;
+      setGestureFeedback(true);
+      setTimeout(() => setGestureFeedback(false), 1200);
+
+      const targetUrl = typeof window !== 'undefined' ? window.location.origin : '';
+      if (!targetUrl) {
+        toast.error('Unable to detect web application URL for webhook setup.', 'Webhook Error');
+        return;
+      }
+
+      toast.info('Secret 7-tap gesture detected: Configuring Webhook...', 'Quick Action');
+
+      try {
+        const res = await api.setWebhook(targetUrl.trim());
+        if (res && res.ok) {
+          toast.success(
+            `Telegram Webhook connected successfully! (${targetUrl})`,
+            'Webhook Activated'
+          );
+        } else {
+          toast.error(
+            res?.description || res?.message || 'Webhook registration error from Telegram',
+            'Webhook Failed'
+          );
+        }
+      } catch (err: any) {
+        toast.error(err.message || 'Failed to setup webhook', 'Webhook Error');
+      }
+    }
+  };
 
   // Templates state
   const [editingTemplate, setEditingTemplate] = useState<MessageTemplate | null>(null);
@@ -53,14 +125,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       return () => clearTimeout(timer);
     }
   }, [editingTemplate]);
-
-  const handleOpenStartMessageEdit = () => {
-    if (!templates.START_MESSAGE) return;
-    setEditingTemplate(templates.START_MESSAGE);
-    setTemplateContent(templates.START_MESSAGE.content);
-    setTemplateMediaType(templates.START_MESSAGE.mediaType || 'none');
-    setTemplateMediaUrl(templates.START_MESSAGE.mediaUrl || '');
-  };
 
   // Admins state
   const [adminsList, setAdminsList] = useState<any[]>([]);
@@ -104,10 +168,19 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     autoDeleteDeliveryEnabled: settings?.autoDeleteDeliveryEnabled ?? true,
     deliveryTimeoutMinutes: settings?.deliveryTimeoutMinutes || 10,
     autoDeleteNoticeEnabled: settings?.autoDeleteNoticeEnabled ?? false,
+    maintenanceMode: settings?.maintenanceMode ?? false,
+    maintenanceNotice: settings?.maintenanceNotice || '',
+    forceSubEnabled: settings?.forceSubEnabled ?? false,
+    requiredChannels: settings?.requiredChannels || [],
     adminNewPassword: ''
   });
   const [botStatusMsg, setBotStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [settingSaving, setSettingSaving] = useState(false);
+
+  // Force Sub Add Channel form state
+  const [newChannelName, setNewChannelName] = useState('');
+  const [newChannelChatId, setNewChannelChatId] = useState('');
+  const [newChannelInviteLink, setNewChannelInviteLink] = useState('');
 
   useEffect(() => {
     if (settings) {
@@ -120,7 +193,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         cleanupAgeHours: settings.cleanupAgeHours || 24,
         autoDeleteDeliveryEnabled: settings.autoDeleteDeliveryEnabled ?? true,
         deliveryTimeoutMinutes: settings.deliveryTimeoutMinutes || 10,
-        autoDeleteNoticeEnabled: settings.autoDeleteNoticeEnabled ?? false
+        autoDeleteNoticeEnabled: settings.autoDeleteNoticeEnabled ?? false,
+        maintenanceMode: settings.maintenanceMode ?? false,
+        maintenanceNotice: settings.maintenanceNotice || '',
+        forceSubEnabled: settings.forceSubEnabled ?? false,
+        requiredChannels: Array.isArray(settings.requiredChannels) ? settings.requiredChannels : []
       }));
     }
   }, [settings]);
@@ -132,6 +209,10 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     } else if (subView === 'cleanup') {
       loadCleanupStatus();
     }
+    // Refresh user count for broadcast
+    api.getUsers().then(users => {
+      setBroadcastUsersCount(users.length);
+    }).catch(() => {});
   }, [subView]);
 
   const loadAdmins = async () => {
@@ -164,10 +245,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         mediaType: templateMediaType,
         mediaUrl: templateMediaUrl.trim()
       });
+      toast.success('Message template saved successfully!');
       onRefreshTemplates();
       setEditingTemplate(null);
     } catch (err: any) {
-      alert(err.message || 'Failed to save template');
+      toast.error(err.message || 'Failed to save template');
     } finally {
       setTemplateSaving(false);
     }
@@ -360,8 +442,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         password: '',
         permissions: { ...newAdminData.permissions }
       });
+      toast.success('Sub-admin created successfully!');
     } catch (err: any) {
-      alert(err.message || 'Failed to add admin');
+      toast.error(err.message || 'Failed to add admin');
     }
   };
 
@@ -370,8 +453,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     try {
       await api.deleteAdmin(id);
       loadAdmins();
+      toast.success('Sub-admin removed successfully');
     } catch (err: any) {
-      alert(err.message || 'Failed to delete admin');
+      toast.error(err.message || 'Failed to delete admin');
     }
   };
 
@@ -382,58 +466,237 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     try {
       const res = await api.runCleanup(botSettings.cleanupAgeHours);
       setCleanupMsg(res.message);
+      toast.success(res.message || 'Message cleanup completed!');
       loadCleanupStatus();
     } catch (err: any) {
-      setCleanupMsg(err.message || 'Cleanup failed');
+      const errText = err.message || 'Cleanup failed';
+      setCleanupMsg(errText);
+      toast.error(errText);
     } finally {
       setCleanupRunning(false);
     }
   };
 
+  // Force Sub Channel Management Handlers
+  const handleAddForceSubChannel = () => {
+    if (!newChannelName.trim() || !newChannelChatId.trim()) {
+      toast.error('Please enter both Channel Name and Chat ID / Username');
+      return;
+    }
+    const cleanChatId = newChannelChatId.trim();
+    const inviteLink = newChannelInviteLink.trim() || (cleanChatId.startsWith('@') ? `https://t.me/${cleanChatId.replace(/^@/, '')}` : '');
+    const newChan = {
+      id: `ch_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      name: newChannelName.trim(),
+      chatId: cleanChatId,
+      inviteLink: inviteLink
+    };
+    setBotSettings((prev: any) => {
+      const existing = Array.isArray(prev.requiredChannels) ? prev.requiredChannels : [];
+      return {
+        ...prev,
+        forceSubEnabled: true,
+        requiredChannels: [...existing, newChan]
+      };
+    });
+    setNewChannelName('');
+    setNewChannelChatId('');
+    setNewChannelInviteLink('');
+    toast.success(`Channel "${newChan.name}" added! Click Save Configuration below to save.`);
+  };
+
+  const handleRemoveForceSubChannel = (channelId: string) => {
+    setBotSettings((prev: any) => {
+      const existing = Array.isArray(prev.requiredChannels) ? prev.requiredChannels : [];
+      return {
+        ...prev,
+        requiredChannels: existing.filter((c: any) => c.id !== channelId)
+      };
+    });
+    toast.info('Channel removed. Click Save Configuration to apply changes.');
+  };
+
   // Save settings & Webhook
-  const handleSaveSettings = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSaveSettings = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     setSettingSaving(true);
     setBotStatusMsg(null);
     try {
-      await api.updateSettings(botSettings);
+      const payload = {
+        ...botSettings,
+        forceSubEnabled: Boolean(botSettings.forceSubEnabled),
+        requiredChannels: Array.isArray(botSettings.requiredChannels) ? botSettings.requiredChannels : []
+      };
+      const res = await api.updateSettings(payload);
+      if (res && res.settings) {
+        setBotSettings((prev: any) => ({
+          ...prev,
+          ...res.settings,
+          forceSubEnabled: res.settings.forceSubEnabled ?? false,
+          requiredChannels: Array.isArray(res.settings.requiredChannels) ? res.settings.requiredChannels : []
+        }));
+      }
       onRefreshSettings();
       setBotStatusMsg({ type: 'success', text: 'Bot settings updated successfully!' });
+      toast.success('Bot settings updated successfully!');
     } catch (err: any) {
-      setBotStatusMsg({ type: 'error', text: err.message || 'Failed to update settings' });
+      const errText = err.message || 'Failed to update settings';
+      setBotStatusMsg({ type: 'error', text: errText });
+      toast.error(errText);
     } finally {
       setSettingSaving(false);
     }
   };
 
   const handleRegisterWebhook = async () => {
-    setBotStatusMsg(null);
+    if (!webhookAppUrl.trim()) {
+      setWebhookStatusMsg({ type: 'error', text: 'Please enter a valid Application URL' });
+      toast.error('Please enter a valid Application URL');
+      return;
+    }
+    setWebhookLoading(true);
+    setWebhookStatusMsg(null);
     try {
-      const res = await api.setWebhook(window.location.origin);
+      const res = await api.setWebhook(webhookAppUrl.trim());
       if (res.ok) {
-        setBotStatusMsg({ type: 'success', text: 'Telegram webhook registered successfully!' });
+        setWebhookStatusMsg({ type: 'success', text: 'Telegram webhook registered successfully!' });
+        toast.success('Telegram webhook registered successfully!');
       } else {
-        setBotStatusMsg({ type: 'error', text: res.description || 'Webhook registration error' });
+        const errText = res.description || 'Webhook registration error';
+        setWebhookStatusMsg({ type: 'error', text: errText });
+        toast.error(errText);
       }
     } catch (err: any) {
-      setBotStatusMsg({ type: 'error', text: err.message || 'Webhook failed' });
+      const errText = err.message || 'Webhook failed';
+      setWebhookStatusMsg({ type: 'error', text: errText });
+      toast.error(errText);
+    } finally {
+      setWebhookLoading(false);
     }
   };
 
   const handleCheckBotInfo = async () => {
-    setBotStatusMsg(null);
+    setWebhookLoading(true);
+    setWebhookStatusMsg(null);
     try {
       const res = await api.getBotInfo();
       if (res.ok && res.result) {
-        setBotStatusMsg({
+        setWebhookStatusMsg({
           type: 'success',
-          text: `Connected to @${res.result.username} (ID: ${res.result.id})`
+          text: `Connected: @${res.result.username} (${res.result.first_name || 'Bot'})`,
+          details: res.result
         });
       } else {
-        setBotStatusMsg({ type: 'error', text: res.description || 'Bot token invalid or unreachable' });
+        setWebhookStatusMsg({ type: 'error', text: res.description || 'Bot token invalid or unreachable' });
       }
     } catch (err: any) {
-      setBotStatusMsg({ type: 'error', text: err.message || 'Check failed' });
+      setWebhookStatusMsg({ type: 'error', text: err.message || 'Connection test failed' });
+    } finally {
+      setWebhookLoading(false);
+    }
+  };
+
+  // Broadcast Handlers
+  const handleSendBroadcast = async () => {
+    if (broadcastMediaType === 'text' && !broadcastMessage.trim()) {
+      alert('Please enter a notification message to broadcast.');
+      return;
+    }
+    if (broadcastMediaType !== 'text' && broadcastMediaSource === 'upload' && !broadcastFile) {
+      alert('Please select a media file to upload from your device.');
+      return;
+    }
+    if (broadcastMediaType !== 'text' && broadcastMediaSource === 'url' && !broadcastMediaUrl.trim()) {
+      alert('Please enter a media URL or Telegram file_id.');
+      return;
+    }
+
+    if (!confirm(`Are you sure you want to send this broadcast to all ${broadcastUsersCount || 'registered'} users now?`)) {
+      return;
+    }
+
+    setBroadcastSending(true);
+    setBroadcastResult(null);
+
+    try {
+      let res;
+      if (broadcastMediaType !== 'text' && broadcastMediaSource === 'upload' && broadcastFile) {
+        const formData = new FormData();
+        formData.append('media', broadcastFile);
+        formData.append('mediaType', broadcastMediaType);
+        if (broadcastMessage.trim()) formData.append('message', broadcastMessage.trim());
+        if (broadcastPin) formData.append('pinMessage', 'true');
+        res = await api.sendBroadcast(formData);
+      } else {
+        res = await api.sendBroadcast({
+          mediaType: broadcastMediaType,
+          message: broadcastMessage.trim() || undefined,
+          mediaUrl: (broadcastMediaType !== 'text' && broadcastMediaSource === 'url') ? broadcastMediaUrl.trim() : undefined,
+          pinMessage: broadcastPin
+        });
+      }
+
+      setBroadcastResult({
+        type: 'success',
+        text: res.message,
+        details: { total: res.total, sent: res.sent, failed: res.failed }
+      });
+    } catch (err: any) {
+      setBroadcastResult({
+        type: 'error',
+        text: err.message || 'Failed to send broadcast'
+      });
+    } finally {
+      setBroadcastSending(false);
+    }
+  };
+
+  const handleTestBroadcast = async () => {
+    if (broadcastMediaType === 'text' && !broadcastMessage.trim()) {
+      alert('Please enter a notification message to test.');
+      return;
+    }
+    if (broadcastMediaType !== 'text' && broadcastMediaSource === 'upload' && !broadcastFile) {
+      alert('Please select a media file to upload.');
+      return;
+    }
+    if (broadcastMediaType !== 'text' && broadcastMediaSource === 'url' && !broadcastMediaUrl.trim()) {
+      alert('Please enter a media URL or Telegram file_id.');
+      return;
+    }
+
+    setBroadcastTesting(true);
+    setBroadcastResult(null);
+
+    try {
+      let res;
+      if (broadcastMediaType !== 'text' && broadcastMediaSource === 'upload' && broadcastFile) {
+        const formData = new FormData();
+        formData.append('media', broadcastFile);
+        formData.append('mediaType', broadcastMediaType);
+        if (broadcastMessage.trim()) formData.append('message', broadcastMessage.trim());
+        if (broadcastPin) formData.append('pinMessage', 'true');
+        res = await api.sendTestBroadcast(formData);
+      } else {
+        res = await api.sendTestBroadcast({
+          mediaType: broadcastMediaType,
+          message: broadcastMessage.trim() || undefined,
+          mediaUrl: (broadcastMediaType !== 'text' && broadcastMediaSource === 'url') ? broadcastMediaUrl.trim() : undefined,
+          pinMessage: broadcastPin
+        });
+      }
+
+      setBroadcastResult({
+        type: 'success',
+        text: res.message
+      });
+    } catch (err: any) {
+      setBroadcastResult({
+        type: 'error',
+        text: err.message || 'Test broadcast failed'
+      });
+    } finally {
+      setBroadcastTesting(false);
     }
   };
 
@@ -443,54 +706,49 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   if (subView === 'menu') {
     return (
       <div className="space-y-4 pb-28">
-        {/* User Card */}
-        <div className="glass-panel rounded-2xl p-4 border border-zinc-800 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center text-white font-bold text-sm">
-              {currentUser.name.charAt(0)}
+        {/* Admin Profile Header Card (Smooth Capsule Rounded Style with 7-Tap Webhook Setup Gesture) */}
+        <div 
+          onClick={handleHeaderSecretTap}
+          title="Admin Profile"
+          className={`glass-panel rounded-full py-3.5 px-5 border shadow-lg flex items-center justify-between gap-3 cursor-pointer select-none active:scale-[0.985] transition-all duration-200 ${
+            gestureFeedback
+              ? 'border-emerald-500/80 bg-emerald-950/40 shadow-[0_0_30px_rgba(16,185,129,0.4)]'
+              : 'border-zinc-800/90 bg-gradient-to-r from-zinc-900/95 via-[#101018]/90 to-zinc-900/95 hover:border-zinc-700/80'
+          }`}
+        >
+          <div className="flex items-center gap-3.5 min-w-0">
+            {/* Official Telegram Logo Avatar */}
+            <div className="w-11 h-11 shrink-0 rounded-full overflow-hidden flex items-center justify-center shadow-md shadow-sky-500/20 bg-[#229ED9]">
+              <svg viewBox="0 0 48 48" className="w-full h-full" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="24" cy="24" r="24" fill="url(#tg_more_card_grad)" />
+                <path fillRule="evenodd" clipRule="evenodd" d="M10.2 23.3C18.6 19.6 24.2 17.1 27.1 15.9C35.2 12.5 36.9 11.9 38 11.9C38.2 11.9 38.8 12 39.2 12.3C39.5 12.6 39.6 13 39.6 13.3C39.6 13.6 39.6 14.2 39.5 14.9L34.3 39.5C33.9 41.3 32.8 41.8 31.3 40.9L23.4 35.1L19.6 38.8C19.2 39.2 18.8 39.6 18 39.6L18.6 31.1L34.1 17.1C34.8 16.5 33.9 16.1 33 16.7L13.8 28.8L5.6 26.2C3.8 25.6 3.8 24.4 6 23.5L10.2 23.3Z" fill="white" />
+                <defs>
+                  <linearGradient id="tg_more_card_grad" x1="24" y1="0" x2="24" y2="48" gradientUnits="userSpaceOnUse">
+                    <stop stopColor="#2AABEE" />
+                    <stop offset="1" stopColor="#229ED9" />
+                  </linearGradient>
+                </defs>
+              </svg>
             </div>
-            <div>
-              <div className="text-sm font-bold text-white flex items-center gap-2">
-                <span>{currentUser.name}</span>
-                <span className="text-[10px] uppercase font-semibold text-red-400 bg-red-500/10 px-2 py-0.5 rounded-md border border-red-500/20">
-                  {currentUser.role}
-                </span>
+            <div className="min-w-0">
+              <div className="text-sm font-bold text-white truncate">
+                {currentUser.name}
               </div>
-              <div className="text-xs text-zinc-400 font-mono mt-0.5">
+              <div className="text-xs text-zinc-400 font-mono mt-0.5 truncate">
                 ID: {currentUser.telegramId}
               </div>
             </div>
           </div>
-        </div>
 
-        {/* Quick Access: Start / Welcome Message Template */}
-        {templates.START_MESSAGE && (
-          <div className="glass-panel rounded-2xl p-4 border border-red-500/30 bg-gradient-to-br from-sky-500/10 via-zinc-900 to-indigo-500/10 flex items-center justify-between gap-3 shadow-lg shadow-sky-500/5">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="w-10 h-10 rounded-xl bg-red-500/20 text-red-400 border border-red-500/30 flex items-center justify-center shrink-0">
-                <Sparkles className="w-5 h-5" />
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-white truncate">Start Message (/start)</span>
-                  <span className="text-[9px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-1.5 py-0.5 rounded-full shrink-0">
-                    Active
-                  </span>
-                </div>
-                <div className="text-[11px] text-zinc-400 truncate mt-0.5 font-mono">
-                  {templates.START_MESSAGE.content.slice(0, 42)}...
-                </div>
-              </div>
-            </div>
-            <button
-              onClick={handleOpenStartMessageEdit}
-              className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm shadow-blue-600/30 active:scale-95"
-            >
-              <Edit2 className="w-3.5 h-3.5" />
-              <span>Edit</span>
-            </button>
+          {/* Strictly Plain Text Role Badge (No emojis or symbols attached) */}
+          <div className="shrink-0 text-right pr-1">
+            <span className={`text-xs font-bold tracking-wide ${
+              currentUser.role?.toLowerCase() === 'owner' ? 'text-amber-400' : 'text-zinc-300'
+            }`}>
+              {currentUser.role?.toLowerCase() === 'owner' ? 'Owner' : 'Admin'}
+            </span>
           </div>
-        )}
+        </div>
 
         {/* Menu Items */}
         <div className="glass-panel rounded-2xl divide-y divide-zinc-800/80 border border-zinc-800 overflow-hidden">
@@ -505,7 +763,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               </div>
               <div>
                 <div className="text-xs font-semibold text-white">Message Templates</div>
-                <div className="text-[11px] text-zinc-400">Edit /start welcome message &amp; bot copy</div>
               </div>
             </div>
             <ChevronRight className="w-4 h-4 text-zinc-500" />
@@ -522,7 +779,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               </div>
               <div>
                 <div className="text-xs font-semibold text-white">Sub-Admins &amp; Permissions</div>
-                <div className="text-[11px] text-zinc-400">Manage team accounts &amp; access</div>
               </div>
             </div>
             <ChevronRight className="w-4 h-4 text-zinc-500" />
@@ -539,13 +795,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               </div>
               <div>
                 <div className="text-xs font-semibold text-white">Message Cleanup</div>
-                <div className="text-[11px] text-zinc-400">10-message limit &amp; auto-deletion</div>
               </div>
             </div>
             <ChevronRight className="w-4 h-4 text-zinc-500" />
           </button>
 
-          {/* Settings & Webhook */}
+          {/* Bot Settings */}
           <button
             onClick={() => setSubView('settings')}
             className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
@@ -555,8 +810,28 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 <Settings className="w-4 h-4" />
               </div>
               <div>
-                <div className="text-xs font-semibold text-white">Bot Settings &amp; Webhook</div>
-                <div className="text-[11px] text-zinc-400">Bot token, URL &amp; connection test</div>
+                <div className="text-xs font-semibold text-white">Bot Settings</div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-zinc-500" />
+          </button>
+
+          {/* Broadcast Notification System */}
+          <button
+            onClick={() => setSubView('broadcast')}
+            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-red-500/20 to-rose-600/20 text-red-400 flex items-center justify-center border border-red-500/30">
+                <Megaphone className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-xs font-semibold text-white flex items-center gap-1.5">
+                  <span>Broadcast System</span>
+                  <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-red-500/20 text-red-300 font-mono font-semibold">
+                    {broadcastUsersCount > 0 ? `${broadcastUsersCount} Users` : 'Rich Media'}
+                  </span>
+                </div>
               </div>
             </div>
             <ChevronRight className="w-4 h-4 text-zinc-500" />
@@ -578,7 +853,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     Hot
                   </span>
                 </div>
-                <div className="text-[11px] text-zinc-400">Essential emojis for Telegram bot & message decoration</div>
               </div>
             </div>
             <ChevronRight className="w-4 h-4 text-zinc-500" />
@@ -595,7 +869,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               </div>
               <div>
                 <div className="text-xs font-semibold text-white">Android APK Architecture</div>
-                <div className="text-[11px] text-zinc-400">Jetpack Compose native app source</div>
               </div>
             </div>
             <ChevronRight className="w-4 h-4 text-zinc-500" />
@@ -611,8 +884,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           <LogOut className="w-4 h-4" />
           <span>Sign Out of Admin Portal</span>
         </button>
-
-        {renderTemplateEditModal()}
       </div>
     );
   }
@@ -657,9 +928,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   </span>
                 </div>
                 <h3 className="text-sm font-bold text-white">{startTemplate.name}</h3>
-                <p className="text-[11px] text-zinc-400">
-                  {startTemplate.description || 'Welcome message sent to users who message /start in private chat'}
-                </p>
               </div>
               <button
                 onClick={() => {
@@ -703,12 +971,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               <div className="flex items-start justify-between">
                 <div>
                   <h4 className="text-xs font-bold text-white">{tpl.name}</h4>
-                  <p className="text-[11px] text-zinc-400">{tpl.description}</p>
                 </div>
                 <button
                   onClick={() => {
                     setEditingTemplate(tpl);
                     setTemplateContent(tpl.content);
+                    setTemplateMediaType(tpl.mediaType || 'none');
+                    setTemplateMediaUrl(tpl.mediaUrl || '');
                   }}
                   className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-red-400 cursor-pointer"
                 >
@@ -736,144 +1005,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           ))}
         </div>
 
-        {/* Edit Modal */}
-        {editingTemplate && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm">
-            <div className="glass-panel w-full max-w-sm rounded-3xl p-5 border border-zinc-700 space-y-3.5">
-              <div className="flex items-center justify-between">
-                <h4 className="font-bold text-white text-sm">Edit {editingTemplate.name}</h4>
-                <button onClick={() => setEditingTemplate(null)} className="text-zinc-400 hover:text-white">
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-
-              <div>
-                <label className="block text-xs text-zinc-300 mb-1">Message Content</label>
-                <textarea
-                  rows={4}
-                  value={templateContent}
-                  onChange={(e) => setTemplateContent(e.target.value)}
-                  className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 text-xs text-white font-mono"
-                />
-              </div>
-
-              {/* Rich Media Attachment for /start Welcome Message */}
-              {editingTemplate.key === 'START_MESSAGE' && (
-                <div className="p-3 rounded-2xl bg-zinc-900/90 border border-zinc-700/80 space-y-2.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-semibold text-white">Attached Media</label>
-                    <span className="text-[10px] text-zinc-400">Photo or Video header</span>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {(['none', 'photo', 'video'] as const).map((m) => (
-                      <button
-                        key={m}
-                        type="button"
-                        onClick={() => setTemplateMediaType(m)}
-                        className={`py-1.5 px-2 rounded-lg text-xs font-semibold capitalize border transition-all cursor-pointer ${
-                          templateMediaType === m
-                            ? 'bg-red-500/20 text-sky-300 border-red-500/50'
-                            : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-white'
-                        }`}
-                      >
-                        {m === 'none' ? 'None' : m === 'photo' ? '📸 Photo' : '🎥 Video'}
-                      </button>
-                    ))}
-                  </div>
-
-                  {templateMediaType !== 'none' && (
-                    <div className="space-y-2">
-                      <input
-                        type="text"
-                        value={templateMediaUrl}
-                        onChange={(e) => setTemplateMediaUrl(e.target.value)}
-                        placeholder={templateMediaType === 'photo' ? 'https://example.com/banner.jpg, file_id, or upload below' : 'https://example.com/video.mp4, file_id, or upload below'}
-                        className="w-full bg-zinc-950 border border-zinc-700 rounded-xl py-1.5 px-3 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
-                      />
-
-                      <div className="flex items-center gap-2">
-                        <label className="flex-1 py-1.5 px-3 rounded-xl border border-dashed border-red-500/40 hover:border-sky-400 bg-red-500/10 hover:bg-red-500/15 flex items-center justify-center gap-1.5 cursor-pointer text-xs text-sky-300 font-semibold transition-all">
-                          <span>📁 Choose {templateMediaType === 'photo' ? 'Photo' : 'Video'} from Device</span>
-                          <input
-                            type="file"
-                            accept={templateMediaType === 'photo' ? 'image/*' : 'video/*'}
-                            className="hidden"
-                            onChange={async (e) => {
-                              const file = e.target.files?.[0];
-                              if (!file) return;
-                              try {
-                                const formData = new FormData();
-                                formData.append('file', file);
-                                formData.append('fileType', templateMediaType);
-                                formData.append('fileName', file.name);
-                                const data = await api.uploadFile(formData);
-                                if (data.success && (data.fileId || data.uploadedFileId)) {
-                                  setTemplateMediaUrl(data.uploadedFileId || data.fileId);
-                                } else {
-                                  alert('Upload failed');
-                                }
-                              } catch (err: any) {
-                                alert(err.message || 'Upload error');
-                              }
-                              e.target.value = '';
-                            }}
-                          />
-                        </label>
-                      </div>
-
-                      <p className="text-[10px] text-zinc-500">
-                        Enter a direct URL, Telegram file_id, or upload directly from your gallery/storage.
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Available Placeholders / Variables */}
-              <div className="text-[11px] text-zinc-400">
-                <span>Available Variables: </span>
-                <div className="flex flex-wrap gap-1 mt-1">
-                  {editingTemplate.key === 'START_MESSAGE' && (
-                    <button
-                      type="button"
-                      onClick={() => setTemplateContent((prev) => `${prev} @username`)}
-                      className="bg-indigo-950/60 border border-indigo-500/40 px-2 py-0.5 rounded text-indigo-300 text-[10px] font-mono hover:bg-indigo-900/60 cursor-pointer font-bold"
-                    >
-                      +@username
-                    </button>
-                  )}
-                  {(editingTemplate.variables || ['user_name', 'user_id', 'bot_name']).map((v) => (
-                    <button
-                      key={v}
-                      type="button"
-                      onClick={() => setTemplateContent((prev) => `${prev} {${v}}`)}
-                      className="bg-zinc-800 border border-zinc-700/80 px-1.5 py-0.5 rounded text-red-400 text-[10px] font-mono hover:bg-zinc-700 cursor-pointer"
-                    >
-                      +{`{${v}}`}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="flex gap-2 pt-2">
-                <button
-                  onClick={() => setEditingTemplate(null)}
-                  className="flex-1 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-red-600/30 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleSaveTemplate}
-                  disabled={templateSaving}
-                  className="flex-1 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-blue-600/30 disabled:opacity-50 transition-colors"
-                >
-                  {templateSaving ? 'Saving...' : 'Save Template'}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        {renderTemplateEditModal()}
       </div>
     );
   }
@@ -1160,7 +1292,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           >
             ← Back to More
           </button>
-          <span className="text-xs text-zinc-400">Bot Connection</span>
+          <span className="text-xs text-zinc-400">Bot Settings</span>
         </div>
 
         {botStatusMsg && (
@@ -1182,52 +1314,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
         <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-4">
           <form onSubmit={handleSaveSettings} className="space-y-3.5">
-            <div>
-              <label className="block text-xs font-medium text-zinc-300 mb-1">
-                Telegram Bot Token
-              </label>
-              <input
-                type="password"
-                value={botSettings.botToken}
-                onChange={(e) => setBotSettings({ ...botSettings, botToken: e.target.value })}
-                placeholder={settings?.botTokenMasked || 'Enter Bot Token from @BotFather'}
-                className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white font-mono"
-              />
-              <p className="text-[11px] text-zinc-500 mt-1">
-                Required for sending replies in groups and private files.
-              </p>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-zinc-300 mb-1">
-                Root Admin Telegram ID
-              </label>
-              <input
-                type="text"
-                value={botSettings.rootAdminId}
-                onChange={(e) => setBotSettings({ ...botSettings, rootAdminId: e.target.value })}
-                placeholder="Enter Telegram User ID"
-                className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white font-mono"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-zinc-300 mb-1">
-                Change Admin Web Portal Password (Optional)
-              </label>
-              <input
-                type="password"
-                value={botSettings.adminNewPassword || ''}
-                onChange={(e) => setBotSettings({ ...botSettings, adminNewPassword: e.target.value })}
-                placeholder="Enter new admin password (leave blank to keep current)"
-                className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white font-mono"
-              />
-              <p className="text-[11px] text-zinc-500 mt-1">
-                Enter a new password to change the admin login password (minimum 6 characters).
-              </p>
-            </div>
-
-            {/* 10-Minute Delivery Auto-Remove / Timeout Settings */}
+            {/* Delivery Auto-Remove / Timeout Settings */}
             <div className="p-3.5 rounded-2xl bg-gradient-to-br from-rose-950/20 via-zinc-900/80 to-zinc-950/90 border border-rose-500/30 space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -1236,7 +1323,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   </div>
                   <div>
                     <div className="text-xs font-bold text-white">Delivery File Auto-Delete (Timeout)</div>
-                    <div className="text-[11px] text-zinc-400">Files delivered will automatically be removed from chat after timeout</div>
                   </div>
                 </div>
                 <label className="relative inline-flex items-center cursor-pointer">
@@ -1253,8 +1339,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               {botSettings.autoDeleteDeliveryEnabled && (
                 <div className="space-y-2.5 pt-1 border-t border-rose-500/20 text-xs">
                   <div>
-                    <label className="block text-[11px] font-medium text-zinc-300 mb-1">
-                      Delivery Timeout in Minutes
+                    <label className="block text-[11px] font-semibold text-zinc-300 mb-1">
+                      Delivery Timeout (Minutes)
                     </label>
                     <div className="flex items-center gap-2">
                       <input
@@ -1263,13 +1349,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                         max="1440"
                         value={botSettings.deliveryTimeoutMinutes}
                         onChange={(e) => setBotSettings({ ...botSettings, deliveryTimeoutMinutes: Math.max(1, Number(e.target.value) || 10) })}
+                        placeholder="e.g. 10"
                         className="w-24 bg-zinc-900 border border-zinc-700 rounded-xl py-1.5 px-3 text-xs text-white font-mono font-bold"
                       />
-                      <span className="text-rose-400 font-semibold text-xs">Minutes (Default: 10 mins)</span>
+                      <span className="text-rose-400 font-semibold text-xs">Minutes</span>
                     </div>
-                    <p className="text-[10px] text-zinc-400 mt-1">
-                      Files sent to users in private chat will be deleted automatically {botSettings.deliveryTimeoutMinutes || 10} minutes after delivery.
-                    </p>
                   </div>
 
                   <label className="flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer pt-1">
@@ -1285,50 +1369,749 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               )}
             </div>
 
+            {/* Bot Maintenance Mode Toggle & Editable Custom Maintenance Notice */}
+            <div className="p-3.5 rounded-2xl bg-gradient-to-br from-amber-950/25 via-zinc-900/80 to-zinc-950/90 border border-amber-500/30 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400">
+                    <Shield className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <span>Bot Maintenance Mode</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                        botSettings.maintenanceMode 
+                          ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' 
+                          : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      }`}>
+                        {botSettings.maintenanceMode ? 'ACTIVE (OFFLINE)' : 'ONLINE'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={botSettings.maintenanceMode}
+                    onChange={(e) => setBotSettings({ ...botSettings, maintenanceMode: e.target.checked })}
+                    className="sr-only peer"
+                  />
+                  <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500"></div>
+                </label>
+              </div>
+
+              {/* Maintenance Notice Customization Input with Dynamic Variable Support */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-semibold text-zinc-300">
+                    Maintenance Notice
+                  </label>
+                  <span className="text-[10px] text-amber-400 font-mono">Dynamic Tags</span>
+                </div>
+                <textarea
+                  rows={2}
+                  value={botSettings.maintenanceNotice || ''}
+                  onChange={(e) => setBotSettings({ ...botSettings, maintenanceNotice: e.target.value })}
+                  placeholder="e.g. ⚠️ Hello @username! {bot_name} is under maintenance. User ID: {user_id}"
+                  className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-2.5 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-amber-500"
+                />
+                <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+                  {[
+                    { tag: '@username', label: '@username' },
+                    { tag: '{user_id}', label: '{user_id}' },
+                    { tag: '{bot_name}', label: '{bot_name}' },
+                    { tag: '{name}', label: '{name}' },
+                  ].map(({ tag, label }) => (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => {
+                        const current = botSettings.maintenanceNotice || '';
+                        const spacer = current.length > 0 && !current.endsWith(' ') ? ' ' : '';
+                        setBotSettings({
+                          ...botSettings,
+                          maintenanceNotice: `${current}${spacer}${tag}`
+                        });
+                      }}
+                      className="px-2 py-0.5 rounded-md bg-zinc-800/90 hover:bg-zinc-700 border border-zinc-700/80 text-[10px] font-mono text-zinc-300 hover:text-white transition-colors cursor-pointer"
+                      title={`Click to insert ${tag}`}
+                    >
+                      +{label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Force Sub / Mandatory Channel Join System */}
+            <div className="p-3.5 rounded-2xl bg-gradient-to-br from-indigo-950/25 via-zinc-900/80 to-zinc-950/90 border border-indigo-500/30 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+                    <Radio className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <span>Mandatory Channel Join (Force Sub)</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                        botSettings.forceSubEnabled 
+                          ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40' 
+                          : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                      }`}>
+                        {botSettings.forceSubEnabled ? 'ACTIVE (FORCED)' : 'OFF'}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-zinc-400 mt-0.5">
+                      Require users to subscribe to specific channels/groups before accessing bot files
+                    </p>
+                  </div>
+                </div>
+
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={botSettings.forceSubEnabled || false}
+                    onChange={(e) => setBotSettings((prev: any) => ({ ...prev, forceSubEnabled: e.target.checked }))}
+                    className="sr-only peer"
+                  />
+                  <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-500"></div>
+                </label>
+              </div>
+
+              {botSettings.forceSubEnabled && (
+                <div className="space-y-3 pt-2 border-t border-indigo-500/20">
+                  {/* List of currently required channels */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="text-[11px] font-semibold text-zinc-300">
+                        Required Channels / Groups ({(botSettings.requiredChannels || []).length})
+                      </label>
+                      <span className="text-[10px] text-zinc-500">Bot must be admin in channels</span>
+                    </div>
+
+                    {(!botSettings.requiredChannels || botSettings.requiredChannels.length === 0) ? (
+                      <div className="p-3 rounded-xl bg-zinc-950/60 border border-zinc-800/80 text-center text-xs text-zinc-500">
+                        No channels added yet. Add at least one channel below.
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {botSettings.requiredChannels.map((ch: any) => (
+                          <div
+                            key={ch.id}
+                            className="p-2.5 rounded-xl bg-zinc-950/70 border border-zinc-800 flex items-center justify-between gap-2 text-xs"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="font-bold text-white flex items-center gap-1.5 truncate">
+                                <span>{ch.name}</span>
+                                <span className="text-[10px] font-mono text-indigo-400 bg-indigo-500/10 px-1.5 py-0.2 rounded border border-indigo-500/20 truncate">
+                                  {ch.chatId}
+                                </span>
+                              </div>
+                              {ch.inviteLink && (
+                                <a
+                                  href={ch.inviteLink}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[10px] text-zinc-400 hover:text-indigo-300 truncate block transition-colors mt-0.5"
+                                >
+                                  {ch.inviteLink}
+                                </a>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveForceSubChannel(ch.id)}
+                              className="p-1.5 rounded-lg bg-zinc-800 hover:bg-rose-500/20 text-zinc-400 hover:text-rose-400 transition-colors cursor-pointer shrink-0"
+                              title="Remove Channel"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Add New Channel Form */}
+                  <div className="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-2">
+                    <div className="text-[11px] font-bold text-indigo-300 flex items-center gap-1">
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Add Required Channel / Group</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <input
+                        type="text"
+                        value={newChannelName}
+                        onChange={(e) => setNewChannelName(e.target.value)}
+                        placeholder="Channel Name (e.g. Official Channel)"
+                        className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+                      />
+                      <input
+                        type="text"
+                        value={newChannelChatId}
+                        onChange={(e) => setNewChannelChatId(e.target.value)}
+                        placeholder="Chat ID or Username (@channel or -100xxx)"
+                        className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={newChannelInviteLink}
+                        onChange={(e) => setNewChannelInviteLink(e.target.value)}
+                        placeholder="Invite Link (e.g. https://t.me/channel or https://t.me/+join)"
+                        className="flex-1 bg-zinc-950 border border-zinc-700/80 rounded-lg p-2 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleAddForceSubChannel}
+                        className="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1 transition-all cursor-pointer active:scale-95 shadow-sm shrink-0"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Add</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Quick Save Force Sub Button */}
+                  <div className="pt-2 border-t border-indigo-500/20 flex items-center justify-between gap-2">
+                    <span className="text-[10px] text-zinc-400">
+                      {(botSettings.requiredChannels || []).length} channel(s) in list
+                    </span>
+                    <button
+                      type="button"
+                      disabled={settingSaving}
+                      onClick={() => handleSaveSettings()}
+                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-sm disabled:opacity-50"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      <span>{settingSaving ? 'Saving...' : 'Save Channels'}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
             <button
               type="submit"
               disabled={settingSaving}
               className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-blue-600/30 disabled:opacity-50 transition-colors"
             >
-              {settingSaving ? 'Saving...' : 'Save Configuration & Password'}
+              {settingSaving ? 'Saving...' : 'Save Configuration'}
             </button>
           </form>
 
-          {/* Quick Diagnostics & Message Templates Navigation */}
-          <div className="pt-3 border-t border-zinc-800/80 space-y-2">
-            <div className="text-xs font-semibold text-zinc-300">Message Templates &amp; Actions:</div>
-            
-            {/* Quick Link into Message Templates */}
+          {/* Broadcast Notification System Link */}
+          <div className="p-3.5 rounded-2xl bg-gradient-to-br from-red-950/30 via-zinc-900 to-zinc-950 border border-red-500/35 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-red-500/20 text-red-400 border border-red-500/30 flex items-center justify-center">
+                  <Megaphone className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                    <span>Broadcast System</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-red-500/20 text-red-300 border border-red-500/30 font-semibold font-mono">
+                      {broadcastUsersCount} users
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <button
               type="button"
-              onClick={() => setSubView('templates')}
-              className="w-full p-2.5 rounded-xl bg-gradient-to-r from-sky-500/15 via-zinc-800 to-indigo-500/15 border border-red-500/30 hover:border-red-500/50 text-white text-xs font-medium flex items-center justify-between cursor-pointer transition-colors shadow-xs"
+              onClick={() => setSubView('broadcast')}
+              className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-red-600 via-rose-600 to-red-600 hover:from-red-500 hover:to-rose-500 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shadow-md shadow-red-600/25 cursor-pointer transition-all active:scale-95"
             >
-              <div className="flex items-center gap-2">
-                <MessageSquare className="w-4 h-4 text-red-400" />
-                <span>Edit All Bot Message Templates</span>
-              </div>
-              <ChevronRight className="w-4 h-4 text-red-400" />
+              <Megaphone className="w-3.5 h-3.5" />
+              <span>Open Broadcast Console ({broadcastUsersCount} Reachable Users)</span>
+              <ChevronRight className="w-3.5 h-3.5 ml-auto" />
             </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
-            <div className="grid grid-cols-2 gap-2 pt-1">
-              <button
-                type="button"
-                onClick={handleCheckBotInfo}
-                className="p-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer"
-              >
+  // -------------------------------------------------------------
+  // SUB-VIEW: WEBHOOK SETUP (Standalone Section)
+  // -------------------------------------------------------------
+  if (subView === 'webhook') {
+    return (
+      <div className="space-y-4 pb-28">
+        <div className="flex items-center justify-between">
+          <button
+            onClick={() => setSubView('menu')}
+            className="text-xs text-red-400 hover:text-sky-300 font-medium cursor-pointer"
+          >
+            ← Back to More
+          </button>
+          <span className="text-xs text-zinc-400">Webhook Setup</span>
+        </div>
+
+        {webhookStatusMsg && (
+          <div
+            className={`p-3 rounded-xl text-xs flex items-start gap-2 ${
+              webhookStatusMsg.type === 'success'
+                ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-300'
+                : 'bg-rose-500/10 border border-rose-500/20 text-rose-300'
+            }`}
+          >
+            {webhookStatusMsg.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+            )}
+            <div className="space-y-1">
+              <div className="font-semibold">{webhookStatusMsg.text}</div>
+              {webhookStatusMsg.details && (
+                <div className="text-[11px] font-mono text-zinc-300 bg-zinc-950/70 p-2 rounded-lg border border-zinc-800 space-y-0.5">
+                  <div>Bot Name: {webhookStatusMsg.details.first_name}</div>
+                  <div>Username: @{webhookStatusMsg.details.username}</div>
+                  <div>Bot ID: {webhookStatusMsg.details.id}</div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-4">
+          <div>
+            <label className="block text-xs font-semibold text-zinc-300 mb-1">
+              Application Webhook URL
+            </label>
+            <input
+              type="text"
+              value={webhookAppUrl}
+              onChange={(e) => setWebhookAppUrl(e.target.value)}
+              placeholder="e.g. https://your-app-domain.com"
+              className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white font-mono focus:outline-none focus:border-blue-500"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 pt-1">
+            <button
+              type="button"
+              onClick={handleCheckBotInfo}
+              disabled={webhookLoading}
+              className="p-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
+            >
+              {webhookLoading ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
                 <RefreshCw className="w-3.5 h-3.5" />
-                <span>Test Token</span>
-              </button>
+              )}
+              <span>Test Bot Token</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleRegisterWebhook}
+              disabled={webhookLoading}
+              className="p-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-blue-600/30 disabled:opacity-50 transition-colors"
+            >
+              {webhookLoading ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Wifi className="w-3.5 h-3.5" />
+              )}
+              <span>Set Webhook</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------
+  // SUB-VIEW: BROADCAST SYSTEM (Rich Media: Photo, Video, Audio, Voice, Text)
+  // -------------------------------------------------------------
+  if (subView === 'broadcast') {
+    return (
+      <div className="space-y-4 pb-28">
+        {/* Navigation Bar */}
+        <div className="flex items-center justify-between">
+          <button
+            onClick={() => setSubView('settings')}
+            className="text-xs text-red-400 hover:text-sky-300 font-medium flex items-center gap-1 cursor-pointer transition-colors"
+          >
+            <span>← Back to Settings</span>
+          </button>
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-[11px] text-emerald-300 font-semibold">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span>{broadcastUsersCount} Reachable Users</span>
+          </div>
+        </div>
+
+        {/* Broadcast Container */}
+        <div className="glass-panel rounded-3xl p-5 border border-zinc-800 space-y-4 shadow-xl">
+          {/* Header */}
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-red-500/20 to-rose-600/30 text-red-400 border border-red-500/40 flex items-center justify-center shrink-0 shadow-md shadow-red-500/10">
+              <Megaphone className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-bold text-white tracking-tight">Mass Broadcast Notification</h3>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/40 font-mono font-semibold">
+                  All Media
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-400 mt-0.5">
+                Dispatch rich notifications and announcements to all bot users in direct message. Strictly supports all rich media types.
+              </p>
+            </div>
+          </div>
+
+          {/* 1. Media Type Selector */}
+          <div>
+            <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
+              Select Notification Type *
+            </label>
+            <div className="grid grid-cols-5 gap-1.5 p-1 bg-zinc-900 border border-zinc-800 rounded-2xl">
               <button
                 type="button"
-                onClick={handleRegisterWebhook}
-                className="p-2.5 rounded-xl bg-red-500/20 hover:bg-sky-500/30 text-sky-300 border border-red-500/30 text-xs font-medium flex items-center justify-center gap-1.5 cursor-pointer"
+                onClick={() => {
+                  setBroadcastMediaType('text');
+                  setBroadcastFile(null);
+                  setBroadcastMediaUrl('');
+                }}
+                className={`py-2 px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
+                  broadcastMediaType === 'text'
+                    ? 'bg-red-500/20 text-sky-300 border border-red-500/40 shadow-xs'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
               >
-                <Send className="w-3.5 h-3.5" />
-                <span>Set Webhook</span>
+                <MessageSquare className="w-4 h-4" />
+                <span className="text-[11px]">Text</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setBroadcastMediaType('photo')}
+                className={`py-2 px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
+                  broadcastMediaType === 'photo'
+                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 shadow-xs'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                <ImageIcon className="w-4 h-4" />
+                <span className="text-[11px]">Photo</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setBroadcastMediaType('video')}
+                className={`py-2 px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
+                  broadcastMediaType === 'video'
+                    ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-xs'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                <VideoIcon className="w-4 h-4" />
+                <span className="text-[11px]">Video</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setBroadcastMediaType('audio')}
+                className={`py-2 px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
+                  broadcastMediaType === 'audio'
+                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-xs'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                <Music className="w-4 h-4" />
+                <span className="text-[11px]">Audio</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setBroadcastMediaType('voice')}
+                className={`py-2 px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
+                  broadcastMediaType === 'voice'
+                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-xs'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                <Mic className="w-4 h-4" />
+                <span className="text-[11px]">Voice</span>
               </button>
             </div>
+          </div>
+
+          {/* 2. Media Source Selection & File Picker (When mediaType !== 'text') */}
+          {broadcastMediaType !== 'text' && (
+            <div className="p-3.5 rounded-2xl bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                  {broadcastMediaType === 'photo' && <ImageIcon className="w-4 h-4 text-rose-400" />}
+                  {broadcastMediaType === 'video' && <VideoIcon className="w-4 h-4 text-purple-400" />}
+                  {broadcastMediaType === 'audio' && <Music className="w-4 h-4 text-amber-400" />}
+                  {broadcastMediaType === 'voice' && <Mic className="w-4 h-4 text-emerald-400" />}
+                  <span className="capitalize">{broadcastMediaType} Media Source</span>
+                </span>
+
+                <div className="flex bg-zinc-950 p-0.5 rounded-lg border border-zinc-800">
+                  <button
+                    type="button"
+                    onClick={() => setBroadcastMediaSource('upload')}
+                    className={`px-2 py-1 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${
+                      broadcastMediaSource === 'upload'
+                        ? 'bg-red-500/20 text-sky-300 border border-red-500/30'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    Upload File
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBroadcastMediaSource('url')}
+                    className={`px-2 py-1 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${
+                      broadcastMediaSource === 'url'
+                        ? 'bg-red-500/20 text-sky-300 border border-red-500/30'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    URL / File ID
+                  </button>
+                </div>
+              </div>
+
+              {/* Upload from Gallery / Device */}
+              {broadcastMediaSource === 'upload' && (
+                <div className="space-y-2">
+                  <label className="w-full py-4 px-4 rounded-xl border border-dashed border-zinc-700 hover:border-red-500/50 bg-zinc-900/60 hover:bg-zinc-900 flex flex-col items-center justify-center gap-1.5 cursor-pointer transition-all">
+                    <Paperclip className="w-5 h-5 text-red-400" />
+                    <span className="text-xs font-semibold text-white">
+                      {broadcastFile ? broadcastFile.name : `Select ${broadcastMediaType.toUpperCase()} from Device`}
+                    </span>
+                    <span className="text-[10px] text-zinc-400">
+                      {broadcastMediaType === 'photo' && 'Supports JPG, PNG, WEBP (gallery photos)'}
+                      {broadcastMediaType === 'video' && 'Supports MP4, MOV, MKV, WebM video clips'}
+                      {broadcastMediaType === 'audio' && 'Supports MP3, M4A, WAV audio files'}
+                      {broadcastMediaType === 'voice' && 'Supports OGG, MP3, M4A voice notes'}
+                    </span>
+                    <input
+                      type="file"
+                      accept={
+                        broadcastMediaType === 'photo' ? 'image/*' :
+                        broadcastMediaType === 'video' ? 'video/*' :
+                        broadcastMediaType === 'audio' ? 'audio/*' :
+                        'audio/*,.ogg,.mp3,.m4a'
+                      }
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          setBroadcastFile(file);
+                        }
+                      }}
+                    />
+                  </label>
+
+                  {broadcastFile && (
+                    <div className="flex items-center justify-between p-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-xs">
+                      <div className="flex items-center gap-2 min-w-0 pr-2">
+                        {broadcastMediaType === 'photo' && <ImageIcon className="w-4 h-4 text-rose-400 shrink-0" />}
+                        {broadcastMediaType === 'video' && <VideoIcon className="w-4 h-4 text-purple-400 shrink-0" />}
+                        {broadcastMediaType === 'audio' && <Music className="w-4 h-4 text-amber-400 shrink-0" />}
+                        {broadcastMediaType === 'voice' && <Mic className="w-4 h-4 text-emerald-400 shrink-0" />}
+                        <div className="truncate text-white font-medium">
+                          {broadcastFile.name}
+                        </div>
+                        <span className="text-[10px] text-zinc-400 font-mono shrink-0">
+                          ({(broadcastFile.size / (1024 * 1024)).toFixed(2)} MB)
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setBroadcastFile(null)}
+                        className="text-rose-400 hover:text-rose-300 text-[11px] font-semibold cursor-pointer shrink-0"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* URL or Telegram File ID input */}
+              {broadcastMediaSource === 'url' && (
+                <div>
+                  <input
+                    type="text"
+                    value={broadcastMediaUrl}
+                    onChange={(e) => setBroadcastMediaUrl(e.target.value)}
+                    placeholder={`Enter ${broadcastMediaType} URL or Telegram file_id...`}
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white font-mono focus:outline-none focus:border-red-500 placeholder:text-zinc-600"
+                  />
+                  <p className="text-[10px] text-zinc-400 mt-1">
+                    Direct public media URL or pre-existing Telegram file_id.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 3. Notification Message / Caption Textarea */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-zinc-300">
+                {broadcastMediaType === 'text' ? 'Announcement Message *' : 'Media Caption (Optional)'}
+              </label>
+              <span className="text-[11px] text-zinc-500 font-mono">
+                {broadcastMessage.length} characters
+              </span>
+            </div>
+
+            <textarea
+              rows={4}
+              value={broadcastMessage}
+              onChange={(e) => setBroadcastMessage(e.target.value)}
+              placeholder={
+                broadcastMediaType === 'text'
+                  ? 'Write your announcement message here... (HTML tags <b>, <i>, <code> supported)'
+                  : 'Add an optional caption for this media...'
+              }
+              className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-3 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/30 transition-colors"
+            />
+
+            {/* Formatting & Placeholder Helpers */}
+            <div className="flex flex-wrap items-center justify-between gap-1 pt-1">
+              <div className="flex flex-wrap gap-1">
+                {['user_name', 'user_id', 'bot_name'].map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => setBroadcastMessage((prev) => `${prev} {${v}}`)}
+                    className="bg-zinc-800 border border-zinc-700/80 px-1.5 py-0.5 rounded text-red-400 text-[10px] font-mono hover:bg-zinc-700 cursor-pointer"
+                  >
+                    +{`{${v}}`}
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-1 text-[10px] text-zinc-400">
+                <button
+                  type="button"
+                  onClick={() => setBroadcastMessage((prev) => `${prev}<b>bold text</b>`)}
+                  className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-bold"
+                >
+                  B
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBroadcastMessage((prev) => `${prev}<i>italic text</i>`)}
+                  className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 italic"
+                >
+                  I
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBroadcastMessage((prev) => `${prev}<code>code</code>`)}
+                  className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-mono"
+                >
+                  &lt;/&gt;
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* 4. Broadcast Options (Pin Message) */}
+          <div className="p-3 rounded-2xl bg-zinc-900/80 border border-zinc-800 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg bg-zinc-800 flex items-center justify-center text-zinc-300">
+                <Pin className="w-3.5 h-3.5" />
+              </div>
+              <div>
+                <div className="text-xs font-semibold text-white">Pin Message</div>
+                <div className="text-[10px] text-zinc-400">Pin notification at the top of user chat</div>
+              </div>
+            </div>
+
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={broadcastPin}
+                onChange={(e) => setBroadcastPin(e.target.checked)}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-red-500"></div>
+            </label>
+          </div>
+
+          {/* 5. Result Banner */}
+          {broadcastResult && (
+            <div
+              className={`p-3.5 rounded-2xl text-xs space-y-1.5 animate-in fade-in duration-200 ${
+                broadcastResult.type === 'success'
+                  ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-300'
+                  : 'bg-rose-500/10 border border-rose-500/30 text-rose-300'
+              }`}
+            >
+              <div className="flex items-center gap-2 font-semibold">
+                {broadcastResult.type === 'success' ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                )}
+                <span>{broadcastResult.text}</span>
+              </div>
+              {broadcastResult.details && (
+                <div className="text-[11px] text-zinc-300 font-mono pt-1 border-t border-emerald-500/20 flex items-center gap-4">
+                  <span>Total: <b>{broadcastResult.details.total}</b></span>
+                  <span className="text-emerald-400">Delivered: <b>{broadcastResult.details.sent}</b></span>
+                  {broadcastResult.details.failed > 0 && (
+                    <span className="text-rose-400">Failed / Blocked: <b>{broadcastResult.details.failed}</b></span>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 6. Action Buttons */}
+          <div className="pt-2 flex flex-col sm:flex-row gap-2">
+            <button
+              type="button"
+              onClick={handleTestBroadcast}
+              disabled={broadcastSending || broadcastTesting}
+              className="py-2.5 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer border border-zinc-700 transition-colors disabled:opacity-50"
+            >
+              {broadcastTesting ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Sending Test...</span>
+                </>
+              ) : (
+                <>
+                  <Send className="w-3.5 h-3.5" />
+                  <span>Test to Me</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={handleSendBroadcast}
+              disabled={broadcastSending || broadcastTesting}
+              className="flex-1 py-2.5 px-4 rounded-xl bg-gradient-to-r from-red-600 via-rose-600 to-red-600 hover:from-red-500 hover:to-rose-500 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-red-600/30 transition-all disabled:opacity-50 active:scale-95"
+            >
+              {broadcastSending ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Broadcasting to {broadcastUsersCount} users...</span>
+                </>
+              ) : (
+                <>
+                  <Megaphone className="w-4 h-4" />
+                  <span>Broadcast to All Users ({broadcastUsersCount})</span>
+                </>
+              )}
+            </button>
           </div>
         </div>
       </div>

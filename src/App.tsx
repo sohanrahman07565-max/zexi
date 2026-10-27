@@ -12,7 +12,9 @@ import { DesignTab } from './components/DesignTab';
 import { MoreTab } from './components/MoreTab';
 import { BottomNav } from './components/BottomNav';
 import { BackgroundEffects } from './components/BackgroundEffects';
-import { Shield, Sparkles, Send, Bell } from 'lucide-react';
+import { DynamicWeatherBackground } from './components/DynamicWeatherBackground';
+import { ToastContainer } from './components/ToastContainer';
+import { Shield, Sparkles, Send, Bell, Crown, ShieldCheck } from 'lucide-react';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<AdminUser | null>(null);
@@ -53,6 +55,10 @@ export default function App() {
   const [adminsCount, setAdminsCount] = useState(1);
   const [trackedCount, setTrackedCount] = useState(0);
   const [totalUsers, setTotalUsers] = useState<number>(0);
+  const [onlineUsers, setOnlineUsers] = useState<number>(0);
+  const [offlineUsers, setOfflineUsers] = useState<number>(0);
+  const [botDisplayName, setBotDisplayName] = useState<string>('');
+  const [isBotConnected, setIsBotConnected] = useState<boolean>(false);
 
   // Initial Load
   useEffect(() => {
@@ -83,23 +89,44 @@ export default function App() {
 
   const refreshAllData = useCallback(async () => {
     try {
-      const [loadedItems, loadedTemplates, loadedSettings, loadedDesign, loadedAdmins, loadedCleanup, loadedStats] = await Promise.all([
+      const [loadedItems, loadedTemplates, loadedSettings, loadedDesign, loadedAdmins, loadedCleanup, loadedStats, loadedBotInfo] = await Promise.all([
         api.getItems().catch(() => []),
         api.getTemplates().catch(() => ({})),
         api.getSettings().catch(() => null),
         api.getDesign().catch(() => null),
         api.getAdmins().catch(() => []),
         api.getCleanupStatus().catch(() => null),
-        api.getStats().catch(() => null)
+        api.getStats().catch(() => null),
+        api.getBotInfo().catch(() => null)
       ]);
 
       setItems(loadedItems);
       setTemplates(loadedTemplates);
-      if (loadedSettings) setSettings(loadedSettings);
+      if (loadedSettings) {
+        setSettings(loadedSettings);
+      }
+
+      // Check bot connection strictly
+      const hasBotToken = Boolean(loadedSettings?.botToken || loadedSettings?.hasToken);
+      if (hasBotToken && loadedBotInfo?.ok && loadedBotInfo?.result) {
+        setIsBotConnected(true);
+        const name =
+          loadedBotInfo.result.first_name ||
+          (loadedBotInfo.result.username ? `@${loadedBotInfo.result.username}` : (loadedSettings?.botUsername ? `@${loadedSettings.botUsername.replace(/^@/, '')}` : 'Bot'));
+        setBotDisplayName(name);
+      } else {
+        setIsBotConnected(false);
+        setBotDisplayName('');
+      }
+
       if (loadedDesign) setDesign(loadedDesign);
       setAdminsCount(loadedAdmins.length || 1);
       if (loadedCleanup) setTrackedCount(loadedCleanup.trackedMessagesCount || 0);
-      if (loadedStats) setTotalUsers(loadedStats.totalUsers || 0);
+      if (loadedStats) {
+        setTotalUsers(loadedStats.totalUsers || 0);
+        setOnlineUsers(loadedStats.onlineUsers ?? 0);
+        setOfflineUsers(loadedStats.offlineUsers ?? Math.max(0, (loadedStats.totalUsers || 0) - (loadedStats.onlineUsers || 0)));
+      }
     } catch (err) {
       console.error('Error loading app data:', err);
     }
@@ -108,6 +135,58 @@ export default function App() {
   const handleNavigate = useCallback((tab: string) => {
     setCurrentTab(tab);
   }, []);
+
+  // Real-time active bot session status checker
+  const checkBotSession = useCallback(async () => {
+    try {
+      const [loadedSettings, loadedBotInfo] = await Promise.all([
+        api.getSettings().catch(() => null),
+        api.getBotInfo().catch(() => null)
+      ]);
+
+      const hasBotToken = Boolean(loadedSettings?.botToken || loadedSettings?.hasToken);
+      if (hasBotToken && loadedBotInfo?.ok && loadedBotInfo?.result) {
+        setIsBotConnected(true);
+        const name =
+          loadedBotInfo.result.first_name ||
+          (loadedBotInfo.result.username ? `@${loadedBotInfo.result.username}` : (loadedSettings?.botUsername ? `@${loadedSettings.botUsername.replace(/^@/, '')}` : 'Bot'));
+        setBotDisplayName(name);
+      } else {
+        setIsBotConnected(false);
+        setBotDisplayName('');
+      }
+    } catch {
+      setIsBotConnected(false);
+      setBotDisplayName('');
+    }
+  }, []);
+
+  // Periodic real-time active bot session polling + window focus sync
+  useEffect(() => {
+    if (!currentUser) return;
+    
+    // Check immediately
+    checkBotSession();
+
+    // Check periodically in the background every 5 seconds for real-time accuracy
+    const botInterval = setInterval(() => {
+      if (typeof navigator === 'undefined' || navigator.onLine) {
+        checkBotSession();
+      }
+    }, 5000);
+
+    const handleFocus = () => {
+      if (typeof navigator === 'undefined' || navigator.onLine) {
+        checkBotSession();
+      }
+    };
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      clearInterval(botInterval);
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, [currentUser, checkBotSession]);
 
   // Continuous Automatic Network Monitoring
   const checkNetworkConnection = async (): Promise<boolean> => {
@@ -218,6 +297,7 @@ export default function App() {
             refreshAllData();
           }}
         />
+        <ToastContainer />
       </div>
     );
   }
@@ -225,37 +305,32 @@ export default function App() {
   // Authenticated Android Mobile View
   return (
     <div className="relative min-h-screen w-full bg-[#060608] text-white selection:bg-red-500 selection:text-white flex justify-center overflow-x-hidden overflow-y-auto">
-      {/* Hardware-Accelerated Floating Ambient Red Glow Layer (Matching Login Aesthetic) */}
+      {/* Dynamic Real-Time Weather Background (Interior Admin Panel) */}
+      <DynamicWeatherBackground />
+
+      {/* Hardware-Accelerated Floating Ambient Accent Layer */}
       <div 
         className="fixed inset-0 pointer-events-none z-0 overflow-hidden"
         style={{
-          background: `radial-gradient(circle at 50% 12%, rgba(239,68,68,0.14) 0%, rgba(220,38,38,0.06) 45%, rgba(6,6,8,0.98) 85%)`,
+          background: `radial-gradient(circle at 50% 12%, rgba(239,68,68,0.08) 0%, rgba(220,38,38,0.03) 45%, transparent 75%)`,
           contain: 'strict',
           transform: 'translate3d(0, 0, 0)'
         }}
       >
         {/* Upper Floating Glowing Orb */}
         <div 
-          className="absolute -top-24 left-1/4 w-[420px] h-[420px] rounded-full blur-[100px] pointer-events-none animate-ambient-1"
-          style={{ background: 'rgba(239, 68, 68, 0.16)', willChange: 'transform, opacity' }}
+          className="absolute -top-24 left-1/4 w-[420px] h-[420px] rounded-full blur-[100px] pointer-events-none opacity-40 animate-ambient-1"
+          style={{ background: 'rgba(239, 68, 68, 0.12)', willChange: 'transform, opacity' }}
         />
         {/* Lower Floating Glowing Orb */}
         <div 
-          className="absolute bottom-12 -right-24 w-[380px] h-[380px] rounded-full blur-[90px] pointer-events-none animate-ambient-2"
-          style={{ background: 'rgba(225, 29, 72, 0.14)', willChange: 'transform, opacity' }}
+          className="absolute bottom-12 -right-24 w-[380px] h-[380px] rounded-full blur-[90px] pointer-events-none opacity-40 animate-ambient-2"
+          style={{ background: 'rgba(225, 29, 72, 0.10)', willChange: 'transform, opacity' }}
         />
         {/* Central Floating Ambient Glow */}
         <div 
-          className="absolute top-1/2 left-1/3 -translate-x-1/2 -translate-y-1/2 w-[340px] h-[340px] rounded-full blur-[80px] pointer-events-none animate-ambient-3"
-          style={{ background: 'rgba(220, 38, 38, 0.12)', willChange: 'transform, opacity' }}
-        />
-        {/* Subtle tech background grid with red accent matching Login */}
-        <div 
-          className="absolute inset-0 opacity-[0.035] pointer-events-none"
-          style={{
-            backgroundImage: `linear-gradient(to right, rgba(239,68,68,0.6) 1px, transparent 1px), linear-gradient(to bottom, rgba(239,68,68,0.6) 1px, transparent 1px)`,
-            backgroundSize: '36px 36px'
-          }}
+          className="absolute top-1/2 left-1/3 -translate-x-1/2 -translate-y-1/2 w-[340px] h-[340px] rounded-full blur-[80px] pointer-events-none opacity-30 animate-ambient-3"
+          style={{ background: 'rgba(220, 38, 38, 0.08)', willChange: 'transform, opacity' }}
         />
       </div>
 
@@ -272,9 +347,9 @@ export default function App() {
 
       {/* Mobile Screen Container */}
       <div className="relative z-10 w-full max-w-md min-h-screen flex flex-col px-4 pt-1 pb-28 sm:pb-32">
-        {/* Top App Bar (Android Material 3 Clean Header) */}
-        <header className="sticky top-0 z-30 flex items-center justify-between py-3 mb-2 border-b border-zinc-800/80 bg-[#060608]/95 backdrop-blur-xl shrink-0">
-          <div className="flex items-center gap-2.5">
+        {/* Top App Bar (Curved Card / Capsule Header Shape with Both Sides Rounded) */}
+        <header className="sticky top-1.5 z-30 flex items-center justify-between px-3.5 py-2.5 mb-3 rounded-2xl sm:rounded-3xl border border-zinc-800/80 bg-[#0c0c14]/90 backdrop-blur-xl shadow-[0_10px_25px_-10px_rgba(0,0,0,0.6)] shrink-0 transition-all">
+          <div className="flex items-center gap-2.5 min-w-0 pr-2">
             <div
               className="w-8 h-8 rounded-xl flex items-center justify-center text-white font-bold shadow-md overflow-hidden shrink-0 relative"
               style={{
@@ -302,8 +377,8 @@ export default function App() {
                 <Send className="w-4 h-4" />
               )}
             </div>
-            <div>
-              <h1 className="text-sm font-bold tracking-tight text-white capitalize">
+            <div className="min-w-0">
+              <h1 className="text-sm font-bold tracking-tight text-white capitalize leading-tight truncate">
                 {currentTab === 'dashboard'
                   ? 'Dashboard'
                   : currentTab === 'files'
@@ -316,19 +391,39 @@ export default function App() {
                   ? 'App Design'
                   : 'More Options'}
               </h1>
-              <div className="flex items-center gap-1.5 text-[10px] text-zinc-400">
-                <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.8)]" />
-                <span>Exact Match Active</span>
+              <div className="flex items-center gap-1.5 text-[10px] mt-0.5 min-w-0">
+                {isBotConnected ? (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)] shrink-0" />
+                    <span className="truncate font-medium text-zinc-300">
+                      Connected to {botDisplayName || 'Bot'}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className="w-1.5 h-1.5 rounded-full bg-zinc-500 shadow-[0_0_4px_rgba(161,161,170,0.5)] shrink-0" />
+                    <span className="truncate font-medium text-zinc-400">
+                      Not Connected
+                    </span>
+                  </>
+                )}
               </div>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          {/* Top-Right Header Area: Role Badge */}
+          <div className="flex items-center shrink-0">
             <button
+              type="button"
               onClick={() => setCurrentTab('more')}
-              className="w-8 h-8 rounded-xl bg-[#13131c] border border-zinc-800 flex items-center justify-center text-zinc-400 hover:text-white hover:border-red-500/40 transition-colors cursor-pointer touch-press"
+              title={`Logged in as ${currentUser.role === 'owner' ? 'Owner' : 'Administrator'} (${currentUser.name})`}
+              className={`px-3 py-1.5 rounded-full border text-xs font-bold tracking-wide transition-all cursor-pointer active:scale-95 shadow-xs ${
+                currentUser.role === 'owner'
+                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25 shadow-[0_0_12px_rgba(245,158,11,0.2)]'
+                  : 'bg-cyan-500/15 border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/25 shadow-[0_0_12px_rgba(6,182,212,0.2)]'
+              }`}
             >
-              <span className="text-xs font-semibold">{currentUser.name.charAt(0)}</span>
+              {currentUser.role === 'owner' ? 'Owner' : 'Admin'}
             </button>
           </div>
         </header>
@@ -342,6 +437,8 @@ export default function App() {
               adminsCount={adminsCount}
               trackedCount={trackedCount}
               totalUsers={totalUsers}
+              onlineUsers={onlineUsers}
+              offlineUsers={offlineUsers}
               settings={settings}
               onNavigate={handleNavigate}
               onOpenAddModal={() => setCurrentTab('files')}
@@ -398,6 +495,9 @@ export default function App() {
           onSelectTab={handleNavigate}
           accentColor={design.primaryColor}
         />
+
+        {/* Global Slide-Down Error & Success Toasts */}
+        <ToastContainer />
       </div>
     </div>
   );

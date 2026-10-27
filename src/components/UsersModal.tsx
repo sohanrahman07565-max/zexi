@@ -131,14 +131,14 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
       className="fixed inset-0 z-50 flex items-center justify-center p-3.5 sm:p-5 pb-24 sm:pb-28 bg-black/85 backdrop-blur-md animate-in fade-in duration-200 overscroll-contain select-none"
     >
       <div 
-        className="w-full max-w-lg max-h-[80vh] sm:max-h-[82vh] flex flex-col rounded-3xl bg-[#0c0c13]/98 border border-red-500/30 shadow-[0_0_60px_-10px_rgba(239,68,68,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] overflow-hidden relative animate-in zoom-in-95 duration-200 select-text"
+        className="w-full max-w-lg max-h-[85vh] sm:max-h-[calc(100vh-120px)] flex flex-col rounded-3xl bg-[#0c0c13]/98 border border-cyan-500/30 shadow-[0_0_60px_-10px_rgba(6,182,212,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] overflow-hidden relative animate-in zoom-in-95 duration-200 select-text"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Subtle top card border glow accent */}
         <div 
           className="absolute top-0 left-1/2 -translate-x-1/2 w-48 h-[1.5px] pointer-events-none"
           style={{
-            background: 'linear-gradient(90deg, transparent, #ef4444, transparent)'
+            background: 'linear-gradient(90deg, transparent, #06b6d4, transparent)'
           }}
         />
 
@@ -232,7 +232,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
         </div>
 
         {/* Users List Body (Scrollable Middle Area) */}
-        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-4 space-y-2.5">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-4 space-y-2.5 pb-[90px]">
           {loading && users.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-zinc-400">
               <RefreshCw className="w-6 h-6 animate-spin text-red-500 mb-2" />
@@ -376,14 +376,10 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
         </div>
 
         {/* Modal Footer (Pinned at bottom) */}
-        <div className="shrink-0 p-3 sm:p-4 border-t border-zinc-800/80 bg-[#0a0a10] flex items-center justify-between text-xs text-zinc-500">
-          <div className="flex items-center gap-1.5">
-            <Sparkles className="w-3.5 h-3.5 text-red-400" />
-            <span>Automatic dynamic UID capture</span>
-          </div>
+        <div className="shrink-0 p-3 sm:p-4 border-t border-zinc-800/80 bg-[#0a0a10] flex items-center justify-end text-xs">
           <button
             onClick={onClose}
-            className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold transition-colors cursor-pointer shadow-md shadow-red-600/30"
+            className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold transition-colors cursor-pointer shadow-md shadow-cyan-600/30 active:scale-95"
           >
             Close
           </button>

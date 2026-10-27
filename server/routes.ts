@@ -439,16 +439,28 @@ apiRouter.get('/items', authenticate, async (_req: Request, res: Response) => {
   return res.json(sanitized);
 });
 
-// GET /api/stats (Metrics including Total User Count)
-apiRouter.get('/stats', authenticate, async (_req: Request, res: Response) => {
-  const totalUsers = await storage.getTotalUserCount();
+// GET /api/stats (Metrics including Total User Count and Online/Offline breakdown)
+apiRouter.get('/stats', authenticate, async (req: Request, res: Response) => {
+  const admin = (req as any).admin as AdminUser | undefined;
+  if (admin && (admin.telegramId || admin.id)) {
+    try {
+      await storage.trackBotUser({
+        id: admin.telegramId || admin.id,
+        firstName: admin.name || 'Admin',
+        username: admin.name ? `@${admin.name.replace(/^@+/, '').trim()}` : undefined
+      });
+    } catch {}
+  }
+  const userStats = await storage.getUserStats();
   const items = await storage.getItems();
   const totalDeliveries = items.reduce((acc, i) => acc + (i.deliveryCount || 0), 0);
   const totalTriggers = items.reduce((acc, i) => acc + (i.triggers?.length || 1), 0);
   const trackedCount = await storage.getTrackedCount();
   const admins = await storage.getAdmins();
   return res.json({
-    totalUsers,
+    totalUsers: userStats.totalUsers,
+    onlineUsers: userStats.onlineUsers,
+    offlineUsers: userStats.offlineUsers,
     totalDeliveries,
     totalTriggers,
     totalItems: items.length,
@@ -543,27 +555,61 @@ apiRouter.post('/items', authenticate, async (req: Request, res: Response) => {
     item.expiresAt = undefined;
   }
 
-  if (type === 'file') {
-    item.telegramFileId = telegramFileId || '';
-    item.uploadedFileId = uploadedFileId || (telegramFileId && (telegramFileId.startsWith('upload_') || telegramFileId.startsWith('local_') || telegramFileId.startsWith('phone_')) ? telegramFileId : undefined);
-    
-    // Compute fileSize from uploaded file on disk if not provided
-    let calculatedSize = fileSize || 0;
-    if (!calculatedSize && item.uploadedFileId) {
-      const up = await storage.getUploadedFile(item.uploadedFileId);
-      if (up) calculatedSize = up.size;
-    }
+  const isTextOnly = req.body.isTextOnly === true || req.body.fileEnabled === false;
+  item.isTextOnly = isTextOnly;
+  item.fileEnabled = !isTextOnly;
+  item.replyMessage = req.body.replyMessage || caption || undefined;
 
-    item.fileType = fileType || 'document';
-    item.fileName = fileName || name;
-    item.fileSize = calculatedSize;
-    item.mimeType = mimeType || '';
-    item.caption = caption || undefined;
+  if (type === 'file') {
+    if (isTextOnly) {
+      item.caption = caption || req.body.replyMessage || undefined;
+      item.fileName = undefined;
+      item.fileType = undefined;
+      item.fileSize = undefined;
+      item.telegramFileId = undefined;
+      item.uploadedFileId = undefined;
+      item.buttonText = buttonText || undefined;
+    } else {
+      item.telegramFileId = telegramFileId || '';
+      item.uploadedFileId = uploadedFileId || (telegramFileId && (telegramFileId.startsWith('upload_') || telegramFileId.startsWith('local_') || telegramFileId.startsWith('phone_')) ? telegramFileId : undefined);
+      
+      // Compute fileSize from uploaded file on disk if not provided
+      let calculatedSize = fileSize || 0;
+      if (!calculatedSize && item.uploadedFileId) {
+        const up = await storage.getUploadedFile(item.uploadedFileId);
+        if (up) calculatedSize = up.size;
+      }
+
+      item.fileType = fileType || 'document';
+      item.fileName = fileName || name;
+      item.fileSize = calculatedSize;
+      item.mimeType = mimeType || '';
+      item.caption = caption || undefined;
+      item.buttonText = buttonText || undefined;
+    }
   } else if (type === 'link') {
     item.url = url;
     item.openMode = (openMode as OpenMode) || 'browser';
     item.buttonText = buttonText || (item.openMode === 'webapp' ? '📱 Launch App' : '🌐 Open Link');
     item.replyMessage = replyMessage || undefined;
+  }
+
+  // Setup Video System configuration
+  item.hasSetupVideo = req.body.hasSetupVideo === true;
+  if (item.hasSetupVideo) {
+    item.setupVideoUrl = req.body.setupVideoUrl ? String(req.body.setupVideoUrl).trim() : undefined;
+    item.setupVideoType = req.body.setupVideoType === 'upload' ? 'upload' : 'url';
+    item.setupVideoFileName = req.body.setupVideoFileName ? String(req.body.setupVideoFileName).trim() : undefined;
+    item.setupVideoButtonText = req.body.setupVideoButtonText ? String(req.body.setupVideoButtonText).trim() : '🎬 Setup Video';
+    item.setupResourceButtonText = req.body.setupResourceButtonText ? String(req.body.setupResourceButtonText).trim() : (item.type === 'file' ? '📁 Get File' : '🔗 Open Link');
+    item.setupVideoMessage = req.body.setupVideoMessage ? String(req.body.setupVideoMessage).trim() : undefined;
+  } else {
+    item.setupVideoUrl = undefined;
+    item.setupVideoType = undefined;
+    item.setupVideoFileName = undefined;
+    item.setupVideoButtonText = undefined;
+    item.setupResourceButtonText = undefined;
+    item.setupVideoMessage = undefined;
   }
 
   await storage.saveItem(item);
@@ -640,10 +686,32 @@ apiRouter.put('/items/:id', authenticate, async (req: Request, res: Response) =>
     url: url !== undefined ? url : existing.url,
     openMode: openMode !== undefined ? openMode : existing.openMode,
     buttonText: buttonText !== undefined ? buttonText : existing.buttonText,
+    replyMessage: req.body.replyMessage !== undefined ? req.body.replyMessage : (caption !== undefined ? caption : existing.replyMessage),
+    isTextOnly: req.body.isTextOnly !== undefined ? Boolean(req.body.isTextOnly) : existing.isTextOnly,
+    fileEnabled: req.body.fileEnabled !== undefined ? Boolean(req.body.fileEnabled) : existing.fileEnabled,
     inFiltersList: inFiltersList !== undefined ? inFiltersList === true : existing.inFiltersList,
     retentionType: finalRetentionType,
     retentionDays: finalRetentionDays,
     expiresAt: finalExpiresAt,
+    hasSetupVideo: req.body.hasSetupVideo !== undefined ? Boolean(req.body.hasSetupVideo) : existing.hasSetupVideo,
+    setupVideoUrl: req.body.hasSetupVideo === false
+      ? undefined
+      : (req.body.setupVideoUrl !== undefined ? (req.body.setupVideoUrl ? String(req.body.setupVideoUrl).trim() : undefined) : existing.setupVideoUrl),
+    setupVideoType: req.body.hasSetupVideo === false
+      ? undefined
+      : (req.body.setupVideoType !== undefined ? req.body.setupVideoType : existing.setupVideoType),
+    setupVideoFileName: req.body.hasSetupVideo === false
+      ? undefined
+      : (req.body.setupVideoFileName !== undefined ? req.body.setupVideoFileName : existing.setupVideoFileName),
+    setupVideoButtonText: req.body.hasSetupVideo === false
+      ? undefined
+      : (req.body.setupVideoButtonText !== undefined ? (req.body.setupVideoButtonText ? String(req.body.setupVideoButtonText).trim() : '🎬 Setup Video') : existing.setupVideoButtonText),
+    setupResourceButtonText: req.body.hasSetupVideo === false
+      ? undefined
+      : (req.body.setupResourceButtonText !== undefined ? (req.body.setupResourceButtonText ? String(req.body.setupResourceButtonText).trim() : (existing.type === 'file' ? '📁 Get File' : '🔗 Open Link')) : existing.setupResourceButtonText),
+    setupVideoMessage: req.body.hasSetupVideo === false
+      ? undefined
+      : (req.body.setupVideoMessage !== undefined ? (req.body.setupVideoMessage ? String(req.body.setupVideoMessage).trim() : undefined) : existing.setupVideoMessage),
     updatedAt: new Date().toISOString()
   };
 
@@ -957,6 +1025,8 @@ apiRouter.get('/settings', authenticate, async (_req: Request, res: Response) =>
   const maskedToken = settings.botToken ? `${settings.botToken.substring(0, 6)}...${settings.botToken.substring(settings.botToken.length - 4)}` : '';
   return res.json({
     ...settings,
+    forceSubEnabled: settings.forceSubEnabled ?? false,
+    requiredChannels: Array.isArray(settings.requiredChannels) ? settings.requiredChannels : [],
     botTokenMasked: maskedToken,
     hasToken: Boolean(settings.botToken)
   });
@@ -974,7 +1044,9 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
     adminNewPassword,
     autoDeleteDeliveryEnabled,
     deliveryTimeoutMinutes,
-    autoDeleteNoticeEnabled
+    autoDeleteNoticeEnabled,
+    forceSubEnabled,
+    requiredChannels
   } = req.body;
   const updates: any = {};
   if (botToken !== undefined && botToken.trim() !== '') updates.botToken = botToken.trim();
@@ -986,6 +1058,23 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
   if (autoDeleteDeliveryEnabled !== undefined) updates.autoDeleteDeliveryEnabled = Boolean(autoDeleteDeliveryEnabled);
   if (deliveryTimeoutMinutes !== undefined) updates.deliveryTimeoutMinutes = Number(deliveryTimeoutMinutes) || 10;
   if (autoDeleteNoticeEnabled !== undefined) updates.autoDeleteNoticeEnabled = Boolean(autoDeleteNoticeEnabled);
+  if (req.body.maintenanceMode !== undefined) updates.maintenanceMode = Boolean(req.body.maintenanceMode);
+  if (req.body.maintenanceNotice !== undefined) updates.maintenanceNotice = String(req.body.maintenanceNotice).trim();
+  if (forceSubEnabled !== undefined) updates.forceSubEnabled = Boolean(forceSubEnabled);
+  if (requiredChannels !== undefined) {
+    if (Array.isArray(requiredChannels)) {
+      updates.requiredChannels = requiredChannels
+        .map((c: any) => ({
+          id: String(c.id || `ch_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`),
+          name: String(c.name || '').trim(),
+          chatId: String(c.chatId || '').trim(),
+          inviteLink: String(c.inviteLink || '').trim()
+        }))
+        .filter((c: any) => c.name && c.chatId);
+    } else {
+      updates.requiredChannels = [];
+    }
+  }
 
   const currentAdmin = (req as any).admin as AdminUser;
   if (adminNewPassword && String(adminNewPassword).trim().length >= 6 && currentAdmin) {
@@ -998,7 +1087,14 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
   }
 
   const newSettings = await storage.updateSettings(updates);
-  return res.json({ success: true, settings: newSettings });
+  return res.json({ 
+    success: true, 
+    settings: {
+      ...newSettings,
+      forceSubEnabled: newSettings.forceSubEnabled ?? false,
+      requiredChannels: Array.isArray(newSettings.requiredChannels) ? newSettings.requiredChannels : []
+    } 
+  });
 });
 
 // POST /api/bot/set-webhook
@@ -1017,6 +1113,140 @@ apiRouter.post('/bot/set-webhook', authenticate, requirePermission('settings_edi
 apiRouter.get('/bot/info', authenticate, async (_req: Request, res: Response) => {
   const result = await TelegramService.callTelegramApi('getMe', {});
   return res.json(result);
+});
+
+// ============================================================================
+// BROADCAST NOTIFICATION SYSTEM (Rich Media: Photo, Video, Audio, Voice, Text)
+// ============================================================================
+
+// POST /api/broadcast (Send broadcast message to all bot users)
+apiRouter.post('/broadcast', authenticate, uploadMiddleware.single('media'), async (req: Request, res: Response) => {
+  try {
+    const { message, mediaType = 'text', mediaUrl, pinMessage } = req.body;
+    const isPinned = pinMessage === true || pinMessage === 'true';
+    const mType = (['text', 'photo', 'video', 'audio', 'voice'].includes(mediaType) ? mediaType : 'text') as 'text' | 'photo' | 'video' | 'audio' | 'voice';
+
+    if (mType === 'text' && (!message || String(message).trim().length === 0)) {
+      return res.status(400).json({ error: 'Notification message text is required' });
+    }
+
+    if (mType !== 'text' && !req.file && (!mediaUrl || String(mediaUrl).trim().length === 0)) {
+      return res.status(400).json({ error: 'Please select a media file to upload or enter a media URL' });
+    }
+
+    const botUsers = await storage.getBotUsers();
+    const activeUsers = botUsers.filter(u => !u.isBanned);
+    const admins = await storage.getAdmins();
+    const settings = await storage.getSettings();
+    const recipientIds = new Set<string>();
+
+    for (const u of activeUsers) {
+      if (u.id) recipientIds.add(String(u.id).trim());
+    }
+    for (const a of admins) {
+      const aid = String(a.telegramId || a.id).trim();
+      if (aid) recipientIds.add(aid);
+    }
+    if (settings.rootAdminId) {
+      recipientIds.add(String(settings.rootAdminId).trim());
+    }
+
+    const targets = Array.from(recipientIds);
+    if (targets.length === 0) {
+      return res.json({
+        success: true,
+        total: 0,
+        sent: 0,
+        failed: 0,
+        message: 'No registered bot users found to broadcast to.'
+      });
+    }
+
+    let sentCount = 0;
+    let failedCount = 0;
+    let cachedTelegramFileId: string | undefined = mediaUrl ? String(mediaUrl).trim() : undefined;
+
+    for (let i = 0; i < targets.length; i++) {
+      const targetChatId = targets[i];
+
+      try {
+        const sendResult = await TelegramService.sendBroadcastMessage({
+          chatId: targetChatId,
+          message: message ? String(message) : undefined,
+          mediaType: mType,
+          mediaUrl: cachedTelegramFileId,
+          fileBuffer: (req.file && !cachedTelegramFileId) ? req.file.buffer : undefined,
+          fileName: req.file?.originalname,
+          mimeType: req.file?.mimetype,
+          pinMessage: isPinned
+        });
+
+        if (sendResult.ok) {
+          sentCount++;
+          if (sendResult.fileId && !cachedTelegramFileId) {
+            cachedTelegramFileId = sendResult.fileId;
+          }
+        } else {
+          failedCount++;
+          console.warn(`[Broadcast] Delivery failed for ${targetChatId}:`, sendResult.description);
+        }
+      } catch (err: any) {
+        failedCount++;
+        console.warn(`[Broadcast] Error sending to ${targetChatId}:`, err?.message);
+      }
+
+      if (i < targets.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 40));
+      }
+    }
+
+    return res.json({
+      success: true,
+      total: targets.length,
+      sent: sentCount,
+      failed: failedCount,
+      message: `Broadcast successfully sent to ${sentCount} out of ${targets.length} users.`
+    });
+  } catch (err: any) {
+    console.error('[Broadcast] Exception during broadcast:', err);
+    return res.status(500).json({ error: err.message || 'Broadcast failed' });
+  }
+});
+
+// POST /api/broadcast/test (Send a single test notification to current admin)
+apiRouter.post('/broadcast/test', authenticate, uploadMiddleware.single('media'), async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).admin as AdminUser;
+    const settings = await storage.getSettings();
+    const adminChatId = admin.telegramId || (admin as any).id || settings.rootAdminId || process.env.ROOT_ADMIN_ID;
+
+    if (!adminChatId) {
+      return res.status(400).json({ error: 'No Telegram ID found for current admin to receive test message' });
+    }
+
+    const { message, mediaType = 'text', mediaUrl, pinMessage } = req.body;
+    const isPinned = pinMessage === true || pinMessage === 'true';
+    const mType = (['text', 'photo', 'video', 'audio', 'voice'].includes(mediaType) ? mediaType : 'text') as 'text' | 'photo' | 'video' | 'audio' | 'voice';
+
+    const sendResult = await TelegramService.sendBroadcastMessage({
+      chatId: adminChatId,
+      message: message ? String(message) : undefined,
+      mediaType: mType,
+      mediaUrl: mediaUrl ? String(mediaUrl).trim() : undefined,
+      fileBuffer: req.file ? req.file.buffer : undefined,
+      fileName: req.file?.originalname,
+      mimeType: req.file?.mimetype,
+      pinMessage: isPinned
+    });
+
+    if (sendResult.ok) {
+      return res.json({ success: true, message: `Test message sent to Telegram ID ${adminChatId}!` });
+    } else {
+      return res.status(400).json({ error: sendResult.description || 'Failed to send test message via Telegram API' });
+    }
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Test broadcast failed' });
+  }
 });
 
 // ============================================================================

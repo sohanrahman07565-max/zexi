@@ -44,6 +44,8 @@ export interface ItemRecord {
   openMode?: 'browser' | 'webapp';
   buttonText?: string;
   replyMessage?: string;
+  isTextOnly?: boolean;
+  fileEnabled?: boolean;
   createdAt: string;
   updatedAt: string;
   status: 'active' | 'disabled';
@@ -52,6 +54,13 @@ export interface ItemRecord {
   retentionType?: 'permanent' | 'temporary';
   retentionDays?: number;
   expiresAt?: string;
+  hasSetupVideo?: boolean;
+  setupVideoUrl?: string;
+  setupVideoType?: 'url' | 'upload';
+  setupVideoFileName?: string;
+  setupVideoButtonText?: string;
+  setupResourceButtonText?: string;
+  setupVideoMessage?: string;
 }
 
 export interface TemplateButton {
@@ -94,6 +103,13 @@ export interface DesignConfig {
   buttonAnimationStyle?: 'orbit' | 'neon' | 'cyber' | 'typing' | 'ripple';
 }
 
+export interface ForceSubChannel {
+  id: string;
+  name: string;
+  chatId: string;
+  inviteLink: string;
+}
+
 export interface BotSettings {
   botToken: string;
   botUsername: string;
@@ -104,8 +120,12 @@ export interface BotSettings {
   autoDeleteDeliveryEnabled?: boolean;
   deliveryTimeoutMinutes?: number;
   autoDeleteNoticeEnabled?: boolean;
+  maintenanceMode?: boolean;
+  maintenanceNotice?: string;
   botTokenMasked?: string;
   hasToken?: boolean;
+  forceSubEnabled?: boolean;
+  requiredChannels?: ForceSubChannel[];
 }
 
 export interface BotUserRecord {
@@ -310,6 +330,8 @@ export const api = {
 
   async getStats(): Promise<{
     totalUsers: number;
+    onlineUsers: number;
+    offlineUsers: number;
     totalDeliveries: number;
     totalTriggers: number;
     totalItems: number;
@@ -447,6 +469,45 @@ export const api = {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to update ban status');
+    return data;
+  },
+
+  // Broadcast System
+  async sendBroadcast(payload: FormData | {
+    message?: string;
+    mediaType: 'text' | 'photo' | 'video' | 'audio' | 'voice';
+    mediaUrl?: string;
+    pinMessage?: boolean;
+  }): Promise<{ success: boolean; total: number; sent: number; failed: number; message: string }> {
+    const isFormData = payload instanceof FormData;
+    const res = await authFetch('/api/broadcast', {
+      method: 'POST',
+      ...(isFormData ? { body: payload } : {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to send broadcast');
+    return data;
+  },
+
+  async sendTestBroadcast(payload: FormData | {
+    message?: string;
+    mediaType: 'text' | 'photo' | 'video' | 'audio' | 'voice';
+    mediaUrl?: string;
+    pinMessage?: boolean;
+  }): Promise<{ success: boolean; message: string }> {
+    const isFormData = payload instanceof FormData;
+    const res = await authFetch('/api/broadcast/test', {
+      method: 'POST',
+      ...(isFormData ? { body: payload } : {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to send test broadcast');
     return data;
   }
 };

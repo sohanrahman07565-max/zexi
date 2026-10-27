@@ -82,6 +82,37 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({
     return () => clearInterval(timer);
   }, []);
 
+  // Dynamic color transformation that smoothly shifts as progress fills up
+  const getDynamicProgressStyle = (p: number) => {
+    if (p < 25) {
+      return {
+        gradient: 'linear-gradient(90deg, #06b6d4, #0ea5e9, #38bdf8)',
+        color: '#38bdf8',
+        glow: '0 0 18px rgba(14, 165, 233, 0.7)'
+      };
+    } else if (p < 50) {
+      return {
+        gradient: 'linear-gradient(90deg, #0ea5e9, #6366f1, #8b5cf6)',
+        color: '#a855f7',
+        glow: '0 0 18px rgba(99, 102, 241, 0.7)'
+      };
+    } else if (p < 75) {
+      return {
+        gradient: 'linear-gradient(90deg, #8b5cf6, #d946ef, #f43f5e)',
+        color: '#f43f5e',
+        glow: '0 0 18px rgba(244, 63, 94, 0.75)'
+      };
+    } else {
+      return {
+        gradient: 'linear-gradient(90deg, #f43f5e, #10b981, #06b6d4)',
+        color: '#10b981',
+        glow: '0 0 20px rgba(16, 185, 129, 0.8)'
+      };
+    }
+  };
+
+  const dynamicColorStyle = getDynamicProgressStyle(progress);
+
   return (
     <div
       className={`fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#050508] text-white overflow-hidden select-none transition-all duration-700 cubic-bezier(0.4,0,0.2,1) ${
@@ -223,24 +254,22 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({
           </p>
         </div>
 
-        {/* Glowing Red Linear Progress Bar (0% -> 100%) */}
-        <div className="w-64 sm:w-72 flex flex-col gap-2">
-          {/* Progress bar track & fill */}
-          <div className="w-full h-1.5 sm:h-2 bg-zinc-900/90 rounded-full border border-red-500/20 overflow-hidden p-[1px] relative">
+        {/* Thick Linear Progress Bar with Smooth Dynamic Color Sequence (No Light Streak) */}
+        <div className="w-64 sm:w-72 flex flex-col gap-2.5">
+          {/* Progress bar track & fill: Slightly thicker, rounded-full with high-end glass container */}
+          <div className="w-full h-3 sm:h-3.5 bg-zinc-950/90 rounded-full border border-zinc-700/60 overflow-hidden p-[2px] relative shadow-[inset_0_2px_4px_rgba(0,0,0,0.8)]">
             <div
-              className="h-full rounded-full transition-all duration-75 ease-out relative"
+              className="h-full rounded-full relative"
               style={{
                 width: `${progress}%`,
-                background: `linear-gradient(90deg, #dc2626, ${accentColor}, #fb7185)`,
-                boxShadow: `0 0 14px ${accentColor}`
+                background: dynamicColorStyle.gradient,
+                boxShadow: dynamicColorStyle.glow,
+                transition: 'width 75ms linear, background 350ms ease, box-shadow 350ms ease'
               }}
-            >
-              {/* Animated Sheen on the progress bar */}
-              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/40 to-transparent animate-[cyber-sheen_1.5s_infinite]" />
-            </div>
+            />
           </div>
 
-          {/* Percentage and Status Indicator */}
+          {/* Percentage and Status Indicator with Dynamic Color Matching */}
           <div className="flex items-center justify-between text-[11px] font-mono tracking-wider">
             <span className="text-zinc-400 text-[10px] truncate max-w-[200px]">
               {statusText}
@@ -248,8 +277,9 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({
             <span
               className="font-bold shrink-0 ml-2"
               style={{
-                color: accentColor,
-                textShadow: `0 0 10px ${accentColor}80`
+                color: dynamicColorStyle.color,
+                textShadow: `0 0 10px ${dynamicColorStyle.color}80`,
+                transition: 'color 350ms ease, text-shadow 350ms ease'
               }}
             >
               {progress}%

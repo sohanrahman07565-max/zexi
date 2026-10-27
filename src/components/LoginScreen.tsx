@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { api, AdminUser } from '../lib/api';
+import { toast } from '../lib/toast';
 import { AlertCircle, Eye, EyeOff, ShieldCheck } from 'lucide-react';
 
 interface LoginScreenProps {
@@ -68,7 +69,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
     const cleanPass = password.trim();
 
     if (!cleanUser || !cleanPass) {
-      setError('Please enter your Admin Name and Password');
+      const msg = 'Please enter your Admin Name and Password';
+      setError(msg);
+      toast.error(msg);
       return;
     }
 
@@ -78,14 +81,18 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
       try {
         const check = await api.validateCredentials(cleanUser, cleanPass);
         if (!check || !check.valid) {
-          setError('Incorrect password. Please enter the correct password.');
+          const msg = 'Incorrect password. Please enter the correct password.';
+          setError(msg);
+          toast.error(msg);
           setIsCredentialsValid(false);
           setLoading(false);
           return;
         }
         setIsCredentialsValid(true);
       } catch {
-        setError('Incorrect password. Please enter the correct password.');
+        const msg = 'Incorrect password. Please enter the correct password.';
+        setError(msg);
+        toast.error(msg);
         setIsCredentialsValid(false);
         setLoading(false);
         return;
@@ -100,12 +107,15 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
 
       // Trigger sleek Zoom-In / Scale-Out exit animation before redirecting to dashboard
       setIsSuccessExiting(true);
+      toast.success(`Welcome back, ${res.admin?.name || 'Admin'}!`);
 
       setTimeout(() => {
         onSuccess(res.admin);
       }, 480);
     } catch (err: any) {
-      setError(err.message || 'Login failed. Please check your credentials.');
+      const msg = err.message || 'Login failed. Please check your credentials.';
+      setError(msg);
+      toast.error(msg);
       setLoading(false);
       setIsSuccessExiting(false);
       setIsCredentialsValid(false);
