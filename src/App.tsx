@@ -136,6 +136,38 @@ export default function App() {
     setCurrentTab(tab);
   }, []);
 
+  // Smooth horizontal touch swipe gestures across main screen area
+  const touchStartPos = React.useRef<{ x: number; y: number } | null>(null);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartPos.current = {
+      x: e.touches[0].clientX,
+      y: e.touches[0].clientY
+    };
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (!touchStartPos.current) return;
+    const deltaX = e.changedTouches[0].clientX - touchStartPos.current.x;
+    const deltaY = e.changedTouches[0].clientY - touchStartPos.current.y;
+    touchStartPos.current = null;
+
+    // Minimum 45px distance, with horizontal displacement clearly exceeding vertical
+    if (Math.abs(deltaX) > 45 && Math.abs(deltaX) > Math.abs(deltaY) * 1.3) {
+      const tabOrder = ['dashboard', 'files', 'filters', 'design', 'more'];
+      const currentIndex = tabOrder.indexOf(currentTab);
+      if (currentIndex !== -1) {
+        if (deltaX < 0 && currentIndex < tabOrder.length - 1) {
+          // Swiped left -> advance to next tab
+          handleNavigate(tabOrder[currentIndex + 1]);
+        } else if (deltaX > 0 && currentIndex > 0) {
+          // Swiped right -> return to previous tab
+          handleNavigate(tabOrder[currentIndex - 1]);
+        }
+      }
+    }
+  };
+
   // Real-time active bot session status checker
   const checkBotSession = useCallback(async () => {
     try {
@@ -270,7 +302,7 @@ export default function App() {
       <SplashScreen
         onComplete={handleSplashComplete}
         logoSymbol={design.loginLogoSymbol || '惡'}
-        logoUrl={design.loginLogoUrl || DEFAULT_LOGO_URL}
+        logoUrl={(!design.loginLogoUrl || design.loginLogoUrl.includes('4fae5ca52db64590')) ? DEFAULT_LOGO_URL : design.loginLogoUrl}
         title={design.loginTitle || 'ADMIN PANEL'}
         accentColor={design.loginAccentColor || '#ef4444'}
       />
@@ -428,8 +460,12 @@ export default function App() {
           </div>
         </header>
 
-        {/* Tab Content Views with Zero-Delay Native Speed Transitions */}
-        <main className="flex-1 w-full overflow-y-auto overscroll-y-auto">
+        {/* Tab Content Views with Zero-Delay Native Speed Transitions and Touch Swipe */}
+        <main
+          onTouchStart={handleTouchStart}
+          onTouchEnd={handleTouchEnd}
+          className="flex-1 w-full overflow-y-auto overscroll-y-auto"
+        >
           {/* Dashboard Tab */}
           <div className={currentTab === 'dashboard' ? 'block animate-tab-fade-in' : 'hidden'}>
             <DashboardTab

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-export const DEFAULT_LOGO_URL = 'https://host.tscv.workers.dev/img/4fae5ca52db64590';
+export const DEFAULT_LOGO_URL = 'https://host.tscv.workers.dev/img/f61e20b6c71945c4';
 
 // Eagerly pre-cache custom logo in browser memory immediately
 if (typeof window !== 'undefined') {
@@ -34,7 +34,9 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({
   onCompleteRef.current = onComplete;
   const startedRef = useRef(false);
 
-  const finalLogoUrl = (logoUrl && logoUrl.trim() !== '') ? logoUrl.trim() : DEFAULT_LOGO_URL;
+  const finalLogoUrl = (!logoUrl || logoUrl.trim() === '' || logoUrl.includes('4fae5ca52db64590'))
+    ? DEFAULT_LOGO_URL
+    : logoUrl.trim();
 
   useEffect(() => {
     if (startedRef.current) return;

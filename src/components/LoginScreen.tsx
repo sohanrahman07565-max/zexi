@@ -125,8 +125,10 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
   const title = design?.loginTitle || 'ADMIN PANEL';
   const subtitle = design?.loginSubtitle || 'SECURE ACCESS';
   const logoSymbol = design?.loginLogoSymbol || '惡';
-  const DEFAULT_LOGO_URL = 'https://host.tscv.workers.dev/img/4fae5ca52db64590';
-  const logoUrl = (design?.loginLogoUrl && design.loginLogoUrl.trim() !== '') ? design.loginLogoUrl.trim() : DEFAULT_LOGO_URL;
+  const DEFAULT_LOGO_URL = 'https://host.tscv.workers.dev/img/f61e20b6c71945c4';
+  const logoUrl = (!design?.loginLogoUrl || design.loginLogoUrl.trim() === '' || design.loginLogoUrl.includes('4fae5ca52db64590'))
+    ? DEFAULT_LOGO_URL
+    : design.loginLogoUrl.trim();
   const idLabel = design?.loginIdLabel || 'USERNAME';
   const idPlaceholder = design?.loginIdPlaceholder || 'Enter username';
   const passLabel = design?.loginPassLabel || 'PASSWORD';

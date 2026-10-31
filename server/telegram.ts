@@ -103,6 +103,20 @@ export class TelegramService {
       });
       clearTimeout(timeoutId);
       const data = await res.json();
+
+      // If failed because the message to be replied was deleted, immediately retry without reply_to_message_id
+      if (!data.ok && payload.reply_to_message_id && typeof data.description === 'string' && (data.description.toLowerCase().includes('replied') || data.description.toLowerCase().includes('reply'))) {
+        console.warn(`[Telegram] ${method} failed with reply_to_message_id (${data.description}). Retrying without reply_to_message_id...`);
+        const fallbackPayload = { ...payload };
+        delete fallbackPayload.reply_to_message_id;
+        const retryRes = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(fallbackPayload)
+        });
+        return await retryRes.json();
+      }
+
       return data;
     } catch (err: any) {
       clearTimeout(timeoutId);
@@ -271,6 +285,14 @@ export class TelegramService {
     return null;
   }
 
+  public static escapeHtml(str: string): string {
+    if (!str) return '';
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
   // Dynamically resolve placeholders inside Maintenance Notice:
   // Supports Telegram Username (@username, {username}), User ID ({user_id}, {id}), Bot Name ({bot_name}, {bot}), and Name ({name}, {user_name})
   public static resolveMaintenanceNotice(
@@ -335,6 +357,18 @@ export class TelegramService {
 
     // Auto-Deletion Check: Process any past-due message deletions promptly
     TelegramService.processDueScheduledDeletions().catch(() => {});
+
+    // Auto-detection of channels & groups where bot is added or active
+    if (update.my_chat_member) {
+      this.handleMyChatMemberUpdate(update.my_chat_member).catch((err) =>
+        console.warn('[Telegram] Error in handleMyChatMemberUpdate:', err)
+      );
+    }
+    // Handle Chat Join Request for Private Channels/Groups
+    if (update.chat_join_request) {
+      await this.handleChatJoinRequest(update.chat_join_request);
+      return;
+    }
 
     // Ban Enforcement: check if user is restricted by administrator
     if (fromId) {
@@ -470,14 +504,476 @@ export class TelegramService {
   }
 
   // =========================================================================
-  // MANDATORY CHANNEL JOIN (FORCE SUB) SYSTEM
+  // MANDATORY CHANNEL JOIN (FORCE SUB) SYSTEM & AUTO-DETECTION
   // =========================================================================
+
+  // Auto-register and verify a channel or group where the bot is present/added
+  public static async registerDetectedChat(chat: any, isExplicitAdmin?: boolean): Promise<ForceSubChannel | null> {
+    if (!chat || !chat.id) return null;
+    const chatId = String(chat.id).trim();
+    const chatType = chat.type || 'channel';
+    if (chatType === 'private') return null;
+
+    try {
+      let title = chat.title || chat.username || `Chat ${chatId}`;
+      let username = chat.username ? `@${chat.username.replace(/^@/, '')}` : undefined;
+      let inviteLink = chat.invite_link || '';
+
+      if (!inviteLink && username) {
+        inviteLink = `https://t.me/${username.replace(/^@/, '')}`;
+      }
+
+      let isAdmin = isExplicitAdmin ?? false;
+      try {
+        const me = await this.callTelegramApi('getMe', {});
+        const botId = me.result?.id;
+        if (botId) {
+          const memberRes = await this.callTelegramApi('getChatMember', {
+            chat_id: chat.id,
+            user_id: botId
+          });
+          if (memberRes && memberRes.ok && memberRes.result) {
+            const st = memberRes.result.status;
+            isAdmin = st === 'administrator' || st === 'creator';
+          }
+        }
+      } catch {}
+
+      if (!inviteLink && isAdmin) {
+        try {
+          const exportRes = await this.callTelegramApi('exportChatInviteLink', { chat_id: chat.id });
+          if (exportRes && exportRes.ok && exportRes.result) {
+            inviteLink = exportRes.result;
+          }
+        } catch {}
+      }
+
+      if (!inviteLink) {
+        try {
+          const fullChat = await this.callTelegramApi('getChat', { chat_id: chat.id });
+          if (fullChat && fullChat.ok && fullChat.result) {
+            title = fullChat.result.title || title;
+            if (fullChat.result.username) username = `@${fullChat.result.username.replace(/^@/, '')}`;
+            inviteLink = fullChat.result.invite_link || (username ? `https://t.me/${username.replace(/^@/, '')}` : '');
+          }
+        } catch {}
+      }
+
+      const registered = await storage.registerDetectedChannel({
+        chatId,
+        name: title,
+        inviteLink,
+        username,
+        type: chatType as any,
+        isAdmin,
+        enabled: true
+      });
+      return registered;
+    } catch (err: any) {
+      console.warn('[Telegram] registerDetectedChat error for', chatId, err?.message);
+      return null;
+    }
+  }
+
+  // Handle bot being added or removed from channels/groups (my_chat_member updates)
+  public static async handleMyChatMemberUpdate(myChatMember: any): Promise<void> {
+    const chat = myChatMember.chat;
+    const newMember = myChatMember.new_chat_member;
+    if (!chat || !chat.id) return;
+
+    const status = newMember?.status;
+    const isAdmin = status === 'administrator' || status === 'creator';
+
+    if (isAdmin || status === 'member') {
+      await this.registerDetectedChat(chat, isAdmin);
+      console.info(`[Telegram] Bot added/promoted in ${chat.type} "${chat.title}" (${chat.id})`);
+    } else if (status === 'left' || status === 'kicked') {
+      console.info(`[Telegram] Bot left/removed from ${chat.type} "${chat.title}" (${chat.id})`);
+      await storage.removeForceSubChannel(String(chat.id));
+    }
+  }
+
+  // Handle incoming ChatJoinRequest for private channels/groups (auto-approval & seamless verification)
+  public static async handleChatJoinRequest(cjr: any): Promise<void> {
+    if (!cjr || !cjr.chat || !cjr.from) return;
+
+    const chat = cjr.chat;
+    const from = cjr.from;
+    const chatId = String(chat.id || '');
+    const chatTitle = chat.title || 'Private Channel/Group';
+    const userId = String(from.id || cjr.user_chat_id || '');
+    const userName = [from.first_name, from.last_name].filter(Boolean).join(' ') || from.first_name || 'User';
+    const userUsername = from.username ? `@${from.username.replace(/^@+/, '')}` : undefined;
+    const inviteLink = cjr.invite_link?.invite_link;
+
+    console.info(`[ForceSub] Received ChatJoinRequest from user ${userId} (${userName} / ${userUsername || 'no_user'}) for chat "${chatTitle}" (${chatId})`);
+
+    // 1. Auto-detect & register this channel in system if not yet registered
+    try {
+      await this.registerDetectedChat(chat);
+    } catch (err: any) {
+      console.warn('[ForceSub] Error registering detected chat from join request:', err?.message);
+    }
+
+    // 2. Track user in bot database
+    try {
+      await storage.trackBotUser({
+        id: userId,
+        username: userUsername,
+        firstName: from.first_name,
+        lastName: from.last_name
+      });
+    } catch {}
+
+    // 3. Record the join request in persistent storage
+    try {
+      await storage.recordJoinRequest({
+        chatId,
+        chatTitle,
+        userId,
+        userName,
+        userUsername,
+        status: 'pending',
+        inviteLink
+      });
+    } catch (err: any) {
+      console.warn('[ForceSub] Error recording join request:', err?.message);
+    }
+
+    // 4. Auto-Approve the Join Request if autoApproveJoinRequests !== false
+    const settings = await storage.getSettings();
+    const shouldAutoApprove = settings.autoApproveJoinRequests !== false;
+
+    if (shouldAutoApprove) {
+      try {
+        console.info(`[ForceSub] Auto-approving join request for user ${userId} in chat ${chatId}...`);
+        const approveRes = await this.callTelegramApi('approveChatJoinRequest', {
+          chat_id: chat.id,
+          user_id: from.id
+        });
+
+        const isSuccess = approveRes && (
+          approveRes.ok || 
+          approveRes.description?.includes('USER_ALREADY_PARTICIPANT') ||
+          approveRes.description?.includes('ALREADY_PARTICIPANT') ||
+          approveRes.description?.includes('HIDE_REQUESTER_MISSING')
+        );
+
+        if (isSuccess) {
+          console.info(`[ForceSub] ✅ Join request approved successfully for user ${userId} in "${chatTitle}"`);
+          await storage.updateJoinRequestStatus(chatId, userId, 'approved');
+
+          // Send an instant confirmation DM to user if possible
+          try {
+            const noticeRes = await this.callTelegramApi('sendMessage', {
+              chat_id: from.id,
+              text: `✅ <b>Join Request Approved!</b>\n\nYour request to join <b>${this.escapeHtml(chatTitle)}</b> has been automatically approved!\n\n👇 You can now return to the bot and tap <b>Verify / Try Again</b> to unlock your requested files immediately.`,
+              parse_mode: 'HTML'
+            });
+            if (noticeRes && noticeRes.ok && noticeRes.result?.message_id) {
+              await storage.recordChatDeliveryMessage(from.id, noticeRes.result.message_id);
+            }
+          } catch {}
+        } else {
+          console.warn(`[ForceSub] Telegram approveChatJoinRequest response for user ${userId}:`, approveRes?.description || approveRes);
+          // If approval couldn't immediately complete (e.g. rights), keep pending so user still passes force sub
+          await storage.updateJoinRequestStatus(chatId, userId, 'pending');
+        }
+      } catch (approveErr: any) {
+        console.error(`[ForceSub] Exception while approving join request for user ${userId}:`, approveErr?.message || approveErr);
+      }
+    }
+  }
+
+  // Actively sync and auto-detect all channels and groups where the bot is currently an administrator
+  public static async syncAdminChannels(): Promise<ForceSubChannel[]> {
+    await storage.loadLatest(true);
+    const settings = await storage.getSettings();
+    const existing = Array.isArray(settings.requiredChannels) ? [...settings.requiredChannels] : [];
+    const detected = await storage.getDetectedChannels();
+
+    const candidates = new Map<string, Partial<ForceSubChannel>>();
+    for (const ch of [...existing, ...detected]) {
+      if (ch.chatId) candidates.set(String(ch.chatId), ch);
+    }
+
+    const me = await this.callTelegramApi('getMe', {});
+    const botId = me.result?.id;
+
+    const syncedList: ForceSubChannel[] = [];
+
+    for (const [rawChatId, info] of candidates.entries()) {
+      let targetChat: string | number = rawChatId;
+      if (/^-?\d+$/.test(rawChatId)) {
+        targetChat = Number(rawChatId);
+      } else if (!rawChatId.startsWith('@') && !rawChatId.startsWith('-')) {
+        targetChat = '@' + rawChatId;
+      }
+
+      try {
+        const chatRes = await this.callTelegramApi('getChat', { chat_id: targetChat });
+        if (chatRes && chatRes.ok && chatRes.result) {
+          const chat = chatRes.result;
+          let isAdmin = false;
+
+          if (botId) {
+            try {
+              const memberRes = await this.callTelegramApi('getChatMember', {
+                chat_id: targetChat,
+                user_id: botId
+              });
+              if (memberRes && memberRes.ok && memberRes.result) {
+                const st = memberRes.result.status;
+                isAdmin = st === 'administrator' || st === 'creator';
+              }
+            } catch {}
+          }
+
+          let inviteLink = chat.invite_link || info.inviteLink || '';
+          const username = chat.username ? `@${chat.username.replace(/^@/, '')}` : (info.username || undefined);
+          if (!inviteLink && username) {
+            inviteLink = `https://t.me/${username.replace(/^@/, '')}`;
+          }
+
+          if (!inviteLink && isAdmin) {
+            try {
+              const exp = await this.callTelegramApi('exportChatInviteLink', { chat_id: targetChat });
+              if (exp && exp.ok && exp.result) {
+                inviteLink = exp.result;
+              }
+            } catch {}
+          }
+
+          const reg = await storage.registerDetectedChannel({
+            id: info.id,
+            chatId: String(chat.id),
+            name: chat.title || info.name || 'Telegram Channel',
+            inviteLink,
+            username,
+            type: chat.type as any,
+            isAdmin,
+            enabled: info.enabled !== undefined ? info.enabled : true
+          });
+          syncedList.push(reg);
+        }
+      } catch (err: any) {
+        console.warn(`[SyncChannels] Chat ${rawChatId} check failed:`, err?.message);
+        if (info.name && info.chatId) {
+          syncedList.push({
+            id: info.id || `ch_${Date.now()}`,
+            name: info.name,
+            chatId: info.chatId,
+            inviteLink: info.inviteLink || '',
+            enabled: info.enabled !== false,
+            type: info.type || 'channel',
+            username: info.username,
+            isAdmin: info.isAdmin
+          });
+        }
+      }
+    }
+
+    const updatedSettings = await storage.getSettings();
+    return updatedSettings.requiredChannels || syncedList;
+  }
+
+  // Admin /connect Command: Connect channel/group by ID or Username
+  public static async handleConnectCommand(
+    fromId: string,
+    replyChatId: string | number,
+    text: string,
+    fallbackChatId?: string | number
+  ): Promise<void> {
+    const isAdmin = await this.isAuthorizedAdmin(fromId);
+    if (!isAdmin) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: replyChatId,
+        text: '⛔ You are not authorized to use admin commands.'
+      });
+      return;
+    }
+
+    const match = text.match(/^\/(?:connect|addchannel)(?:@\w+)?(?:\s+(.+))?$/i);
+    const rawTarget = match?.[1]?.trim() || (fallbackChatId ? String(fallbackChatId) : '');
+    if (!rawTarget) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: replyChatId,
+        text: `ℹ️ <b>Connect Channel / Group</b>\n\nUsage: <code>/connect &lt;channel_id_or_username&gt;</code>\n\nExamples:\n• <code>/connect @mychannel</code>\n• <code>/connect -1001234567890</code>\n• <code>/connect https://t.me/mychannel</code>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    let target = rawTarget;
+    let inviteLink = '';
+    if (target.startsWith('https://t.me/')) {
+      if (target.includes('/+')) {
+        inviteLink = target;
+      } else {
+        target = '@' + target.replace('https://t.me/', '').replace(/\/.*$/, '');
+      }
+    } else if (target.startsWith('t.me/')) {
+      if (target.includes('/+')) {
+        inviteLink = 'https://' + target;
+      } else {
+        target = '@' + target.replace('t.me/', '').replace(/\/.*$/, '');
+      }
+    } else if (!target.startsWith('@') && !target.startsWith('-') && !/^\d+$/.test(target)) {
+      target = '@' + target;
+    }
+
+    const queryChat = /^-?\d+$/.test(target) ? Number(target) : target;
+
+    let chatTitle = String(rawTarget);
+    let chatType: 'channel' | 'supergroup' | 'group' = String(target).startsWith('-100') ? 'supergroup' : 'channel';
+    let username = target.startsWith('@') ? target : undefined;
+    let resolvedChatId = String(target);
+
+    try {
+      const chatRes = await this.callTelegramApi('getChat', { chat_id: queryChat });
+      if (chatRes && chatRes.ok && chatRes.result) {
+        const c = chatRes.result;
+        chatTitle = c.title || c.username || chatTitle;
+        chatType = c.type || chatType;
+        if (c.username) username = `@${c.username.replace(/^@/, '')}`;
+        resolvedChatId = String(c.id);
+        if (c.invite_link) inviteLink = c.invite_link;
+        if (!inviteLink && username) {
+          inviteLink = `https://t.me/${username.replace(/^@/, '')}`;
+        }
+      }
+    } catch (err: any) {
+      console.warn('[Telegram] /connect getChat error:', err?.message);
+    }
+
+    // If still no invite link, try exportChatInviteLink
+    if (!inviteLink) {
+      try {
+        const linkRes = await this.callTelegramApi('exportChatInviteLink', { chat_id: queryChat });
+        if (linkRes && linkRes.ok && linkRes.result) {
+          inviteLink = linkRes.result;
+        }
+      } catch {}
+    }
+    if (!inviteLink && username) {
+      inviteLink = `https://t.me/${username.replace(/^@/, '')}`;
+    }
+
+    // Register channel into storage (both detectedChannels and settings.requiredChannels)
+    const channelRecord = await storage.registerDetectedChannel({
+      chatId: resolvedChatId,
+      name: chatTitle,
+      inviteLink,
+      username,
+      type: chatType,
+      isAdmin: true,
+      enabled: true
+    });
+
+    // Ensure forceSubEnabled is turned on
+    await storage.updateSettings({ forceSubEnabled: true });
+
+    await this.callTelegramApi('sendMessage', {
+      chat_id: replyChatId,
+      text: `✅ <b>Channel Successfully Connected!</b>\n\n` +
+            `📢 <b>Name:</b> ${this.escapeHtml(channelRecord.name)}\n` +
+            `🆔 <b>Chat ID:</b> <code>${channelRecord.chatId}</code>\n` +
+            `🏷️ <b>Type:</b> <code>${channelRecord.type || 'channel'}</code>\n` +
+            (channelRecord.inviteLink ? `🔗 <b>Invite Link:</b> ${channelRecord.inviteLink}\n` : '') +
+            `\n✨ <i>Added to Force Sub channels with toggle ON. You can manage or delete it anytime from the Admin Panel or with <code>/disconnect ${channelRecord.chatId}</code>.</i>`,
+      parse_mode: 'HTML'
+    });
+  }
+
+  // Admin /disconnect Command: Disconnect channel/group by ID or Username
+  public static async handleDisconnectCommand(
+    fromId: string,
+    replyChatId: string | number,
+    text: string,
+    fallbackChatId?: string | number
+  ): Promise<void> {
+    const isAdmin = await this.isAuthorizedAdmin(fromId);
+    if (!isAdmin) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: replyChatId,
+        text: '⛔ You are not authorized to use admin commands.'
+      });
+      return;
+    }
+
+    const match = text.match(/^\/(?:disconnect|removechannel)(?:@\w+)?(?:\s+(.+))?$/i);
+    const rawTarget = match?.[1]?.trim() || (fallbackChatId ? String(fallbackChatId) : '');
+    if (!rawTarget) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: replyChatId,
+        text: `ℹ️ <b>Disconnect Channel / Group</b>\n\nUsage: <code>/disconnect &lt;channel_id_or_username&gt;</code>\n\nExample: <code>/disconnect @mychannel</code> or <code>/disconnect -1001234567890</code>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    const cleanTarget = rawTarget.replace(/^https:\/\/t\.me\//, '@').replace(/^t\.me\//, '@');
+    await storage.removeForceSubChannel(cleanTarget);
+
+    await this.callTelegramApi('sendMessage', {
+      chat_id: replyChatId,
+      text: `🗑️ <b>Channel Disconnected!</b>\n\nThe channel/group <code>${this.escapeHtml(cleanTarget)}</code> has been removed from Force Sub.`,
+      parse_mode: 'HTML'
+    });
+  }
+
+  // Restores banned user access across all connected channels and groups in Telegram
+  public static async unbanUserInConnectedChats(userId: string | number): Promise<void> {
+    try {
+      const cleanTarget = String(userId).trim().replace(/^@+/, '');
+      let targetNumericId = Number(cleanTarget);
+
+      // If userId was a username, resolve their numeric Telegram ID from storage
+      if (isNaN(targetNumericId) || !targetNumericId) {
+        const found = await storage.findUserByIdOrUsername(cleanTarget);
+        if (found && found.id && !isNaN(Number(found.id))) {
+          targetNumericId = Number(found.id);
+        }
+      }
+
+      if (!targetNumericId) return;
+
+      const settings = await storage.getSettings();
+      const detected = await storage.getDetectedChannels();
+      const candidateChats = new Set<string | number>();
+
+      for (const ch of [...(settings.requiredChannels || []), ...detected]) {
+        if (ch.chatId) candidateChats.add(ch.chatId);
+      }
+
+      for (const chat of candidateChats) {
+        try {
+          const targetChat = /^-?\d+$/.test(String(chat)) ? Number(chat) : String(chat);
+          await this.callTelegramApi('unbanChatMember', {
+            chat_id: targetChat,
+            user_id: targetNumericId,
+            only_if_banned: true
+          });
+        } catch {}
+      }
+    } catch (err: any) {
+      console.warn(`[Telegram] unbanUserInConnectedChats error for ${userId}:`, err?.message || err);
+    }
+  }
+
   public static async checkUserForceSub(
     userId: string | number
   ): Promise<{ allJoined: boolean; unjoinedChannels: ForceSubChannel[] }> {
     try {
       const settings = await storage.getSettings();
       if (!settings.forceSubEnabled || !settings.requiredChannels || settings.requiredChannels.length === 0) {
+        return { allJoined: true, unjoinedChannels: [] };
+      }
+
+      // CRITICAL: Filter only ACTIVE channels where enabled !== false!
+      // If a channel/group toggle is turned OFF by the admin, it should instantly hide from the mandatory join list and no longer be required for users.
+      const activeChannels = settings.requiredChannels.filter(c => c.enabled !== false);
+      if (activeChannels.length === 0) {
         return { allJoined: true, unjoinedChannels: [] };
       }
 
@@ -492,30 +988,80 @@ export class TelegramService {
 
       const unjoined: ForceSubChannel[] = [];
 
-      for (const channel of settings.requiredChannels) {
-        const rawChatId = (channel.chatId || '').trim();
+      for (const channel of activeChannels) {
+        let rawChatId = (channel.chatId || '').trim();
         if (!rawChatId) continue;
+
+        // Clean chatId: strip URLs like https://t.me/channel or t.me/channel
+        if (rawChatId.startsWith('https://t.me/')) {
+          rawChatId = '@' + rawChatId.replace('https://t.me/', '').replace(/\/.*$/, '').replace(/^\+/, '');
+        } else if (rawChatId.startsWith('t.me/')) {
+          rawChatId = '@' + rawChatId.replace('t.me/', '').replace(/\/.*$/, '').replace(/^\+/, '');
+        } else if (!rawChatId.startsWith('@') && !rawChatId.startsWith('-') && !/^\d+$/.test(rawChatId)) {
+          rawChatId = '@' + rawChatId;
+        }
+
+        const targetChat = /^-?\d+$/.test(rawChatId) ? Number(rawChatId) : rawChatId;
+        const numericUserId = Number(cleanUserId) || cleanUserId;
+
+        let isMember = false;
 
         try {
           // getChatMember takes numeric ID or @channel_username
           const res = await this.callTelegramApi('getChatMember', {
-            chat_id: rawChatId,
-            user_id: Number(cleanUserId) || cleanUserId
+            chat_id: targetChat,
+            user_id: numericUserId
           });
 
           if (res && res.ok && res.result) {
             const status = res.result.status;
-            // Member is active if status is creator, administrator, member, or restricted
-            const isMember = status === 'creator' || status === 'administrator' || status === 'member' || status === 'restricted';
-            if (!isMember) {
-              unjoined.push(channel);
-            }
-          } else {
-            console.info(`[ForceSub] Membership check not confirmed for user ${cleanUserId} in ${rawChatId}:`, res?.description);
-            unjoined.push(channel);
+            // Valid member status in Telegram: creator, administrator, member, or restricted (where is_member is not false)
+            isMember = status === 'creator' || status === 'administrator' || status === 'member' || (status === 'restricted' && res.result.is_member !== false);
           }
         } catch (err: any) {
-          console.warn(`[ForceSub] Error querying getChatMember for ${cleanUserId} in ${rawChatId}:`, err?.message);
+          console.warn(`[ForceSub] Error querying getChatMember for ${cleanUserId} in ${targetChat}:`, err?.message);
+        }
+
+        // --- SEAMLESS VERIFICATION FOR PRIVATE CHANNELS WITH JOIN REQUESTS ---
+        // For private channels or groups where users submit a "Join Request", getChatMember can return 'left'
+        // or fail if approval propagation is pending.
+        // 1. Check if user has an approved or pending join request recorded in the system
+        if (!isMember) {
+          const hasJoinRequest = await storage.isJoinRequestApprovedOrPending(
+            String(targetChat),
+            String(cleanUserId),
+            channel.id,
+            channel.username
+          );
+          if (hasJoinRequest) {
+            isMember = true;
+            console.info(`[ForceSub] User ${cleanUserId} verified via recorded Join Request for "${channel.name}" (${targetChat})`);
+          } else {
+            // 2. Also try proactive auto-approval in case a join request was submitted and is waiting
+            try {
+              const approveRes = await this.callTelegramApi('approveChatJoinRequest', {
+                chat_id: targetChat,
+                user_id: numericUserId
+              });
+              if (approveRes && (
+                approveRes.ok || 
+                approveRes.description?.includes('USER_ALREADY_PARTICIPANT') ||
+                approveRes.description?.includes('ALREADY_PARTICIPANT')
+              )) {
+                isMember = true;
+                await storage.recordJoinRequest({
+                  chatId: String(targetChat),
+                  chatTitle: channel.name,
+                  userId: String(cleanUserId),
+                  status: 'approved'
+                });
+                console.info(`[ForceSub] User ${cleanUserId} auto-approved on verification check for "${channel.name}" (${targetChat})`);
+              }
+            } catch {}
+          }
+        }
+
+        if (!isMember) {
           unjoined.push(channel);
         }
       }
@@ -534,11 +1080,14 @@ export class TelegramService {
     chatId: string | number,
     unjoinedChannels: ForceSubChannel[],
     targetPayload: string = 'start',
-    messageIdToEdit?: number
+    messageIdToEdit?: number,
+    userInfo?: { id?: string | number; firstName?: string; username?: string }
   ): Promise<void> {
     const keyboardRows: any[][] = [];
 
-    for (const ch of unjoinedChannels) {
+    // Channel Join Buttons: SMART DYNAMIC FILTERING - ONLY display the remaining unjoined channels!
+    for (let i = 0; i < unjoinedChannels.length; i++) {
+      const ch = unjoinedChannels[i];
       let channelUrl = ch.inviteLink ? ch.inviteLink.trim() : '';
       if (!channelUrl) {
         if (ch.chatId && ch.chatId.startsWith('@')) {
@@ -549,26 +1098,47 @@ export class TelegramService {
       }
       keyboardRows.push([
         {
-          text: `📢 Join ${ch.name}`,
-          url: channelUrl
+          text: `📢 Join ${ch.name} ↗️`,
+          url: channelUrl,
+          style: 'primary'
         }
       ]);
     }
 
-    // "Verify / Try Again" callback button
+    // "Verify / Try Again" callback button: Success emerald accent styling matching bot theme
     keyboardRows.push([
       {
-        text: '🔄 Verify / Try Again',
-        callback_data: `forcesub_verify:${targetPayload || 'start'}`
+        text: '🔄 Verify / Try Again ✅',
+        callback_data: `forcesub_verify:${targetPayload || 'start'}`,
+        style: 'success'
       }
     ]);
 
-    const channelNames = unjoinedChannels.map((c, i) => `${i + 1}. <b>${c.name}</b>`).join('\n');
-    const promptText =
-      `⚠️ <b>Mandatory Subscription Required!</b>\n\n` +
-      `To use this bot and access your requested content, please join our official channels & groups:\n\n` +
-      `${channelNames}\n\n` +
-      `<i>Tap each link above to join, then press <b>Verify / Try Again</b> below.</i>`;
+    // Dynamic unjoined channels enumeration for {channel_list} placeholder
+    const channelNames = unjoinedChannels
+      .map((c, i) => `  🔹 ${i + 1}. <b>${c.name}</b>`)
+      .join('\n');
+
+    // Load Editable Message Template from storage (Requirement 2)
+    const templates = await storage.getTemplates();
+    const template = templates['FORCESUB_PROMPT'];
+    const botName = await this.getBotUsername();
+
+    let promptText = template?.content || (
+      `🔒 <b>Channel Membership Required</b>\n\n` +
+      `To use this bot and access your requested content, please subscribe to our official channel(s) below:\n\n` +
+      `{channel_list}\n\n` +
+      `👇 <i>Tap the button(s) above to join, then press <b>Verify / Try Again</b> below.</i>`
+    );
+
+    const userName = userInfo?.firstName || 'Friend';
+    const userId = String(userInfo?.id || chatId);
+
+    promptText = promptText
+      .replace(/{channel_list}/g, channelNames)
+      .replace(/{user_name}/g, userName)
+      .replace(/{user_id}/g, userId)
+      .replace(/{bot_name}/g, `@${botName.replace(/^@/, '')}`);
 
     if (messageIdToEdit) {
       try {
@@ -580,7 +1150,12 @@ export class TelegramService {
           reply_markup: { inline_keyboard: keyboardRows }
         });
         if (editRes && editRes.ok) return;
-      } catch {}
+        // If Telegram returns "message is not modified", the content is already up-to-date.
+        // We MUST NOT send a new message, which would clutter and spam the user's chat!
+        return;
+      } catch {
+        return;
+      }
     }
 
     await this.callTelegramApi('sendMessage', {
@@ -595,9 +1170,35 @@ export class TelegramService {
   // GROUP MESSAGE HANDLING (EXACT TRIGGER MATCHING & STRICT GROUP PRIVACY)
   // =========================================================================
   private static async handleGroupMessage(message: any, text: string): Promise<void> {
-    if (!text && !message.document && !message.photo && !message.video && !message.audio) return;
-
     const fromId = String(message.from?.id || '');
+
+    // =========================================================================
+    // ANTI-FORWARD PROTECTION SYSTEM
+    // Detect and instantly delete any forwarded messages from other chats/channels/users
+    // =========================================================================
+    const isForwarded = Boolean(
+      message.forward_origin || 
+      message.forward_from || 
+      message.forward_from_chat || 
+      message.forward_sender_name || 
+      message.forward_date
+    );
+
+    if (isForwarded) {
+      const settings = await storage.getSettings();
+      if (settings.antiForwardEnabled) {
+        const isAdmin = await this.isAuthorizedAdmin(fromId);
+        if (!isAdmin) {
+          console.info(`[Anti-Forward] Detected forwarded message ${message.message_id} in group ${message.chat.id} from user ${fromId}. Deleting instantly.`);
+          if (message.message_id) {
+            await this.deleteUserMessage(message.chat.id, message.message_id);
+          }
+          return;
+        }
+      }
+    }
+
+    if (!text && !message.document && !message.photo && !message.video && !message.audio) return;
 
     // 1. Check if user is inside an active /add session in group
     let addSession = activeAddSessions.get(fromId);
@@ -625,6 +1226,8 @@ export class TelegramService {
     const isClearStartMediaCommand = /^\/clearstartmedia(?:@\w+)?(?:\s+|$)/i.test(text);
     const isCleanupCommand = /^\/cleanup(?:@\w+)?(?:\s+|$)/i.test(text);
     const isAdminListCommand = /^\/(?:admins?|users?)(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isConnectCommand = /^\/(?:connect|addchannel)(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isDisconnectCommand = /^\/(?:disconnect|removechannel)(?:@\w+)?(?:\s+|$)/i.test(text);
 
     const isAdminCommand =
       isAddCommand ||
@@ -635,7 +1238,9 @@ export class TelegramService {
       isSetStartMediaCommand ||
       isClearStartMediaCommand ||
       isCleanupCommand ||
-      isAdminListCommand;
+      isAdminListCommand ||
+      isConnectCommand ||
+      isDisconnectCommand;
 
     if (isAdminCommand) {
       const isAdmin = await this.isAuthorizedAdmin(fromId);
@@ -806,6 +1411,465 @@ export class TelegramService {
           'Admin list sent to your private messages.'
         );
         return;
+      }
+
+      if (isConnectCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleConnectCommand(fromId, fromId, text, message.chat.id);
+          },
+          'Channel connection processed. Details sent to your private messages.'
+        );
+        return;
+      }
+
+      if (isDisconnectCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleDisconnectCommand(fromId, fromId, text, message.chat.id);
+          },
+          'Channel disconnection processed. Details sent to your private messages.'
+        );
+        return;
+      }
+    }
+
+    // =========================================================================
+    // MODERATION, BAN/UNBAN, REPORT & ANTI-FRAUD IN GROUPS
+    // =========================================================================
+
+    // 1. /ban Command: Admin replies /ban or runs /ban <user_id_or_username>
+    const banMatch = text.match(/^\/ban(?:@\w+)?(?:\s+(.+))?$/i);
+    if (banMatch) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      if (isAdmin) {
+        let targetId = '';
+        let targetName = '';
+        let targetUsername = '';
+
+        if (message.reply_to_message?.from) {
+          const targetUser = message.reply_to_message.from;
+          targetId = String(targetUser.id);
+          targetName = targetUser.first_name || targetUser.username || 'User';
+          targetUsername = targetUser.username ? `@${targetUser.username.replace(/^@/, '')}` : '';
+        } else if (banMatch[1]?.trim()) {
+          const query = banMatch[1].trim();
+          const found = await storage.findUserByIdOrUsername(query);
+          if (found) {
+            targetId = String(found.id);
+            targetName = found.firstName || found.username || 'User';
+            targetUsername = found.username ? `@${found.username.replace(/^@/, '')}` : '';
+          } else {
+            targetId = query.replace(/^@/, '');
+            targetName = query;
+            targetUsername = query.startsWith('@') ? query : '';
+          }
+        }
+
+        if (targetId) {
+          try {
+            await this.callTelegramApi('banChatMember', {
+              chat_id: message.chat.id,
+              user_id: Number(targetId) || targetId
+            });
+          } catch (e) {
+            console.warn('[Telegram] banChatMember error:', e);
+          }
+          await storage.setBotUserBanned(targetId, true);
+
+          const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+          await this.callTelegramApi('sendMessage', {
+            chat_id: message.chat.id,
+            text: `OK Boss. ${userDisplay} has been successfully banned.`,
+            reply_to_message_id: message.message_id
+          });
+          if (message.message_id) {
+            setTimeout(() => {
+              TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
+            }, 3000);
+          }
+          return;
+        }
+      }
+    }
+
+    // 2. /unban Command: Admin runs /unban <user_id_or_username> or replies /unban
+    const unbanMatch = text.match(/^\/unban(?:@\w+)?(?:\s+(.+))?$/i);
+    if (unbanMatch) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      if (isAdmin) {
+        let targetId = '';
+        let targetName = '';
+        let targetUsername = '';
+
+        if (message.reply_to_message?.from) {
+          const targetUser = message.reply_to_message.from;
+          targetId = String(targetUser.id);
+          targetName = targetUser.first_name || targetUser.username || 'User';
+          targetUsername = targetUser.username ? `@${targetUser.username.replace(/^@/, '')}` : '';
+        } else if (unbanMatch[1]?.trim()) {
+          const query = unbanMatch[1].trim();
+          const found = await storage.findUserByIdOrUsername(query);
+          if (found) {
+            targetId = String(found.id);
+            targetName = found.firstName || found.username || 'User';
+            targetUsername = found.username ? `@${found.username.replace(/^@/, '')}` : '';
+          } else {
+            targetId = query.replace(/^@/, '');
+            targetName = query;
+            targetUsername = query.startsWith('@') ? query : '';
+          }
+        }
+
+        if (targetId) {
+          try {
+            await this.callTelegramApi('unbanChatMember', {
+              chat_id: message.chat.id,
+              user_id: Number(targetId) || targetId,
+              only_if_banned: true
+            });
+          } catch (e) {
+            console.warn('[Telegram] unbanChatMember error in group:', e);
+          }
+          await storage.setBotUserBanned(targetId, false);
+          await storage.resetUserLinkWarning(message.chat.id, targetId);
+          await storage.resetUserFraudWarning(message.chat.id, targetId);
+          TelegramService.unbanUserInConnectedChats(targetId).catch(() => {});
+
+          const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+          await this.callTelegramApi('sendMessage', {
+            chat_id: message.chat.id,
+            text: `✅ <b>OK Boss. ${userDisplay} has been successfully unbanned.</b>`,
+            parse_mode: 'HTML',
+            reply_to_message_id: message.message_id
+          });
+          if (message.message_id) {
+            setTimeout(() => {
+              TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
+            }, 3000);
+          }
+          return;
+        } else {
+          await this.callTelegramApi('sendMessage', {
+            chat_id: message.chat.id,
+            text: `ℹ️ <b>How to Unban:</b>\nReply to any user's message with <code>/unban</code>, or type <code>/unban &lt;user_id_or_username&gt;</code>.`,
+            parse_mode: 'HTML',
+            reply_to_message_id: message.message_id
+          });
+          return;
+        }
+      }
+    }
+
+    // 3. /report Command: User replies to a message with /report <reason>, or sends /report <@username_or_id> <reason>
+    const reportMatch = text.match(/^\/report(?:@\w+)?(?:\s+(.+))?$/i);
+    if (reportMatch || text.trim().toLowerCase().startsWith('/report')) {
+      let targetUser: any = null;
+      let reason = reportMatch?.[1]?.trim() || '';
+      let reportedContent = '';
+      let messageId: number | undefined = undefined;
+
+      if (message.reply_to_message) {
+        targetUser = message.reply_to_message.from || message.reply_to_message.sender_chat;
+        messageId = message.reply_to_message.message_id;
+        reportedContent = message.reply_to_message.text || message.reply_to_message.caption || '[Attachment/Media]';
+        if (!reason) reason = 'Inappropriate content / violation';
+      } else if (reportMatch?.[1]?.trim()) {
+        const parts = reportMatch[1].trim().split(/\s+/);
+        const query = parts[0];
+        reason = parts.slice(1).join(' ').trim() || 'Inappropriate behavior / violation';
+        const found = await storage.findUserByIdOrUsername(query);
+        if (found) {
+          targetUser = {
+            id: found.id,
+            first_name: found.firstName || found.username || 'User',
+            username: found.username ? found.username.replace(/^@+/, '') : undefined
+          };
+        } else {
+          targetUser = {
+            id: query.replace(/^@+/, ''),
+            first_name: query,
+            username: query.startsWith('@') ? query.replace(/^@+/, '') : undefined
+          };
+        }
+        reportedContent = reason;
+      }
+
+      if (!targetUser) {
+        if (message.message_id) {
+          await this.deleteUserMessage(message.chat.id, message.message_id);
+        }
+        await this.sendAutoDeletingNotice(
+          message.chat.id,
+          'ℹ️ <b>How to Report:</b> Reply to the message you want to report with <code>/report &lt;reason&gt;</code>, or send <code>/report &lt;@username_or_id&gt; &lt;reason&gt;</code>.',
+          6000
+        );
+        return;
+      }
+
+      const reporter = message.from || {};
+      const targetUserId = String(targetUser.id || '');
+      const targetUserName = targetUser.first_name || targetUser.title || targetUser.username || 'User';
+      const targetUserUsername = targetUser.username;
+
+      const report = await storage.saveReport({
+        id: `rep_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`,
+        reporterId: String(reporter.id || ''),
+        reporterName: reporter.first_name || reporter.username || 'User',
+        reporterUsername: reporter.username,
+        reportedUserId: targetUserId,
+        reportedUserName: targetUserName,
+        reportedUserUsername: targetUserUsername,
+        reason,
+        chatId: String(message.chat.id),
+        chatTitle: message.chat.title || 'Group',
+        messageId,
+        reportedContent: reportedContent || reason,
+        status: 'pending',
+        createdAt: new Date().toISOString()
+      });
+
+      // Forward report instantly to all bot admins via private DM
+      const admins = await storage.getAdmins();
+      const settings = await storage.getSettings();
+      const adminTargetIds = new Set<string>();
+      if (settings.rootAdminId) adminTargetIds.add(String(settings.rootAdminId).trim());
+      if (process.env.ROOT_ADMIN_ID) adminTargetIds.add(String(process.env.ROOT_ADMIN_ID).trim());
+      for (const a of admins) {
+        if (a.telegramId) adminTargetIds.add(String(a.telegramId).trim());
+        if (a.id && /^\d+$/.test(String(a.id))) adminTargetIds.add(String(a.id).trim());
+      }
+
+      const adminReportMsg = 
+        `🚨 <b>New User Report Filed</b>\n\n` +
+        `👤 <b>Reported User:</b> ${targetUserName} (${targetUserUsername ? '@' + targetUserUsername : `ID: <code>${targetUserId}</code>`})\n` +
+        `🆔 <b>User ID:</b> <code>${targetUserId}</code>\n` +
+        `📢 <b>Reported By:</b> ${reporter.first_name || 'User'} (${reporter.username ? '@' + reporter.username : `ID: <code>${reporter.id}</code>`})\n` +
+        `👥 <b>Chat / Source:</b> ${message.chat.title || 'Group'} (<code>${message.chat.id}</code>)\n` +
+        `📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>\n` +
+        `💬 <b>Content Snippet:</b>\n<blockquote>${this.escapeHtml(reportedContent.slice(0, 300))}</blockquote>`;
+
+      const keyboard = {
+        inline_keyboard: [
+          [
+            { text: '🚫 Ban User', callback_data: `admin_ban_user:${targetUserId}:${report.id}` },
+            { text: 'Dismiss', callback_data: `admin_dismiss_report:${report.id}` }
+          ]
+        ]
+      };
+
+      for (const adminId of adminTargetIds) {
+        try {
+          await this.callTelegramApi('sendMessage', {
+            chat_id: adminId,
+            text: adminReportMsg,
+            parse_mode: 'HTML',
+            reply_markup: keyboard
+          });
+        } catch (e) {
+          console.warn(`[Telegram] Failed to notify admin ${adminId} of report:`, e);
+        }
+      }
+
+      // Delete the /report command message from the group
+      if (message.message_id) {
+        await this.deleteUserMessage(message.chat.id, message.message_id);
+      }
+      // Send auto-deleting confirmation notice
+      await this.sendAutoDeletingNotice(
+        message.chat.id,
+        '✅ <i>Report received and forwarded to administrators for review.</i>',
+        4000
+      );
+      return;
+    }
+
+    // 4. Anti-Link Sharing Protection in groups:
+    const hasLinkEntity = (message.entities || []).some(
+      (e: any) => e.type === 'url' || e.type === 'text_link'
+    ) || (message.caption_entities || []).some(
+      (e: any) => e.type === 'url' || e.type === 'text_link'
+    );
+    const linkRegex = /(?:https?:\/\/|www\.|t\.me\/|telegram\.me\/)[^\s]+/i;
+    const domainRegex = /\b[a-zA-Z0-9-]+\.(?:com|org|net|io|me|co|app|xyz|site|online|top|info|biz|ru|cn|in|de|uk|us|ca)\b/i;
+    const containsLink = hasLinkEntity || linkRegex.test(text) || domainRegex.test(text);
+
+    if (containsLink) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      if (!isAdmin) {
+        // Instantly delete the shared link message
+        if (message.message_id) {
+          await this.deleteUserMessage(message.chat.id, message.message_id);
+        }
+
+        const currentWarnings = await storage.getUserLinkWarnings(message.chat.id, fromId);
+        await storage.incrementUserLinkWarning(message.chat.id, fromId);
+
+        const userName = message.from?.first_name || message.from?.username || 'User';
+        const userMention = message.from?.username ? `@${message.from.username}` : userName;
+
+        if (currentWarnings === 0) {
+          // First Warning: English warning text required strictly
+          const warningText = `First Warning: Links are not allowed in this group. If you share a link again, you will be banned from the group.`;
+          await this.callTelegramApi('sendMessage', {
+            chat_id: message.chat.id,
+            text: `⚠️ <b>${userMention}</b>\n${warningText}`,
+            parse_mode: 'HTML'
+          });
+        } else {
+          // Repeated violation: Ban user from group & announce
+          try {
+            await this.callTelegramApi('banChatMember', {
+              chat_id: message.chat.id,
+              user_id: Number(fromId) || fromId
+            });
+          } catch (e) {
+            console.warn('[Telegram] banChatMember error on link violation:', e);
+          }
+          await storage.setBotUserBanned(fromId, true);
+
+          const banNotice = `${userName} (${userMention}) has been banned for repeatedly sharing links.`;
+          await this.callTelegramApi('sendMessage', {
+            chat_id: message.chat.id,
+            text: `🚫 <b>${banNotice}</b>`,
+            parse_mode: 'HTML'
+          });
+        }
+        return;
+      }
+    }
+
+    // 5. Fraud Protection & Custom Word Filter Rules
+    const fraudRules = await storage.getFraudRules();
+    const activeFraudRules = fraudRules.filter(r => r.enabled);
+    if (activeFraudRules.length > 0) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      if (!isAdmin) {
+        const lowerText = text.toLowerCase();
+        for (const rule of activeFraudRules) {
+          let matched = false;
+          const kw = rule.keyword.trim().toLowerCase();
+          if (rule.matchType === 'exact') {
+            matched = lowerText === kw;
+          } else if (rule.matchType === 'regex') {
+            try {
+              const reg = new RegExp(rule.keyword, 'i');
+              matched = reg.test(text);
+            } catch {}
+          } else {
+            // Default: contains
+            matched = lowerText.includes(kw);
+          }
+
+          if (matched) {
+            const action = rule.action || 'delete_and_warn';
+            const maxWarnings = rule.maxWarnings && rule.maxWarnings > 0 ? rule.maxWarnings : 3;
+            const duration = rule.duration || 'permanent';
+
+            // Delete offending message if configured
+            if (action === 'delete' || action === 'delete_and_warn' || action === 'mute' || action === 'ban') {
+              if (message.message_id) {
+                await this.deleteUserMessage(message.chat.id, message.message_id);
+              }
+            }
+
+            // Increment and evaluate warning count
+            const currentWarnings = await storage.incrementUserFraudWarning(message.chat.id, fromId, rule.id);
+            const isFinalThreshold = currentWarnings >= maxWarnings;
+
+            let actionDescription = 'Warning issued';
+            if (action === 'delete') {
+              actionDescription = 'Message deleted';
+            } else if (action === 'mute') {
+              actionDescription = isFinalThreshold ? `Muted (${duration})` : `Warning (${currentWarnings}/${maxWarnings})`;
+            } else if (action === 'ban') {
+              actionDescription = isFinalThreshold ? `Banned (${duration})` : `Warning (${currentWarnings}/${maxWarnings})`;
+            }
+
+            // If threshold reached and action is mute or ban, execute penalty
+            if (isFinalThreshold && (action === 'mute' || action === 'ban')) {
+              let durationSec = 0;
+              if (duration === '1h') durationSec = 3600;
+              else if (duration === '6h') durationSec = 6 * 3600;
+              else if (duration === '24h') durationSec = 24 * 3600;
+              else if (duration === '7d') durationSec = 7 * 86400;
+              else if (duration === '30d') durationSec = 30 * 86400;
+
+              const untilDate = durationSec > 0 ? Math.floor(Date.now() / 1000) + durationSec : undefined;
+
+              if (action === 'mute') {
+                try {
+                  await this.callTelegramApi('restrictChatMember', {
+                    chat_id: message.chat.id,
+                    user_id: Number(fromId) || fromId,
+                    permissions: {
+                      can_send_messages: false,
+                      can_send_audios: false,
+                      can_send_documents: false,
+                      can_send_photos: false,
+                      can_send_videos: false,
+                      can_send_video_notes: false,
+                      can_send_voice_notes: false,
+                      can_send_polls: false,
+                      can_send_other_messages: false,
+                      can_add_web_page_previews: false
+                    },
+                    ...(untilDate ? { until_date: untilDate } : {})
+                  });
+                } catch (e) {
+                  console.warn('[Telegram] Error muting user for fraud keyword:', e);
+                }
+              } else if (action === 'ban') {
+                try {
+                  await this.callTelegramApi('banChatMember', {
+                    chat_id: message.chat.id,
+                    user_id: Number(fromId) || fromId,
+                    ...(untilDate ? { until_date: untilDate } : {})
+                  });
+                } catch (e) {
+                  console.warn('[Telegram] Error banning user for fraud keyword:', e);
+                }
+                await storage.setBotUserBanned(fromId, true);
+              }
+
+              // Reset warnings after enforcing final punishment
+              await storage.resetUserFraudWarning(message.chat.id, fromId, rule.id);
+            }
+
+            // Send notification/warning message
+            if (action !== 'delete') {
+              const templates = await storage.getTemplates();
+              const defaultTpl = templates.FRAUD_KEYWORD_DEFAULT_REPLY?.content || 
+                '⚠️ <b>Warning ({warning_count}/{max_warnings}):</b> Prohibited content detected.\nUser: {user_name} (ID: <code>{user_id}</code>)\nAction taken: {action}';
+              
+              const rawMessage = rule.customMessage || rule.warningText || defaultTpl;
+              const formattedReply = rawMessage
+                .replace(/\{user_name\}/g, message.from?.first_name || 'User')
+                .replace(/\{user_id\}/g, fromId)
+                .replace(/\{keyword\}/g, rule.keyword)
+                .replace(/\{warning_count\}/g, String(currentWarnings))
+                .replace(/\{max_warnings\}/g, String(maxWarnings))
+                .replace(/\{action\}/g, actionDescription)
+                .replace(/\{duration\}/g, duration);
+
+              if (rule.mediaUrl && rule.mediaType && rule.mediaType !== 'text' && rule.mediaType !== 'none') {
+                await TelegramService.sendBroadcastMessage({
+                  chatId: message.chat.id,
+                  message: formattedReply,
+                  mediaType: rule.mediaType as any,
+                  mediaUrl: rule.mediaUrl
+                });
+              } else {
+                await this.callTelegramApi('sendMessage', {
+                  chat_id: message.chat.id,
+                  text: formattedReply,
+                  parse_mode: 'HTML'
+                });
+              }
+            }
+            return;
+          }
+        }
       }
     }
 
@@ -1106,12 +2170,174 @@ export class TelegramService {
       }
 
       if (rawPayload) {
+        // Clean user trigger message so the private chat is clean
+        try {
+          await this.callTelegramApi('deleteMessage', {
+            chat_id: chatId,
+            message_id: message.message_id
+          });
+        } catch {}
         await this.handleDeepLinkDelivery(chatId, rawPayload);
         return;
       } else {
         await this.sendStartWelcomeMessage(chatId, fromId, message);
         return;
       }
+    }
+
+    // Admin /ban command in private chat
+    const privBanMatch = text.match(/^\/ban(?:@\w+)?(?:\s+(.+))?$/i);
+    if (privBanMatch) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      if (isAdmin && privBanMatch[1]?.trim()) {
+        const query = privBanMatch[1].trim();
+        const found = await storage.findUserByIdOrUsername(query);
+        const targetId = found ? String(found.id) : query.replace(/^@/, '');
+        const targetName = found ? (found.firstName || found.username || 'User') : query;
+        const targetUsername = found?.username ? `@${found.username.replace(/^@/, '')}` : (query.startsWith('@') ? query : '');
+        await storage.setBotUserBanned(targetId, true);
+        const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: `OK Boss. ${userDisplay} has been successfully banned.`
+        });
+        return;
+      }
+    }
+
+    // Admin /unban command in private chat
+    const privUnbanMatch = text.match(/^\/unban(?:@\w+)?(?:\s+(.+))?$/i);
+    if (privUnbanMatch) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      if (isAdmin) {
+        const query = privUnbanMatch[1]?.trim();
+        if (!query) {
+          await this.callTelegramApi('sendMessage', {
+            chat_id: chatId,
+            text: `ℹ️ <b>How to Unban:</b>\nType <code>/unban &lt;user_id_or_username&gt;</code>\nExample: <code>/unban 123456789</code> or <code>/unban @john_doe</code>`,
+            parse_mode: 'HTML'
+          });
+          return;
+        }
+
+        const found = await storage.findUserByIdOrUsername(query);
+        const targetId = found ? String(found.id) : query.replace(/^@/, '');
+        const targetName = found ? (found.firstName || found.username || 'User') : query;
+        const targetUsername = found?.username ? `@${found.username.replace(/^@/, '')}` : (query.startsWith('@') ? query : '');
+        
+        await storage.setBotUserBanned(targetId, false);
+        await storage.resetUserLinkWarning(targetId);
+        await storage.resetUserFraudWarning(targetId);
+        TelegramService.unbanUserInConnectedChats(targetId).catch(() => {});
+
+        const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: `✅ <b>OK Boss. ${userDisplay} has been successfully unbanned.</b>`,
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+    }
+
+    // /report command in private chat
+    const privReportMatch = text.match(/^\/report(?:@\w+)?(?:\s+(.+))?$/i);
+    if (privReportMatch) {
+      const query = privReportMatch[1]?.trim();
+      if (!query) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: `ℹ️ <b>How to Report:</b>\nSend <code>/report &lt;@username_or_id&gt; &lt;reason&gt;</code>\nExample: <code>/report @spammer Violating community rules</code>`,
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+
+      const parts = query.split(/\s+/);
+      const targetQuery = parts[0];
+      const reason = parts.slice(1).join(' ').trim() || 'Inappropriate behavior / violation';
+      const found = await storage.findUserByIdOrUsername(targetQuery);
+      
+      const targetUserId = found ? String(found.id) : targetQuery.replace(/^@+/, '');
+      const targetUserName = found ? (found.firstName || found.username || 'User') : targetQuery;
+      const targetUserUsername = found?.username ? found.username.replace(/^@+/, '') : (targetQuery.startsWith('@') ? targetQuery.replace(/^@+/, '') : undefined);
+
+      const reporter = message.from || {};
+      const report = await storage.saveReport({
+        id: `rep_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`,
+        reporterId: String(reporter.id || fromId),
+        reporterName: reporter.first_name || reporter.username || 'User',
+        reporterUsername: reporter.username,
+        reportedUserId: targetUserId,
+        reportedUserName: targetUserName,
+        reportedUserUsername: targetUserUsername,
+        reason,
+        chatId: String(chatId),
+        chatTitle: 'Direct Message',
+        reportedContent: reason,
+        status: 'pending',
+        createdAt: new Date().toISOString()
+      });
+
+      // Forward to all admin inboxes
+      const admins = await storage.getAdmins();
+      const settings = await storage.getSettings();
+      const adminTargetIds = new Set<string>();
+      if (settings.rootAdminId) adminTargetIds.add(String(settings.rootAdminId).trim());
+      if (process.env.ROOT_ADMIN_ID) adminTargetIds.add(String(process.env.ROOT_ADMIN_ID).trim());
+      for (const a of admins) {
+        if (a.telegramId) adminTargetIds.add(String(a.telegramId).trim());
+        if (a.id && /^\d+$/.test(String(a.id))) adminTargetIds.add(String(a.id).trim());
+      }
+
+      const adminReportMsg = 
+        `🚨 <b>New User Report Filed (DM)</b>\n\n` +
+        `👤 <b>Reported User:</b> ${targetUserName} (${targetUserUsername ? '@' + targetUserUsername : `ID: <code>${targetUserId}</code>`})\n` +
+        `🆔 <b>User ID:</b> <code>${targetUserId}</code>\n` +
+        `📢 <b>Reported By:</b> ${reporter.first_name || 'User'} (${reporter.username ? '@' + reporter.username : `ID: <code>${reporter.id}</code>`})\n` +
+        `💬 <b>Direct Message Report</b>\n` +
+        `📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>`;
+
+      const keyboard = {
+        inline_keyboard: [
+          [
+            { text: '🚫 Ban User', callback_data: `admin_ban_user:${targetUserId}:${report.id}` },
+            { text: 'Dismiss', callback_data: `admin_dismiss_report:${report.id}` }
+          ]
+        ]
+      };
+
+      for (const adminId of adminTargetIds) {
+        try {
+          await this.callTelegramApi('sendMessage', {
+            chat_id: adminId,
+            text: adminReportMsg,
+            parse_mode: 'HTML',
+            reply_markup: keyboard
+          });
+        } catch (e) {
+          console.warn(`[Telegram] Failed to notify admin ${adminId} of DM report:`, e);
+        }
+      }
+
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: '✅ <i>Report received and forwarded to administrators for review.</i>',
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    // Admin /connect or /addchannel command
+    if (/^\/(?:connect|addchannel)(?:@\w+)?(?:\s+.*)?$/i.test(text.trim())) {
+      await this.handleConnectCommand(fromId, chatId, text);
+      return;
+    }
+
+    // Admin /disconnect or /removechannel command
+    if (/^\/(?:disconnect|removechannel)(?:@\w+)?(?:\s+.*)?$/i.test(text.trim())) {
+      await this.handleDisconnectCommand(fromId, chatId, text);
+      return;
     }
 
     // 2b. Filters command (/filters, /filter) - Strictly requires '/' prefix
@@ -1210,6 +2436,15 @@ export class TelegramService {
           return;
         }
 
+        if (message.message_id) {
+          try {
+            await this.callTelegramApi('deleteMessage', {
+              chat_id: chatId,
+              message_id: message.message_id
+            });
+          } catch {}
+        }
+
         await this.handleDeepLinkDelivery(chatId, payload);
         return;
       }
@@ -1262,17 +2497,19 @@ export class TelegramService {
     // When a user requests a new file or link, automatically delete previous bot delivery messages/bubbles
     // sent to that user to keep the chat screen completely clean and fresh with only the latest requested file.
     try {
-      const prevMessageIds = await storage.clearChatDeliveryMessages(chatId);
+      const targetChat = /^-?\d+$/.test(String(chatId)) ? Number(chatId) : String(chatId);
+      const prevMessageIds = await storage.clearChatDeliveryMessages(targetChat);
       if (prevMessageIds && prevMessageIds.length > 0) {
         for (const oldMsgId of prevMessageIds) {
           try {
             await this.callTelegramApi('deleteMessage', {
-              chat_id: chatId,
-              message_id: oldMsgId
+              chat_id: targetChat,
+              message_id: Number(oldMsgId)
             });
           } catch {}
         }
       }
+      TelegramService.cancelActiveTimersForChat(targetChat);
     } catch (cleanErr) {
       console.warn('[Telegram FreshChat] Could not purge previous deliveries:', cleanErr);
     }
@@ -3123,6 +4360,9 @@ export class TelegramService {
           text: 'Please join all channels or groups to use this bot.',
           show_alert: true
         });
+        if (chatId && cb.message?.message_id) {
+          await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, targetPayload, cb.message.message_id, cb.from);
+        }
         return;
       }
 
@@ -3147,6 +4387,95 @@ export class TelegramService {
         await this.handleDeepLinkDelivery(chatId, targetPayload);
       } else {
         await this.sendStartWelcomeMessage(chatId, fromId, cb.message);
+      }
+      return;
+    }
+
+    // ADMIN ACTION ON USER REPORT: Ban User
+    if (data && data.startsWith('admin_ban_user:')) {
+      const parts = data.split(':');
+      const targetUserId = parts[1];
+      const reportId = parts[2];
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      if (!isAdmin) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Unauthorized: Only admins can perform this action.',
+          show_alert: true
+        });
+        return;
+      }
+
+      await storage.setBotUserBanned(targetUserId, true);
+      if (reportId) {
+        await storage.updateReportStatus(reportId, 'resolved', fromId);
+      }
+
+      const allReports = await storage.getReports();
+      const report = allReports.find(r => r.id === reportId);
+      if (report && report.chatId) {
+        try {
+          await this.callTelegramApi('banChatMember', {
+            chat_id: report.chatId,
+            user_id: Number(targetUserId) || targetUserId
+          });
+        } catch (e) {
+          console.warn('[Telegram] banChatMember error:', e);
+        }
+      }
+
+      await this.callTelegramApi('answerCallbackQuery', {
+        callback_query_id: cb.id,
+        text: `User ${targetUserId} has been banned.`,
+        show_alert: false
+      });
+
+      if (chatId && cb.message?.message_id) {
+        try {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: `${cb.message.text || ''}\n\n<b>🔨 Resolved:</b> User was BANNED by Admin.`,
+            parse_mode: 'HTML'
+          });
+        } catch {}
+      }
+      return;
+    }
+
+    // ADMIN ACTION ON USER REPORT: Dismiss Report
+    if (data && data.startsWith('admin_dismiss_report:')) {
+      const parts = data.split(':');
+      const reportId = parts[1];
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      if (!isAdmin) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Unauthorized.',
+          show_alert: true
+        });
+        return;
+      }
+
+      if (reportId) {
+        await storage.updateReportStatus(reportId, 'dismissed', fromId);
+      }
+
+      await this.callTelegramApi('answerCallbackQuery', {
+        callback_query_id: cb.id,
+        text: 'Report dismissed.',
+        show_alert: false
+      });
+
+      if (chatId && cb.message?.message_id) {
+        try {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: `${cb.message.text || ''}\n\n<b>✅ Report Dismissed</b> by Admin.`,
+            parse_mode: 'HTML'
+          });
+        } catch {}
       }
       return;
     }
@@ -4018,15 +5347,28 @@ export class TelegramService {
     this.activeTimers.set(sched.id, timer);
   }
 
+  public static cancelActiveTimersForChat(chatId: string | number): void {
+    const key = String(chatId);
+    for (const [id, timer] of this.activeTimers.entries()) {
+      if (id.includes(key)) {
+        clearTimeout(timer);
+        this.activeTimers.delete(id);
+      }
+    }
+  }
+
   public static async executeScheduledDeletion(sched: ScheduledDeletion): Promise<void> {
     try {
       console.info(`[Telegram] Auto-deleting delivered file message ${sched.messageId} in chat ${sched.chatId} after ${sched.timeoutMinutes}m timeout`);
       
+      const targetChatId = /^-?\d+$/.test(String(sched.chatId)) ? Number(sched.chatId) : String(sched.chatId);
+      const targetMsgId = Number(sched.messageId);
+
       // Delete the delivered file message safely
-      if (sched.chatId && sched.messageId) {
+      if (targetChatId && targetMsgId) {
         const res = await this.callTelegramApi('deleteMessage', {
-          chat_id: sched.chatId,
-          message_id: sched.messageId
+          chat_id: targetChatId,
+          message_id: targetMsgId
         });
         if (!res.ok) {
           console.info(`[Telegram] Scheduled deleteMessage result: ${res?.description || 'already removed'}`);
@@ -4034,10 +5376,10 @@ export class TelegramService {
       }
 
       // Also delete companion notice if one was sent
-      if (sched.chatId && sched.companionNoticeId) {
+      if (targetChatId && sched.companionNoticeId) {
         await this.callTelegramApi('deleteMessage', {
-          chat_id: sched.chatId,
-          message_id: sched.companionNoticeId
+          chat_id: targetChatId,
+          message_id: Number(sched.companionNoticeId)
         }).catch(() => {});
       }
     } catch (err: any) {
@@ -4078,6 +5420,15 @@ export class TelegramService {
 
   public static async initPollingWorker(): Promise<void> {
     if (this.pollingActive) return;
+
+    // If server is designated as a silent backup mirror (and failover is not active), stay dormant
+    try {
+      const backupConfig = await storage.getBackupConfig();
+      if (backupConfig?.role === 'backup' && !backupConfig?.failoverActive) {
+        console.info('[Telegram] Server is running in Silent Backup Mirror mode. Bot listener is dormant awaiting failover signal.');
+        return;
+      }
+    } catch {}
 
     const token = await this.getBotToken();
     if (!token) {

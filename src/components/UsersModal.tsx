@@ -85,7 +85,10 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
     try {
       setActionLoadingId(user.id);
       setFeedback(null);
-      const res = await api.toggleBanUser(user.id);
+      const isCurrentlyBanned = Boolean(user.isBanned);
+      const res = isCurrentlyBanned
+        ? await api.unbanUser(user.id)
+        : await api.toggleBanUser(user.id);
       
       // Update local state optimistically
       setUsers((prev) =>
@@ -94,7 +97,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
 
       setFeedback({
         type: 'success',
-        message: res.user.isBanned ? `User ${user.id} banned successfully` : `User ${user.id} unbanned successfully`
+        message: res.user.isBanned ? `User ${user.id} banned successfully` : `User ${user.id} unbanned successfully. Full access restored.`
       });
 
       if (onUserUpdated) {

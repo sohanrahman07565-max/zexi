@@ -108,6 +108,12 @@ export interface ForceSubChannel {
   name: string;
   chatId: string;
   inviteLink: string;
+  enabled?: boolean;
+  isAutoDetected?: boolean;
+  type?: 'channel' | 'supergroup' | 'group';
+  username?: string;
+  isAdmin?: boolean;
+  detectedAt?: string;
 }
 
 export interface BotSettings {
@@ -126,6 +132,21 @@ export interface BotSettings {
   hasToken?: boolean;
   forceSubEnabled?: boolean;
   requiredChannels?: ForceSubChannel[];
+  autoApproveJoinRequests?: boolean;
+  antiForwardEnabled?: boolean;
+}
+
+export interface JoinRequestRecord {
+  id: string; // `${chatId}_${userId}`
+  chatId: string;
+  chatTitle?: string;
+  userId: string;
+  userName?: string;
+  userUsername?: string;
+  status: 'approved' | 'pending' | 'rejected';
+  inviteLink?: string;
+  createdAt: string;
+  approvedAt?: string;
 }
 
 export interface BotUserRecord {
@@ -139,6 +160,40 @@ export interface BotUserRecord {
   isBanned?: boolean;
   bannedAt?: string;
   isAdmin?: boolean;
+}
+
+export interface UserReportRecord {
+  id: string;
+  reporterId: string;
+  reporterName?: string;
+  reporterUsername?: string;
+  reportedUserId: string;
+  reportedUserName?: string;
+  reportedUserUsername?: string;
+  reason: string;
+  chatId?: string;
+  chatTitle?: string;
+  messageId?: number;
+  reportedContent?: string;
+  createdAt: string;
+  status: 'pending' | 'resolved' | 'dismissed';
+  resolvedBy?: string;
+  resolvedAt?: string;
+}
+
+export interface FraudKeywordRule {
+  id: string;
+  keyword: string;
+  matchType: 'contains' | 'exact' | 'regex';
+  action: 'delete' | 'warn' | 'delete_and_warn' | 'mute' | 'ban';
+  duration?: 'permanent' | '1h' | '6h' | '24h' | '7d' | '30d';
+  maxWarnings?: number;
+  customMessage?: string;
+  warningText?: string;
+  mediaUrl?: string;
+  mediaType?: 'photo' | 'video' | 'audio' | 'voice' | 'text' | 'none';
+  enabled: boolean;
+  createdAt: string;
 }
 
 const TOKEN_KEY = 'tg_admin_token';
@@ -417,6 +472,44 @@ export const api = {
     return data;
   },
 
+  async syncChannels(): Promise<{ success: boolean; channels: ForceSubChannel[]; message: string }> {
+    const res = await authFetch('/api/settings/sync-channels', {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to auto-detect channels');
+    return data;
+  },
+
+  async toggleChannel(channelId: string, enabled?: boolean): Promise<{ success: boolean; channel: ForceSubChannel }> {
+    const res = await authFetch('/api/settings/toggle-channel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ channelId, enabled })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to toggle channel');
+    return data;
+  },
+
+  async getJoinRequests(): Promise<{ success: boolean; requests: JoinRequestRecord[] }> {
+    const res = await authFetch('/api/settings/join-requests');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to fetch join requests');
+    return data;
+  },
+
+  async approveJoinRequest(chatId: string, userId: string): Promise<{ success: boolean; result: any }> {
+    const res = await authFetch('/api/settings/approve-join-request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chatId, userId })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to approve join request');
+    return data;
+  },
+
   async setWebhook(appUrl: string): Promise<any> {
     const res = await authFetch('/api/bot/set-webhook', {
       method: 'POST',
@@ -508,6 +601,172 @@ export const api = {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to send test broadcast');
+    return data;
+  },
+
+  async unbanUser(userId: string): Promise<{ success: boolean; user: BotUserRecord }> {
+    const res = await authFetch(`/api/users/${userId}/unban`, {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to unban user');
+    return data;
+  },
+
+  // Reports API
+  async getReports(): Promise<UserReportRecord[]> {
+    const res = await authFetch('/api/reports');
+    if (!res.ok) throw new Error('Failed to load reports');
+    return await res.json();
+  },
+
+  async updateReport(id: string, payload: { status: 'pending' | 'resolved' | 'dismissed'; banUser?: boolean }): Promise<{ success: boolean; report: UserReportRecord }> {
+    const res = await authFetch(`/api/reports/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to update report');
+    return data;
+  },
+
+  async deleteReport(id: string): Promise<{ success: boolean }> {
+    const res = await authFetch(`/api/reports/${id}`, {
+      method: 'DELETE'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to delete report');
+    return data;
+  },
+
+  // Fraud Rules API
+  async getFraudRules(): Promise<FraudKeywordRule[]> {
+    const res = await authFetch('/api/fraud-rules');
+    if (!res.ok) throw new Error('Failed to load fraud rules');
+    return await res.json();
+  },
+
+  async createFraudRule(payload: Partial<FraudKeywordRule>): Promise<{ success: boolean; rule: FraudKeywordRule }> {
+    const res = await authFetch('/api/fraud-rules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to create fraud rule');
+    return data;
+  },
+
+  async updateFraudRule(id: string, payload: Partial<FraudKeywordRule>): Promise<{ success: boolean; rule: FraudKeywordRule }> {
+    const res = await authFetch(`/api/fraud-rules/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to update fraud rule');
+    return data;
+  },
+
+  async deleteFraudRule(id: string): Promise<{ success: boolean }> {
+    const res = await authFetch(`/api/fraud-rules/${id}`, {
+      method: 'DELETE'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to delete fraud rule');
+    return data;
+  },
+
+  // Backup Server API
+  async getBackupServerStatus(): Promise<{
+    config: {
+      enabled: boolean;
+      serverUrl: string;
+      secretKey: string;
+      role: 'primary' | 'backup';
+      autoSyncOnSave: boolean;
+      syncIntervalMinutes: number;
+      lastSyncAt?: string;
+      lastSyncStatus?: 'success' | 'failed' | 'idle' | 'in_progress';
+      lastSyncMessage?: string;
+      mirroredStats?: {
+        itemsCount: number;
+        usersCount: number;
+        filesCount: number;
+        reportsCount: number;
+        rulesCount: number;
+        templatesCount: number;
+        lastSyncedAt: string;
+      };
+      failoverActive?: boolean;
+    };
+    localStats: {
+      itemsCount: number;
+      usersCount: number;
+      filesCount: number;
+      reportsCount: number;
+      rulesCount: number;
+      templatesCount: number;
+      channelsCount: number;
+    };
+    serverTime: string;
+  }> {
+    const res = await authFetch('/api/backup-server/status');
+    if (!res.ok) throw new Error('Failed to load backup server status');
+    return await res.json();
+  },
+
+  async updateBackupServerConfig(config: any): Promise<{ success: boolean; config: any }> {
+    const res = await authFetch('/api/backup-server/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to update backup server configuration');
+    return data;
+  },
+
+  async syncNowBackupServer(): Promise<{ success: boolean; message: string; stats?: any }> {
+    const res = await authFetch('/api/backup-server/sync-now', {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to trigger backup server sync');
+    return data;
+  },
+
+  async testBackupServerConnection(serverUrl?: string, secretKey?: string): Promise<{ success: boolean; message: string; latencyMs?: number; backupServerRole?: string }> {
+    const res = await authFetch('/api/backup-server/test-connection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ serverUrl, secretKey })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Connection test failed');
+    return data;
+  },
+
+  async switchBackupServerRole(role?: 'primary' | 'backup'): Promise<{ success: boolean; message: string; config: any }> {
+    const res = await authFetch('/api/backup-server/failover/switch-role', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to switch server role');
+    return data;
+  },
+
+  async restoreBackupSnapshot(snapshot: any): Promise<{ success: boolean; message: string; counts: any }> {
+    const res = await authFetch('/api/backup-server/restore-snapshot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ snapshot })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to restore snapshot');
     return data;
   }
 };

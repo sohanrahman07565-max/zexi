@@ -500,9 +500,176 @@ apiRouter.post('/users/:id/ban', authenticate, async (req: Request, res: Respons
 
   try {
     const updated = await storage.toggleBanUser(userId);
+    // If the user was unbanned, restore access in Telegram groups/channels as well
+    if (updated && !updated.isBanned) {
+      TelegramService.unbanUserInConnectedChats(userId).catch(err => {
+        console.warn('[Telegram] unbanUserInConnectedChats error:', err);
+      });
+    }
     return res.json({ success: true, user: updated });
   } catch (err: any) {
     return res.status(400).json({ error: err.message || 'Failed to update user ban status' });
+  }
+});
+
+// POST /api/users/:id/unban
+apiRouter.post('/users/:id/unban', authenticate, async (req: Request, res: Response) => {
+  const userId = req.params.id;
+  if (!userId) {
+    return res.status(400).json({ error: 'User ID is required' });
+  }
+  try {
+    const updated = await storage.setBotUserBanned(userId, false);
+    if (updated) {
+      TelegramService.unbanUserInConnectedChats(userId).catch(err => {
+        console.warn('[Telegram] unbanUserInConnectedChats error:', err);
+      });
+    }
+    return res.json({ success: true, user: updated });
+  } catch (err: any) {
+    return res.status(400).json({ error: err.message || 'Failed to unban user' });
+  }
+});
+
+// ============================================================================
+// USER REPORTS SYSTEM
+// ============================================================================
+
+// GET /api/reports
+apiRouter.get('/reports', authenticate, async (_req: Request, res: Response) => {
+  try {
+    const reports = await storage.getReports();
+    return res.json(reports);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch reports' });
+  }
+});
+
+// PUT /api/reports/:id
+apiRouter.put('/reports/:id', authenticate, async (req: Request, res: Response) => {
+  try {
+    const reportId = req.params.id;
+    const { status, banUser } = req.body;
+    const admin = (req as any).admin as AdminUser;
+
+    const report = (await storage.getReports()).find(r => r.id === reportId);
+    if (!report) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
+
+    if (banUser && report.reportedUserId) {
+      await storage.setBotUserBanned(report.reportedUserId, true);
+      if (report.chatId) {
+        try {
+          await TelegramService.callTelegramApi('banChatMember', {
+            chat_id: report.chatId,
+            user_id: Number(report.reportedUserId) || report.reportedUserId
+          });
+        } catch (e) {
+          console.warn('[Routes] banChatMember on report resolution error:', e);
+        }
+      }
+    }
+
+    const updated = await storage.updateReportStatus(reportId, status || 'resolved', admin?.id);
+    return res.json({ success: true, report: updated });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to update report' });
+  }
+});
+
+// DELETE /api/reports/:id
+apiRouter.delete('/reports/:id', authenticate, async (req: Request, res: Response) => {
+  try {
+    const success = await storage.deleteReport(req.params.id);
+    return res.json({ success });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to delete report' });
+  }
+});
+
+// ============================================================================
+// FRAUD PROTECTION & CUSTOM KEYWORD RULES
+// ============================================================================
+
+// GET /api/fraud-rules
+apiRouter.get('/fraud-rules', authenticate, async (_req: Request, res: Response) => {
+  try {
+    const rules = await storage.getFraudRules();
+    return res.json(rules);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch fraud rules' });
+  }
+});
+
+// POST /api/fraud-rules
+apiRouter.post('/fraud-rules', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const { keyword, matchType = 'contains', action = 'delete_and_warn', duration = 'permanent', maxWarnings = 3, warningText, mediaUrl, mediaType, enabled = true } = req.body;
+    if (!keyword || String(keyword).trim().length === 0) {
+      return res.status(400).json({ error: 'Keyword is required' });
+    }
+
+    const id = `fr_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
+    const rule = await storage.saveFraudRule({
+      id,
+      keyword: String(keyword).trim(),
+      matchType: matchType || 'contains',
+      action: action || 'delete_and_warn',
+      duration: duration || 'permanent',
+      maxWarnings: Number(maxWarnings) || 3,
+      warningText: warningText ? String(warningText).trim() : undefined,
+      customMessage: warningText ? String(warningText).trim() : undefined,
+      mediaUrl: mediaUrl ? String(mediaUrl).trim() : undefined,
+      mediaType: mediaType || undefined,
+      enabled: Boolean(enabled),
+      createdAt: new Date().toISOString()
+    });
+
+    return res.json({ success: true, rule });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to save fraud rule' });
+  }
+});
+
+// PUT /api/fraud-rules/:id
+apiRouter.put('/fraud-rules/:id', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id;
+    const { keyword, matchType, action, duration, maxWarnings, warningText, mediaUrl, mediaType, enabled } = req.body;
+    const existing = (await storage.getFraudRules()).find(r => r.id === id);
+    if (!existing) {
+      return res.status(404).json({ error: 'Fraud rule not found' });
+    }
+
+    const updated = await storage.saveFraudRule({
+      id,
+      keyword: keyword !== undefined ? String(keyword).trim() : existing.keyword,
+      matchType: matchType !== undefined ? matchType : existing.matchType,
+      action: action !== undefined ? action : existing.action,
+      duration: duration !== undefined ? duration : (existing.duration || 'permanent'),
+      maxWarnings: maxWarnings !== undefined ? Number(maxWarnings) : (existing.maxWarnings || 3),
+      warningText: warningText !== undefined ? String(warningText).trim() : (existing.warningText || existing.customMessage),
+      customMessage: warningText !== undefined ? String(warningText).trim() : (existing.customMessage || existing.warningText),
+      mediaUrl: mediaUrl !== undefined ? String(mediaUrl).trim() : existing.mediaUrl,
+      mediaType: mediaType !== undefined ? mediaType : existing.mediaType,
+      enabled: enabled !== undefined ? Boolean(enabled) : existing.enabled,
+      createdAt: existing.createdAt
+    });
+
+    return res.json({ success: true, rule: updated });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to update fraud rule' });
+  }
+});
+
+// DELETE /api/fraud-rules/:id
+apiRouter.delete('/fraud-rules/:id', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const success = await storage.deleteFraudRule(req.params.id);
+    return res.json({ success });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to delete fraud rule' });
   }
 });
 
@@ -1061,6 +1228,8 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
   if (req.body.maintenanceMode !== undefined) updates.maintenanceMode = Boolean(req.body.maintenanceMode);
   if (req.body.maintenanceNotice !== undefined) updates.maintenanceNotice = String(req.body.maintenanceNotice).trim();
   if (forceSubEnabled !== undefined) updates.forceSubEnabled = Boolean(forceSubEnabled);
+  if (req.body.autoApproveJoinRequests !== undefined) updates.autoApproveJoinRequests = Boolean(req.body.autoApproveJoinRequests);
+  if (req.body.antiForwardEnabled !== undefined) updates.antiForwardEnabled = Boolean(req.body.antiForwardEnabled);
   if (requiredChannels !== undefined) {
     if (Array.isArray(requiredChannels)) {
       updates.requiredChannels = requiredChannels
@@ -1068,7 +1237,13 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
           id: String(c.id || `ch_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`),
           name: String(c.name || '').trim(),
           chatId: String(c.chatId || '').trim(),
-          inviteLink: String(c.inviteLink || '').trim()
+          inviteLink: String(c.inviteLink || '').trim(),
+          enabled: c.enabled !== false,
+          isAutoDetected: Boolean(c.isAutoDetected),
+          type: c.type || 'channel',
+          username: c.username ? String(c.username).trim() : undefined,
+          isAdmin: c.isAdmin !== undefined ? Boolean(c.isAdmin) : true,
+          detectedAt: c.detectedAt || new Date().toISOString()
         }))
         .filter((c: any) => c.name && c.chatId);
     } else {
@@ -1091,10 +1266,77 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
     success: true, 
     settings: {
       ...newSettings,
+      antiForwardEnabled: newSettings.antiForwardEnabled ?? false,
       forceSubEnabled: newSettings.forceSubEnabled ?? false,
+      autoApproveJoinRequests: newSettings.autoApproveJoinRequests ?? true,
       requiredChannels: Array.isArray(newSettings.requiredChannels) ? newSettings.requiredChannels : []
     } 
   });
+});
+
+// POST /api/settings/sync-channels - Auto-detect and sync channels/groups where bot is admin
+apiRouter.post('/settings/sync-channels', authenticate, requirePermission('settings_edit'), async (_req: Request, res: Response) => {
+  try {
+    const synced = await TelegramService.syncAdminChannels();
+    return res.json({
+      success: true,
+      channels: synced,
+      message: `Successfully detected and synced ${synced.length} channel(s) & group(s)`
+    });
+  } catch (err: any) {
+    console.error('[API] Error syncing channels:', err);
+    return res.status(500).json({ error: err.message || 'Failed to auto-detect channels' });
+  }
+});
+
+// POST /api/settings/toggle-channel - Toggle channel ON/OFF directly
+apiRouter.post('/settings/toggle-channel', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const { channelId, enabled } = req.body;
+    if (!channelId) {
+      return res.status(400).json({ error: 'channelId is required' });
+    }
+    const updated = await storage.toggleForceSubChannel(String(channelId), enabled !== undefined ? Boolean(enabled) : undefined);
+    if (!updated) {
+      return res.status(404).json({ error: 'Channel not found' });
+    }
+    return res.json({ success: true, channel: updated });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to toggle channel' });
+  }
+});
+
+// GET /api/settings/join-requests - View recorded private channel join requests
+apiRouter.get('/settings/join-requests', authenticate, requirePermission('settings_edit'), async (_req: Request, res: Response) => {
+  try {
+    const requests = await storage.getJoinRequests();
+    return res.json({ success: true, requests });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to fetch join requests' });
+  }
+});
+
+// POST /api/settings/approve-join-request - Manually approve a join request
+apiRouter.post('/settings/approve-join-request', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const { chatId, userId } = req.body;
+    if (!chatId || !userId) {
+      return res.status(400).json({ error: 'chatId and userId are required' });
+    }
+    const cleanChatId = /^-?\d+$/.test(String(chatId)) ? Number(chatId) : String(chatId);
+    const cleanUserId = Number(userId) || userId;
+
+    const approveRes = await TelegramService.callTelegramApi('approveChatJoinRequest', {
+      chat_id: cleanChatId,
+      user_id: cleanUserId
+    });
+
+    await storage.updateJoinRequestStatus(String(chatId), String(userId), 'approved');
+
+    return res.json({ success: true, result: approveRes });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to approve join request' });
+  }
 });
 
 // POST /api/bot/set-webhook
@@ -1105,7 +1347,14 @@ apiRouter.post('/bot/set-webhook', authenticate, requirePermission('settings_edi
   }
 
   const webhookUrl = `${appUrl}/api/telegram-webhook`;
-  const result = await TelegramService.callTelegramApi('setWebhook', { url: webhookUrl });
+  const result = await TelegramService.callTelegramApi('setWebhook', { 
+    url: webhookUrl,
+    allowed_updates: [
+      'message', 'edited_message', 'channel_post', 'edited_channel_post',
+      'inline_query', 'chosen_inline_result', 'callback_query',
+      'my_chat_member', 'chat_member', 'chat_join_request'
+    ]
+  });
   return res.json(result);
 });
 
@@ -1487,5 +1736,224 @@ apiRouter.post('/telegram-webhook', async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('[Webhook] Error:', err);
     return res.status(200).json({ ok: true }); // Always return 200 to Telegram
+  }
+});
+
+// ============================================================================
+// BACKUP SERVER & REAL-TIME REPLICATION ENDPOINTS
+// ============================================================================
+
+// 1. Silent Mirror Receiver (Protected by x-replication-token)
+apiRouter.post('/backup-server/receive-mirror', async (req: Request, res: Response) => {
+  try {
+    const token = req.headers['x-replication-token'] as string;
+    const config = await storage.getBackupConfig();
+
+    if (!token || !config.secretKey || token.trim() !== config.secretKey.trim()) {
+      return res.status(401).json({ error: 'Unauthorized: Invalid replication handshake token' });
+    }
+
+    const { snapshot, stats } = req.body;
+    if (!snapshot || typeof snapshot !== 'object') {
+      return res.status(400).json({ error: 'Missing or invalid snapshot payload' });
+    }
+
+    console.info(`[BackupServer] Receiving mirror snapshot from primary server...`);
+    const result = await storage.restoreFromSnapshot(snapshot);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Mirror snapshot successfully accepted and saved into silent backup vault.',
+      restored: result.restoredCounts,
+      timestamp: new Date().toISOString()
+    });
+  } catch (err: any) {
+    console.error('[BackupServer] Error processing mirror snapshot:', err);
+    return res.status(500).json({ error: err.message || 'Failed to process mirror snapshot' });
+  }
+});
+
+// 2. Ping Healthcheck for replication handshake (Protected by x-replication-token)
+apiRouter.get('/backup-server/ping', async (req: Request, res: Response) => {
+  const token = req.headers['x-replication-token'] as string;
+  const config = await storage.getBackupConfig();
+
+  if (!token || !config.secretKey || token.trim() !== config.secretKey.trim()) {
+    return res.status(401).json({ error: 'Unauthorized: Invalid replication handshake token' });
+  }
+
+  return res.status(200).json({
+    status: 'ok',
+    role: config.role,
+    failoverActive: Boolean(config.failoverActive),
+    timestamp: Date.now()
+  });
+});
+
+// 3. Get Backup Server Status (Admin authenticated)
+apiRouter.get('/backup-server/status', authenticate, async (_req: Request, res: Response) => {
+  try {
+    const config = await storage.getBackupConfig();
+    const fullDb = await storage.getFullSnapshot(false);
+
+    const localStats = {
+      itemsCount: fullDb.items?.length || 0,
+      usersCount: Object.keys(fullDb.botUsers || {}).length,
+      filesCount: Object.keys(fullDb.uploadedFilesIndex || {}).length,
+      reportsCount: fullDb.reports?.length || 0,
+      rulesCount: fullDb.fraudRules?.length || 0,
+      templatesCount: Object.keys(fullDb.templates || {}).length,
+      channelsCount: fullDb.detectedChannels?.length || 0
+    };
+
+    return res.json({
+      config,
+      localStats,
+      serverTime: new Date().toISOString()
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to get backup status' });
+  }
+});
+
+// 4. Update Backup Server Configuration (Admin authenticated)
+apiRouter.post('/backup-server/config', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { enabled, serverUrl, secretKey, role, autoSyncOnSave, syncIntervalMinutes } = req.body;
+    const updated = await storage.updateBackupConfig({
+      ...(enabled !== undefined ? { enabled: Boolean(enabled) } : {}),
+      ...(serverUrl !== undefined ? { serverUrl: String(serverUrl).trim() } : {}),
+      ...(secretKey !== undefined ? { secretKey: String(secretKey).trim() } : {}),
+      ...(role !== undefined ? { role: role === 'backup' ? 'backup' : 'primary' } : {}),
+      ...(autoSyncOnSave !== undefined ? { autoSyncOnSave: Boolean(autoSyncOnSave) } : {}),
+      ...(syncIntervalMinutes !== undefined ? { syncIntervalMinutes: Number(syncIntervalMinutes) || 5 } : {})
+    });
+
+    return res.json({ success: true, config: updated });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to update backup config' });
+  }
+});
+
+// 5. Trigger Immediate Sync to Backup Server (Admin authenticated)
+apiRouter.post('/backup-server/sync-now', authenticate, async (_req: Request, res: Response) => {
+  try {
+    const result = await storage.replicateToBackupServer();
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Sync failed' });
+  }
+});
+
+// 6. Test Handshake Connection to Designated Backup Server (Admin authenticated)
+apiRouter.post('/backup-server/test-connection', authenticate, async (req: Request, res: Response) => {
+  try {
+    const config = await storage.getBackupConfig();
+    const targetUrl = (req.body.serverUrl || config.serverUrl || '').trim().replace(/\/+$/, '');
+    const targetSecret = (req.body.secretKey || config.secretKey || '').trim();
+
+    if (!targetUrl) {
+      return res.status(400).json({ error: 'Please enter a target backup server URL' });
+    }
+
+    const endpoint = `${targetUrl}/api/backup-server/ping`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    const startTime = Date.now();
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      headers: {
+        'x-replication-token': targetSecret
+      },
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    const latencyMs = Date.now() - startTime;
+
+    if (!response.ok) {
+      const errText = await response.text();
+      return res.status(400).json({
+        success: false,
+        error: `Connection handshake failed (HTTP ${response.status}): ${errText.slice(0, 100)}`,
+        latencyMs
+      });
+    }
+
+    const data = await response.json().catch(() => ({}));
+    return res.json({
+      success: true,
+      message: 'Connection successful! Backup server is online and authenticated.',
+      latencyMs,
+      backupServerRole: data.role || 'unknown'
+    });
+  } catch (err: any) {
+    return res.status(400).json({
+      success: false,
+      error: `Could not connect to backup server: ${err.message || 'Network unreachable'}`
+    });
+  }
+});
+
+// 7. Failover Switch / Promote Role (Admin authenticated)
+apiRouter.post('/backup-server/failover/switch-role', authenticate, async (req: Request, res: Response) => {
+  try {
+    const config = await storage.getBackupConfig();
+    const targetRole = req.body.role || (config.role === 'primary' ? 'backup' : 'primary');
+    const isPromotingToPrimary = targetRole === 'primary';
+
+    const updated = await storage.updateBackupConfig({
+      role: targetRole,
+      failoverActive: isPromotingToPrimary
+    });
+
+    if (isPromotingToPrimary) {
+      console.info('[Failover] Promoting server to Active Primary! Initializing bot worker...');
+      await TelegramService.initPollingWorker();
+    } else {
+      console.info('[Failover] Switching server to Silent Backup mirror. Halting bot polling...');
+      TelegramService.stopPolling();
+    }
+
+    return res.json({
+      success: true,
+      message: isPromotingToPrimary
+        ? 'Failover activated! This server is now the Active Primary and bot operations have resumed.'
+        : 'Server switched to Silent Standby Mirror mode.',
+      config: updated
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to switch role' });
+  }
+});
+
+// 8. Download standalone snapshot archive (Admin authenticated)
+apiRouter.get('/backup-server/export-snapshot', authenticate, async (_req: Request, res: Response) => {
+  try {
+    const snapshot = await storage.getFullSnapshot(true);
+    const dateStr = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="bot-backup-snapshot-${dateStr}.json"`);
+    return res.send(JSON.stringify(snapshot, null, 2));
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to export snapshot' });
+  }
+});
+
+// 9. Restore standalone snapshot archive (Admin authenticated)
+apiRouter.post('/backup-server/restore-snapshot', authenticate, async (req: Request, res: Response) => {
+  try {
+    const snapshot = req.body.snapshot || req.body;
+    if (!snapshot || typeof snapshot !== 'object') {
+      return res.status(400).json({ error: 'Invalid snapshot data' });
+    }
+    const result = await storage.restoreFromSnapshot(snapshot);
+    return res.json({
+      success: true,
+      message: 'Snapshot successfully restored into database.',
+      counts: result.restoredCounts
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to restore snapshot' });
   }
 });

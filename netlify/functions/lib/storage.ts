@@ -141,6 +141,12 @@ export interface ForceSubChannel {
   name: string;
   chatId: string;
   inviteLink: string;
+  enabled?: boolean;
+  isAutoDetected?: boolean;
+  type?: 'channel' | 'supergroup' | 'group';
+  username?: string;
+  isAdmin?: boolean;
+  detectedAt?: string;
 }
 
 export interface BotSettings {
@@ -157,6 +163,21 @@ export interface BotSettings {
   maintenanceNotice?: string;
   forceSubEnabled?: boolean;
   requiredChannels?: ForceSubChannel[];
+  autoApproveJoinRequests?: boolean;
+  antiForwardEnabled?: boolean;
+}
+
+export interface JoinRequestRecord {
+  id: string; // `${chatId}_${userId}`
+  chatId: string;
+  chatTitle?: string;
+  userId: string;
+  userName?: string;
+  userUsername?: string;
+  status: 'approved' | 'pending' | 'rejected';
+  inviteLink?: string;
+  createdAt: string;
+  approvedAt?: string;
 }
 
 export interface ScheduledDeletion {
@@ -198,6 +219,75 @@ export interface BotUserRecord {
   isAdmin?: boolean;
 }
 
+export interface UserReportRecord {
+  id: string;
+  reporterId: string;
+  reporterName: string;
+  reporterUsername?: string;
+  reportedUserId: string;
+  reportedUserName: string;
+  reportedUserUsername?: string;
+  chatId: string;
+  chatTitle?: string;
+  reason: string;
+  originalMessageText?: string;
+  reportedContent?: string;
+  originalMessageId?: number;
+  messageId?: number;
+  status: 'pending' | 'resolved' | 'dismissed';
+  createdAt: string;
+  resolvedBy?: string;
+  resolvedAt?: string;
+}
+
+export interface FraudKeywordRule {
+  id: string;
+  keyword: string;
+  matchType: 'contains' | 'exact' | 'regex';
+  action: 'warn' | 'delete' | 'delete_and_warn' | 'mute' | 'ban';
+  duration?: 'permanent' | '1h' | '6h' | '24h' | '7d' | '30d';
+  maxWarnings?: number; // e.g. 1 to 10 (default: 3)
+  customMessage?: string;
+  warningText?: string;
+  mediaType?: 'none' | 'photo' | 'video' | 'voice' | 'audio' | 'text';
+  mediaUrl?: string; // URL or Telegram file_id
+  enabled: boolean;
+  createdAt: string;
+}
+
+export interface BackupServerConfig {
+  enabled: boolean;
+  serverUrl: string;
+  secretKey: string;
+  role: 'primary' | 'backup';
+  autoSyncOnSave: boolean;
+  syncIntervalMinutes: number;
+  lastSyncAt?: string;
+  lastSyncStatus?: 'success' | 'failed' | 'idle' | 'in_progress';
+  lastSyncMessage?: string;
+  mirroredStats?: {
+    itemsCount: number;
+    usersCount: number;
+    filesCount: number;
+    reportsCount: number;
+    rulesCount: number;
+    templatesCount: number;
+    lastSyncedAt: string;
+  };
+  failoverActive?: boolean;
+}
+
+export const DEFAULT_BACKUP_SERVER_CONFIG: BackupServerConfig = {
+  enabled: false,
+  serverUrl: '',
+  secretKey: 'bsk_' + Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10),
+  role: 'primary',
+  autoSyncOnSave: true,
+  syncIntervalMinutes: 5,
+  lastSyncStatus: 'idle',
+  lastSyncMessage: 'No synchronization performed yet'
+};
+
 export interface AppDatabase {
   items: ItemRecord[];
   templates: Record<string, MessageTemplate>;
@@ -209,8 +299,15 @@ export interface AppDatabase {
   chatDeliveryMessages?: Record<string, number[]>;
   design: DesignConfig;
   settings: BotSettings;
+  backupServer?: BackupServerConfig;
   addSessions?: Record<string, any>;
   botUsers?: Record<string, BotUserRecord>;
+  reports?: UserReportRecord[];
+  fraudRules?: FraudKeywordRule[];
+  linkWarnings?: Record<string, number>;
+  fraudWarnings?: Record<string, number>;
+  detectedChannels?: ForceSubChannel[];
+  joinRequests?: Record<string, JoinRequestRecord>;
   uploadedFilesIndex?: Record<string, {
     id: string;
     fileName: string;
@@ -315,6 +412,27 @@ export const DEFAULT_TEMPLATES: Record<string, MessageTemplate> = {
     description: 'Notice message notifying users that delivered file is temporary and will auto-destruct',
     content: '⏳ <i>Auto-Delete Notice: This file will automatically disappear in {timeout} minutes. Please save or forward it now!</i>',
     variables: ['timeout', 'name']
+  },
+  ANTI_LINK_WARNING: {
+    key: 'ANTI_LINK_WARNING',
+    name: 'Anti-Link Group Warning',
+    description: 'Warning message sent when a non-admin user posts an unauthorized link in group chat',
+    content: 'First Warning: Links are not allowed in this group. If you share a link again, you will be banned from the group.',
+    variables: ['user_name', 'user_id']
+  },
+  FRAUD_KEYWORD_DEFAULT_REPLY: {
+    key: 'FRAUD_KEYWORD_DEFAULT_REPLY',
+    name: 'Restricted Word Auto-Reply / Warning',
+    description: 'Auto-reply or warning sent when a user triggers a restricted keyword',
+    content: '⚠️ <b>Warning {user_name} ({warning_count}/{max_warnings}):</b> Prohibited content detected (<code>{keyword}</code>). If you continue, you will be restricted from this chat.',
+    variables: ['user_name', 'user_id', 'keyword', 'warning_count', 'max_warnings', 'action']
+  },
+  FORCESUB_PROMPT: {
+    key: 'FORCESUB_PROMPT',
+    name: 'Force Sub / Mandatory Join Prompt',
+    description: 'Main text displayed on the verification screen when a user has not joined all mandatory channels/groups',
+    content: "🔒 <b>Channel Membership Required</b>\n\nTo use this bot and access your requested content, please subscribe to our official channel(s) below:\n\n{channel_list}\n\n👇 <i>Tap the button(s) above to join, then press <b>Verify / Try Again</b> below.</i>",
+    variables: ['channel_list', 'user_name', 'user_id', 'bot_name']
   }
 };
 
@@ -347,7 +465,7 @@ export const DEFAULT_DESIGN: DesignConfig = {
   borderRadius: 'rounded',
   loginTitle: 'ADMIN PANEL',
   loginSubtitle: 'SECURE ACCESS',
-  loginLogoUrl: 'https://host.tscv.workers.dev/img/4fae5ca52db64590',
+  loginLogoUrl: 'https://host.tscv.workers.dev/img/f61e20b6c71945c4',
   loginLogoSymbol: '惡',
   loginIdLabel: 'ADMIN NAME',
   loginIdPlaceholder: 'Enter admin name',
@@ -370,6 +488,8 @@ export const DEFAULT_SETTINGS: BotSettings = {
   autoDeleteNoticeEnabled: false,
   maintenanceMode: false,
   forceSubEnabled: false,
+  autoApproveJoinRequests: true,
+  antiForwardEnabled: false,
   requiredChannels: []
 };
 
@@ -403,8 +523,15 @@ export class SharedStorageService {
       uploadedFilesIndex: {},
       addSessions: {},
       botUsers: {},
+      reports: [],
+      fraudRules: [],
+      linkWarnings: {},
+      fraudWarnings: {},
+      detectedChannels: [],
+      joinRequests: {},
       design: { ...DEFAULT_DESIGN },
-      settings: { ...DEFAULT_SETTINGS }
+      settings: { ...DEFAULT_SETTINGS },
+      backupServer: { ...DEFAULT_BACKUP_SERVER_CONFIG }
     };
   }
 
@@ -496,6 +623,12 @@ export class SharedStorageService {
         uploadedFilesIndex: loadedData.uploadedFilesIndex || {},
         addSessions: loadedData.addSessions || {},
         botUsers: loadedData.botUsers || {},
+        reports: Array.isArray(loadedData.reports) ? loadedData.reports : [],
+        fraudRules: Array.isArray(loadedData.fraudRules) ? loadedData.fraudRules : [],
+        linkWarnings: loadedData.linkWarnings || {},
+        fraudWarnings: loadedData.fraudWarnings || {},
+        detectedChannels: Array.isArray(loadedData.detectedChannels) ? loadedData.detectedChannels : [],
+        joinRequests: loadedData.joinRequests || {},
         design: { ...DEFAULT_DESIGN, ...(loadedData.design || {}) },
         settings: {
           ...DEFAULT_SETTINGS,
@@ -504,7 +637,13 @@ export class SharedStorageService {
           rootAdminId: process.env.ROOT_ADMIN_ID || loadedData.settings?.rootAdminId || '',
           autoDeleteNoticeEnabled: loadedData.settings?.autoDeleteNoticeEnabled ?? false,
           forceSubEnabled: loadedData.settings?.forceSubEnabled ?? false,
+          autoApproveJoinRequests: loadedData.settings?.autoApproveJoinRequests ?? true,
+          antiForwardEnabled: loadedData.settings?.antiForwardEnabled ?? false,
           requiredChannels: Array.isArray(loadedData.settings?.requiredChannels) ? loadedData.settings.requiredChannels : []
+        },
+        backupServer: {
+          ...DEFAULT_BACKUP_SERVER_CONFIG,
+          ...(loadedData.backupServer || {})
         }
       };
     }
@@ -587,6 +726,17 @@ export class SharedStorageService {
     }
 
     this.lastLoadedAt = Date.now();
+
+    // Trigger debounced real-time replication to silent backup mirror if enabled
+    if (
+      this.db.backupServer?.enabled &&
+      this.db.backupServer?.role === 'primary' &&
+      this.db.backupServer?.autoSyncOnSave &&
+      this.db.backupServer?.serverUrl
+    ) {
+      this.scheduleSilentReplication();
+    }
+
     return true;
   }
 
@@ -1154,7 +1304,20 @@ export class SharedStorageService {
   public async isUserBanned(userId: string | number): Promise<boolean> {
     if (!userId) return false;
     await this.loadLatest(false);
-    return Boolean(this.db.botUsers?.[String(userId).trim()]?.isBanned);
+    const cleanId = String(userId).trim();
+    // 1. Direct key check
+    const directUser = this.db.botUsers?.[cleanId];
+    if (directUser !== undefined) {
+      return Boolean(directUser.isBanned);
+    }
+    // 2. Check by username or ID across all registered records
+    const cleanUsername = cleanId.replace(/^@+/, '').toLowerCase();
+    const allUsers = Object.values(this.db.botUsers || {});
+    const match = allUsers.find(u => 
+      String(u.id).trim() === cleanId || 
+      (u.username && u.username.replace(/^@+/, '').toLowerCase() === cleanUsername)
+    );
+    return Boolean(match?.isBanned);
   }
 
   public async toggleBanUser(userId: string | number): Promise<BotUserRecord | null> {
@@ -1174,11 +1337,22 @@ export class SharedStorageService {
       throw new Error('Administrators cannot be banned');
     }
 
-    let user = this.db.botUsers[cleanId];
-    if (!user) {
-      const now = new Date().toISOString();
+    const cleanUsername = cleanId.replace(/^@+/, '').toLowerCase();
+    const matchingKeys = Object.keys(this.db.botUsers).filter(k => {
+      const u = this.db.botUsers![k];
+      return k === cleanId || 
+             k.replace(/^@+/, '').toLowerCase() === cleanUsername ||
+             String(u.id).trim() === cleanId || 
+             (u.username && u.username.replace(/^@+/, '').toLowerCase() === cleanUsername);
+    });
+
+    const now = new Date().toISOString();
+    let user: BotUserRecord | null = null;
+
+    if (matchingKeys.length === 0) {
       user = {
         id: cleanId,
+        username: cleanId.startsWith('@') ? cleanId : undefined,
         firstSeenAt: now,
         lastActiveAt: now,
         interactionCount: 0,
@@ -1187,9 +1361,41 @@ export class SharedStorageService {
       };
       this.db.botUsers[cleanId] = user;
     } else {
-      user.isBanned = !user.isBanned;
-      user.bannedAt = user.isBanned ? new Date().toISOString() : undefined;
+      const targetBannedState = !Boolean(this.db.botUsers[matchingKeys[0]]?.isBanned);
+      for (const k of matchingKeys) {
+        const u = this.db.botUsers[k];
+        u.isBanned = targetBannedState;
+        if (targetBannedState) {
+          u.bannedAt = now;
+        } else {
+          delete u.bannedAt;
+          (u as any).bannedAt = undefined;
+        }
+        user = u;
+      }
     }
+
+    // When unbanned, completely clear any link warnings or fraud restrictions
+    if (user && !user.isBanned) {
+      delete user.bannedAt;
+      (user as any).bannedAt = undefined;
+      await this.resetUserLinkWarning(cleanId);
+      await this.resetUserFraudWarning(cleanId);
+      if (user.id) {
+        await this.resetUserLinkWarning(user.id);
+        await this.resetUserFraudWarning(user.id);
+        if (this.db.botUsers[String(user.id).trim()]) {
+          this.db.botUsers[String(user.id).trim()].isBanned = false;
+          delete this.db.botUsers[String(user.id).trim()].bannedAt;
+          (this.db.botUsers[String(user.id).trim()] as any).bannedAt = undefined;
+        }
+      }
+      if (user.username) {
+        await this.resetUserLinkWarning(user.username);
+        await this.resetUserFraudWarning(user.username);
+      }
+    }
+
     await this.persist();
     return user;
   }
@@ -1197,6 +1403,10 @@ export class SharedStorageService {
   // --- Design ---
   public async getDesign(): Promise<DesignConfig> {
     await this.loadLatest(false);
+    // Auto-migrate legacy default logo asset if still stored
+    if (!this.db.design.loginLogoUrl || this.db.design.loginLogoUrl.includes('4fae5ca52db64590')) {
+      this.db.design.loginLogoUrl = 'https://host.tscv.workers.dev/img/f61e20b6c71945c4';
+    }
     return this.db.design;
   }
 
@@ -1213,6 +1423,9 @@ export class SharedStorageService {
     if (this.db.settings.forceSubEnabled === undefined) {
       this.db.settings.forceSubEnabled = false;
     }
+    if (this.db.settings.antiForwardEnabled === undefined) {
+      this.db.settings.antiForwardEnabled = false;
+    }
     if (!Array.isArray(this.db.settings.requiredChannels)) {
       this.db.settings.requiredChannels = [];
     }
@@ -1225,12 +1438,234 @@ export class SharedStorageService {
       ...this.db.settings, 
       ...settings,
       forceSubEnabled: settings.forceSubEnabled !== undefined ? Boolean(settings.forceSubEnabled) : (this.db.settings.forceSubEnabled ?? false),
+      antiForwardEnabled: settings.antiForwardEnabled !== undefined ? Boolean(settings.antiForwardEnabled) : (this.db.settings.antiForwardEnabled ?? false),
       requiredChannels: settings.requiredChannels !== undefined && Array.isArray(settings.requiredChannels) 
         ? settings.requiredChannels 
         : (Array.isArray(this.db.settings.requiredChannels) ? this.db.settings.requiredChannels : [])
     };
     await this.persist();
     return this.db.settings;
+  }
+
+  // --- Force Sub & Auto-Detected Channels ---
+  public async getDetectedChannels(): Promise<ForceSubChannel[]> {
+    await this.loadLatest(false);
+    return Array.isArray(this.db.detectedChannels) ? this.db.detectedChannels : [];
+  }
+
+  public async registerDetectedChannel(channel: Partial<ForceSubChannel>): Promise<ForceSubChannel> {
+    await this.loadLatest(true);
+    if (!Array.isArray(this.db.detectedChannels)) {
+      this.db.detectedChannels = [];
+    }
+    if (!Array.isArray(this.db.settings.requiredChannels)) {
+      this.db.settings.requiredChannels = [];
+    }
+
+    const cleanChatId = String(channel.chatId || '').trim();
+    if (!cleanChatId) throw new Error('Chat ID is required');
+
+    // Check if channel already exists in detected list
+    let existingDetected = this.db.detectedChannels.find(c => 
+      c.chatId === cleanChatId || (channel.username && c.username && c.username.toLowerCase() === channel.username.toLowerCase())
+    );
+
+    const channelRecord: ForceSubChannel = {
+      id: existingDetected?.id || channel.id || `ch_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      name: channel.name?.trim() || existingDetected?.name || 'Telegram Channel',
+      chatId: cleanChatId,
+      inviteLink: channel.inviteLink?.trim() || existingDetected?.inviteLink || '',
+      enabled: channel.enabled !== undefined ? channel.enabled : (existingDetected?.enabled ?? true),
+      isAutoDetected: true,
+      type: channel.type || existingDetected?.type || 'channel',
+      username: channel.username || existingDetected?.username,
+      isAdmin: channel.isAdmin !== undefined ? channel.isAdmin : true,
+      detectedAt: existingDetected?.detectedAt || new Date().toISOString()
+    };
+
+    if (existingDetected) {
+      Object.assign(existingDetected, channelRecord);
+    } else {
+      this.db.detectedChannels.push(channelRecord);
+    }
+
+    // Also synchronize into settings.requiredChannels so it displays in Force Sub settings seamlessly
+    const reqIndex = this.db.settings.requiredChannels.findIndex(c => 
+      c.chatId === cleanChatId || (channel.username && c.username && c.username.toLowerCase() === channel.username.toLowerCase())
+    );
+    if (reqIndex >= 0) {
+      const prev = this.db.settings.requiredChannels[reqIndex];
+      this.db.settings.requiredChannels[reqIndex] = {
+        ...prev,
+        ...channelRecord,
+        enabled: prev.enabled !== undefined ? prev.enabled : channelRecord.enabled
+      };
+    } else {
+      this.db.settings.requiredChannels.push(channelRecord);
+    }
+
+    await this.persist();
+    return channelRecord;
+  }
+
+  public async toggleForceSubChannel(channelId: string, enabled?: boolean): Promise<ForceSubChannel | null> {
+    await this.loadLatest(true);
+    if (!Array.isArray(this.db.settings.requiredChannels)) {
+      this.db.settings.requiredChannels = [];
+    }
+    const ch = this.db.settings.requiredChannels.find(c => c.id === channelId || c.chatId === channelId);
+    if (!ch) return null;
+
+    ch.enabled = enabled !== undefined ? enabled : !ch.enabled;
+
+    // Also update in detectedChannels if present
+    if (Array.isArray(this.db.detectedChannels)) {
+      const det = this.db.detectedChannels.find(c => c.id === channelId || c.chatId === channelId);
+      if (det) det.enabled = ch.enabled;
+    }
+
+    await this.persist();
+    return ch;
+  }
+
+  public async removeForceSubChannel(channelId: string): Promise<boolean> {
+    await this.loadLatest(true);
+    if (Array.isArray(this.db.settings.requiredChannels)) {
+      this.db.settings.requiredChannels = this.db.settings.requiredChannels.filter(c => c.id !== channelId && c.chatId !== channelId);
+    }
+    if (Array.isArray(this.db.detectedChannels)) {
+      this.db.detectedChannels = this.db.detectedChannels.filter(c => c.id !== channelId && c.chatId !== channelId);
+    }
+    return await this.persist();
+  }
+
+  // --- Private Channel Join Requests & Auto-Approval ---
+  public async recordJoinRequest(data: {
+    chatId: string | number;
+    userId: string | number;
+    chatTitle?: string;
+    userName?: string;
+    userUsername?: string;
+    status?: 'approved' | 'pending' | 'rejected';
+    inviteLink?: string;
+    approvedAt?: string;
+  }): Promise<JoinRequestRecord> {
+    await this.loadLatest(true);
+    if (!this.db.joinRequests) {
+      this.db.joinRequests = {};
+    }
+    const cleanChatId = String(data.chatId || '').trim();
+    const cleanUserId = String(data.userId || '').trim();
+    if (!cleanChatId || !cleanUserId) {
+      throw new Error('Both chatId and userId are required to record a join request');
+    }
+
+    const id = `${cleanChatId}_${cleanUserId}`;
+    const now = new Date().toISOString();
+    const existing = this.db.joinRequests[id];
+
+    const record: JoinRequestRecord = {
+      id,
+      chatId: cleanChatId,
+      chatTitle: data.chatTitle || existing?.chatTitle || '',
+      userId: cleanUserId,
+      userName: data.userName || existing?.userName || '',
+      userUsername: data.userUsername || existing?.userUsername,
+      status: data.status || existing?.status || 'pending',
+      inviteLink: data.inviteLink || existing?.inviteLink,
+      createdAt: existing?.createdAt || now,
+      approvedAt: data.status === 'approved' ? (data.approvedAt || now) : existing?.approvedAt
+    };
+
+    this.db.joinRequests[id] = record;
+    await this.persist();
+    return record;
+  }
+
+  public async isJoinRequestApprovedOrPending(
+    chatId: string | number,
+    userId: string | number,
+    channelId?: string,
+    channelUsername?: string
+  ): Promise<boolean> {
+    await this.loadLatest(false);
+    if (!this.db.joinRequests) return false;
+
+    const cleanUserId = String(userId || '').trim();
+    if (!cleanUserId) return false;
+
+    const rawChat = String(chatId || '').trim();
+    // Normalize forms: e.g. -10012345, 12345, @username
+    const strippedChat = rawChat.replace(/^-100/, '').replace(/^-/, '').replace(/^@/, '').toLowerCase();
+    const cleanUsername = channelUsername ? channelUsername.replace(/^@/, '').toLowerCase() : '';
+
+    const records = Object.values(this.db.joinRequests);
+    for (const req of records) {
+      if (String(req.userId).trim() !== cleanUserId) continue;
+
+      const reqChat = String(req.chatId).trim();
+      const strippedReqChat = reqChat.replace(/^-100/, '').replace(/^-/, '').replace(/^@/, '').toLowerCase();
+
+      // Check match by Chat ID, stripped ID, channelId, or Username
+      const matchesChat = 
+        reqChat === rawChat ||
+        (strippedChat && strippedReqChat === strippedChat) ||
+        (channelId && (req.id.startsWith(channelId) || reqChat === channelId)) ||
+        (cleanUsername && (
+          reqChat.toLowerCase() === `@${cleanUsername}` ||
+          reqChat.toLowerCase() === cleanUsername ||
+          req.chatTitle?.toLowerCase() === cleanUsername
+        ));
+
+      if (matchesChat) {
+        if (req.status === 'approved' || req.status === 'pending') {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  public async getJoinRequests(): Promise<JoinRequestRecord[]> {
+    await this.loadLatest(false);
+    if (!this.db.joinRequests) return [];
+    return Object.values(this.db.joinRequests).sort(
+      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+    );
+  }
+
+  public async updateJoinRequestStatus(
+    chatId: string | number,
+    userId: string | number,
+    status: 'approved' | 'rejected' | 'pending'
+  ): Promise<JoinRequestRecord | null> {
+    await this.loadLatest(true);
+    if (!this.db.joinRequests) return null;
+
+    const cleanChatId = String(chatId).trim();
+    const cleanUserId = String(userId).trim();
+    const id = `${cleanChatId}_${cleanUserId}`;
+
+    let req = this.db.joinRequests[id];
+    if (!req) {
+      // Find matching user + chat
+      const strippedChat = cleanChatId.replace(/^-100/, '').replace(/^-/, '');
+      for (const item of Object.values(this.db.joinRequests)) {
+        if (item.userId === cleanUserId && item.chatId.replace(/^-100/, '').replace(/^-/, '') === strippedChat) {
+          req = item;
+          break;
+        }
+      }
+    }
+
+    if (!req) return null;
+    req.status = status;
+    if (status === 'approved') {
+      req.approvedAt = new Date().toISOString();
+    }
+    await this.persist();
+    return req;
   }
 
   // --- Scheduled Message Deletion (10-minute Delivery Auto-Remove) ---
@@ -1333,13 +1768,31 @@ export class SharedStorageService {
   public async clearChatDeliveryMessages(chatId: string | number): Promise<number[]> {
     await this.loadLatest(true);
     const key = String(chatId);
-    if (!this.db.chatDeliveryMessages || !this.db.chatDeliveryMessages[key]) {
-      return [];
+    const recordedList = this.db.chatDeliveryMessages?.[key] ? [...this.db.chatDeliveryMessages[key]] : [];
+    if (this.db.chatDeliveryMessages && this.db.chatDeliveryMessages[key]) {
+      this.db.chatDeliveryMessages[key] = [];
     }
-    const list = [...this.db.chatDeliveryMessages[key]];
-    this.db.chatDeliveryMessages[key] = [];
+
+    // Also include any message IDs currently in scheduledDeletions for this chat
+    const scheduledMsgIds: number[] = [];
+    if (Array.isArray(this.db.scheduledDeletions)) {
+      const remaining: ScheduledDeletion[] = [];
+      for (const item of this.db.scheduledDeletions) {
+        if (String(item.chatId) === key) {
+          scheduledMsgIds.push(item.messageId);
+          if (item.companionNoticeId) scheduledMsgIds.push(item.companionNoticeId);
+        } else {
+          remaining.push(item);
+        }
+      }
+      this.db.scheduledDeletions = remaining;
+    }
+
     await this.persist();
-    return list;
+
+    // Return unique message IDs that need deletion
+    const allMsgIds = Array.from(new Set([...recordedList, ...scheduledMsgIds])).filter(Boolean);
+    return allMsgIds;
   }
 
   // --- Uploaded Files Storage (Direct phone / storage upload support) ---
@@ -1575,6 +2028,451 @@ export class SharedStorageService {
     if (this.db.addSessions && this.db.addSessions[fromId]) {
       delete this.db.addSessions[fromId];
       await this.persist();
+    }
+  }
+
+  // --- User Reports ---
+  public async getReports(): Promise<UserReportRecord[]> {
+    await this.loadLatest(true);
+    return Array.isArray(this.db.reports) ? [...this.db.reports].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()) : [];
+  }
+
+  public async saveReport(report: UserReportRecord): Promise<UserReportRecord> {
+    await this.loadLatest(true);
+    if (!Array.isArray(this.db.reports)) {
+      this.db.reports = [];
+    }
+    const idx = this.db.reports.findIndex(r => r.id === report.id);
+    if (idx >= 0) {
+      this.db.reports[idx] = { ...this.db.reports[idx], ...report };
+    } else {
+      this.db.reports.unshift(report);
+    }
+    await this.persist();
+    return report;
+  }
+
+  public async updateReportStatus(id: string, status: 'pending' | 'resolved' | 'dismissed', resolvedBy?: string): Promise<UserReportRecord | null> {
+    await this.loadLatest(true);
+    if (!Array.isArray(this.db.reports)) return null;
+    const report = this.db.reports.find(r => r.id === id);
+    if (report) {
+      report.status = status;
+      if (resolvedBy) report.resolvedBy = resolvedBy;
+      if (status === 'resolved' || status === 'dismissed') report.resolvedAt = new Date().toISOString();
+      await this.persist();
+      return report;
+    }
+    return null;
+  }
+
+  public async deleteReport(id: string): Promise<boolean> {
+    await this.loadLatest(true);
+    if (!Array.isArray(this.db.reports)) return false;
+    const before = this.db.reports.length;
+    this.db.reports = this.db.reports.filter(r => r.id !== id);
+    if (this.db.reports.length !== before) {
+      await this.persist();
+      return true;
+    }
+    return false;
+  }
+
+  // --- Fraud & Restricted Keyword Rules ---
+  public async getFraudRules(): Promise<FraudKeywordRule[]> {
+    await this.loadLatest(false);
+    return Array.isArray(this.db.fraudRules) ? this.db.fraudRules : [];
+  }
+
+  public async saveFraudRule(rule: FraudKeywordRule): Promise<FraudKeywordRule> {
+    await this.loadLatest(true);
+    if (!Array.isArray(this.db.fraudRules)) {
+      this.db.fraudRules = [];
+    }
+    const idx = this.db.fraudRules.findIndex(r => r.id === rule.id);
+    if (idx >= 0) {
+      this.db.fraudRules[idx] = { ...this.db.fraudRules[idx], ...rule };
+    } else {
+      this.db.fraudRules.push(rule);
+    }
+    await this.persist();
+    return rule;
+  }
+
+  public async deleteFraudRule(id: string): Promise<boolean> {
+    await this.loadLatest(true);
+    if (!Array.isArray(this.db.fraudRules)) return false;
+    const before = this.db.fraudRules.length;
+    this.db.fraudRules = this.db.fraudRules.filter(r => r.id !== id);
+    if (this.db.fraudRules.length !== before) {
+      await this.persist();
+      return true;
+    }
+    return false;
+  }
+
+  // --- Group Link Warnings Tracking ---
+  public async getUserLinkWarnings(chatOrUserId: string | number, maybeUserId?: string | number): Promise<number> {
+    await this.loadLatest(false);
+    const key = maybeUserId !== undefined ? `${chatOrUserId}_${maybeUserId}` : String(chatOrUserId);
+    return this.db.linkWarnings?.[key] || 0;
+  }
+
+  public async incrementUserLinkWarning(chatOrUserId: string | number, maybeUserId?: string | number): Promise<number> {
+    await this.loadLatest(true);
+    if (!this.db.linkWarnings) {
+      this.db.linkWarnings = {};
+    }
+    const key = maybeUserId !== undefined ? `${chatOrUserId}_${maybeUserId}` : String(chatOrUserId);
+    const nextVal = (this.db.linkWarnings[key] || 0) + 1;
+    this.db.linkWarnings[key] = nextVal;
+    await this.persist();
+    return nextVal;
+  }
+
+  public async resetUserLinkWarning(chatOrUserId: string | number, maybeUserId?: string | number): Promise<void> {
+    await this.loadLatest(true);
+    if (this.db.linkWarnings) {
+      const key = maybeUserId !== undefined ? `${chatOrUserId}_${maybeUserId}` : String(chatOrUserId);
+      delete this.db.linkWarnings[key];
+      await this.persist();
+    }
+  }
+
+  // --- Fraud & Keyword Rule Warnings ---
+  public async getUserFraudWarnings(chatId: string | number, userId: string | number, ruleId?: string): Promise<number> {
+    await this.loadLatest(false);
+    const key = ruleId ? `${chatId}_${userId}_${ruleId}` : `${chatId}_${userId}`;
+    return this.db.fraudWarnings?.[key] || 0;
+  }
+
+  public async incrementUserFraudWarning(chatId: string | number, userId: string | number, ruleId?: string): Promise<number> {
+    await this.loadLatest(true);
+    if (!this.db.fraudWarnings) {
+      this.db.fraudWarnings = {};
+    }
+    const key = ruleId ? `${chatId}_${userId}_${ruleId}` : `${chatId}_${userId}`;
+    const nextVal = (this.db.fraudWarnings[key] || 0) + 1;
+    this.db.fraudWarnings[key] = nextVal;
+    await this.persist();
+    return nextVal;
+  }
+
+  public async resetUserFraudWarning(chatOrUserId: string | number, maybeUserId?: string | number, ruleId?: string): Promise<void> {
+    await this.loadLatest(true);
+    if (this.db.fraudWarnings) {
+      if (maybeUserId !== undefined) {
+        const key = ruleId ? `${chatOrUserId}_${maybeUserId}_${ruleId}` : `${chatOrUserId}_${maybeUserId}`;
+        delete this.db.fraudWarnings[key];
+        delete this.db.fraudWarnings[`${chatOrUserId}_${maybeUserId}`];
+      } else {
+        const target = String(chatOrUserId);
+        for (const k of Object.keys(this.db.fraudWarnings)) {
+          if (k.includes(target)) {
+            delete this.db.fraudWarnings[k];
+          }
+        }
+      }
+      await this.persist();
+    }
+  }
+
+  // --- User Lookup by ID or Username ---
+  public async findUserByIdOrUsername(query: string): Promise<BotUserRecord | null> {
+    await this.loadLatest(false);
+    const clean = query.trim().replace(/^@+/, '').toLowerCase();
+    if (!clean) return null;
+    const users = Object.values(this.db.botUsers || {});
+    const byId = users.find(u => String(u.id).trim() === clean || String(u.id).trim() === query.trim());
+    if (byId) return byId;
+    const byUsername = users.find(u => u.username && u.username.replace(/^@+/, '').toLowerCase() === clean);
+    if (byUsername) return byUsername;
+    const adminMatch = this.db.admins.find(a => 
+      String(a.id).trim() === clean || 
+      String(a.telegramId).trim() === clean || 
+      (a.name && a.name.toLowerCase() === clean)
+    );
+    if (adminMatch) {
+      return {
+        id: adminMatch.telegramId || adminMatch.id,
+        username: adminMatch.name.startsWith('@') ? adminMatch.name : undefined,
+        firstName: adminMatch.name,
+        firstSeenAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+        interactionCount: 1,
+        isAdmin: true
+      };
+    }
+    return null;
+  }
+
+  public async setBotUserBanned(userId: string | number, isBanned: boolean): Promise<BotUserRecord | null> {
+    if (!userId) return null;
+    const cleanId = String(userId).trim();
+    await this.loadLatest(true);
+    if (!this.db.botUsers) {
+      this.db.botUsers = {};
+    }
+
+    if (isBanned) {
+      const admins = await this.getAdmins();
+      const settings = await this.getSettings();
+      const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163');
+      const isAdmin = cleanId === rootAdminId || rootAdminId.includes(cleanId) || admins.some(a => String(a.telegramId) === cleanId || String(a.id) === cleanId);
+      if (isAdmin) {
+        throw new Error('Administrators cannot be banned');
+      }
+    }
+
+    const cleanUsername = cleanId.replace(/^@+/, '').toLowerCase();
+    const matchingKeys = Object.keys(this.db.botUsers).filter(k => {
+      const u = this.db.botUsers![k];
+      return k === cleanId || 
+             k.replace(/^@+/, '').toLowerCase() === cleanUsername ||
+             String(u.id).trim() === cleanId || 
+             (u.username && u.username.replace(/^@+/, '').toLowerCase() === cleanUsername);
+    });
+
+    const now = new Date().toISOString();
+    let user: BotUserRecord | null = null;
+
+    if (matchingKeys.length === 0) {
+      user = {
+        id: cleanId,
+        username: cleanId.startsWith('@') ? cleanId : undefined,
+        firstSeenAt: now,
+        lastActiveAt: now,
+        interactionCount: 0,
+        isBanned: Boolean(isBanned),
+        bannedAt: isBanned ? now : undefined
+      };
+      this.db.botUsers[cleanId] = user;
+    } else {
+      for (const k of matchingKeys) {
+        const u = this.db.botUsers[k];
+        u.isBanned = Boolean(isBanned);
+        if (isBanned) {
+          u.bannedAt = now;
+        } else {
+          delete u.bannedAt;
+          (u as any).bannedAt = undefined;
+        }
+        user = u;
+      }
+    }
+
+    // When unbanned, completely clear any link warnings or fraud restrictions
+    if (user && !isBanned) {
+      delete user.bannedAt;
+      (user as any).bannedAt = undefined;
+      await this.resetUserLinkWarning(cleanId);
+      await this.resetUserFraudWarning(cleanId);
+      if (user.id) {
+        await this.resetUserLinkWarning(user.id);
+        await this.resetUserFraudWarning(user.id);
+        if (this.db.botUsers[String(user.id).trim()]) {
+          this.db.botUsers[String(user.id).trim()].isBanned = false;
+          delete this.db.botUsers[String(user.id).trim()].bannedAt;
+          (this.db.botUsers[String(user.id).trim()] as any).bannedAt = undefined;
+        }
+      }
+      if (user.username) {
+        await this.resetUserLinkWarning(user.username);
+        await this.resetUserFraudWarning(user.username);
+      }
+    }
+
+    await this.persist();
+    return user;
+  }
+
+  // =========================================================================
+  // BACKUP SERVER & LIVE MIRROR REPLICATION SYSTEM
+  // =========================================================================
+  private replicationDebounceTimer: any = null;
+
+  public scheduleSilentReplication(): void {
+    if (this.replicationDebounceTimer) {
+      clearTimeout(this.replicationDebounceTimer);
+    }
+    this.replicationDebounceTimer = setTimeout(() => {
+      this.replicateToBackupServer().catch(err => {
+        console.warn('[BackupServer] Auto-replication notice:', err?.message || err);
+      });
+    }, 2500);
+  }
+
+  public async getBackupConfig(): Promise<BackupServerConfig> {
+    await this.loadLatest(false);
+    return this.db.backupServer || { ...DEFAULT_BACKUP_SERVER_CONFIG };
+  }
+
+  public async updateBackupConfig(partial: Partial<BackupServerConfig>): Promise<BackupServerConfig> {
+    await this.loadLatest(true);
+    this.db.backupServer = {
+      ...(this.db.backupServer || DEFAULT_BACKUP_SERVER_CONFIG),
+      ...partial
+    };
+    await this.persist();
+    return this.db.backupServer;
+  }
+
+  public async getFullSnapshot(includeFiles = true): Promise<any> {
+    await this.loadLatest(false);
+    const snapshot: any = JSON.parse(JSON.stringify(this.db));
+
+    if (includeFiles && this.db.uploadedFilesIndex) {
+      for (const [id, meta] of Object.entries(this.db.uploadedFilesIndex)) {
+        if (!meta.base64) {
+          try {
+            const rec = await this.getUploadedFile(id);
+            if (rec && rec.buffer) {
+              snapshot.uploadedFilesIndex[id].base64 = rec.buffer.toString('base64');
+            }
+          } catch {}
+        }
+      }
+    }
+
+    return snapshot;
+  }
+
+  public async restoreFromSnapshot(snapshot: any): Promise<{ restoredCounts: any }> {
+    if (!snapshot || typeof snapshot !== 'object') {
+      throw new Error('Invalid snapshot payload');
+    }
+
+    await this.loadLatest(true);
+
+    if (Array.isArray(snapshot.items)) this.db.items = snapshot.items;
+    if (snapshot.templates && typeof snapshot.templates === 'object') this.db.templates = { ...DEFAULT_TEMPLATES, ...snapshot.templates };
+    if (Array.isArray(snapshot.admins) && snapshot.admins.length > 0) this.db.admins = snapshot.admins;
+    if (snapshot.design) this.db.design = { ...DEFAULT_DESIGN, ...snapshot.design };
+    if (snapshot.settings) this.db.settings = { ...DEFAULT_SETTINGS, ...snapshot.settings };
+    if (snapshot.botUsers) this.db.botUsers = { ...(this.db.botUsers || {}), ...snapshot.botUsers };
+    if (Array.isArray(snapshot.reports)) this.db.reports = snapshot.reports;
+    if (Array.isArray(snapshot.fraudRules)) this.db.fraudRules = snapshot.fraudRules;
+    if (Array.isArray(snapshot.detectedChannels)) this.db.detectedChannels = snapshot.detectedChannels;
+
+    let fileCount = 0;
+    if (snapshot.uploadedFilesIndex && typeof snapshot.uploadedFilesIndex === 'object') {
+      if (!this.db.uploadedFilesIndex) this.db.uploadedFilesIndex = {};
+      for (const [fileId, fileData] of Object.entries(snapshot.uploadedFilesIndex as Record<string, any>)) {
+        this.db.uploadedFilesIndex[fileId] = {
+          id: fileData.id || fileId,
+          fileName: fileData.fileName || 'file',
+          fileType: fileData.fileType || 'document',
+          mimeType: fileData.mimeType || 'application/octet-stream',
+          size: fileData.size || 0,
+          createdAt: fileData.createdAt || new Date().toISOString()
+        };
+
+        if (fileData.base64) {
+          try {
+            const buffer = Buffer.from(fileData.base64, 'base64');
+            await this.saveUploadedFile(fileId, {
+              buffer,
+              fileName: fileData.fileName || 'file',
+              fileType: fileData.fileType,
+              mimeType: fileData.mimeType
+            });
+            fileCount++;
+          } catch {}
+        }
+      }
+    }
+
+    const counts = {
+      itemsCount: this.db.items.length,
+      usersCount: Object.keys(this.db.botUsers || {}).length,
+      filesCount: Object.keys(this.db.uploadedFilesIndex || {}).length,
+      reportsCount: (this.db.reports || []).length,
+      rulesCount: (this.db.fraudRules || []).length,
+      restoredFilesWithBinary: fileCount
+    };
+
+    if (this.db.backupServer) {
+      this.db.backupServer.lastSyncAt = new Date().toISOString();
+      this.db.backupServer.lastSyncStatus = 'success';
+      this.db.backupServer.lastSyncMessage = `Snapshot mirrored: ${counts.itemsCount} items, ${counts.filesCount} files, ${counts.usersCount} users.`;
+      this.db.backupServer.mirroredStats = {
+        ...counts,
+        templatesCount: Object.keys(this.db.templates || {}).length,
+        lastSyncedAt: new Date().toISOString()
+      };
+    }
+
+    await this.persist();
+    return { restoredCounts: counts };
+  }
+
+  public async replicateToBackupServer(targetUrl?: string, customSecretKey?: string): Promise<{ success: boolean; message: string; stats?: any }> {
+    await this.loadLatest(false);
+    const config = this.db.backupServer || DEFAULT_BACKUP_SERVER_CONFIG;
+    const url = (targetUrl || config.serverUrl || '').trim().replace(/\/+$/, '');
+    const secret = customSecretKey || config.secretKey;
+
+    if (!url) {
+      throw new Error('Designated backup server URL is not configured');
+    }
+
+    const snapshot = await this.getFullSnapshot(true);
+    const stats = {
+      itemsCount: snapshot.items?.length || 0,
+      usersCount: Object.keys(snapshot.botUsers || {}).length,
+      filesCount: Object.keys(snapshot.uploadedFilesIndex || {}).length,
+      reportsCount: snapshot.reports?.length || 0,
+      rulesCount: snapshot.fraudRules?.length || 0,
+      templatesCount: Object.keys(snapshot.templates || {}).length,
+      lastSyncedAt: new Date().toISOString()
+    };
+
+    config.lastSyncStatus = 'in_progress';
+    config.lastSyncMessage = 'Syncing full database and file mirrors to backup server...';
+
+    try {
+      const endpoint = `${url}/api/backup-server/receive-mirror`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 35000);
+
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-replication-token': secret
+        },
+        body: JSON.stringify({
+          source: 'primary',
+          timestamp: stats.lastSyncedAt,
+          stats,
+          snapshot
+        }),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`Backup server returned HTTP ${response.status}: ${errText.slice(0, 120)}`);
+      }
+
+      config.lastSyncStatus = 'success';
+      config.lastSyncAt = stats.lastSyncedAt;
+      config.lastSyncMessage = `Live mirror sync successful: ${stats.itemsCount} items, ${stats.filesCount} files, ${stats.usersCount} users.`;
+      config.mirroredStats = stats;
+      await this.persist();
+
+      return {
+        success: true,
+        message: config.lastSyncMessage,
+        stats
+      };
+    } catch (err: any) {
+      config.lastSyncStatus = 'failed';
+      config.lastSyncMessage = `Sync failed: ${err.message || 'Connection timeout or network failure'}`;
+      await this.persist();
+      throw err;
     }
   }
 }
