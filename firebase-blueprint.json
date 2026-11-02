@@ -1,0 +1,23 @@
+{
+  "entities": {
+    "Admin": {
+      "title": "Admin",
+      "description": "Administrator account metadata and permissions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["owner", "subadmin"] },
+        "name": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "email", "role"]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": "Admin",
+      "description": "Registered administrator accounts with role-based access"
+    }
+  }
+}

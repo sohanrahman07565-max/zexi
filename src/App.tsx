@@ -68,6 +68,17 @@ export default function App() {
   const initApp = async () => {
     setLoading(true);
     try {
+      // Check for auth_token in URL query param (returned by Telegram OAuth callback)
+      if (typeof window !== 'undefined') {
+        const urlParams = new URLSearchParams(window.location.search);
+        const authToken = urlParams.get('auth_token');
+        if (authToken) {
+          api.setToken(authToken);
+          const cleanUrl = window.location.pathname;
+          window.history.replaceState({}, document.title, cleanUrl);
+        }
+      }
+
       // 1. Check current session
       const meData = await api.getMe();
       if (meData?.admin) {

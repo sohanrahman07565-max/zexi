@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: telegram-group-file-bot
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ROOT_ADMIN_ID
+        sync: false
+      - key: ADMIN_NAME
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true

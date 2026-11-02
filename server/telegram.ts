@@ -7,6 +7,7 @@ interface AddSession {
     | 'awaiting_content'
     | 'awaiting_file_content'
     | 'awaiting_link_url'
+    | 'awaiting_text_content'
     | 'awaiting_trigger_type'
     | 'awaiting_trigger_name'
     | 'awaiting_keyword_type'
@@ -17,8 +18,13 @@ interface AddSession {
     | 'awaiting_link_button_text'
     | 'awaiting_retention_choice'
     | 'awaiting_retention_days'
+    | 'awaiting_setup_video_choice'
+    | 'awaiting_setup_video'
     | 'awaiting_caption';
   type?: 'file' | 'link';
+  isTextOnly?: boolean;
+  textResponse?: string;
+  fileName?: string;
   fileData?: {
     fileId: string;
     fileUniqueId?: string;
@@ -47,6 +53,10 @@ interface AddSession {
   retentionDays?: number;
   setupMessageId?: number;
   lastPromptMessageId?: number;
+  hasSetupVideo?: boolean;
+  setupVideoUrl?: string;
+  setupVideoType?: 'url' | 'upload';
+  setupVideoFileName?: string;
 }
 
 const activeAddSessions: Map<string, AddSession> = new Map();
@@ -91,8 +101,18 @@ export class TelegramService {
       return { ok: false, description: 'No bot token configured' };
     }
 
+    // Ensure HTML parse mode by default for text/message methods if not explicitly specified
+    if (!payload.parse_mode && (method === 'sendMessage' || method === 'editMessageText' || method === 'sendPhoto' || method === 'sendVideo' || method === 'sendDocument' || method === 'sendAudio' || method === 'sendAnimation' || method === 'sendVoice')) {
+      payload.parse_mode = 'HTML';
+    }
+
+    // Adaptive timeout: for long-polling (getUpdates), allow payload.timeout + 15s. Standard calls allow 15s.
+    const timeoutSeconds = method === 'getUpdates'
+      ? (Number(payload?.timeout) || 10) + 15
+      : 15;
+
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutSeconds * 1000);
 
     try {
       const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
@@ -103,6 +123,19 @@ export class TelegramService {
       });
       clearTimeout(timeoutId);
       const data = await res.json();
+
+      // If failed because of parse entities error (e.g. unclosed tags), retry without HTML parse_mode
+      if (!data.ok && data.description && typeof data.description === 'string' && data.description.toLowerCase().includes('parse entities')) {
+        console.warn(`[Telegram] ${method} failed with entity parsing (${data.description}). Retrying without parse_mode...`);
+        const fallbackPayload = { ...payload };
+        delete fallbackPayload.parse_mode;
+        const retryRes = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(fallbackPayload)
+        });
+        return await retryRes.json();
+      }
 
       // If failed because the message to be replied was deleted, immediately retry without reply_to_message_id
       if (!data.ok && payload.reply_to_message_id && typeof data.description === 'string' && (data.description.toLowerCase().includes('replied') || data.description.toLowerCase().includes('reply'))) {
@@ -120,6 +153,10 @@ export class TelegramService {
       return data;
     } catch (err: any) {
       clearTimeout(timeoutId);
+      if (method === 'getUpdates' && (err.name === 'AbortError' || err.message?.includes('aborted'))) {
+        // Normal long-poll cycle completion; return empty updates cleanly without logging error
+        return { ok: true, result: [] };
+      }
       console.error(`[Telegram] API error calling ${method}:`, err);
       return { ok: false, description: err.message };
     }
@@ -1081,11 +1118,12 @@ export class TelegramService {
     unjoinedChannels: ForceSubChannel[],
     targetPayload: string = 'start',
     messageIdToEdit?: number,
-    userInfo?: { id?: string | number; firstName?: string; username?: string }
+    userInfo?: { id?: string | number; firstName?: string; first_name?: string; lastName?: string; last_name?: string; username?: string; [key: string]: any }
   ): Promise<void> {
     const keyboardRows: any[][] = [];
 
-    // Channel Join Buttons: SMART DYNAMIC FILTERING - ONLY display the remaining unjoined channels!
+    // Channel Join Buttons: Grid layout with 2 buttons per row
+    const channelButtons: any[] = [];
     for (let i = 0; i < unjoinedChannels.length; i++) {
       const ch = unjoinedChannels[i];
       let channelUrl = ch.inviteLink ? ch.inviteLink.trim() : '';
@@ -1096,16 +1134,19 @@ export class TelegramService {
           channelUrl = 'https://t.me';
         }
       }
-      keyboardRows.push([
-        {
-          text: `📢 Join ${ch.name} ↗️`,
-          url: channelUrl,
-          style: 'primary'
-        }
-      ]);
+      channelButtons.push({
+        text: `📢 ${ch.name}`,
+        url: channelUrl,
+        style: 'primary'
+      });
     }
 
-    // "Verify / Try Again" callback button: Success emerald accent styling matching bot theme
+    // Chunk channel buttons into pairs of 2 per row
+    for (let i = 0; i < channelButtons.length; i += 2) {
+      keyboardRows.push(channelButtons.slice(i, i + 2));
+    }
+
+    // "Verify / Try Again" callback button: Full width prominent button
     keyboardRows.push([
       {
         text: '🔄 Verify / Try Again ✅',
@@ -1131,14 +1172,47 @@ export class TelegramService {
       `👇 <i>Tap the button(s) above to join, then press <b>Verify / Try Again</b> below.</i>`
     );
 
-    const userName = userInfo?.firstName || 'Friend';
+    let userMention = '';
+    let userDisplayName = '';
     const userId = String(userInfo?.id || chatId);
 
+    const rawFirstName = userInfo?.first_name || userInfo?.firstName;
+    const rawLastName = userInfo?.last_name || userInfo?.lastName;
+    const rawUsername = userInfo?.username;
+
+    if (rawUsername) {
+      userMention = `@${String(rawUsername).replace(/^@+/, '').trim()}`;
+    }
+    if (rawFirstName) {
+      userDisplayName = [rawFirstName, rawLastName].filter(Boolean).join(' ').trim();
+    }
+
+    if (!userMention || !userDisplayName) {
+      try {
+        const storedUser = await storage.getUser(userId);
+        if (storedUser) {
+          if (!userMention && storedUser.username) {
+            userMention = `@${storedUser.username.replace(/^@+/, '').trim()}`;
+          }
+          if (!userDisplayName && storedUser.firstName) {
+            userDisplayName = [storedUser.firstName, storedUser.lastName].filter(Boolean).join(' ').trim();
+          }
+        }
+      } catch {}
+    }
+
+    // Dynamic real name: prioritize user's actual real name (e.g. "Sohan"), then username, then ID
+    const realUserName = userDisplayName || userMention || `User`;
+    const dynamicUserName = realUserName;
+
     promptText = promptText
-      .replace(/{channel_list}/g, channelNames)
-      .replace(/{user_name}/g, userName)
-      .replace(/{user_id}/g, userId)
-      .replace(/{bot_name}/g, `@${botName.replace(/^@/, '')}`);
+      .replace(/\{channel_list\}/gi, channelNames)
+      .replace(/\{user_name\}|\{@?username\}|\{name\}|\{user\}|\{first_name\}/gi, realUserName)
+      .replace(/\{user_id\}|\{userid\}|\{id\}/gi, userId)
+      .replace(/\{bot_name\}|\{botname\}|\{bot\}/gi, `@${botName.replace(/^@/, '')}`)
+      .replace(/(^|\s)@username\b/gi, `$1${userMention || realUserName}`)
+      .replace(/Hey Friend/gi, `Hey ${realUserName}`)
+      .replace(/\bFriend\b/gi, realUserName);
 
     if (messageIdToEdit) {
       try {
@@ -1167,34 +1241,186 @@ export class TelegramService {
   }
 
   // =========================================================================
+  // OFFICIAL SOURCE & BROADCAST WHITELIST VERIFIER
+  // Whitelist channel posts, automatic forwards from linked channels,
+  // connected official force-sub channels, and group administrators.
+  // =========================================================================
+  private static async isOfficialOrAdminMessage(message: any, fromId: string): Promise<boolean> {
+    // 1. Automatic forwards from linked official channel into group (Telegram official flag)
+    if (message.is_automatic_forward === true) {
+      return true;
+    }
+
+    // 2. Telegram internal system bots / channel accounts
+    const senderUserId = String(message.from?.id || '');
+    if (senderUserId === '777000' || senderUserId === '1087968824' || senderUserId === '136817688') {
+      return true;
+    }
+
+    // 3. Sender is a channel or anonymous admin
+    if (message.sender_chat) {
+      // If posted as the group itself (anonymous admin)
+      if (message.chat?.id && String(message.sender_chat.id) === String(message.chat.id)) {
+        return true;
+      }
+      // If sender_chat is any channel post sent to group
+      if (message.sender_chat.type === 'channel') {
+        return true;
+      }
+    }
+
+    // 4. Check connected official channels in database
+    const settings = await storage.getSettings();
+    const detectedChannels = await storage.getDetectedChannels();
+    const connectedIds = new Set<string>();
+    const connectedUsernames = new Set<string>();
+
+    if (Array.isArray(settings.requiredChannels)) {
+      for (const ch of settings.requiredChannels) {
+        if (ch.chatId) connectedIds.add(String(ch.chatId).trim());
+        if (ch.id) connectedIds.add(String(ch.id).trim());
+        if (ch.username) connectedUsernames.add(ch.username.replace(/^@+/, '').toLowerCase().trim());
+      }
+    }
+    if (Array.isArray(detectedChannels)) {
+      for (const ch of detectedChannels) {
+        if (ch.chatId) connectedIds.add(String(ch.chatId).trim());
+        if (ch.id) connectedIds.add(String(ch.id).trim());
+        if (ch.username) connectedUsernames.add(ch.username.replace(/^@+/, '').toLowerCase().trim());
+      }
+    }
+
+    // Check if sender_chat matches connected official channels
+    if (message.sender_chat) {
+      const senderId = String(message.sender_chat.id);
+      const senderUser = message.sender_chat.username ? message.sender_chat.username.replace(/^@+/, '').toLowerCase() : '';
+      if (connectedIds.has(senderId) || (senderUser && connectedUsernames.has(senderUser))) {
+        return true;
+      }
+    }
+
+    // Check if forward source is an official connected channel
+    const fwdChat = message.forward_from_chat || message.forward_origin?.chat;
+    if (fwdChat) {
+      const fwdId = String(fwdChat.id);
+      const fwdUser = fwdChat.username ? fwdChat.username.replace(/^@+/, '').toLowerCase() : '';
+      if (connectedIds.has(fwdId) || (fwdUser && connectedUsernames.has(fwdUser))) {
+        return true;
+      }
+    }
+
+    // 5. Authorized administrator check
+    if (fromId) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      if (isAdmin) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  // =========================================================================
   // GROUP MESSAGE HANDLING (EXACT TRIGGER MATCHING & STRICT GROUP PRIVACY)
   // =========================================================================
   private static async handleGroupMessage(message: any, text: string): Promise<void> {
     const fromId = String(message.from?.id || '');
 
     // =========================================================================
-    // ANTI-FORWARD PROTECTION SYSTEM
-    // Detect and instantly delete any forwarded messages from other chats/channels/users
+    // ADVANCED ANTI-SPAM & LINK/FORWARD PROTECTION SYSTEM
+    // 1. Whitelist Channel Posts / Allow Official Broadcasts & Admins
+    // 2. Block User Links & Forwards
+    // 3. 3-Strike Warning & Auto-Ban System
     // =========================================================================
-    const isForwarded = Boolean(
-      message.forward_origin || 
-      message.forward_from || 
-      message.forward_from_chat || 
-      message.forward_sender_name || 
-      message.forward_date
-    );
+    const isOfficial = await this.isOfficialOrAdminMessage(message, fromId);
 
-    if (isForwarded) {
-      const settings = await storage.getSettings();
-      if (settings.antiForwardEnabled) {
-        const isAdmin = await this.isAuthorizedAdmin(fromId);
-        if (!isAdmin) {
-          console.info(`[Anti-Forward] Detected forwarded message ${message.message_id} in group ${message.chat.id} from user ${fromId}. Deleting instantly.`);
-          if (message.message_id) {
-            await this.deleteUserMessage(message.chat.id, message.message_id);
-          }
-          return;
+    if (!isOfficial) {
+      const isForwarded = Boolean(
+        message.forward_origin || 
+        message.forward_from || 
+        message.forward_from_chat || 
+        message.forward_sender_name || 
+        message.forward_date
+      );
+
+      const hasLinkEntity = (message.entities || []).some(
+        (e: any) => e.type === 'url' || e.type === 'text_link'
+      ) || (message.caption_entities || []).some(
+        (e: any) => e.type === 'url' || e.type === 'text_link'
+      );
+      const linkRegex = /(?:https?:\/\/|www\.|t\.me\/|telegram\.me\/)[^\s]+/i;
+      const domainRegex = /\b[a-zA-Z0-9-]+\.(?:com|org|net|io|me|co|app|xyz|site|online|top|info|biz|ru|cn|in|de|uk|us|ca)\b/i;
+      const combinedText = `${text || ''} ${message.caption || ''}`;
+      const containsLink = hasLinkEntity || linkRegex.test(combinedText) || domainRegex.test(combinedText);
+
+      if (isForwarded || containsLink) {
+        // Instantly delete the offending message
+        if (message.message_id) {
+          await this.deleteUserMessage(message.chat.id, message.message_id);
         }
+
+        if (fromId) {
+          // Increment strike warning counter in storage
+          const warningCount = await storage.incrementUserLinkWarning(message.chat.id, fromId);
+
+          const userObj = message.from || {};
+          const firstName = (userObj.first_name || '').trim();
+          const lastName = (userObj.last_name || '').trim();
+          const realName = (firstName + (lastName ? ' ' + lastName : '')).trim() || userObj.username || 'User';
+          const userMention = userObj.username ? `@${userObj.username}` : `<b>${this.escapeHtml(realName)}</b>`;
+
+          const violationType = (containsLink && isForwarded)
+            ? 'links and forwarded messages'
+            : containsLink
+              ? 'links'
+              : 'forwarded messages from external sources';
+
+          if (warningCount === 1) {
+            // 1st violation: Warning 1/3
+            const warningText = `⚠️ <b>Strike [1/3] Warning</b> | ${userMention}\n\n` +
+              `🚫 Sharing ${violationType} is strictly prohibited in this group.\n` +
+              `📌 <i>Your message has been deleted. You have 2 warnings remaining before an automatic ban.</i>`;
+            await this.callTelegramApi('sendMessage', {
+              chat_id: message.chat.id,
+              text: warningText,
+              parse_mode: 'HTML'
+            });
+          } else if (warningCount === 2) {
+            // 2nd violation: Warning 2/3 (Final warning)
+            const warningText = `⚠️ <b>Strike [2/3] Warning — FINAL WARNING</b> | ${userMention}\n\n` +
+              `🚫 Sharing ${violationType} is prohibited!\n` +
+              `🚨 <b>CRITICAL:</b> You have 1 warning remaining. Your NEXT violation will result in an IMMEDIATE AUTO-BAN!`;
+            await this.callTelegramApi('sendMessage', {
+              chat_id: message.chat.id,
+              text: warningText,
+              parse_mode: 'HTML'
+            });
+          } else {
+            // 3rd violation: Auto-ban user
+            try {
+              await this.callTelegramApi('banChatMember', {
+                chat_id: message.chat.id,
+                user_id: Number(fromId) || fromId
+              });
+            } catch (banErr) {
+              console.warn('[Anti-Spam] banChatMember error on 3rd strike:', banErr);
+            }
+
+            await storage.setBotUserBanned(fromId, true);
+            await storage.resetUserLinkWarning(message.chat.id, fromId);
+
+            const banNotice = `🚫 <b>USER AUTO-BANNED (Strike 3/3)</b>\n\n` +
+              `👤 <b>User:</b> ${userMention} (${this.escapeHtml(realName)})\n` +
+              `🆔 <b>User ID:</b> <code>${fromId}</code>\n` +
+              `⚠️ <b>Reason:</b> Exceeded maximum 3-strike warnings for unauthorized links / external forward spam.`;
+            await this.callTelegramApi('sendMessage', {
+              chat_id: message.chat.id,
+              text: banNotice,
+              parse_mode: 'HTML'
+            });
+          }
+        }
+        return;
       }
     }
 
@@ -1684,60 +1910,6 @@ export class TelegramService {
       return;
     }
 
-    // 4. Anti-Link Sharing Protection in groups:
-    const hasLinkEntity = (message.entities || []).some(
-      (e: any) => e.type === 'url' || e.type === 'text_link'
-    ) || (message.caption_entities || []).some(
-      (e: any) => e.type === 'url' || e.type === 'text_link'
-    );
-    const linkRegex = /(?:https?:\/\/|www\.|t\.me\/|telegram\.me\/)[^\s]+/i;
-    const domainRegex = /\b[a-zA-Z0-9-]+\.(?:com|org|net|io|me|co|app|xyz|site|online|top|info|biz|ru|cn|in|de|uk|us|ca)\b/i;
-    const containsLink = hasLinkEntity || linkRegex.test(text) || domainRegex.test(text);
-
-    if (containsLink) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId);
-      if (!isAdmin) {
-        // Instantly delete the shared link message
-        if (message.message_id) {
-          await this.deleteUserMessage(message.chat.id, message.message_id);
-        }
-
-        const currentWarnings = await storage.getUserLinkWarnings(message.chat.id, fromId);
-        await storage.incrementUserLinkWarning(message.chat.id, fromId);
-
-        const userName = message.from?.first_name || message.from?.username || 'User';
-        const userMention = message.from?.username ? `@${message.from.username}` : userName;
-
-        if (currentWarnings === 0) {
-          // First Warning: English warning text required strictly
-          const warningText = `First Warning: Links are not allowed in this group. If you share a link again, you will be banned from the group.`;
-          await this.callTelegramApi('sendMessage', {
-            chat_id: message.chat.id,
-            text: `⚠️ <b>${userMention}</b>\n${warningText}`,
-            parse_mode: 'HTML'
-          });
-        } else {
-          // Repeated violation: Ban user from group & announce
-          try {
-            await this.callTelegramApi('banChatMember', {
-              chat_id: message.chat.id,
-              user_id: Number(fromId) || fromId
-            });
-          } catch (e) {
-            console.warn('[Telegram] banChatMember error on link violation:', e);
-          }
-          await storage.setBotUserBanned(fromId, true);
-
-          const banNotice = `${userName} (${userMention}) has been banned for repeatedly sharing links.`;
-          await this.callTelegramApi('sendMessage', {
-            chat_id: message.chat.id,
-            text: `🚫 <b>${banNotice}</b>`,
-            parse_mode: 'HTML'
-          });
-        }
-        return;
-      }
-    }
 
     // 5. Fraud Protection & Custom Word Filter Rules
     const fraudRules = await storage.getFraudRules();
@@ -2048,6 +2220,8 @@ export class TelegramService {
       .replace(/\{id\}/gi, String(fromId))
       .replace(/@?\{@?bot_name\}/gi, formattedBotName)
       .replace(/@?\{@?bot_username\}/gi, formattedBotName)
+      .replace(/Hey Friend/gi, `Hey ${userDisplayName}`)
+      .replace(/\bFriend\b/gi, userDisplayName)
       .replace(/@@([a-zA-Z0-9_]+)/g, '@$1'); // Avoid double @@
 
     const mediaType = startTemplate?.mediaType || 'none';
@@ -2165,7 +2339,7 @@ export class TelegramService {
       // Mandatory Channel Join (Force Sub) Check
       const forceCheck = await this.checkUserForceSub(fromId);
       if (!forceCheck.allJoined) {
-        await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, rawPayload || 'start');
+        await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, rawPayload || 'start', undefined, message?.from);
         return;
       }
 
@@ -2432,7 +2606,7 @@ export class TelegramService {
         // Check Force Sub
         const forceCheck = await this.checkUserForceSub(fromId);
         if (!forceCheck.allJoined) {
-          await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, payload);
+          await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, payload, undefined, message?.from);
           return;
         }
 
@@ -2453,7 +2627,7 @@ export class TelegramService {
     // Check Force Sub on any other direct user interactions in private chat
     const generalForceCheck = await this.checkUserForceSub(fromId);
     if (!generalForceCheck.allJoined) {
-      await this.sendForceSubPrompt(chatId, generalForceCheck.unjoinedChannels, 'start');
+      await this.sendForceSubPrompt(chatId, generalForceCheck.unjoinedChannels, 'start', undefined, message?.from);
       return;
     }
   }
@@ -3660,12 +3834,13 @@ export class TelegramService {
     const sessionData: AddSession = { stage: 'awaiting_content' };
     const promptId = await TelegramService.sendOrEditSetupPrompt(
       chatId,
-      `📥 <b>What would you like to add?</b>\n\nChoose an option below or send your <b>File</b> or <b>Web Link (URL)</b> directly:\n• <b>File:</b> Document, Photo, Video, Audio, APK, ZIP\n• <b>Link:</b> Website URL (https://...)`,
+      `📥 <b>What would you like to add?</b>\n\nChoose an option below or send your content directly:\n• <b>File:</b> Document, Photo, Video, Audio, APK, ZIP\n• <b>Link:</b> Website URL (https://...)\n• <b>Text Response:</b> Custom text / message`,
       {
         inline_keyboard: [
           [
-            { text: 'Add File', callback_data: 'add_choose_file', style: 'primary' },
-            { text: 'Add Link', callback_data: 'add_choose_link', style: 'primary' }
+            { text: '📁 Add File', callback_data: 'add_choose_file', style: 'primary' },
+            { text: '🔗 Add Link', callback_data: 'add_choose_link', style: 'primary' },
+            { text: '💬 Add Text', callback_data: 'add_choose_text', style: 'primary' }
           ],
           [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
         ]
@@ -3691,12 +3866,13 @@ export class TelegramService {
 
     const rawInput = text.trim();
 
-    // Stage 1: Awaiting Content Choice (Detects File or Link)
+    // Stage 1: Awaiting Content Choice (Detects File, Link, or Pure Text)
     if (session.stage === 'awaiting_content') {
       const media = this.extractMediaFromMessage(message);
       if (media) {
         session.type = 'file';
         session.fileData = media;
+        session.isTextOnly = false;
         if (message.caption) {
           session.caption = message.caption;
         }
@@ -3750,14 +3926,45 @@ export class TelegramService {
         return;
       }
 
+      // If user typed normal text (no file and no URL), automatically treat it as a Text Response!
+      if (rawInput) {
+        session.type = 'file';
+        session.isTextOnly = true;
+        session.caption = rawInput;
+        session.textResponse = rawInput;
+        session.fileName = 'Text: ' + (rawInput.slice(0, 25).replace(/\n/g, ' '));
+        session.stage = 'awaiting_trigger_type';
+
+        const promptId = await TelegramService.sendOrEditSetupPrompt(
+          chatId,
+          `✅ <b>Text Response Received:</b>\n<i>${rawInput.slice(0, 100)}${rawInput.length > 100 ? '...' : ''}</i>\n\n<b>Step 1/4: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+          {
+            inline_keyboard: [
+              [
+                { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
+                { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
+                { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
+              ],
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+            ]
+          },
+          session
+        );
+        if (promptId) session.lastPromptMessageId = promptId;
+        activeAddSessions.set(fromId, session);
+        await storage.saveAddSession(fromId, session);
+        return;
+      }
+
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
-        '📥 Please send the <b>File</b> you want to add or send a <b>Web Link (URL)</b> starting with http:// or https:// (or type /cancel to abort):',
+        '📥 Please send the <b>File</b>, <b>Web Link (URL)</b>, or enter a <b>Text Message</b> to deliver (or type /cancel to abort):',
         {
           inline_keyboard: [
             [
-              { text: 'Add File', callback_data: 'add_choose_file', style: 'primary' },
-              { text: 'Add Link', callback_data: 'add_choose_link', style: 'primary' }
+              { text: '📁 Add File', callback_data: 'add_choose_file', style: 'primary' },
+              { text: '🔗 Add Link', callback_data: 'add_choose_link', style: 'primary' },
+              { text: '💬 Add Text', callback_data: 'add_choose_text', style: 'primary' }
             ],
             [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
           ]
@@ -3850,6 +4057,53 @@ export class TelegramService {
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
         '❌ Invalid URL. Please send a valid web link starting with https:// or http:// (or type /cancel):',
+        {
+          inline_keyboard: [
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+          ]
+        },
+        session
+      );
+      if (promptId) session.lastPromptMessageId = promptId;
+      activeAddSessions.set(fromId, session);
+      await storage.saveAddSession(fromId, session);
+      return;
+    }
+
+    // Stage 1c: Explicitly awaiting text content (PATH C)
+    if (session.stage === 'awaiting_text_content') {
+      if (rawInput) {
+        session.type = 'file';
+        session.isTextOnly = true;
+        session.caption = rawInput;
+        session.textResponse = rawInput;
+        session.fileName = 'Text: ' + (rawInput.slice(0, 25).replace(/\n/g, ' '));
+        session.stage = 'awaiting_trigger_type';
+
+        const promptId = await TelegramService.sendOrEditSetupPrompt(
+          chatId,
+          `✅ <b>Text Response Received:</b>\n<i>${rawInput.slice(0, 100)}${rawInput.length > 100 ? '...' : ''}</i>\n\n<b>Step 1/4: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+          {
+            inline_keyboard: [
+              [
+                { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
+                { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
+                { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
+              ],
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+            ]
+          },
+          session
+        );
+        if (promptId) session.lastPromptMessageId = promptId;
+        activeAddSessions.set(fromId, session);
+        await storage.saveAddSession(fromId, session);
+        return;
+      }
+
+      const promptId = await TelegramService.sendOrEditSetupPrompt(
+        chatId,
+        '❌ Please send a valid text message (or type /cancel to abort):',
         {
           inline_keyboard: [
             [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
@@ -4111,7 +4365,7 @@ export class TelegramService {
       if (lower === 'permanent' || lower === 'p' || lower.includes('perm')) {
         session.retentionType = 'permanent';
         session.retentionDays = undefined;
-        await this.finalizeAndSaveItem(fromId, chatId, session);
+        await this.promptSetupVideoChoice(fromId, chatId, session);
         return;
       } else if (lower === 'temporary' || lower === 't' || lower.includes('temp')) {
         session.retentionType = 'temporary';
@@ -4186,8 +4440,126 @@ export class TelegramService {
 
       session.retentionType = 'temporary';
       session.retentionDays = days;
-      await this.finalizeAndSaveItem(fromId, chatId, session);
+      await this.promptSetupVideoChoice(fromId, chatId, session);
       return;
+    }
+
+    // Stage 6: Awaiting setup video decision (Yes / No)
+    if (session.stage === 'awaiting_setup_video_choice') {
+      const lower = rawInput.toLowerCase();
+      if (lower === '1' || lower === 'yes' || lower === 'y' || lower.includes('add')) {
+        session.hasSetupVideo = true;
+        session.stage = 'awaiting_setup_video';
+        activeAddSessions.set(fromId, session);
+        await storage.saveAddSession(fromId, session);
+
+        const promptId = await TelegramService.sendOrEditSetupPrompt(
+          chatId,
+          `🎬 <b>Send Setup Video</b>\n\nPlease provide your setup video tutorial. You can:\n• Send/upload a video directly from your phone/gallery\n• Forward a video from any chat or channel\n• Send a video URL link (e.g. YouTube or direct MP4 link)\n\n<i>Or send /skip to finish without a video, or /cancel to abort.</i>`,
+          {
+            inline_keyboard: [
+              [{ text: 'Skip Video', callback_data: 'add_sv_no', style: 'primary' }],
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+            ]
+          },
+          session
+        );
+        if (promptId) {
+          session.lastPromptMessageId = promptId;
+          await storage.saveAddSession(fromId, session);
+        }
+        return;
+      } else {
+        session.hasSetupVideo = false;
+        await this.finalizeAndSaveItem(fromId, chatId, session);
+        return;
+      }
+    }
+
+    // Stage 7: Awaiting setup video file, forwarded message, or URL
+    if (session.stage === 'awaiting_setup_video') {
+      const lower = rawInput.toLowerCase();
+      if (lower === '/skip' || lower === 'skip') {
+        session.hasSetupVideo = false;
+        await this.finalizeAndSaveItem(fromId, chatId, session);
+        return;
+      }
+
+      // Direct video message or forwarded video
+      if (message.video) {
+        session.hasSetupVideo = true;
+        session.setupVideoUrl = message.video.file_id;
+        session.setupVideoType = 'upload';
+        session.setupVideoFileName = message.video.file_name || 'setup_video.mp4';
+        await this.finalizeAndSaveItem(fromId, chatId, session);
+        return;
+      }
+
+      // Video sent as document
+      if (message.document && (message.document.mime_type?.startsWith('video/') || /\.(mp4|mov|mkv|avi|webm)$/i.test(message.document.file_name || ''))) {
+        session.hasSetupVideo = true;
+        session.setupVideoUrl = message.document.file_id;
+        session.setupVideoType = 'upload';
+        session.setupVideoFileName = message.document.file_name || 'setup_video.mp4';
+        await this.finalizeAndSaveItem(fromId, chatId, session);
+        return;
+      }
+
+      // Web URL link (YouTube, Vimeo, MP4, etc.)
+      const urlMatch = rawInput.match(/https?:\/\/[^\s]+/i);
+      if (urlMatch) {
+        session.hasSetupVideo = true;
+        session.setupVideoUrl = urlMatch[0];
+        session.setupVideoType = 'url';
+        await this.finalizeAndSaveItem(fromId, chatId, session);
+        return;
+      }
+
+      const promptId = await TelegramService.sendOrEditSetupPrompt(
+        chatId,
+        '❌ Invalid input. Please send/forward a video file, or send a valid URL starting with http:// or https:// (or tap Skip Video below):',
+        {
+          inline_keyboard: [
+            [{ text: 'Skip Video', callback_data: 'add_sv_no', style: 'primary' }],
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+          ]
+        },
+        session
+      );
+      if (promptId) session.lastPromptMessageId = promptId;
+      activeAddSessions.set(fromId, session);
+      await storage.saveAddSession(fromId, session);
+      return;
+    }
+  }
+
+  // Prompt admin for Setup Video choice during /add wizard
+  private static async promptSetupVideoChoice(
+    fromId: string,
+    chatId: string | number,
+    session: AddSession
+  ): Promise<void> {
+    session.stage = 'awaiting_setup_video_choice';
+    activeAddSessions.set(fromId, session);
+    await storage.saveAddSession(fromId, session);
+
+    const promptId = await TelegramService.sendOrEditSetupPrompt(
+      chatId,
+      `🎬 <b>Setup Video Configuration</b>\n\nDo you want to add a setup video? (Yes / No)\n\n<i>When enabled, users will see an interactive menu with [ 🎬 Setup Video ] and [ ${session.type === 'file' ? '📁 Get File' : '🔗 Open Link'} ] buttons.</i>`,
+      {
+        inline_keyboard: [
+          [
+            { text: '1. Yes, Add Setup Video', callback_data: 'add_sv_yes', style: 'success' },
+            { text: '2. No, Skip (Direct Delivery)', callback_data: 'add_sv_no', style: 'primary' }
+          ],
+          [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+        ]
+      },
+      session
+    );
+    if (promptId) {
+      session.lastPromptMessageId = promptId;
+      await storage.saveAddSession(fromId, session);
     }
   }
 
@@ -4206,7 +4578,8 @@ export class TelegramService {
 
     await storage.loadLatest(true);
     const isFile = session.type === 'file';
-    const id = `${isFile ? 'f_' : 'l_'}${Date.now().toString(36)}`;
+    const isTextOnly = Boolean(session.isTextOnly || (!session.fileData && isFile));
+    const id = `${isFile ? (isTextOnly ? 't_' : 'f_') : 'l_'}${Date.now().toString(36)}`;
     const retentionType = session.retentionType || 'permanent';
     const retentionDays = retentionType === 'temporary' ? (session.retentionDays || 7) : undefined;
     const expiresAt = retentionType === 'temporary'
@@ -4216,9 +4589,47 @@ export class TelegramService {
     const inFiltersList = session.inFiltersList === true;
     const openMode: OpenMode = session.openMode || 'browser';
 
+    const hasSetupVideo = Boolean(session.hasSetupVideo && session.setupVideoUrl);
+    const setupVideoUrl = hasSetupVideo ? session.setupVideoUrl : undefined;
+    const setupVideoType = hasSetupVideo ? (session.setupVideoType || 'url') : undefined;
+    const setupVideoFileName = hasSetupVideo ? session.setupVideoFileName : undefined;
+    const setupVideoButtonText = hasSetupVideo ? '🎬 Setup Video' : undefined;
+    const setupResourceButtonText = hasSetupVideo ? (isFile ? (isTextOnly ? '💬 View Message' : '📁 Get File') : '🔗 Open Link') : undefined;
+
     let newItem: ItemRecord;
 
-    if (isFile) {
+    if (isFile && isTextOnly) {
+      const textContent = session.textResponse || session.caption || rawKeyword;
+      const cleanSnippet = textContent.replace(/\n/g, ' ').trim();
+      const textTitle = session.fileName || `Text: ${cleanSnippet.slice(0, 25)}${cleanSnippet.length > 25 ? '...' : ''}`;
+      newItem = {
+        id,
+        type: 'file',
+        name: textTitle,
+        triggers,
+        triggerType,
+        rawKeyword,
+        inFiltersList,
+        isTextOnly: true,
+        fileEnabled: false,
+        caption: session.caption || session.textResponse || undefined,
+        replyMessage: session.caption || session.textResponse || undefined,
+        buttonText: '💬 View Message',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        status: 'active',
+        deliveryCount: 0,
+        retentionType,
+        retentionDays,
+        expiresAt,
+        hasSetupVideo,
+        setupVideoUrl,
+        setupVideoType,
+        setupVideoFileName,
+        setupVideoButtonText,
+        setupResourceButtonText
+      };
+    } else if (isFile) {
       const fileName = session.fileData?.fileName || 'Uploaded File';
       newItem = {
         id,
@@ -4228,6 +4639,8 @@ export class TelegramService {
         triggerType,
         rawKeyword,
         inFiltersList,
+        isTextOnly: false,
+        fileEnabled: true,
         telegramFileId: session.fileData?.fileId,
         telegramFileUniqueId: session.fileData?.fileUniqueId,
         fileType: session.fileData?.fileType || 'document',
@@ -4241,7 +4654,13 @@ export class TelegramService {
         deliveryCount: 0,
         retentionType,
         retentionDays,
-        expiresAt
+        expiresAt,
+        hasSetupVideo,
+        setupVideoUrl,
+        setupVideoType,
+        setupVideoFileName,
+        setupVideoButtonText,
+        setupResourceButtonText
       };
     } else {
       const url = session.linkData?.url || 'https://';
@@ -4269,7 +4688,13 @@ export class TelegramService {
         deliveryCount: 0,
         retentionType,
         retentionDays,
-        expiresAt
+        expiresAt,
+        hasSetupVideo,
+        setupVideoUrl,
+        setupVideoType,
+        setupVideoFileName,
+        setupVideoButtonText,
+        setupResourceButtonText
       };
     }
 
@@ -4288,11 +4713,17 @@ export class TelegramService {
       ? 'Yes (Visible in /filters list)'
       : 'No (Hidden from public /filters)';
 
+    const typeDesc = isFile ? (isTextOnly ? '💬 Text Response' : '📁 File') : '🔗 Web Link';
+
     const deliveryDesc = isFile
-      ? 'Direct Telegram Document / Media File'
+      ? (isTextOnly ? 'Direct Text Message Response' : 'Direct Telegram Document / Media File')
       : (openMode === 'webapp' ? 'Telegram Mini App (Embedded)' : 'Standard Web Browser');
 
-    const successText = `✅ <b>Success! Your ${isFile ? 'file' : 'link'} has been saved successfully.</b>\n\n📋 <b>Configuration Details:</b>\n• Type: <b>${isFile ? '📁 File' : '🔗 Web Link'}</b>\n• Name: <b>${newItem.name}</b>\n• Trigger: <code>${primaryTrigger}</code> (${triggerType})\n• Public Filters: <b>${filterStatus}</b>\n• Delivery Mode: <b>${deliveryDesc}</b>\n• Retention: <b>${retentionDesc}</b>\n\n🔗 <b>Direct Link:</b>\n${deepLink}\n\n💡 <i>Type <code>${primaryTrigger}</code> in any group or here to test delivery!</i>`;
+    const setupVideoDesc = hasSetupVideo
+      ? `🎬 Enabled (${setupVideoType === 'url' ? 'URL Link' : 'Uploaded Video'})`
+      : 'None (Direct Delivery)';
+
+    const successText = `✅ <b>Success! Your ${typeDesc} has been saved successfully.</b>\n\n📋 <b>Configuration Details:</b>\n• Type: <b>${typeDesc}</b>\n• Name: <b>${newItem.name}</b>\n• Trigger: <code>${primaryTrigger}</code> (${triggerType})\n• Public Filters: <b>${filterStatus}</b>\n• Delivery Mode: <b>${deliveryDesc}</b>\n• Retention: <b>${retentionDesc}</b>\n• Setup Video: <b>${setupVideoDesc}</b>\n\n🔗 <b>Direct Link:</b>\n${deepLink}\n\n💡 <i>Type <code>${primaryTrigger}</code> in any group or here to test delivery!</i>`;
 
     const successMarkup = {
       inline_keyboard: [
@@ -4603,6 +5034,34 @@ export class TelegramService {
       return;
     }
 
+    if (data === 'add_choose_text') {
+      if (session) {
+        session.type = 'file';
+        session.isTextOnly = true;
+        session.stage = 'awaiting_text_content';
+        activeAddSessions.set(fromId, session);
+        await storage.saveAddSession(fromId, session);
+
+        if (chatId) {
+          const promptId = await TelegramService.sendOrEditSetupPrompt(
+            chatId,
+            '💬 Please enter the <b>Text Message</b> you want the bot to deliver when triggered:\n\n<i>You can use bold, italic, links, and HTML tags. Or send /cancel to abort.</i>',
+            {
+              inline_keyboard: [
+                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+              ]
+            },
+            session
+          );
+          if (promptId) {
+            session.lastPromptMessageId = promptId;
+            await storage.saveAddSession(fromId, session);
+          }
+        }
+      }
+      return;
+    }
+
     // Step 1: Trigger Type Selection (#, /, or normal)
     if (data === 'add_kw_hashtag' || data === 'add_kw_slash' || data === 'add_kw_normal') {
       if (session) {
@@ -4806,7 +5265,7 @@ export class TelegramService {
       if (session) {
         session.retentionType = 'permanent';
         session.retentionDays = undefined;
-        await this.finalizeAndSaveItem(fromId, chatId, session);
+        await this.promptSetupVideoChoice(fromId, chatId, session);
       }
       return;
     }
@@ -4849,6 +5308,43 @@ export class TelegramService {
         const days = parseInt(data.replace('add_days_', ''), 10) || 7;
         session.retentionType = 'temporary';
         session.retentionDays = days;
+        await this.promptSetupVideoChoice(fromId, chatId, session);
+      }
+      return;
+    }
+
+    // Setup Video Selection Callbacks
+    if (data === 'add_sv_yes') {
+      if (session) {
+        session.hasSetupVideo = true;
+        session.stage = 'awaiting_setup_video';
+        activeAddSessions.set(fromId, session);
+        await storage.saveAddSession(fromId, session);
+
+        if (chatId) {
+          const promptId = await TelegramService.sendOrEditSetupPrompt(
+            chatId,
+            `🎬 <b>Send Setup Video</b>\n\nPlease provide your setup video tutorial. You can:\n• Send/upload a video directly from your phone/gallery\n• Forward a video from any chat or channel\n• Send a video URL link (e.g. YouTube or direct MP4 link)\n\n<i>Or send /skip to finish without a video, or /cancel to abort.</i>`,
+            {
+              inline_keyboard: [
+                [{ text: 'Skip Video', callback_data: 'add_sv_no', style: 'primary' }],
+                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+              ]
+            },
+            session
+          );
+          if (promptId) {
+            session.lastPromptMessageId = promptId;
+            await storage.saveAddSession(fromId, session);
+          }
+        }
+      }
+      return;
+    }
+
+    if (data === 'add_sv_no') {
+      if (session) {
+        session.hasSetupVideo = false;
         await this.finalizeAndSaveItem(fromId, chatId, session);
       }
       return;
@@ -5439,17 +5935,18 @@ export class TelegramService {
     try {
       const webhookInfo = await this.callTelegramApi('getWebhookInfo', {});
       if (webhookInfo?.result?.url) {
-        console.info(`[Telegram] Webhook is active (${webhookInfo.result.url}). Webhook ingress handles updates.`);
-        return;
+        console.info(`[Telegram Render Service] Found active webhook (${webhookInfo.result.url}). Deleting webhook for continuous Render long-polling...`);
+        await this.callTelegramApi('deleteWebhook', { drop_pending_updates: false });
+        console.info('[Telegram Render Service] Webhook cleared. Continuous background polling is now active.');
       }
     } catch (err: any) {
-      console.warn('[Telegram] Could not check webhook status:', err.message);
+      console.warn('[Telegram Render Service] Webhook cleanup check:', err?.message || err);
     }
 
     this.pollingActive = true;
-    console.info('[Telegram] Starting background polling worker for live updates.');
+    console.info('[Telegram Render Service] Persistent background polling worker active.');
     this.runPollingLoop().catch((err) => {
-      console.warn('[Telegram] Polling loop stopped:', err);
+      console.warn('[Telegram Render Service] Polling loop stopped:', err);
       this.pollingActive = false;
     });
   }
@@ -5463,7 +5960,7 @@ export class TelegramService {
       try {
         const res = await this.callTelegramApi('getUpdates', {
           offset: this.pollingOffset,
-          timeout: 20,
+          timeout: 10,
           allowed_updates: [
             'message', 'edited_message', 'channel_post', 'edited_channel_post',
             'inline_query', 'chosen_inline_result', 'callback_query',
@@ -5483,9 +5980,12 @@ export class TelegramService {
         }
       } catch (err: any) {
         if (err.message && err.message.includes('409')) {
-          console.info('[Telegram Polling] Webhook set; stopping polling loop.');
-          this.pollingActive = false;
-          break;
+          console.info('[Telegram Polling] Webhook conflict detected (409). Deleting webhook to resume continuous Render polling...');
+          try {
+            await this.callTelegramApi('deleteWebhook', { drop_pending_updates: false });
+          } catch {}
+          await new Promise((r) => setTimeout(r, 2000));
+          continue;
         }
         await new Promise((r) => setTimeout(r, 4000));
       }

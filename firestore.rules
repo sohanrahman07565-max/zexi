@@ -1,0 +1,22 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(adminId) {
+      return isSignedIn() && (request.auth.uid == adminId || request.auth.token.email == 'sohanrahman07565@gmail.com');
+    }
+
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(adminId);
+    }
+  }
+}

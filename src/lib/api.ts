@@ -221,6 +221,26 @@ export function authFetch(url: string, options: RequestInit = {}): Promise<Respo
 }
 
 export const api = {
+  setToken(token: string): void {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localStorage.setItem(TOKEN_KEY, token);
+      }
+    } catch {}
+  },
+
+  getToken(): string | null {
+    return getStoredToken();
+  },
+
+  clearToken(): void {
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localStorage.removeItem(TOKEN_KEY);
+      }
+    } catch {}
+  },
+
   async getMe(): Promise<{ admin: AdminUser } | null> {
     try {
       const res = await authFetch('/api/auth/me');
@@ -239,6 +259,42 @@ export const api = {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Login failed');
+    if (data.token) {
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          localStorage.setItem(TOKEN_KEY, data.token);
+        }
+      } catch {}
+    }
+    return data;
+  },
+
+  async firebaseLogin(payload: { idToken?: string; email?: string | null; displayName?: string | null; password?: string }): Promise<{ success: boolean; admin: AdminUser; token?: string; error?: string }> {
+    const res = await authFetch('/api/auth/firebase-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Firebase authentication failed');
+    if (data.token) {
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          localStorage.setItem(TOKEN_KEY, data.token);
+        }
+      } catch {}
+    }
+    return data;
+  },
+
+  async telegramLogin(tgUser: any): Promise<{ success: boolean; admin: AdminUser; token?: string; error?: string }> {
+    const res = await authFetch('/api/auth/telegram-login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(tgUser)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Telegram authentication failed');
     if (data.token) {
       try {
         if (typeof window !== 'undefined' && window.localStorage) {

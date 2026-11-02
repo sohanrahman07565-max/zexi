@@ -1,329 +1,263 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState } from 'react';
 import { api, AdminUser } from '../lib/api';
 import { toast } from '../lib/toast';
-import { AlertCircle, Eye, EyeOff, ShieldCheck } from 'lucide-react';
+import { auth } from '../lib/firebase';
+import { 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword 
+} from 'firebase/auth';
+import { 
+  ShieldCheck, 
+  Lock, 
+  Mail, 
+  Eye, 
+  EyeOff, 
+  ArrowRight, 
+  AlertCircle, 
+  Loader2 
+} from 'lucide-react';
 
 interface LoginScreenProps {
   onSuccess: (admin: AdminUser) => void;
   design?: any;
 }
 
+const DEFAULT_LOGO_URL = 'https://host.tscv.workers.dev/img/df6c9e167caf42c6';
+const DESIGNATED_ADMIN_EMAIL = 'sohanrahman07565@gmail.com';
+
 export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) => {
-  // Username / Admin Name & Password
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Validation state: button is strictly clickable ONLY when correct credentials / password are provided
-  const [isCredentialsValid, setIsCredentialsValid] = useState(false);
-
-  // Successful Login Exit Animation state
   const [isSuccessExiting, setIsSuccessExiting] = useState(false);
 
-  // Debounced real-time credential validation without exposing any "Verifying" text
-  const validationTimerRef = useRef<any>(null);
-
-  useEffect(() => {
-    const cleanUser = username.trim();
-    const cleanPass = password.trim();
-
-    if (validationTimerRef.current) {
-      clearTimeout(validationTimerRef.current);
-    }
-
-    // Reset error when user changes inputs
-    if (error) {
-      setError(null);
-    }
-
-    // If either field is empty, credentials are immediately not valid
-    if (!cleanUser || !cleanPass) {
-      setIsCredentialsValid(false);
-      return;
-    }
-
-    // Debounce verification by 100ms for instantaneous touch response without UI freeze
-    validationTimerRef.current = setTimeout(async () => {
-      try {
-        const res = await api.validateCredentials(cleanUser, cleanPass);
-        setIsCredentialsValid(Boolean(res && res.valid));
-      } catch {
-        setIsCredentialsValid(false);
-      }
-    }, 100);
-
-    return () => {
-      if (validationTimerRef.current) {
-        clearTimeout(validationTimerRef.current);
-      }
-    };
-  }, [username, password]);
-
-  const handleLogin = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
+  // Email & Password Submission with Firebase Authentication & Whitelist Verification
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
     if (loading || isSuccessExiting) return;
 
-    const cleanUser = username.trim();
-    const cleanPass = password.trim();
+    const cleanEmail = email.trim();
+    const cleanPassword = password.trim();
 
-    if (!cleanUser || !cleanPass) {
-      const msg = 'Please enter your Admin Name and Password';
+    if (!cleanEmail || !cleanPassword) {
+      const msg = 'Please enter both email and password';
       setError(msg);
       toast.error(msg);
       return;
-    }
-
-    // Double check credentials validity if user pressed Enter quickly
-    if (!isCredentialsValid) {
-      setLoading(true);
-      try {
-        const check = await api.validateCredentials(cleanUser, cleanPass);
-        if (!check || !check.valid) {
-          const msg = 'Incorrect password. Please enter the correct password.';
-          setError(msg);
-          toast.error(msg);
-          setIsCredentialsValid(false);
-          setLoading(false);
-          return;
-        }
-        setIsCredentialsValid(true);
-      } catch {
-        const msg = 'Incorrect password. Please enter the correct password.';
-        setError(msg);
-        toast.error(msg);
-        setIsCredentialsValid(false);
-        setLoading(false);
-        return;
-      }
     }
 
     setLoading(true);
     setError(null);
 
     try {
-      const res = await api.login(cleanUser, cleanPass);
+      let firebaseUser: any = null;
+      let idToken: string = '';
 
-      // Trigger sleek Zoom-In / Scale-Out exit animation before redirecting to dashboard
+      // 1. Attempt Firebase Email/Password Sign-In
+      try {
+        const userCredential = await signInWithEmailAndPassword(auth, cleanEmail, cleanPassword);
+        firebaseUser = userCredential.user;
+        idToken = await firebaseUser.getIdToken();
+      } catch (fbErr: any) {
+        console.warn('[Firebase Auth] Note during email sign-in:', fbErr.code);
+        if (cleanEmail.toLowerCase() === DESIGNATED_ADMIN_EMAIL) {
+          try {
+            const signupCredential = await createUserWithEmailAndPassword(auth, cleanEmail, cleanPassword);
+            firebaseUser = signupCredential.user;
+            idToken = await firebaseUser.getIdToken();
+          } catch {}
+        }
+      }
+
+      // 2. Complete authentication via server session
+      let res: { success: boolean; admin: AdminUser; token?: string };
+
+      if (idToken) {
+        res = await api.firebaseLogin({
+          idToken,
+          email: firebaseUser?.email || cleanEmail,
+          displayName: firebaseUser?.displayName || cleanEmail.split('@')[0]
+        });
+      } else {
+        res = await api.login(cleanEmail, cleanPassword);
+      }
+
       setIsSuccessExiting(true);
-      toast.success(`Welcome back, ${res.admin?.name || 'Admin'}!`);
+      toast.success(`Welcome back, ${res.admin.name || 'Admin'}!`);
 
       setTimeout(() => {
         onSuccess(res.admin);
-      }, 480);
+      }, 450);
     } catch (err: any) {
-      const msg = err.message || 'Login failed. Please check your credentials.';
+      console.error('[Login] Authentication error:', err);
+      const msg = err.message || 'Invalid credentials or unauthorized account.';
       setError(msg);
       toast.error(msg);
       setLoading(false);
       setIsSuccessExiting(false);
-      setIsCredentialsValid(false);
     }
   };
 
-  const title = design?.loginTitle || 'ADMIN PANEL';
+  const title = design?.loginTitle || 'ADMIN ACCESS';
   const subtitle = design?.loginSubtitle || 'SECURE ACCESS';
-  const logoSymbol = design?.loginLogoSymbol || '惡';
-  const DEFAULT_LOGO_URL = 'https://host.tscv.workers.dev/img/f61e20b6c71945c4';
-  const logoUrl = (!design?.loginLogoUrl || design.loginLogoUrl.trim() === '' || design.loginLogoUrl.includes('4fae5ca52db64590'))
-    ? DEFAULT_LOGO_URL
-    : design.loginLogoUrl.trim();
-  const idLabel = design?.loginIdLabel || 'USERNAME';
-  const idPlaceholder = design?.loginIdPlaceholder || 'Enter username';
-  const passLabel = design?.loginPassLabel || 'PASSWORD';
-  const passPlaceholder = design?.loginPassPlaceholder || 'Enter password';
-  const buttonText = design?.loginButtonText || 'SIGN IN';
-  const accentColor = design?.loginAccentColor || '#ef4444';
-
-  const hasInput = Boolean(username.trim() && password.trim());
-  const isButtonClickable = isCredentialsValid && !loading && !isSuccessExiting;
+  const logoUrl = design?.loginLogoUrl || DEFAULT_LOGO_URL;
 
   return (
-    <div className="min-h-screen w-full flex items-center justify-center p-4 relative overflow-x-hidden overflow-y-auto bg-[#060608] selection:bg-red-500 selection:text-white">
-      {/* Background: Deep dark/black with subtle neon red gradient */}
+    <div className="min-h-screen w-full flex items-center justify-center p-4 relative overflow-hidden bg-[#06070a]">
+      {/* Vibrant Red Ambient Background Glows */}
+      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[400px] bg-gradient-to-tr from-red-600/25 via-rose-600/15 to-transparent blur-[120px] rounded-full pointer-events-none animate-pulse duration-[8000ms]" />
+      <div className="absolute bottom-5 left-1/3 w-[450px] h-[300px] bg-red-900/20 blur-[130px] rounded-full pointer-events-none" />
+      <div className="absolute top-10 right-10 w-[300px] h-[300px] bg-rose-700/10 blur-[100px] rounded-full pointer-events-none" />
+      
+      {/* Red-tinted Cyber Grid */}
       <div 
-        className="absolute inset-0 pointer-events-none transition-opacity duration-700"
+        className="absolute inset-0 opacity-[0.07] pointer-events-none"
         style={{
-          background: `radial-gradient(circle at 50% 36%, ${accentColor}2e 0%, ${accentColor}12 40%, rgba(6, 6, 8, 0.98) 75%)`
-        }}
-      />
-      <div 
-        className="absolute w-[500px] h-[500px] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full blur-[120px] pointer-events-none transition-transform duration-700"
-        style={{ backgroundColor: `${accentColor}1a` }}
-      />
-
-      {/* Subtle tech background grid */}
-      <div 
-        className="absolute inset-0 opacity-[0.035] pointer-events-none"
-        style={{
-          backgroundImage: `linear-gradient(to right, ${accentColor} 1px, transparent 1px), linear-gradient(to bottom, ${accentColor} 1px, transparent 1px)`,
-          backgroundSize: '36px 36px'
+          backgroundImage: 'radial-gradient(rgba(239, 68, 68, 0.45) 1px, transparent 1px)',
+          backgroundSize: '24px 24px'
         }}
       />
 
-      {/* Main Login Card with smooth Zoom-In entrance & Zoom-Out exit transitions */}
-      <div 
-        className={`w-full max-w-sm relative z-10 ${
-          isSuccessExiting
-            ? 'animate-login-scale-out pointer-events-none'
-            : 'animate-login-scale-in'
-        }`}
-      >
-        {/* Centered Container Card with rounded corners, dark fill, subtle red border outline, and soft red outer glow */}
-        <div 
-          className="rounded-3xl p-7 sm:p-8 bg-[#0c0c13]/95 border shadow-2xl backdrop-blur-2xl transition-all duration-300 relative overflow-hidden"
-          style={{
-            borderColor: isCredentialsValid ? `${accentColor}99` : (hasInput ? `${accentColor}55` : `${accentColor}33`),
-            boxShadow: isCredentialsValid
-              ? `0 0 65px -8px ${accentColor}77, 0 20px 45px -15px rgba(0,0,0,0.85)`
-              : `0 0 45px -12px ${accentColor}33, 0 20px 40px -15px rgba(0,0,0,0.8)`
-          }}
-        >
-          {/* Subtle top card border glow accent */}
-          <div 
-            className="absolute top-0 left-1/2 -translate-x-1/2 w-48 h-[1.5px] transition-all duration-300"
-            style={{
-              background: `linear-gradient(90deg, transparent, ${accentColor}, transparent)`,
-              opacity: isCredentialsValid ? 1 : 0.6
-            }}
-          />
-
-          {/* Branding & Header Section */}
-          <div className="flex flex-col items-center text-center mb-6">
-            {/* Logo Icon: Circular user logo/avatar badge with crown & Zexi Tools */}
-            <div 
-              className="w-16 h-16 rounded-full flex items-center justify-center mb-3.5 transition-all duration-300 hover:scale-105 cursor-default overflow-hidden relative shadow-lg p-0.5"
-              style={{
-                background: `radial-gradient(circle, #2a0814 0%, #0c0408 100%)`,
-                boxShadow: isCredentialsValid 
-                  ? `0 0 32px ${accentColor}aa, inset 0 1px 3px rgba(255,255,255,0.45)`
-                  : `0 0 22px ${accentColor}66, inset 0 1px 3px rgba(255,255,255,0.45)`,
-                border: `2px solid ${accentColor}`
-              }}
-            >
-              <img 
-                src={logoUrl} 
-                alt={title} 
-                className="w-full h-full object-cover rounded-full"
-                loading="eager"
-              />
-
-              {/* Gloss sheen overlay */}
-              <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-white/15 to-transparent pointer-events-none rounded-full" />
+      {/* Main Login Card with Red Glow Border */}
+      <div className={`w-full max-w-md relative z-10 transition-all duration-500 ease-out ${
+        isSuccessExiting ? 'scale-95 opacity-0 translate-y-3' : 'scale-100 opacity-100'
+      }`}>
+        <div className="glass-panel rounded-3xl p-6 sm:p-8 border border-red-500/25 shadow-[0_0_60px_rgba(239,68,68,0.18),0_25px_50px_rgba(0,0,0,0.9)] space-y-6 backdrop-blur-2xl bg-zinc-950/90 transition-all hover:border-red-500/35 duration-300">
+          
+          {/* Header & Logo with Glowing Red Ring */}
+          <div className="text-center space-y-3">
+            <div className="relative inline-block">
+              <div className="w-20 h-20 rounded-2xl p-1 bg-gradient-to-tr from-red-600 via-rose-500 to-red-400 shadow-xl shadow-red-600/40 mx-auto transition-transform hover:scale-105 duration-300">
+                <img
+                  src={logoUrl}
+                  alt="Admin Logo"
+                  className="w-full h-full object-cover rounded-[14px]"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).src = DEFAULT_LOGO_URL;
+                  }}
+                />
+              </div>
+              <div className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-emerald-500 border-2 border-zinc-950 flex items-center justify-center text-white shadow-xs">
+                <ShieldCheck className="w-3.5 h-3.5" />
+              </div>
             </div>
 
-            {/* Title: Bold uppercase in glowing vibrant red */}
-            <h1 
-              className="text-2xl font-black tracking-wider uppercase font-mono"
-              style={{
-                color: accentColor,
-                textShadow: `0 0 18px ${accentColor}aa`
-              }}
-            >
-              {title}
-            </h1>
-
-            {/* Subtitle: Small uppercase in muted light gray */}
-            <p className="text-[10px] font-bold tracking-[0.28em] text-zinc-400 uppercase mt-1">
-              {subtitle}
-            </p>
+            <div>
+              <h2 className="text-xl sm:text-2xl font-black text-white tracking-wider uppercase">
+                {title}
+              </h2>
+              {/* Clean Subtitle Without Any Emojis */}
+              <div className="mt-1 text-xs font-semibold text-zinc-400 tracking-widest uppercase">
+                {subtitle}
+              </div>
+            </div>
           </div>
 
+          {/* Error Banner */}
           {error && (
-            <div className="mb-4 p-3 rounded-xl bg-red-950/50 border border-red-800/50 flex items-start gap-2.5 text-red-200 text-xs animate-[shake_0.4s_ease-in-out]">
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-400" />
-              <span className="leading-tight">{error}</span>
+            <div className="p-3.5 rounded-2xl bg-rose-500/10 border border-rose-500/25 text-rose-300 text-xs flex items-center gap-2.5 animate-in fade-in duration-200">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+              <span className="leading-snug">{error}</span>
             </div>
           )}
 
-          {/* Login Form with Native Keyboard support */}
-          <form onSubmit={handleLogin} className="space-y-4">
-            {/* Input Field 1: USERNAME */}
-            <div>
-              <label className="block text-[11px] font-bold text-zinc-400 uppercase tracking-wider mb-1.5">
-                {idLabel}
+          {/* Email & Password Form Only (No other login methods) */}
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {/* Email Field */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-zinc-300 uppercase tracking-wider">
+                Admin Email
               </label>
               <div className="relative">
+                <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
                 <input
-                  type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder={idPlaceholder}
-                  autoComplete="username"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck="false"
-                  disabled={loading || isSuccessExiting}
-                  className="w-full bg-[#13131c] border border-zinc-800/90 rounded-xl py-3 px-4 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/40 focus:shadow-[0_0_18px_rgba(239,68,68,0.35)] transition-all duration-200 hover:border-zinc-700"
-                  style={{
-                    caretColor: accentColor
-                  }}
+                  type="email"
+                  autoComplete="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="admin@example.com"
+                  className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl py-3 pl-10 pr-4 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/30 transition-all duration-200"
                 />
               </div>
             </div>
 
-            {/* Input Field 2: PASSWORD with Visibility Toggle */}
-            <div>
-              <label className="block text-[11px] font-bold text-zinc-400 uppercase tracking-wider mb-1.5">
-                {passLabel}
+            {/* Password Field */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-zinc-300 uppercase tracking-wider">
+                Password
               </label>
               <div className="relative">
+                <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
                 <input
                   type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder={passPlaceholder}
-                  autoComplete="current-password"
-                  disabled={loading || isSuccessExiting}
-                  className="w-full bg-[#13131c] border border-zinc-800/90 rounded-xl py-3 pl-4 pr-11 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/40 focus:shadow-[0_0_18px_rgba(239,68,68,0.35)] transition-all duration-200 hover:border-zinc-700"
-                  style={{
-                    caretColor: accentColor
-                  }}
+                  placeholder="••••••••"
+                  className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl py-3 pl-10 pr-11 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/30 transition-all duration-200"
                 />
-                {/* Show/Hide Password Toggle Button */}
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-red-400 p-1 rounded-md transition-colors cursor-pointer"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer"
                   title={showPassword ? 'Hide password' : 'Show password'}
-                  tabIndex={-1}
                 >
-                  {showPassword ? <EyeOff className="w-4 h-4 text-red-500" /> : <Eye className="w-4 h-4" />}
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
             </div>
 
-            {/* Action Button: Dynamic SIGN IN Button - strictly disabled & unclickable until correct password is typed */}
+            {/* Vibrant Glowing Red Sign In Button */}
             <button
               type="submit"
-              disabled={!isButtonClickable}
-              className={`w-full mt-5 py-3.5 px-6 rounded-xl font-black uppercase tracking-widest text-sm flex items-center justify-center gap-2 transition-all duration-300 ${
-                isButtonClickable
-                  ? 'text-white cursor-pointer active:scale-[0.98] hover:brightness-110 shadow-lg'
-                  : 'bg-zinc-900/80 border border-zinc-800/80 text-zinc-500 opacity-40 cursor-not-allowed select-none'
-              }`}
-              style={
-                isButtonClickable
-                  ? {
-                      background: `linear-gradient(90deg, #dc2626, ${accentColor}, #e11d48)`,
-                      boxShadow: `0 8px 30px ${accentColor}66, 0 0 20px ${accentColor}44`
-                    }
-                  : undefined
-              }
+              disabled={loading}
+              className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-red-600 via-rose-600 to-red-600 hover:from-red-500 hover:to-rose-500 text-white font-bold text-sm shadow-xl shadow-red-600/40 hover:shadow-red-500/50 flex items-center justify-center gap-2 transition-all duration-300 cursor-pointer active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed mt-2"
             >
-              {loading || isSuccessExiting ? (
-                <div className="flex items-center justify-center py-0.5">
-                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                </div>
+              {loading ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>Verifying Credentials...</span>
+                </>
               ) : (
-                <div className="flex items-center gap-2">
-                  {isCredentialsValid && <ShieldCheck className="w-4 h-4 text-white" />}
-                  <span className="font-black tracking-widest text-sm drop-shadow-sm">{buttonText}</span>
-                </div>
+                <>
+                  <span>Sign In</span>
+                  <ArrowRight className="w-4 h-4" />
+                </>
               )}
             </button>
+
+            {/* Minimal Standalone Google Logo Decoration (Non-clickable) */}
+            <div className="pt-2 flex flex-col items-center justify-center select-none pointer-events-none">
+              <div 
+                className="w-9 h-9 rounded-full bg-zinc-900/80 border border-zinc-800/90 flex items-center justify-center shadow-inner shadow-black/50 opacity-80"
+                aria-hidden="true"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24">
+                  <path
+                    fill="#4285F4"
+                    d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                  />
+                  <path
+                    fill="#EA4335"
+                    d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                  />
+                </svg>
+              </div>
+            </div>
           </form>
+
         </div>
       </div>
     </div>

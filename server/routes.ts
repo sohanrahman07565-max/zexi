@@ -298,6 +298,117 @@ apiRouter.post('/auth/validate-credentials', async (req: Request, res: Response)
   return res.json({ valid: validPassword });
 });
 
+// POST /api/auth/firebase-login (Firebase Authentication Session Creator)
+apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
+  const { idToken, email, displayName } = req.body;
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  
+  if (!cleanEmail) {
+    return res.status(400).json({ error: 'Email is required for authentication' });
+  }
+
+  // Reload admins
+  await storage.loadLatest(true);
+  const allAdmins = await storage.getAdmins();
+  const rootAdminId = String(process.env.ROOT_ADMIN_ID || '8153757163').trim();
+  const rootAdminName = (process.env.ADMIN_NAME || 'Owner Admin').trim();
+  // Strict Whitelist Check for Admin Access (sohanrahman07565@gmail.com or configured admin email)
+  const configuredWhitelistedEmails = new Set<string>([
+    'sohanrahman07565@gmail.com',
+    ...(process.env.ADMIN_EMAIL ? [process.env.ADMIN_EMAIL.toLowerCase().trim()] : [])
+  ]);
+
+  // Include any emails explicitly configured in existing admin records
+  for (const a of allAdmins) {
+    if (a.name && a.name.includes('@')) {
+      configuredWhitelistedEmails.add(a.name.toLowerCase().trim());
+    }
+  }
+
+  const isWhitelisted = configuredWhitelistedEmails.has(cleanEmail) || cleanEmail === 'sohanrahman07565@gmail.com';
+
+  if (!isWhitelisted) {
+    console.warn('[Firebase Auth] Strict whitelist rejection for unauthorized email:', cleanEmail);
+    return res.status(403).json({ 
+      error: `Access Denied: Account (${cleanEmail}) is not authorized. Only designated administrators can access this panel.` 
+    });
+  }
+
+  const isOwnerEmail = cleanEmail === 'sohanrahman07565@gmail.com';
+
+  // Find matching admin by email or name
+  let admin = allAdmins.find(a => 
+    (a.name && a.name.toLowerCase() === cleanEmail) ||
+    (a.telegramId && a.telegramId.toLowerCase() === cleanEmail) ||
+    (a.id && a.id.toLowerCase() === cleanEmail)
+  );
+
+  // If owner email or first admin in the system, authorize as owner
+  if (!admin) {
+    if (isOwnerEmail || allAdmins.length === 0) {
+      console.info('[Firebase Auth] Auto-provisioning Owner Admin for:', cleanEmail);
+      const newOwner: AdminUser = {
+        id: rootAdminId || '8153757163',
+        telegramId: rootAdminId || '8153757163',
+        name: displayName || rootAdminName || cleanEmail.split('@')[0],
+        role: 'owner',
+        passwordHash: await hashPassword(cleanEmail + '_admin_secret'),
+        permissions: {
+          files_view: true, files_add: true, files_edit: true, files_delete: true,
+          links_view: true, links_add: true, links_edit: true, links_delete: true,
+          messages_view: true, messages_edit: true, admins_manage: true,
+          design_edit: true, settings_edit: true, cleanup_manage: true
+        },
+        enabled: true,
+        createdAt: new Date().toISOString()
+      };
+      await storage.saveAdmin(newOwner);
+      admin = newOwner;
+    }
+  }
+
+  if (!admin) {
+    // If only one owner admin exists, associate with that owner
+    const owner = allAdmins.find(a => a.role === 'owner');
+    if (owner && isOwnerEmail) {
+      admin = owner;
+    }
+  }
+
+  if (!admin || !admin.enabled) {
+    console.warn('[Firebase Auth] Access denied for email:', cleanEmail);
+    return res.status(403).json({ error: 'Access Denied: This email is not authorized as an administrator.' });
+  }
+
+  // Create session
+  const rawToken = await storage.createSession(admin.id, admin.role);
+  const signedToken = signSessionToken(rawToken);
+
+  res.cookie('tg_admin_session', signedToken, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none',
+    maxAge: 12 * 60 * 60 * 1000 // 12 hours
+  });
+
+  admin.lastLoginAt = new Date().toISOString();
+  await storage.saveAdmin(admin);
+
+  console.info('[Firebase Auth] Session successfully created for admin:', admin.name, admin.role);
+
+  return res.json({
+    success: true,
+    token: signedToken,
+    admin: {
+      id: admin.id,
+      telegramId: admin.telegramId,
+      name: admin.name,
+      role: admin.role,
+      permissions: admin.permissions
+    }
+  });
+});
+
 // POST /api/auth/logout
 apiRouter.post('/auth/logout', async (req: Request, res: Response) => {
   const rawHeader = req.cookies?.tg_admin_session || req.headers.authorization?.replace(/^Bearer\s+/i, '');
@@ -364,10 +475,31 @@ apiRouter.post('/auth/forgot-password', async (req: Request, res: Response) => {
   return res.json({ success: true, message: 'Password has been reset successfully. You can now log in.' });
 });
 
-// Public info for login screen styling
-apiRouter.get('/auth/login-design', async (_req: Request, res: Response) => {
+// Public info for login screen styling & bot info for Telegram Login Widget
+apiRouter.get('/auth/login-design', async (req: Request, res: Response) => {
   const design = await storage.getDesign();
+  const settings = await storage.getSettings();
+  let botUsername = '';
+  try {
+    botUsername = await TelegramService.getBotUsername();
+  } catch {}
+
+  const botToken = process.env.TELEGRAM_CLIENT_SECRET || process.env.TELEGRAM_BOT_TOKEN || settings.botToken || '';
+  const clientId = process.env.TELEGRAM_CLIENT_ID || process.env.TELEGRAM_BOT_ID || (botToken.includes(':') ? botToken.split(':')[0] : '');
+
+  const host = req.get('host') || 'localhost:3000';
+  const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
+  const currentOrigin = `${protocol}://${host}`;
+
   return res.json({
+    botUsername: botUsername ? botUsername.replace(/^@/, '') : '',
+    clientId,
+    clientSecretConfigured: Boolean(botToken),
+    redirectUri: `${currentOrigin}/api/auth/callback`,
+    deployedUrls: {
+      dev: 'https://ais-dev-5pmvaj2s66z7xu34aogymi-761412699643.asia-east1.run.app/api/auth/callback',
+      shared: 'https://ais-pre-5pmvaj2s66z7xu34aogymi-761412699643.asia-east1.run.app/api/auth/callback'
+    },
     loginTitle: design.loginTitle || 'ADMIN PANEL',
     loginSubtitle: design.loginSubtitle || 'SECURE ACCESS',
     loginLogoUrl: design.loginLogoUrl || '',
@@ -384,6 +516,206 @@ apiRouter.get('/auth/login-design', async (_req: Request, res: Response) => {
     cardStyle: design.cardStyle,
     borderRadius: design.borderRadius,
     buttonAnimationStyle: design.buttonAnimationStyle || 'orbit'
+  });
+});
+
+// Helper to verify Telegram authentication data and check admin whitelist
+async function verifyAndAuthorizeTelegramUser(tgUser: any): Promise<{ ok: boolean; admin?: AdminUser; error?: string; statusCode?: number }> {
+  if (!tgUser || !tgUser.id) {
+    return { ok: false, error: 'Telegram account information is required', statusCode: 400 };
+  }
+
+  // Force-reload fresh data from persistent storage
+  await storage.loadLatest(true);
+  const settings = await storage.getSettings();
+  const botToken = process.env.TELEGRAM_CLIENT_SECRET || process.env.TELEGRAM_BOT_TOKEN || settings.botToken || '';
+
+  // 1. Verify Telegram cryptographic hash signature if hash and token are provided
+  if (tgUser.hash && botToken) {
+    try {
+      const secretKey = crypto.createHash('sha256').update(botToken).digest();
+      const checkArray: string[] = [];
+      const keys = Object.keys(tgUser).filter(k => k !== 'hash').sort();
+      for (const k of keys) {
+        checkArray.push(`${k}=${tgUser[k]}`);
+      }
+      const dataCheckString = checkArray.join('\n');
+      const calculatedHmac = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
+
+      if (calculatedHmac !== tgUser.hash) {
+        console.warn('[Auth] Telegram Login Hash signature verification failed for user ID:', tgUser.id);
+        return { ok: false, error: 'Telegram authentication verification failed: Invalid cryptographic signature.', statusCode: 401 };
+      }
+
+      // Check auth_date expiration (within 24 hours)
+      if (tgUser.auth_date && (Date.now() / 1000 - Number(tgUser.auth_date) > 86400)) {
+        return { ok: false, error: 'Telegram authentication data has expired. Please log in again.', statusCode: 401 };
+      }
+    } catch (err: any) {
+      console.error('[Auth] Error verifying Telegram hash signature:', err);
+      return { ok: false, error: 'Internal error verifying Telegram authentication.', statusCode: 500 };
+    }
+  }
+
+  // 2. ADMIN WHITELIST & AUTHORIZATION CHECK
+  const userIdStr = String(tgUser.id).trim();
+  const rawUsername = tgUser.username ? String(tgUser.username).trim().replace(/^@/, '').toLowerCase() : '';
+  const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '').trim();
+  const envAdminName = String(process.env.ADMIN_NAME || process.env.ADMIN_USERNAME || '').trim().replace(/^@/, '').toLowerCase();
+  
+  const allAdmins = await storage.getAdmins();
+  let admin: AdminUser | null = null;
+
+  // Check 1: Root admin ID match
+  if (rootAdminId && (userIdStr === rootAdminId || rootAdminId.includes(userIdStr))) {
+    admin = allAdmins.find(a => a.role === 'owner') || null;
+    if (!admin) {
+      // Auto-create root owner account for this verified Telegram user
+      const newOwner: AdminUser = {
+        id: userIdStr,
+        telegramId: userIdStr,
+        name: tgUser.first_name || (rawUsername ? `@${rawUsername}` : 'Owner Admin'),
+        role: 'owner',
+        passwordHash: await hashPassword(crypto.randomBytes(16).toString('hex')),
+        permissions: {
+          files_view: true, files_add: true, files_edit: true, files_delete: true,
+          links_view: true, links_add: true, links_edit: true, links_delete: true,
+          messages_view: true, messages_edit: true, admins_manage: true,
+          design_edit: true, settings_edit: true, cleanup_manage: true
+        },
+        enabled: true,
+        createdAt: new Date().toISOString()
+      };
+      await storage.saveAdmin(newOwner);
+      admin = newOwner;
+    }
+  }
+
+  // Check 2: Match against registered admins whitelist
+  if (!admin) {
+    for (const a of allAdmins) {
+      const aId = String(a.id || '').trim();
+      const aTgId = String(a.telegramId || '').trim();
+      const aName = String(a.name || '').trim().replace(/^@/, '').toLowerCase();
+      const aTgUsername = String((a as any).telegramUsername || '').trim().replace(/^@/, '').toLowerCase();
+
+      if (aId === userIdStr || aTgId === userIdStr) {
+        admin = a;
+        break;
+      }
+      if (rawUsername && (aName === rawUsername || aTgUsername === rawUsername)) {
+        admin = a;
+        break;
+      }
+    }
+  }
+
+  // Check 3: ENV Admin Username match
+  if (!admin && envAdminName && rawUsername && rawUsername === envAdminName) {
+    admin = allAdmins.find(a => a.role === 'owner') || null;
+  }
+
+  // Check 4: If system has zero admins, first authenticating Telegram user becomes initial Owner Admin
+  if (!admin && allAdmins.length === 0) {
+    console.info('[Auth] No existing admins found. Initializing Owner Admin from Telegram account:', userIdStr);
+    const newOwner: AdminUser = {
+      id: userIdStr,
+      telegramId: userIdStr,
+      name: tgUser.first_name || (rawUsername ? `@${rawUsername}` : 'Owner Admin'),
+      role: 'owner',
+      passwordHash: await hashPassword(crypto.randomBytes(16).toString('hex')),
+      permissions: {
+        files_view: true, files_add: true, files_edit: true, files_delete: true,
+        links_view: true, links_add: true, links_edit: true, links_delete: true,
+        messages_view: true, messages_edit: true, admins_manage: true,
+        design_edit: true, settings_edit: true, cleanup_manage: true
+      },
+      enabled: true,
+      createdAt: new Date().toISOString()
+    };
+    await storage.saveAdmin(newOwner);
+    await storage.updateSettings({ rootAdminId: userIdStr });
+    admin = newOwner;
+  }
+
+  // STRICT WHITELIST RESTRICTION:
+  // If the Telegram ID is not explicitly configured and authorized as an admin, deny access completely!
+  if (!admin) {
+    console.warn(`[Auth] Access Denied: Telegram account ${userIdStr} (@${rawUsername || 'none'}) is NOT in the admin whitelist.`);
+    return {
+      ok: false,
+      error: `Access Denied: Telegram account (${rawUsername ? '@' + rawUsername : 'ID: ' + userIdStr}) is not in the authorized Admin whitelist. Please contact the Owner Admin to authorize this account.`,
+      statusCode: 403
+    };
+  }
+
+  if (!admin.enabled) {
+    return { ok: false, error: 'Access Denied: Your administrator account has been disabled.', statusCode: 403 };
+  }
+
+  return { ok: true, admin };
+}
+
+// GET /api/auth/callback (Telegram OAuth / Login Widget Redirect Callback)
+apiRouter.get('/auth/callback', async (req: Request, res: Response) => {
+  const query = req.query as Record<string, string>;
+  const authResult = await verifyAndAuthorizeTelegramUser(query);
+  if (!authResult.ok || !authResult.admin) {
+    return res.redirect('/?error=' + encodeURIComponent(authResult.error || 'Access Denied'));
+  }
+
+  const admin = authResult.admin;
+  const rawToken = await storage.createSession(admin.id, admin.role);
+  const signedToken = signSessionToken(rawToken);
+
+  res.cookie('tg_admin_session', signedToken, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none',
+    maxAge: 12 * 60 * 60 * 1000
+  });
+
+  admin.lastLoginAt = new Date().toISOString();
+  await storage.saveAdmin(admin);
+
+  console.info(`[Auth Callback] Verified Telegram Admin redirected in: ${admin.name} (Telegram ID: ${admin.id})`);
+  return res.redirect(`/?auth_token=${encodeURIComponent(signedToken)}`);
+});
+
+// POST /api/auth/telegram-login (Telegram Login Widget / OpenID Connect with Admin Whitelist Verification)
+apiRouter.post('/auth/telegram-login', async (req: Request, res: Response) => {
+  const tgUser = req.body;
+  const authResult = await verifyAndAuthorizeTelegramUser(tgUser);
+  if (!authResult.ok || !authResult.admin) {
+    return res.status(authResult.statusCode || 403).json({ error: authResult.error || 'Access Denied' });
+  }
+
+  const admin = authResult.admin;
+  const rawToken = await storage.createSession(admin.id, admin.role);
+  const signedToken = signSessionToken(rawToken);
+
+  res.cookie('tg_admin_session', signedToken, {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none',
+    maxAge: 12 * 60 * 60 * 1000
+  });
+
+  admin.lastLoginAt = new Date().toISOString();
+  await storage.saveAdmin(admin);
+
+  console.info(`[Auth] Verified Telegram Admin logged in: ${admin.name} (Telegram ID: ${admin.id})`);
+
+  return res.json({
+    success: true,
+    token: signedToken,
+    admin: {
+      id: admin.id,
+      telegramId: admin.telegramId,
+      name: admin.name,
+      role: admin.role,
+      permissions: admin.permissions
+    }
   });
 });
 
@@ -676,7 +1008,23 @@ apiRouter.delete('/fraud-rules/:id', authenticate, requirePermission('settings_e
 // POST /api/items
 apiRouter.post('/items', authenticate, async (req: Request, res: Response) => {
   const admin = (req as any).admin as AdminUser;
-  const { type, name, rawKeyword, triggerType, caption, telegramFileId, uploadedFileId, fileType, fileName, fileSize, mimeType, url, openMode, buttonText, replyMessage, triggers, retentionType, retentionDays } = req.body;
+  const { type: rawType, name, rawKeyword, triggerType, caption, telegramFileId, uploadedFileId, fileType, fileName, fileSize, mimeType, url, openMode, buttonText, replyMessage, triggers, retentionType, retentionDays } = req.body;
+
+  const cleanKeyword = rawKeyword ? String(rawKeyword).replace(/^[#/]/, '').trim() : '';
+  if (!cleanKeyword) {
+    return res.status(400).json({ error: 'Trigger keyword is required' });
+  }
+
+  // Auto-detect item type:
+  // 1. If explicit 'link' or valid url provided: 'link'
+  // 2. If 'text' or isTextOnly is true or no files/links provided: 'file' with isTextOnly = true
+  // 3. Otherwise: 'file'
+  const isExplicitLink = rawType === 'link' || Boolean(url && String(url).trim().match(/^https?:\/\//i));
+  const isExplicitText = rawType === 'text' || req.body.isTextOnly === true || req.body.fileEnabled === false;
+  const hasFilesAttached = Boolean(telegramFileId || uploadedFileId || req.body.hasFiles || fileType);
+
+  let type: 'file' | 'link' = isExplicitLink ? 'link' : 'file';
+  const isTextOnly = !isExplicitLink && (isExplicitText || (!hasFilesAttached && (Boolean(caption) || Boolean(replyMessage))));
 
   if (type === 'file' && admin.role !== 'owner' && !admin.permissions.files_add) {
     return res.status(403).json({ error: 'Permission denied: Cannot add files' });
@@ -685,21 +1033,18 @@ apiRouter.post('/items', authenticate, async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Permission denied: Cannot add links' });
   }
 
-  if (!type || !name || !rawKeyword) {
-    return res.status(400).json({ error: 'Type, name, and keyword are required' });
-  }
+  const resolvedName = (name && String(name).trim()) || (isTextOnly ? `Text: ${cleanKeyword}` : (fileName || `Item ${cleanKeyword}`));
 
-  const cleanKeyword = String(rawKeyword).replace(/^[#/]/, '').trim();
   const tType: TriggerType = triggerType || 'hashtag';
   const primaryTrigger = tType === 'hashtag' ? `#${cleanKeyword}` : tType === 'slash' ? `/${cleanKeyword}` : cleanKeyword;
   const allTriggers = Array.isArray(triggers) && triggers.length > 0 ? triggers : [primaryTrigger];
 
-  const id = `${type === 'file' ? 'f_' : 'l_'}${Date.now().toString(36)}`;
+  const id = `${type === 'file' ? (isTextOnly ? 't_' : 'f_') : 'l_'}${Date.now().toString(36)}`;
 
   const item: ItemRecord = {
     id,
     type,
-    name: String(name).trim(),
+    name: resolvedName,
     triggers: allTriggers,
     triggerType: tType,
     rawKeyword: cleanKeyword,
@@ -722,10 +1067,9 @@ apiRouter.post('/items', authenticate, async (req: Request, res: Response) => {
     item.expiresAt = undefined;
   }
 
-  const isTextOnly = req.body.isTextOnly === true || req.body.fileEnabled === false;
   item.isTextOnly = isTextOnly;
   item.fileEnabled = !isTextOnly;
-  item.replyMessage = req.body.replyMessage || caption || undefined;
+  item.replyMessage = req.body.replyMessage || caption || resolvedName;
 
   if (type === 'file') {
     if (isTextOnly) {
@@ -909,7 +1253,7 @@ apiRouter.delete('/items/:id', authenticate, async (req: Request, res: Response)
 // POST /api/items/upload (Upload direct media from phone storage/browser via multipart FormData or base64)
 apiRouter.post('/items/upload', authenticate, uploadMiddleware.single('file'), async (req: Request, res: Response) => {
   const admin = (req as any).admin as AdminUser;
-  if (admin.role !== 'owner' && !admin.permissions?.files_add) {
+  if (admin.role !== 'owner' && !admin.permissions?.files_add && !admin.permissions?.links_add && !admin.permissions?.files_edit && !admin.permissions?.links_edit) {
     return res.status(403).json({ error: 'Permission denied: Cannot upload files' });
   }
 
@@ -982,25 +1326,30 @@ apiRouter.post('/items/upload', authenticate, uploadMiddleware.single('file'), a
     }
 
     // 2. Try to pre-register with Telegram if possible (for files <= 50MB)
-    const settings = await storage.getSettings();
-    const candidateChat = admin.telegramId || (admin as any).id || settings.rootAdminId || process.env.ROOT_ADMIN_ID;
-    let result = await TelegramService.uploadFileToTelegram(
-      buffer,
-      fileName,
-      fType,
-      caption,
-      candidateChat,
-      mimeType
-    );
-    if (!result.ok && (settings.rootAdminId || process.env.ROOT_ADMIN_ID) && candidateChat !== (settings.rootAdminId || process.env.ROOT_ADMIN_ID)) {
+    let result: { ok: boolean; fileId?: string; fileUniqueId?: string; error?: string } = { ok: false, error: 'Telegram upload deferred' };
+    try {
+      const settings = await storage.getSettings();
+      const candidateChat = admin.telegramId || (admin as any).id || settings.rootAdminId || process.env.ROOT_ADMIN_ID;
       result = await TelegramService.uploadFileToTelegram(
         buffer,
         fileName,
         fType,
         caption,
-        settings.rootAdminId || process.env.ROOT_ADMIN_ID,
+        candidateChat,
         mimeType
       );
+      if (!result.ok && (settings.rootAdminId || process.env.ROOT_ADMIN_ID) && candidateChat !== (settings.rootAdminId || process.env.ROOT_ADMIN_ID)) {
+        result = await TelegramService.uploadFileToTelegram(
+          buffer,
+          fileName,
+          fType,
+          caption,
+          settings.rootAdminId || process.env.ROOT_ADMIN_ID,
+          mimeType
+        );
+      }
+    } catch (tgErr: any) {
+      console.warn('[Upload] Telegram pre-registration caught error:', tgErr?.message);
     }
 
     if (result.ok && result.fileId) {

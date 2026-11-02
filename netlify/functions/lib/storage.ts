@@ -465,7 +465,7 @@ export const DEFAULT_DESIGN: DesignConfig = {
   borderRadius: 'rounded',
   loginTitle: 'ADMIN PANEL',
   loginSubtitle: 'SECURE ACCESS',
-  loginLogoUrl: 'https://host.tscv.workers.dev/img/f61e20b6c71945c4',
+  loginLogoUrl: 'https://host.tscv.workers.dev/img/df6c9e167caf42c6',
   loginLogoSymbol: '惡',
   loginIdLabel: 'ADMIN NAME',
   loginIdPlaceholder: 'Enter admin name',
@@ -1320,6 +1320,22 @@ export class SharedStorageService {
     return Boolean(match?.isBanned);
   }
 
+  public async getUser(userId: string | number): Promise<BotUserRecord | null> {
+    if (!userId) return null;
+    await this.loadLatest(false);
+    const cleanId = String(userId).trim();
+    if (this.db.botUsers?.[cleanId]) {
+      return this.db.botUsers[cleanId];
+    }
+    const cleanUsername = cleanId.replace(/^@+/, '').toLowerCase();
+    const allUsers = Object.values(this.db.botUsers || {});
+    const match = allUsers.find(u => 
+      String(u.id).trim() === cleanId || 
+      (u.username && u.username.replace(/^@+/, '').toLowerCase() === cleanUsername)
+    );
+    return match || null;
+  }
+
   public async toggleBanUser(userId: string | number): Promise<BotUserRecord | null> {
     if (!userId) return null;
     const cleanId = String(userId).trim();
@@ -1404,8 +1420,8 @@ export class SharedStorageService {
   public async getDesign(): Promise<DesignConfig> {
     await this.loadLatest(false);
     // Auto-migrate legacy default logo asset if still stored
-    if (!this.db.design.loginLogoUrl || this.db.design.loginLogoUrl.includes('4fae5ca52db64590')) {
-      this.db.design.loginLogoUrl = 'https://host.tscv.workers.dev/img/f61e20b6c71945c4';
+    if (!this.db.design.loginLogoUrl || this.db.design.loginLogoUrl.includes('4fae5ca52db64590') || this.db.design.loginLogoUrl.includes('f61e20b6c71945c4')) {
+      this.db.design.loginLogoUrl = 'https://host.tscv.workers.dev/img/df6c9e167caf42c6';
     }
     return this.db.design;
   }

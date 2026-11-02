@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-export const DEFAULT_LOGO_URL = 'https://host.tscv.workers.dev/img/f61e20b6c71945c4';
+export const DEFAULT_LOGO_URL = 'https://host.tscv.workers.dev/img/df6c9e167caf42c6';
 
 // Eagerly pre-cache custom logo in browser memory immediately
 if (typeof window !== 'undefined') {
