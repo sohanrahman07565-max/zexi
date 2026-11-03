@@ -4,7 +4,7 @@ import multer from 'multer';
 import dotenv from 'dotenv';
 import { storage, AdminUser, ItemRecord, TriggerType, OpenMode } from './storage';
 import { TelegramService, getItemPayload } from './telegram';
-import { hashPassword, verifyPassword, signSessionToken, verifySessionToken } from '../netlify/functions/lib/auth';
+import { hashPassword, verifyPassword, signSessionToken, verifySessionToken } from './auth';
 
 dotenv.config({ override: true });
 
@@ -83,7 +83,7 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   const cleanPassword = String(password).trim();
   console.info('[Auth] Admin login attempt for identifier/name:', cleanId);
 
-  // Force-reload fresh data from shared persistent storage (Netlify Blobs / disk)
+  // Force-reload fresh data from persistent storage
   await storage.loadLatest(true);
 
   // Reload latest environment variables if .env was changed
@@ -94,7 +94,7 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   // Read environment variables for Admin Name and Password
   const envAdminName = (process.env.ADMIN_NAME || process.env.ADMIN_USERNAME || process.env.ROOT_ADMIN_NAME || '').trim();
   const envAdminPassword = (process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS || process.env.ROOT_ADMIN_PASSWORD || '').trim();
-  const envRootId = (process.env.ROOT_ADMIN_ID || '').trim();
+  const envRootId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '').trim();
 
   const cleanNormalized = cleanId.replace(/\s+/g, '').toLowerCase();
   const envNameNormalized = envAdminName.replace(/\s+/g, '').toLowerCase();
@@ -246,7 +246,7 @@ apiRouter.post('/auth/validate-credentials', async (req: Request, res: Response)
 
   const envAdminName = (process.env.ADMIN_NAME || process.env.ADMIN_USERNAME || process.env.ROOT_ADMIN_NAME || '').trim();
   const envAdminPassword = (process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS || process.env.ROOT_ADMIN_PASSWORD || '').trim();
-  const envRootId = (process.env.ROOT_ADMIN_ID || '').trim();
+  const envRootId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '').trim();
 
   const cleanNormalized = cleanId.replace(/\s+/g, '').toLowerCase();
   const envNameNormalized = envAdminName.replace(/\s+/g, '').toLowerCase();
@@ -310,7 +310,7 @@ apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
   // Reload admins
   await storage.loadLatest(true);
   const allAdmins = await storage.getAdmins();
-  const rootAdminId = String(process.env.ROOT_ADMIN_ID || '8153757163').trim();
+  const rootAdminId = String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '8153757163').trim();
   const rootAdminName = (process.env.ADMIN_NAME || 'Owner Admin').trim();
   // Strict Whitelist Check for Admin Access (sohanrahman07565@gmail.com or configured admin email)
   const configuredWhitelistedEmails = new Set<string>([

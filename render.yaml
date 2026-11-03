@@ -2,7 +2,7 @@ services:
   - type: web
     name: telegram-group-file-bot
     runtime: node
-    plan: free
+    plan: starter
     region: oregon
     buildCommand: npm install && npm run build
     startCommand: npm start
@@ -12,7 +12,11 @@ services:
         value: production
       - key: PORT
         value: 10000
+      - key: BOT_TOKEN
+        sync: false
       - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
         sync: false
       - key: ROOT_ADMIN_ID
         sync: false
@@ -24,3 +28,5 @@ services:
         sync: false
       - key: SESSION_SECRET
         generateValue: true
+      - key: DATA_FILE_PATH
+        value: .data/store.json

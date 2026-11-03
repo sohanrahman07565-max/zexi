@@ -1,5 +1,5 @@
 import { storage, ItemRecord, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel } from './storage';
-import { hashPassword } from '../netlify/functions/lib/auth';
+import { hashPassword } from './auth';
 
 // In-memory conversation state for interactive private chat commands (like /add)
 interface AddSession {
@@ -91,7 +91,7 @@ export function getItemPayload(item: ItemRecord): string {
 export class TelegramService {
   private static async getBotToken(): Promise<string> {
     const settings = await storage.getSettings();
-    return settings.botToken || process.env.TELEGRAM_BOT_TOKEN || '';
+    return process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || settings.botToken || '';
   }
 
   public static async callTelegramApi(method: string, payload: Record<string, any>): Promise<any> {
@@ -503,7 +503,7 @@ export class TelegramService {
     await storage.loadLatest(false);
     const admins = await storage.getAdmins();
     const settings = await storage.getSettings();
-    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163').trim();
+    const rootAdminId = String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || settings.rootAdminId || '8153757163').trim();
     if (cleanId === rootAdminId || rootAdminId.includes(cleanId)) return true;
     const admin = await storage.getAdmin(cleanId);
     if (admin && admin.enabled) return true;
@@ -1860,6 +1860,7 @@ export class TelegramService {
       const settings = await storage.getSettings();
       const adminTargetIds = new Set<string>();
       if (settings.rootAdminId) adminTargetIds.add(String(settings.rootAdminId).trim());
+      if (process.env.ADMIN_ID) adminTargetIds.add(String(process.env.ADMIN_ID).trim());
       if (process.env.ROOT_ADMIN_ID) adminTargetIds.add(String(process.env.ROOT_ADMIN_ID).trim());
       for (const a of admins) {
         if (a.telegramId) adminTargetIds.add(String(a.telegramId).trim());
@@ -2657,7 +2658,7 @@ export class TelegramService {
       return;
     }
 
-    // Force reload latest data from persistent storage (Netlify Blobs / disk)
+    // Force reload latest data from persistent storage
     await storage.loadLatest(true);
 
     // Mandatory Channel Join (Force Sub) Check

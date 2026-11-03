@@ -1,7 +1,7 @@
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
 
-// Get session secret from environment, with a secure fallback for local dev
+// Get session secret from environment, with a secure fallback
 export function getSessionSecret(): string {
   return process.env.SESSION_SECRET || 'tg-admin-secure-session-secret-key-32chars';
 }
