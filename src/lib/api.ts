@@ -130,6 +130,7 @@ export interface BotSettings {
   maintenanceNotice?: string;
   botTokenMasked?: string;
   hasToken?: boolean;
+  isConnected?: boolean;
   forceSubEnabled?: boolean;
   requiredChannels?: ForceSubChannel[];
   autoApproveJoinRequests?: boolean;

@@ -89,9 +89,9 @@ export function getItemPayload(item: ItemRecord): string {
 }
 
 export class TelegramService {
-  private static async getBotToken(): Promise<string> {
+  public static async getBotToken(): Promise<string> {
     const settings = await storage.getSettings();
-    return process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || settings.botToken || '';
+    return (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || settings.botToken || '').trim().replace(/^["']|["']$/g, '');
   }
 
   public static async callTelegramApi(method: string, payload: Record<string, any>): Promise<any> {
@@ -5944,12 +5944,30 @@ export class TelegramService {
       console.warn('[Telegram Render Service] Webhook cleanup check:', err?.message || err);
     }
 
+    // Verify Telegram connection & ensure username is saved
+    try {
+      const me = await this.callTelegramApi('getMe', {});
+      if (me?.ok && me.result) {
+        console.info(`[Telegram] Connection verified for @${me.result.username || 'Bot'} (ID: ${me.result.id})`);
+        const settings = await storage.getSettings();
+        if (!settings.botUsername || settings.botUsername !== me.result.username) {
+          await storage.updateSettings({ botUsername: me.result.username || '' });
+        }
+      }
+    } catch (e: any) {
+      console.warn('[Telegram] Could not verify bot profile on worker init:', e?.message || e);
+    }
+
     this.pollingActive = true;
     console.info('[Telegram Render Service] Persistent background polling worker active.');
     this.runPollingLoop().catch((err) => {
       console.warn('[Telegram Render Service] Polling loop stopped:', err);
       this.pollingActive = false;
     });
+  }
+
+  public static isPollingActive(): boolean {
+    return this.pollingActive;
   }
 
   public static stopPolling(): void {

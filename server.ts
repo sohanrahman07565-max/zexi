@@ -24,10 +24,40 @@ async function startServer() {
   // Initialize storage
   await storage.init();
 
+  // Explicitly check BOT_TOKEN from environment variables upon boot
+  const envBotToken = (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '').trim().replace(/^["']|["']$/g, '');
+  const envAdminId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '').trim().replace(/^["']|["']$/g, '');
+
+  if (envBotToken) {
+    console.log('🤖 Telegram Bot Token detected from environment. Synchronizing and verifying connection...');
+    const settingsUpdate: any = { botToken: envBotToken };
+    if (envAdminId) settingsUpdate.rootAdminId = envAdminId;
+    await storage.updateSettings(settingsUpdate);
+
+    try {
+      const me = await TelegramService.callTelegramApi('getMe', {});
+      if (me?.ok && me.result) {
+        const botUsername = me.result.username || '';
+        const botName = me.result.first_name || 'Bot';
+        console.log(`✅ [Telegram Connected] Bot: "${botName}" (@${botUsername}) | ID: ${me.result.id}`);
+        await storage.updateSettings({
+          botToken: envBotToken,
+          botUsername: botUsername
+        });
+      } else {
+        console.warn('⚠️ [Telegram] Connection verification returned unconfirmed:', me?.description || me);
+      }
+    } catch (botErr: any) {
+      console.error('❌ [Telegram] Failed to connect on startup:', botErr?.message || botErr);
+    }
+  } else {
+    console.log('ℹ️ No BOT_TOKEN or TELEGRAM_BOT_TOKEN found in environment variables. Bot features are awaiting token configuration.');
+  }
+
   // Initialize scheduled file auto-delete worker (10-minute delivery timeout)
   await TelegramService.initScheduledDeletionWorker();
 
-  // Initialize Telegram polling worker (receives live updates when webhook is not set)
+  // Initialize Telegram background polling worker immediately
   await TelegramService.initPollingWorker();
 
   // Mount API Router

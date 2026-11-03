@@ -11,9 +11,20 @@ dotenv.config({ override: true });
 export const apiRouter = Router();
 
 // Lightweight Health check endpoint for network monitoring and offline detection
-apiRouter.all('/health', (_req: Request, res: Response) => {
+apiRouter.all('/health', async (_req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-  return res.status(200).json({ status: 'ok', timestamp: Date.now() });
+  const settings = await storage.getSettings().catch(() => null);
+  const botToken = await TelegramService.getBotToken().catch(() => '');
+  return res.status(200).json({ 
+    status: 'ok', 
+    timestamp: Date.now(),
+    uptime: Math.floor(process.uptime()),
+    bot: {
+      hasToken: Boolean(botToken),
+      botUsername: settings?.botUsername || null,
+      isPolling: TelegramService.isPollingActive()
+    }
+  });
 });
 
 // Multer upload middleware for direct binary/multipart file streaming (up to 200MB)
@@ -1537,14 +1548,30 @@ apiRouter.put('/design', authenticate, requirePermission('design_edit'), async (
 // GET /api/settings
 apiRouter.get('/settings', authenticate, async (_req: Request, res: Response) => {
   const settings = await storage.getSettings();
+  const token = (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || settings.botToken || '').trim().replace(/^["']|["']$/g, '');
+
+  let botUsername = settings.botUsername || '';
+  if (token && !botUsername) {
+    try {
+      const me = await TelegramService.callTelegramApi('getMe', {});
+      if (me?.ok && me.result?.username) {
+        botUsername = me.result.username;
+        await storage.updateSettings({ botUsername, botToken: token });
+      }
+    } catch {}
+  }
+
   // Mask token for privacy
-  const maskedToken = settings.botToken ? `${settings.botToken.substring(0, 6)}...${settings.botToken.substring(settings.botToken.length - 4)}` : '';
+  const maskedToken = token ? `${token.substring(0, 6)}...${token.substring(token.length - 4)}` : '';
   return res.json({
     ...settings,
+    botToken: token,
+    botUsername,
     forceSubEnabled: settings.forceSubEnabled ?? false,
     requiredChannels: Array.isArray(settings.requiredChannels) ? settings.requiredChannels : [],
     botTokenMasked: maskedToken,
-    hasToken: Boolean(settings.botToken)
+    hasToken: Boolean(token),
+    isConnected: Boolean(token && botUsername)
   });
 });
 
@@ -1710,7 +1737,53 @@ apiRouter.post('/bot/set-webhook', authenticate, requirePermission('settings_edi
 // GET /api/bot/info
 apiRouter.get('/bot/info', authenticate, async (_req: Request, res: Response) => {
   const result = await TelegramService.callTelegramApi('getMe', {});
+  if (result?.ok && result.result?.username) {
+    const settings = await storage.getSettings().catch(() => null);
+    if (settings && settings.botUsername !== result.result.username) {
+      await storage.updateSettings({ botUsername: result.result.username }).catch(() => {});
+    }
+  }
   return res.json(result);
+});
+
+// GET /api/bot/status - Dynamic bot connection and polling status check
+apiRouter.get('/bot/status', async (_req: Request, res: Response) => {
+  const settings = await storage.getSettings().catch(() => null);
+  const token = await TelegramService.getBotToken().catch(() => '');
+  const isPolling = TelegramService.isPollingActive();
+
+  let botUsername = settings?.botUsername || '';
+  let botFirstName = '';
+  let isConnected = false;
+
+  if (token) {
+    try {
+      const me = await TelegramService.callTelegramApi('getMe', {});
+      if (me?.ok && me.result) {
+        isConnected = true;
+        botUsername = me.result.username || botUsername;
+        botFirstName = me.result.first_name || '';
+        if (botUsername && settings && botUsername !== settings.botUsername) {
+          await storage.updateSettings({ botUsername }).catch(() => {});
+        }
+      } else if (botUsername) {
+        isConnected = true;
+      }
+    } catch {
+      if (botUsername) {
+        isConnected = true;
+      }
+    }
+  }
+
+  return res.json({
+    hasToken: Boolean(token),
+    isConnected,
+    isPolling,
+    botUsername,
+    botFirstName,
+    displayName: botFirstName || (botUsername ? `@${botUsername}` : (isConnected ? 'Telegram Bot' : ''))
+  });
 });
 
 // ============================================================================

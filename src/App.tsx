@@ -117,13 +117,19 @@ export default function App() {
         setSettings(loadedSettings);
       }
 
-      // Check bot connection strictly
+      // Check bot connection dynamically
       const hasBotToken = Boolean(loadedSettings?.botToken || loadedSettings?.hasToken);
-      if (hasBotToken && loadedBotInfo?.ok && loadedBotInfo?.result) {
+      const isConnected = Boolean(
+        (hasBotToken && loadedBotInfo?.ok && loadedBotInfo?.result) ||
+        (hasBotToken && (loadedSettings?.isConnected || loadedSettings?.botUsername))
+      );
+
+      if (isConnected) {
         setIsBotConnected(true);
         const name =
-          loadedBotInfo.result.first_name ||
-          (loadedBotInfo.result.username ? `@${loadedBotInfo.result.username}` : (loadedSettings?.botUsername ? `@${loadedSettings.botUsername.replace(/^@/, '')}` : 'Bot'));
+          loadedBotInfo?.result?.first_name ||
+          (loadedBotInfo?.result?.username ? `@${loadedBotInfo.result.username}` : '') ||
+          (loadedSettings?.botUsername ? `@${loadedSettings.botUsername.replace(/^@/, '')}` : 'Telegram Bot');
         setBotDisplayName(name);
       } else {
         setIsBotConnected(false);
