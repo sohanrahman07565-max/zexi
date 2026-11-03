@@ -60,10 +60,30 @@ export default function App() {
   const [botDisplayName, setBotDisplayName] = useState<string>('');
   const [isBotConnected, setIsBotConnected] = useState<boolean>(false);
 
+  // Dedicated dynamic bot status fetcher that reads directly from the API on mount
+  const fetchBotStatus = useCallback(async () => {
+    try {
+      const info = await api.getBotInfo().catch(() => null);
+      if (info && (info.isConnected || (info.ok && (info.result || info.botUsername)) || info.botUsername)) {
+        const handle =
+          (info.botUsername ? String(info.botUsername).replace(/^@/, '') : '') ||
+          (info.result?.username ? String(info.result.username).replace(/^@/, '') : '') ||
+          (info.displayName ? String(info.displayName).replace(/^@/, '') : '') ||
+          info.result?.first_name ||
+          'Bot';
+        setIsBotConnected(true);
+        setBotDisplayName(`@${handle}`);
+      }
+    } catch (e) {
+      console.warn('Could not fetch bot status on mount:', e);
+    }
+  }, []);
+
   // Initial Load
   useEffect(() => {
     initApp();
-  }, []);
+    fetchBotStatus();
+  }, [fetchBotStatus]);
 
   const initApp = async () => {
     setLoading(true);
@@ -118,20 +138,23 @@ export default function App() {
       }
 
       // Check bot connection dynamically
-      const hasBotToken = Boolean(loadedSettings?.botToken || loadedSettings?.hasToken);
+      const activeHandle =
+        (loadedBotInfo?.botUsername ? String(loadedBotInfo.botUsername).replace(/^@/, '') : '') ||
+        (loadedBotInfo?.result?.username ? String(loadedBotInfo.result.username).replace(/^@/, '') : '') ||
+        (loadedBotInfo?.displayName ? String(loadedBotInfo.displayName).replace(/^@/, '') : '') ||
+        (loadedSettings?.botUsername ? String(loadedSettings.botUsername).replace(/^@/, '') : '');
+
       const isConnected = Boolean(
-        (hasBotToken && loadedBotInfo?.ok && loadedBotInfo?.result) ||
-        (hasBotToken && (loadedSettings?.isConnected || loadedSettings?.botUsername))
+        loadedBotInfo?.isConnected ||
+        (loadedBotInfo?.ok && (loadedBotInfo?.result || loadedBotInfo?.botUsername)) ||
+        (Boolean(loadedSettings?.botToken || loadedSettings?.hasToken) && activeHandle) ||
+        activeHandle
       );
 
-      if (isConnected) {
+      if (isConnected && activeHandle) {
         setIsBotConnected(true);
-        const name =
-          loadedBotInfo?.result?.first_name ||
-          (loadedBotInfo?.result?.username ? `@${loadedBotInfo.result.username}` : '') ||
-          (loadedSettings?.botUsername ? `@${loadedSettings.botUsername.replace(/^@/, '')}` : 'Telegram Bot');
-        setBotDisplayName(name);
-      } else {
+        setBotDisplayName(`@${activeHandle}`);
+      } else if (loadedBotInfo?.isConnected === false && !activeHandle) {
         setIsBotConnected(false);
         setBotDisplayName('');
       }
@@ -445,7 +468,7 @@ export default function App() {
                   <>
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)] shrink-0" />
                     <span className="truncate font-medium text-zinc-300">
-                      Connected to {botDisplayName || 'Bot'}
+                      Connected to {botDisplayName ? (botDisplayName.startsWith('@') ? botDisplayName : `@${botDisplayName}`) : 'Bot'}
                     </span>
                   </>
                 ) : (

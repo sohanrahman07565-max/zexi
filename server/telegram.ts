@@ -90,8 +90,17 @@ export function getItemPayload(item: ItemRecord): string {
 
 export class TelegramService {
   public static async getBotToken(): Promise<string> {
-    const settings = await storage.getSettings();
-    return (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || settings.botToken || '').trim().replace(/^["']|["']$/g, '');
+    const envToken = (
+      process.env.BOT_TOKEN ||
+      process.env.TELEGRAM_BOT_TOKEN ||
+      process.env.TG_BOT_TOKEN ||
+      process.env.BOT_API_TOKEN ||
+      process.env.TOKEN ||
+      ''
+    ).trim().replace(/^["']|["']$/g, '');
+    if (envToken) return envToken;
+    const settings = await storage.getSettings().catch(() => ({} as any));
+    return (settings?.botToken || '').trim().replace(/^["']|["']$/g, '');
   }
 
   public static async callTelegramApi(method: string, payload: Record<string, any>): Promise<any> {

@@ -4,7 +4,10 @@ import { toast } from '../lib/toast';
 import { auth } from '../lib/firebase';
 import { 
   signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword 
+  createUserWithEmailAndPassword,
+  GoogleAuthProvider,
+  signInWithPopup,
+  signOut
 } from 'firebase/auth';
 import { 
   ShieldCheck, 
@@ -95,6 +98,59 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
       const msg = err.message || 'Invalid credentials or unauthorized account.';
       setError(msg);
       toast.error(msg);
+      setLoading(false);
+      setIsSuccessExiting(false);
+    }
+  };
+
+  // Interactive Google Sign-In with strict admin whitelist verification
+  const handleGoogleSignIn = async () => {
+    if (loading || isSuccessExiting) return;
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+
+      const userCredential = await signInWithPopup(auth, provider);
+      const user = userCredential.user;
+      const userEmail = (user.email || '').trim().toLowerCase();
+
+      // Strict whitelist check: only allow designated administrator (sohanrahman07565@gmail.com)
+      if (userEmail !== DESIGNATED_ADMIN_EMAIL.toLowerCase()) {
+        await signOut(auth).catch(() => {});
+        const unauthorizedMsg = `Access Denied: Account (${userEmail || 'Selected user'}) is not authorized. Only the designated administrator (${DESIGNATED_ADMIN_EMAIL}) may access this panel.`;
+        setError(unauthorizedMsg);
+        toast.error(unauthorizedMsg);
+        setLoading(false);
+        return;
+      }
+
+      // Authorized administrator - exchange ID token for session
+      const idToken = await user.getIdToken();
+      const res = await api.firebaseLogin({
+        idToken,
+        email: user.email,
+        displayName: user.displayName || 'Owner Admin'
+      });
+
+      setIsSuccessExiting(true);
+      toast.success(`Welcome back, ${res.admin.name || 'Admin'}!`);
+
+      setTimeout(() => {
+        onSuccess(res.admin);
+      }, 450);
+    } catch (err: any) {
+      console.error('[Google Sign-In] Authentication error:', err);
+      if (err.code === 'auth/popup-closed-by-user') {
+        setError('Google sign-in was cancelled.');
+      } else {
+        const msg = err.message || 'Google authentication failed. Please try again.';
+        setError(msg);
+        toast.error(msg);
+      }
       setLoading(false);
       setIsSuccessExiting(false);
     }
@@ -230,13 +286,17 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
               )}
             </button>
 
-            {/* Minimal Standalone Google Logo Decoration (Non-clickable) */}
-            <div className="pt-2 flex flex-col items-center justify-center select-none pointer-events-none">
-              <div 
-                className="w-9 h-9 rounded-full bg-zinc-900/80 border border-zinc-800/90 flex items-center justify-center shadow-inner shadow-black/50 opacity-80"
-                aria-hidden="true"
+            {/* Minimal Interactive Google Sign-In Button */}
+            <div className="pt-2 flex flex-col items-center justify-center">
+              <button
+                type="button"
+                onClick={handleGoogleSignIn}
+                disabled={loading || isSuccessExiting}
+                aria-label="Sign in with Google"
+                title="Sign in with Google (Authorized Administrator)"
+                className="group relative w-10 h-10 rounded-full bg-zinc-900/90 hover:bg-zinc-800/90 border border-zinc-800 hover:border-red-500/50 flex items-center justify-center shadow-lg shadow-black/50 hover:shadow-[0_0_16px_rgba(239,68,68,0.35)] transition-all duration-300 cursor-pointer active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <svg className="w-4 h-4" viewBox="0 0 24 24">
+                <svg className="w-4 h-4 transition-transform group-hover:scale-110 duration-200" viewBox="0 0 24 24">
                   <path
                     fill="#4285F4"
                     d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
@@ -254,7 +314,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
                     d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
                   />
                 </svg>
-              </div>
+              </button>
             </div>
           </form>
 

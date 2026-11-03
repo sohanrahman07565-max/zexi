@@ -1734,16 +1734,61 @@ apiRouter.post('/bot/set-webhook', authenticate, requirePermission('settings_edi
   return res.json(result);
 });
 
-// GET /api/bot/info
-apiRouter.get('/bot/info', authenticate, async (_req: Request, res: Response) => {
-  const result = await TelegramService.callTelegramApi('getMe', {});
-  if (result?.ok && result.result?.username) {
-    const settings = await storage.getSettings().catch(() => null);
-    if (settings && settings.botUsername !== result.result.username) {
-      await storage.updateSettings({ botUsername: result.result.username }).catch(() => {});
+// GET /api/bot/info - Dynamic bot status & profile directly from process.env.BOT_TOKEN
+apiRouter.get('/bot/info', async (_req: Request, res: Response) => {
+  const token = await TelegramService.getBotToken().catch(() => '');
+  const settings = await storage.getSettings().catch(() => null);
+
+  if (!token) {
+    return res.json({
+      ok: false,
+      isConnected: false,
+      hasToken: false,
+      botUsername: settings?.botUsername || '',
+      displayName: settings?.botUsername ? `@${settings.botUsername.replace(/^@/, '')}` : '',
+      description: 'No bot token found in environment variables (BOT_TOKEN) or settings'
+    });
+  }
+
+  let botUsername = (settings?.botUsername || '').replace(/^@/, '');
+  let botFirstName = '';
+  let isConnected = false;
+  let rawResult: any = null;
+
+  try {
+    const result = await TelegramService.callTelegramApi('getMe', {});
+    if (result?.ok && result.result) {
+      rawResult = result.result;
+      botUsername = (result.result.username || botUsername).replace(/^@/, '');
+      botFirstName = result.result.first_name || '';
+      isConnected = true;
+
+      // Sync botUsername to settings so it's always persisted
+      if (botUsername && settings && settings.botUsername !== botUsername) {
+        await storage.updateSettings({ botUsername, botToken: token }).catch(() => {});
+      }
+    } else if (botUsername) {
+      isConnected = true;
+    }
+  } catch (err: any) {
+    console.warn('[Telegram /bot/info] Notice fetching profile:', err?.message || err);
+    if (botUsername) {
+      isConnected = true;
     }
   }
-  return res.json(result);
+
+  const cleanHandle = botUsername ? `@${botUsername}` : '';
+  const displayName = cleanHandle || (botFirstName ? botFirstName : (isConnected ? 'Telegram Bot' : ''));
+
+  return res.json({
+    ok: isConnected,
+    hasToken: Boolean(token),
+    isConnected,
+    botUsername: botUsername || (rawResult?.username ? String(rawResult.username).replace(/^@/, '') : ''),
+    botFirstName,
+    displayName,
+    result: rawResult || (botUsername ? { username: botUsername, first_name: botFirstName || botUsername } : null)
+  });
 });
 
 // GET /api/bot/status - Dynamic bot connection and polling status check

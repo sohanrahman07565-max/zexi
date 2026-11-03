@@ -25,7 +25,7 @@ async function startServer() {
   await storage.init();
 
   // Explicitly check BOT_TOKEN from environment variables upon boot
-  const envBotToken = (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '').trim().replace(/^["']|["']$/g, '');
+  const envBotToken = (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || process.env.TG_BOT_TOKEN || process.env.BOT_API_TOKEN || process.env.TOKEN || '').trim().replace(/^["']|["']$/g, '');
   const envAdminId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '').trim().replace(/^["']|["']$/g, '');
 
   if (envBotToken) {
