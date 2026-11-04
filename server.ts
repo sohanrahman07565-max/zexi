@@ -9,6 +9,15 @@ import { TelegramService } from './server/telegram';
 
 dotenv.config();
 
+// Global 24/7 Process Guards: Prevent Node.js from exiting on network drops or unhandled promises
+process.on('uncaughtException', (err: any) => {
+  console.error('🛡️ [Process Guard] Caught uncaughtException (service kept online 24/7):', err?.message || err);
+});
+
+process.on('unhandledRejection', (reason: any) => {
+  console.error('🛡️ [Process Guard] Caught unhandledRejection (service kept online 24/7):', reason?.message || reason);
+});
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 

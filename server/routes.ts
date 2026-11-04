@@ -323,9 +323,10 @@ apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
   const allAdmins = await storage.getAdmins();
   const rootAdminId = String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '8153757163').trim();
   const rootAdminName = (process.env.ADMIN_NAME || 'Owner Admin').trim();
-  // Strict Whitelist Check for Admin Access (sohanrahman07565@gmail.com or configured admin email)
+  // Strict Whitelist Check for Admin Access (zexiofficial8884@gmail.com, sohanrahman07565@gmail.com, or configured admin email)
   const configuredWhitelistedEmails = new Set<string>([
     'sohanrahman07565@gmail.com',
+    'zexiofficial8884@gmail.com',
     ...(process.env.ADMIN_EMAIL ? [process.env.ADMIN_EMAIL.toLowerCase().trim()] : [])
   ]);
 
@@ -336,7 +337,7 @@ apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
     }
   }
 
-  const isWhitelisted = configuredWhitelistedEmails.has(cleanEmail) || cleanEmail === 'sohanrahman07565@gmail.com';
+  const isWhitelisted = configuredWhitelistedEmails.has(cleanEmail) || cleanEmail === 'sohanrahman07565@gmail.com' || cleanEmail === 'zexiofficial8884@gmail.com';
 
   if (!isWhitelisted) {
     console.warn('[Firebase Auth] Strict whitelist rejection for unauthorized email:', cleanEmail);
@@ -345,7 +346,7 @@ apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
     });
   }
 
-  const isOwnerEmail = cleanEmail === 'sohanrahman07565@gmail.com';
+  const isOwnerEmail = cleanEmail === 'sohanrahman07565@gmail.com' || cleanEmail === 'zexiofficial8884@gmail.com';
 
   // Find matching admin by email or name
   let admin = allAdmins.find(a => 

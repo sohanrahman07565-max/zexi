@@ -6,6 +6,8 @@ export interface AdminUser {
   telegramId: string;
   name: string;
   role: 'owner' | 'subadmin';
+  enabled?: boolean;
+  lastLoginAt?: string;
   permissions: {
     files_view: boolean;
     files_add: boolean;

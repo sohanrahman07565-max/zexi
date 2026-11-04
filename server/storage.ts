@@ -493,6 +493,8 @@ export const DEFAULT_SETTINGS: BotSettings = {
 };
 
 // Persistent storage paths for standalone Render Web Service and local environment
+const FIREBASE_RTDB_URL = "https://zexiofficial8-default-rtdb.asia-southeast1.firebasedatabase.app";
+
 function getFallbackFilePaths(): string[] {
   const paths: string[] = [];
   if (process.env.DATA_FILE_PATH) {
@@ -510,6 +512,9 @@ function getFallbackFilePaths(): string[] {
 export class SharedStorageService {
   private db: AppDatabase;
   private lastLoadedAt: number = 0;
+  private triggerCache = new Map<string, ItemRecord>();
+  private itemCache = new Map<string, ItemRecord>();
+  private cloudSyncTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     this.db = {
@@ -533,6 +538,71 @@ export class SharedStorageService {
       settings: { ...DEFAULT_SETTINGS },
       backupServer: { ...DEFAULT_BACKUP_SERVER_CONFIG }
     };
+  }
+
+  // Fast O(1) in-memory indexing for super-fast Telegram bot responses
+  private rebuildCache(): void {
+    this.triggerCache.clear();
+    this.itemCache.clear();
+    for (const item of this.db.items) {
+      if (item.status === 'active') {
+        this.itemCache.set(item.id, item);
+        this.itemCache.set(`f_${item.id.replace(/^f_/, '')}`, item);
+        this.itemCache.set(`l_${item.id.replace(/^l_/, '')}`, item);
+        if (item.rawKeyword) {
+          this.triggerCache.set(item.rawKeyword.trim().toLowerCase(), item);
+        }
+        if (Array.isArray(item.triggers)) {
+          for (const t of item.triggers) {
+            const ct = t.trim().toLowerCase();
+            if (ct) {
+              this.triggerCache.set(ct, item);
+              if (ct.startsWith('#')) {
+                this.triggerCache.set(ct.substring(1), item);
+              }
+              if (ct.startsWith('/')) {
+                this.triggerCache.set(ct.substring(1), item);
+                this.triggerCache.set(ct.replace(/@\w+$/, ''), item);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Background Cloud Sync to Firebase Realtime Database for zero data loss
+  private scheduleCloudSync(): void {
+    if (this.cloudSyncTimer) clearTimeout(this.cloudSyncTimer);
+    this.cloudSyncTimer = setTimeout(async () => {
+      try {
+        const payload = JSON.stringify({
+          items: this.db.items,
+          templates: this.db.templates,
+          admins: this.db.admins,
+          settings: this.db.settings,
+          design: this.db.design,
+          botUsers: this.db.botUsers,
+          reports: this.db.reports,
+          fraudRules: this.db.fraudRules,
+          linkWarnings: this.db.linkWarnings,
+          fraudWarnings: this.db.fraudWarnings,
+          detectedChannels: this.db.detectedChannels,
+          joinRequests: this.db.joinRequests,
+          uploadedFilesIndex: this.db.uploadedFilesIndex,
+          updatedAt: new Date().toISOString()
+        });
+
+        await fetch(`${FIREBASE_RTDB_URL}/app_state.json`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload
+        });
+        console.log('☁️ [Firebase Cloud] Storage successfully synced to Firebase Realtime Database (zero data loss).');
+      } catch (err: any) {
+        console.warn('☁️ [Firebase Cloud] Storage sync notice:', err?.message || err);
+      }
+    }, 1200);
   }
 
   // Always loads the freshest data to ensure high consistency across worker tasks
@@ -565,6 +635,22 @@ export class SharedStorageService {
       try {
         loadedData = JSON.parse(freshestJson);
       } catch {}
+    }
+
+    // Zero Data Loss: If local disk has no data or on new Render deployment, restore from Firebase Realtime Database
+    if (!loadedData) {
+      try {
+        const cloudRes = await fetch(`${FIREBASE_RTDB_URL}/app_state.json`);
+        if (cloudRes.ok) {
+          const cloudData = await cloudRes.json();
+          if (cloudData && typeof cloudData === 'object' && (cloudData.items || cloudData.settings || cloudData.admins)) {
+            console.log('☁️ [Firebase Storage] Restored state from Firebase Realtime Database cloud.');
+            loadedData = cloudData;
+          }
+        }
+      } catch (cloudErr: any) {
+        // Network offline / silent notice
+      }
     }
 
     if (loadedData) {
@@ -639,6 +725,7 @@ export class SharedStorageService {
     }
 
     this.lastLoadedAt = Date.now();
+    this.rebuildCache();
     return this.db;
   }
 
@@ -647,7 +734,7 @@ export class SharedStorageService {
     await this.loadLatest(true);
   }
 
-  // Persists the current database to disk storage
+  // Persists the current database to disk storage and syncs to cloud
   public async persist(): Promise<boolean> {
     let savedToFile = false;
 
@@ -671,6 +758,10 @@ export class SharedStorageService {
     }
 
     this.lastLoadedAt = Date.now();
+    this.rebuildCache();
+
+    // Zero Data Loss: Asynchronously sync database to Firebase Realtime Database cloud
+    this.scheduleCloudSync();
 
     // Trigger debounced real-time replication to silent backup mirror if enabled
     if (
@@ -861,8 +952,17 @@ export class SharedStorageService {
   }
 
   public async getItem(id: string): Promise<ItemRecord | null> {
+    const cached = this.itemCache.get(id);
+    if (cached && cached.status === 'active') {
+      if (cached.retentionType === 'temporary' && cached.expiresAt && Date.now() >= new Date(cached.expiresAt).getTime()) {
+        await this.checkAndCleanExpiredItems();
+        return null;
+      }
+      return cached;
+    }
+
     await this.loadLatest(false);
-    const item = this.db.items.find(i => i.id === id);
+    const item = this.itemCache.get(id) || this.db.items.find(i => i.id === id);
     if (item && item.retentionType === 'temporary' && item.expiresAt) {
       if (Date.now() >= new Date(item.expiresAt).getTime()) {
         await this.checkAndCleanExpiredItems();
@@ -873,11 +973,23 @@ export class SharedStorageService {
   }
 
   public async findItemByTrigger(trigger: string): Promise<ItemRecord | null> {
-    await this.loadLatest(false);
     const cleanTrigger = trigger.trim();
     if (!cleanTrigger) return null;
     const lowerTrigger = cleanTrigger.toLowerCase();
 
+    // 1. Super-Fast O(1) Cache Lookup
+    const fastMatch = this.triggerCache.get(lowerTrigger) ||
+      (lowerTrigger.startsWith('/') ? this.triggerCache.get(lowerTrigger.replace(/@\w+$/, '')) : null);
+
+    if (fastMatch && fastMatch.status === 'active') {
+      if (fastMatch.retentionType === 'temporary' && fastMatch.expiresAt && Date.now() >= new Date(fastMatch.expiresAt).getTime()) {
+        await this.checkAndCleanExpiredItems();
+        return null;
+      }
+      return fastMatch;
+    }
+
+    await this.loadLatest(false);
     const isHashtag = cleanTrigger.startsWith('#');
     const isSlash = cleanTrigger.startsWith('/');
 
@@ -885,7 +997,6 @@ export class SharedStorageService {
       if (item.status !== 'active' || !Array.isArray(item.triggers) || item.triggers.length === 0) return false;
 
       // 1. Hashtag Commands (e.g., #box, #crack)
-      // Must ONLY match items with triggers that explicitly start with '#'
       if (isHashtag) {
         return item.triggers.some(t => {
           const ct = t.trim().toLowerCase();
@@ -894,7 +1005,6 @@ export class SharedStorageService {
       }
 
       // 2. Slash Commands (e.g., /box)
-      // Must ONLY match items with triggers that explicitly start with '/'
       if (isSlash) {
         const cleanSlash = lowerTrigger.replace(/@\w+$/, '');
         return item.triggers.some(t => {
@@ -904,10 +1014,8 @@ export class SharedStorageService {
       }
 
       // 3. Normal Plain Text
-      // Must NEVER match hashtag triggers or slash commands!
       return item.triggers.some(t => {
         const ct = t.trim().toLowerCase();
-        // Ignore any hashtag or slash command trigger
         if (ct.startsWith('#') || ct.startsWith('/')) return false;
         return ct === lowerTrigger;
       });

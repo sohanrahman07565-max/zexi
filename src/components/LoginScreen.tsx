@@ -26,26 +26,29 @@ interface LoginScreenProps {
 }
 
 const DEFAULT_LOGO_URL = 'https://host.tscv.workers.dev/img/df6c9e167caf42c6';
-const DESIGNATED_ADMIN_EMAIL = 'sohanrahman07565@gmail.com';
+const AUTHORIZED_ADMIN_EMAILS = [
+  'zexiofficial8884@gmail.com',
+  'sohanrahman07565@gmail.com'
+];
 
 export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) => {
-  const [email, setEmail] = useState('');
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isSuccessExiting, setIsSuccessExiting] = useState(false);
 
-  // Email & Password Submission with Firebase Authentication & Whitelist Verification
+  // Dual Login Submission: Supports Telegram Admin ID, Admin Username, and Email Credentials
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (loading || isSuccessExiting) return;
 
-    const cleanEmail = email.trim();
+    const cleanId = identifier.trim();
     const cleanPassword = password.trim();
 
-    if (!cleanEmail || !cleanPassword) {
-      const msg = 'Please enter both email and password';
+    if (!cleanId || !cleanPassword) {
+      const msg = 'Please enter both your email and password';
       setError(msg);
       toast.error(msg);
       return;
@@ -55,36 +58,38 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
     setError(null);
 
     try {
-      let firebaseUser: any = null;
-      let idToken: string = '';
-
-      // 1. Attempt Firebase Email/Password Sign-In
-      try {
-        const userCredential = await signInWithEmailAndPassword(auth, cleanEmail, cleanPassword);
-        firebaseUser = userCredential.user;
-        idToken = await firebaseUser.getIdToken();
-      } catch (fbErr: any) {
-        console.warn('[Firebase Auth] Note during email sign-in:', fbErr.code);
-        if (cleanEmail.toLowerCase() === DESIGNATED_ADMIN_EMAIL) {
-          try {
-            const signupCredential = await createUserWithEmailAndPassword(auth, cleanEmail, cleanPassword);
-            firebaseUser = signupCredential.user;
-            idToken = await firebaseUser.getIdToken();
-          } catch {}
-        }
-      }
-
-      // 2. Complete authentication via server session
       let res: { success: boolean; admin: AdminUser; token?: string };
 
-      if (idToken) {
-        res = await api.firebaseLogin({
-          idToken,
-          email: firebaseUser?.email || cleanEmail,
-          displayName: firebaseUser?.displayName || cleanEmail.split('@')[0]
-        });
+      if (cleanId.includes('@')) {
+        // Email path
+        let idToken = '';
+        let firebaseUser: any = null;
+        try {
+          const userCredential = await signInWithEmailAndPassword(auth, cleanId, cleanPassword);
+          firebaseUser = userCredential.user;
+          idToken = await firebaseUser.getIdToken();
+        } catch (fbErr: any) {
+          if (AUTHORIZED_ADMIN_EMAILS.includes(cleanId.toLowerCase())) {
+            try {
+              const signup = await createUserWithEmailAndPassword(auth, cleanId, cleanPassword);
+              firebaseUser = signup.user;
+              idToken = await firebaseUser.getIdToken();
+            } catch {}
+          }
+        }
+
+        if (idToken) {
+          res = await api.firebaseLogin({
+            idToken,
+            email: firebaseUser?.email || cleanId,
+            displayName: firebaseUser?.displayName || cleanId.split('@')[0]
+          });
+        } else {
+          res = await api.login(cleanId, cleanPassword);
+        }
       } else {
-        res = await api.login(cleanEmail, cleanPassword);
+        // Direct Telegram Admin ID (numeric ID or username) authentication
+        res = await api.login(cleanId, cleanPassword);
       }
 
       setIsSuccessExiting(true);
@@ -118,10 +123,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
       const user = userCredential.user;
       const userEmail = (user.email || '').trim().toLowerCase();
 
-      // Strict whitelist check: only allow designated administrator (sohanrahman07565@gmail.com)
-      if (userEmail !== DESIGNATED_ADMIN_EMAIL.toLowerCase()) {
+      // Strict whitelist check: only allow designated administrator
+      const isAuthorized = AUTHORIZED_ADMIN_EMAILS.includes(userEmail);
+      if (!isAuthorized) {
         await signOut(auth).catch(() => {});
-        const unauthorizedMsg = `Access Denied: Account (${userEmail || 'Selected user'}) is not authorized. Only the designated administrator (${DESIGNATED_ADMIN_EMAIL}) may access this panel.`;
+        const unauthorizedMsg = `Access Denied: Account (${userEmail || 'Selected user'}) is not authorized. Only designated administrators (${AUTHORIZED_ADMIN_EMAILS.join(', ')}) may access this panel.`;
         setError(unauthorizedMsg);
         toast.error(unauthorizedMsg);
         setLoading(false);
@@ -219,22 +225,22 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
             </div>
           )}
 
-          {/* Email & Password Form Only (No other login methods) */}
+          {/* Dual Login Form: Telegram Admin ID or Email */}
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Email Field */}
             <div className="space-y-1.5">
               <label className="block text-xs font-semibold text-zinc-300 uppercase tracking-wider">
-                Admin Email
+                Enter Email
               </label>
               <div className="relative">
                 <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
                 <input
-                  type="email"
-                  autoComplete="email"
+                  type="text"
+                  autoComplete="username"
                   required
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="admin@example.com"
+                  value={identifier}
+                  onChange={(e) => setIdentifier(e.target.value)}
+                  placeholder="Enter Email"
                   className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl py-3 pl-10 pr-4 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/30 transition-all duration-200"
                 />
               </div>
@@ -243,7 +249,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
             {/* Password Field */}
             <div className="space-y-1.5">
               <label className="block text-xs font-semibold text-zinc-300 uppercase tracking-wider">
-                Password
+                Enter Password
               </label>
               <div className="relative">
                 <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
@@ -253,7 +259,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder="••••••••"
+                  placeholder="Enter Password"
                   className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl py-3 pl-10 pr-11 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/30 transition-all duration-200"
                 />
                 <button

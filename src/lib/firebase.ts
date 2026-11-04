@@ -1,30 +1,20 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { getFirestore, doc, getDocFromServer } from 'firebase/firestore';
-import rawConfig from '../../firebase-applet-config.json';
+import { getFirestore } from 'firebase/firestore';
+import { getDatabase } from 'firebase/database';
 
 export const firebaseConfig = {
-  apiKey: rawConfig.apiKey || "AIzaSyAnQ0nbJl36_dBHaWnzo9IFZDJrRfn5nAA",
-  authDomain: rawConfig.authDomain || "persuasive-sled-llxdt.firebaseapp.com",
-  projectId: rawConfig.projectId || "persuasive-sled-llxdt",
-  storageBucket: rawConfig.storageBucket || "persuasive-sled-llxdt.appspot.com",
-  messagingSenderId: rawConfig.messagingSenderId || "979073438419",
-  appId: rawConfig.appId || "1:979073438419:web:02625d32455e5b8c81fa26"
+  apiKey: "AIzaSyCx2CDvJEm_i6gQ4O8EhN16pkqLFp7mFZI",
+  authDomain: "zexiofficial8.firebaseapp.com",
+  databaseURL: "https://zexiofficial8-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "zexiofficial8",
+  storageBucket: "zexiofficial8.firebasestorage.app",
+  messagingSenderId: "454772013301",
+  appId: "1:454772013301:web:dac9c5438f64297d7f2dbc",
+  measurementId: "G-9PF1ETHCEP"
 };
 
 export const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-export const db = getFirestore(app, rawConfig.firestoreDatabaseId); /* CRITICAL: The app will break without this line */
 export const auth = getAuth(app);
-
-// Test Firestore connection on boot
-export async function testConnection() {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.warn('Firebase client is offline or initializing.');
-    }
-  }
-}
-
-testConnection();
+export const db = getFirestore(app);
+export const rtdb = getDatabase(app);

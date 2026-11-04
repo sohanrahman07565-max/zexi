@@ -5968,11 +5968,17 @@ export class TelegramService {
     }
 
     this.pollingActive = true;
-    console.info('[Telegram Render Service] Persistent background polling worker active.');
-    this.runPollingLoop().catch((err) => {
-      console.warn('[Telegram Render Service] Polling loop stopped:', err);
-      this.pollingActive = false;
-    });
+    console.info('[Telegram Render Service] Persistent background polling worker active (24/7 continuous mode).');
+
+    const launchPolling = () => {
+      this.pollingActive = true;
+      this.runPollingLoop().catch((err) => {
+        console.warn('[Telegram Render Service] Polling loop caught error, auto-recovering in 2s...', err?.message || err);
+        setTimeout(launchPolling, 2000);
+      });
+    };
+
+    launchPolling();
   }
 
   public static isPollingActive(): boolean {
@@ -6001,13 +6007,13 @@ export class TelegramService {
             this.pollingOffset = Math.max(this.pollingOffset, update.update_id + 1);
             try {
               await this.handleUpdate(update);
-            } catch (updateErr) {
-              console.error('[Telegram Polling] Error handling update:', updateErr);
+            } catch (updateErr: any) {
+              console.error('[Telegram Polling] Error handling update (swallowed to prevent crash):', updateErr?.message || updateErr);
             }
           }
         }
       } catch (err: any) {
-        if (err.message && err.message.includes('409')) {
+        if (err?.message && err.message.includes('409')) {
           console.info('[Telegram Polling] Webhook conflict detected (409). Deleting webhook to resume continuous Render polling...');
           try {
             await this.callTelegramApi('deleteWebhook', { drop_pending_updates: false });
@@ -6015,7 +6021,8 @@ export class TelegramService {
           await new Promise((r) => setTimeout(r, 2000));
           continue;
         }
-        await new Promise((r) => setTimeout(r, 4000));
+        // Silently wait and retry on network drop or timeout
+        await new Promise((r) => setTimeout(r, 2000));
       }
     }
   }

@@ -1,12 +1,13 @@
 {
-  "projectId": "persuasive-sled-llxdt",
-  "appId": "1:979073438419:web:02625d32455e5b8c81fa26",
-  "apiKey": "AIzaSyAnQ0nbJl36_dBHaWnzo9IFZDJrRfn5nAA",
-  "authDomain": "persuasive-sled-llxdt.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-telegramgroupfil-f56ca0aa-1303-4416-876e-ea0753975c7a",
-  "storageBucket": "persuasive-sled-llxdt.appspot.com",
-  "messagingSenderId": "979073438419",
-  "measurementId": "",
-  "oAuthClientId": "979073438419-km8obtu5ds9fvakg8cdvk97jlddg9965.apps.googleusercontent.com",
+  "projectId": "zexiofficial8",
+  "appId": "1:454772013301:web:dac9c5438f64297d7f2dbc",
+  "apiKey": "AIzaSyCx2CDvJEm_i6gQ4O8EhN16pkqLFp7mFZI",
+  "authDomain": "zexiofficial8.firebaseapp.com",
+  "databaseURL": "https://zexiofficial8-default-rtdb.asia-southeast1.firebasedatabase.app",
+  "storageBucket": "zexiofficial8.firebasestorage.app",
+  "messagingSenderId": "454772013301",
+  "measurementId": "G-9PF1ETHCEP",
+  "firestoreDatabaseId": "(default)",
+  "oAuthClientId": "",
   "recaptchaSiteKey": ""
 }
