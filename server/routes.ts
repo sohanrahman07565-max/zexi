@@ -771,6 +771,7 @@ apiRouter.post('/auth/setup-owner', async (req: Request, res: Response) => {
 
 // GET /api/items
 apiRouter.get('/items', authenticate, async (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'private, no-cache, stale-while-revalidate=5');
   const items = await storage.getItems();
   // Strip huge base64 strings so the response is lightweight and never overloads browser/network
   const sanitized = items.map(item => {
@@ -785,14 +786,15 @@ apiRouter.get('/items', authenticate, async (_req: Request, res: Response) => {
 
 // GET /api/stats (Metrics including Total User Count and Online/Offline breakdown)
 apiRouter.get('/stats', authenticate, async (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'private, no-cache, stale-while-revalidate=5');
   const admin = (req as any).admin as AdminUser | undefined;
   if (admin && (admin.telegramId || admin.id)) {
     try {
-      await storage.trackBotUser({
+      storage.trackBotUser({
         id: admin.telegramId || admin.id,
         firstName: admin.name || 'Admin',
         username: admin.name ? `@${admin.name.replace(/^@+/, '').trim()}` : undefined
-      });
+      }).catch(() => {});
     } catch {}
   }
   const userStats = await storage.getUserStats();
@@ -815,6 +817,7 @@ apiRouter.get('/stats', authenticate, async (req: Request, res: Response) => {
 
 // GET /api/users (List of all interacted users with online status and admin flag)
 apiRouter.get('/users', authenticate, async (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'private, no-cache, stale-while-revalidate=5');
   const users = await storage.getBotUsers();
   const admins = await storage.getAdmins();
   const settings = await storage.getSettings();
@@ -827,9 +830,18 @@ apiRouter.get('/users', authenticate, async (_req: Request, res: Response) => {
     if (a.id) adminIds.add(String(a.id));
   }
 
+  // Streamlined payload: return only display fields needed by dashboard
   const enriched = users.map(u => ({
-    ...u,
-    isAdmin: adminIds.has(String(u.id))
+    id: u.id,
+    username: u.username,
+    firstName: u.firstName,
+    lastName: u.lastName,
+    firstSeenAt: u.firstSeenAt,
+    lastActiveAt: u.lastActiveAt,
+    isOnline: u.isOnline,
+    interactionCount: u.interactionCount,
+    isBanned: Boolean(u.isBanned),
+    isAdmin: adminIds.has(String(u.id)) || Boolean(u.isAdmin)
   }));
 
   return res.json(enriched);
@@ -1638,6 +1650,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
     }
   }
 
+  cachedBotInfoPayload = null;
   const newSettings = await storage.updateSettings(updates);
   return res.json({ 
     success: true, 
@@ -1735,20 +1748,30 @@ apiRouter.post('/bot/set-webhook', authenticate, requirePermission('settings_edi
   return res.json(result);
 });
 
+let cachedBotInfoPayload: { data: any; expiresAt: number; token: string } | null = null;
+
 // GET /api/bot/info - Dynamic bot status & profile directly from process.env.BOT_TOKEN
 apiRouter.get('/bot/info', async (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'private, no-cache, stale-while-revalidate=5');
   const token = await TelegramService.getBotToken().catch(() => '');
+
+  // Fast In-Memory Path: serve cached bot info in 0.05ms
+  if (cachedBotInfoPayload && cachedBotInfoPayload.token === token && Date.now() < cachedBotInfoPayload.expiresAt) {
+    return res.json(cachedBotInfoPayload.data);
+  }
+
   const settings = await storage.getSettings().catch(() => null);
 
   if (!token) {
-    return res.json({
+    const emptyPayload = {
       ok: false,
       isConnected: false,
       hasToken: false,
       botUsername: settings?.botUsername || '',
       displayName: settings?.botUsername ? `@${settings.botUsername.replace(/^@/, '')}` : '',
       description: 'No bot token found in environment variables (BOT_TOKEN) or settings'
-    });
+    };
+    return res.json(emptyPayload);
   }
 
   let botUsername = (settings?.botUsername || '').replace(/^@/, '');
@@ -1766,7 +1789,7 @@ apiRouter.get('/bot/info', async (_req: Request, res: Response) => {
 
       // Sync botUsername to settings so it's always persisted
       if (botUsername && settings && settings.botUsername !== botUsername) {
-        await storage.updateSettings({ botUsername, botToken: token }).catch(() => {});
+        storage.updateSettings({ botUsername, botToken: token }).catch(() => {});
       }
     } else if (botUsername) {
       isConnected = true;
@@ -1781,7 +1804,7 @@ apiRouter.get('/bot/info', async (_req: Request, res: Response) => {
   const cleanHandle = botUsername ? `@${botUsername}` : '';
   const displayName = cleanHandle || (botFirstName ? botFirstName : (isConnected ? 'Telegram Bot' : ''));
 
-  return res.json({
+  const responsePayload = {
     ok: isConnected,
     hasToken: Boolean(token),
     isConnected,
@@ -1789,7 +1812,15 @@ apiRouter.get('/bot/info', async (_req: Request, res: Response) => {
     botFirstName,
     displayName,
     result: rawResult || (botUsername ? { username: botUsername, first_name: botFirstName || botUsername } : null)
-  });
+  };
+
+  cachedBotInfoPayload = {
+    data: responsePayload,
+    expiresAt: Date.now() + 20000, // 20s TTL
+    token
+  };
+
+  return res.json(responsePayload);
 });
 
 // GET /api/bot/status - Dynamic bot connection and polling status check

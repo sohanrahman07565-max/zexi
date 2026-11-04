@@ -1,4 +1,5 @@
 import express from 'express';
+import compression from 'compression';
 import cookieParser from 'cookie-parser';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +26,16 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
   const isProd = process.env.NODE_ENV === 'production';
+
+  // High-performance gzip/deflate response compression
+  app.use(compression({
+    level: 6,
+    threshold: 256,
+    filter: (req, res) => {
+      if (req.headers['x-no-compression']) return false;
+      return compression.filter(req, res);
+    }
+  }));
 
   app.use(express.json({ limit: '200mb' }));
   app.use(express.urlencoded({ extended: true, limit: '200mb' }));

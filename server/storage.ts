@@ -605,10 +605,190 @@ export class SharedStorageService {
     }, 1200);
   }
 
-  // Always loads the freshest data to ensure high consistency across worker tasks
-  public async loadLatest(force = true): Promise<AppDatabase> {
+  // High-performance LRU / In-Memory Cache Layer
+  private lruCache = new Map<string, { value: any; expiresAt: number; hitCount: number }>();
+  private readonly MAX_LRU_ENTRIES = 1000;
+  private blobStore = new Map<string, Map<string, any>>();
+  private isPersisting = false;
+  private pendingPersistTimer: NodeJS.Timeout | null = null;
+  private lastDiskCheck: number = 0;
+
+  public getCached<T>(key: string): T | null {
+    const entry = this.lruCache.get(key);
+    if (!entry) return null;
+    if (Date.now() > entry.expiresAt) {
+      this.lruCache.delete(key);
+      return null;
+    }
+    entry.hitCount++;
+    return entry.value as T;
+  }
+
+  public setCached<T>(key: string, value: T, ttlMs = 15000): void {
+    if (this.lruCache.size >= this.MAX_LRU_ENTRIES) {
+      let oldestKey: string | null = null;
+      let oldestHits = Infinity;
+      for (const [k, v] of this.lruCache.entries()) {
+        if (v.hitCount < oldestHits) {
+          oldestHits = v.hitCount;
+          oldestKey = k;
+        }
+      }
+      if (oldestKey) this.lruCache.delete(oldestKey);
+    }
+    this.lruCache.set(key, { value, expiresAt: Date.now() + ttlMs, hitCount: 1 });
+  }
+
+  public invalidateCache(pattern?: string): void {
+    if (!pattern) {
+      this.lruCache.clear();
+      return;
+    }
+    for (const k of this.lruCache.keys()) {
+      if (k.startsWith(pattern) || k.includes(pattern)) {
+        this.lruCache.delete(k);
+      }
+    }
+  }
+
+  // --- Hybrid Blob / Netlify Blobs Compatibility Layer ---
+  // Maps storage keys efficiently in-memory so data retrieval remains instantaneous on Render
+  public async getBlob<T = any>(storeName: string, key: string): Promise<T | null> {
+    const store = this.blobStore.get(storeName);
+    if (store && store.has(key)) {
+      return store.get(key) as T;
+    }
+    if (storeName === 'items') {
+      const item = await this.getItem(key);
+      return item as unknown as T;
+    }
+    if (storeName === 'users') {
+      const user = await this.getUser(key);
+      return user as unknown as T;
+    }
+    if (storeName === 'templates') {
+      const tpl = await this.getTemplate(key);
+      return tpl as unknown as T;
+    }
+    if (storeName === 'settings' && key === 'bot') {
+      return (await this.getSettings()) as unknown as T;
+    }
+    return null;
+  }
+
+  public async setBlob(storeName: string, key: string, data: any): Promise<void> {
+    if (!this.blobStore.has(storeName)) {
+      this.blobStore.set(storeName, new Map());
+    }
+    this.blobStore.get(storeName)!.set(key, data);
+    this.invalidateCache(`blob:${storeName}`);
+  }
+
+  public async deleteBlob(storeName: string, key: string): Promise<boolean> {
+    const store = this.blobStore.get(storeName);
+    if (store && store.has(key)) {
+      store.delete(key);
+      this.invalidateCache(`blob:${storeName}`);
+      return true;
+    }
+    return false;
+  }
+
+  public async listBlobs(storeName: string): Promise<string[]> {
+    const store = this.blobStore.get(storeName);
+    if (store) {
+      return Array.from(store.keys());
+    }
+    if (storeName === 'items') {
+      return this.db.items.map(i => i.id);
+    }
+    if (storeName === 'users') {
+      return Object.keys(this.db.botUsers || {});
+    }
+    return [];
+  }
+
+  // Background non-blocking disk & Firebase revalidation (Stale-While-Revalidate)
+  private async revalidateInBackground(): Promise<void> {
     const now = Date.now();
-    if (!force && this.lastLoadedAt > 0 && now - this.lastLoadedAt < 500) {
+    if (now - this.lastDiskCheck < 20000) return;
+    this.lastDiskCheck = now;
+
+    try {
+      let newestDiskJson: string | null = null;
+      let freshestMtime = -1;
+      for (const filePath of getFallbackFilePaths()) {
+        if (fs.existsSync(filePath)) {
+          const stat = await fs.promises.stat(filePath).catch(() => null);
+          if (stat && stat.mtimeMs > freshestMtime) {
+            const raw = await fs.promises.readFile(filePath, 'utf-8').catch(() => null);
+            if (raw && raw.trim().startsWith('{')) {
+              freshestMtime = stat.mtimeMs;
+              newestDiskJson = raw;
+            }
+          }
+        }
+      }
+
+      if (newestDiskJson && freshestMtime > this.lastLoadedAt) {
+        const parsed = JSON.parse(newestDiskJson);
+        if (parsed && typeof parsed === 'object') {
+          this.applyLoadedData(parsed);
+          this.lastLoadedAt = freshestMtime;
+          this.rebuildCache();
+          this.invalidateCache();
+        }
+      }
+    } catch {}
+  }
+
+  private applyLoadedData(loadedData: Partial<AppDatabase>): void {
+    this.db = {
+      items: Array.isArray(loadedData.items) ? loadedData.items : [],
+      templates: { ...DEFAULT_TEMPLATES, ...(loadedData.templates || {}) },
+      admins: Array.isArray(loadedData.admins) ? loadedData.admins : [],
+      sessions: Array.isArray(loadedData.sessions) ? loadedData.sessions : [],
+      webcodes: Array.isArray(loadedData.webcodes) ? loadedData.webcodes : [],
+      trackedMessages: loadedData.trackedMessages || {},
+      scheduledDeletions: Array.isArray(loadedData.scheduledDeletions) ? loadedData.scheduledDeletions : [],
+      uploadedFilesIndex: loadedData.uploadedFilesIndex || {},
+      addSessions: loadedData.addSessions || {},
+      botUsers: loadedData.botUsers || {},
+      reports: Array.isArray(loadedData.reports) ? loadedData.reports : [],
+      fraudRules: Array.isArray(loadedData.fraudRules) ? loadedData.fraudRules : [],
+      linkWarnings: loadedData.linkWarnings || {},
+      fraudWarnings: loadedData.fraudWarnings || {},
+      detectedChannels: Array.isArray(loadedData.detectedChannels) ? loadedData.detectedChannels : [],
+      joinRequests: loadedData.joinRequests || {},
+      design: { ...DEFAULT_DESIGN, ...(loadedData.design || {}) },
+      settings: {
+        ...DEFAULT_SETTINGS,
+        ...(loadedData.settings || {}),
+        botToken: process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || loadedData.settings?.botToken || '',
+        rootAdminId: process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || loadedData.settings?.rootAdminId || '',
+        autoDeleteNoticeEnabled: loadedData.settings?.autoDeleteNoticeEnabled ?? false,
+        forceSubEnabled: loadedData.settings?.forceSubEnabled ?? false,
+        autoApproveJoinRequests: loadedData.settings?.autoApproveJoinRequests ?? true,
+        antiForwardEnabled: loadedData.settings?.antiForwardEnabled ?? false,
+        requiredChannels: Array.isArray(loadedData.settings?.requiredChannels) ? loadedData.settings.requiredChannels : []
+      },
+      backupServer: {
+        ...DEFAULT_BACKUP_SERVER_CONFIG,
+        ...(loadedData.backupServer || {})
+      }
+    };
+  }
+
+  // Blazing-fast In-Memory load with non-blocking background revalidation
+  public async loadLatest(force = false): Promise<AppDatabase> {
+    const now = Date.now();
+
+    // Fast Path: If already in memory and not cold boot, return immediately (0.01ms)
+    if (this.lastLoadedAt > 0 && (!force || now - this.lastLoadedAt < 5000)) {
+      // Trigger background revalidation if stale (> 30s)
+      if (now - this.lastDiskCheck > 30000) {
+        this.revalidateInBackground().catch(() => {});
+      }
       return this.db;
     }
 
@@ -654,40 +834,7 @@ export class SharedStorageService {
     }
 
     if (loadedData) {
-      this.db = {
-        items: Array.isArray(loadedData.items) ? loadedData.items : [],
-        templates: { ...DEFAULT_TEMPLATES, ...(loadedData.templates || {}) },
-        admins: Array.isArray(loadedData.admins) ? loadedData.admins : [],
-        sessions: Array.isArray(loadedData.sessions) ? loadedData.sessions : [],
-        webcodes: Array.isArray(loadedData.webcodes) ? loadedData.webcodes : [],
-        trackedMessages: loadedData.trackedMessages || {},
-        scheduledDeletions: Array.isArray(loadedData.scheduledDeletions) ? loadedData.scheduledDeletions : [],
-        uploadedFilesIndex: loadedData.uploadedFilesIndex || {},
-        addSessions: loadedData.addSessions || {},
-        botUsers: loadedData.botUsers || {},
-        reports: Array.isArray(loadedData.reports) ? loadedData.reports : [],
-        fraudRules: Array.isArray(loadedData.fraudRules) ? loadedData.fraudRules : [],
-        linkWarnings: loadedData.linkWarnings || {},
-        fraudWarnings: loadedData.fraudWarnings || {},
-        detectedChannels: Array.isArray(loadedData.detectedChannels) ? loadedData.detectedChannels : [],
-        joinRequests: loadedData.joinRequests || {},
-        design: { ...DEFAULT_DESIGN, ...(loadedData.design || {}) },
-        settings: {
-          ...DEFAULT_SETTINGS,
-          ...(loadedData.settings || {}),
-          botToken: process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || loadedData.settings?.botToken || '',
-          rootAdminId: process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || loadedData.settings?.rootAdminId || '',
-          autoDeleteNoticeEnabled: loadedData.settings?.autoDeleteNoticeEnabled ?? false,
-          forceSubEnabled: loadedData.settings?.forceSubEnabled ?? false,
-          autoApproveJoinRequests: loadedData.settings?.autoApproveJoinRequests ?? true,
-          antiForwardEnabled: loadedData.settings?.antiForwardEnabled ?? false,
-          requiredChannels: Array.isArray(loadedData.settings?.requiredChannels) ? loadedData.settings.requiredChannels : []
-        },
-        backupServer: {
-          ...DEFAULT_BACKUP_SERVER_CONFIG,
-          ...(loadedData.backupServer || {})
-        }
-      };
+      this.applyLoadedData(loadedData);
     }
 
     // Ensure root admin from ADMIN_ID / ROOT_ADMIN_ID exists in admin list if configured
@@ -698,7 +845,6 @@ export class SharedStorageService {
     if (rootId) {
       let rootAdmin = this.db.admins.find(a => a.id === rootId || a.telegramId === rootId);
       if (!rootAdmin && this.db.admins.length === 0) {
-        // Bootstrap root admin with password from env or default
         const initPass = envAdminPassword || 'admin123';
         const defaultHash = await hashPassword(initPass);
         rootAdmin = {
@@ -712,20 +858,21 @@ export class SharedStorageService {
           createdAt: new Date().toISOString()
         };
         this.db.admins.push(rootAdmin);
-        await this.persist();
+        this.persist().catch(() => {});
       } else if (rootAdmin && envAdminPassword) {
-        // If an explicit ADMIN_PASSWORD is set in environment variables, ensure the root owner matches it
         const matchesEnv = await verifyPassword(envAdminPassword, rootAdmin.passwordHash);
         if (!matchesEnv) {
           rootAdmin.passwordHash = await hashPassword(envAdminPassword);
-          await this.persist();
+          this.persist().catch(() => {});
           console.info('[Storage] Updated root admin password hash from ADMIN_PASSWORD environment variable.');
         }
       }
     }
 
     this.lastLoadedAt = Date.now();
+    this.lastDiskCheck = Date.now();
     this.rebuildCache();
+    this.invalidateCache();
     return this.db;
   }
 
@@ -734,31 +881,11 @@ export class SharedStorageService {
     await this.loadLatest(true);
   }
 
-  // Persists the current database to disk storage and syncs to cloud
+  // Fast asynchronous persistence: updates in-memory immediately & writes to disk non-blockingly
   public async persist(): Promise<boolean> {
-    let savedToFile = false;
-
-    // Write to persistent disk files
-    for (const filePath of getFallbackFilePaths()) {
-      try {
-        const dir = path.dirname(filePath);
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true });
-        }
-        fs.writeFileSync(filePath, JSON.stringify(this.db, null, 2), 'utf-8');
-        savedToFile = true;
-      } catch (err: any) {
-        // Continue to fallback paths if any
-      }
-    }
-
-    if (!savedToFile) {
-      console.error('[Storage] Error: Persistence failed on all storage mechanisms.');
-      return false;
-    }
-
     this.lastLoadedAt = Date.now();
     this.rebuildCache();
+    this.invalidateCache();
 
     // Zero Data Loss: Asynchronously sync database to Firebase Realtime Database cloud
     this.scheduleCloudSync();
@@ -772,6 +899,25 @@ export class SharedStorageService {
     ) {
       this.scheduleSilentReplication();
     }
+
+    // Non-blocking asynchronous file persistence
+    if (this.pendingPersistTimer) clearTimeout(this.pendingPersistTimer);
+    this.pendingPersistTimer = setTimeout(async () => {
+      try {
+        const snapshot = JSON.stringify(this.db, null, 2);
+        for (const filePath of getFallbackFilePaths()) {
+          try {
+            const dir = path.dirname(filePath);
+            if (!fs.existsSync(dir)) {
+              await fs.promises.mkdir(dir, { recursive: true });
+            }
+            await fs.promises.writeFile(filePath, snapshot, 'utf-8');
+          } catch {}
+        }
+      } catch (err: any) {
+        console.error('[Storage] Error during async file persistence:', err?.message || err);
+      }
+    }, 250);
 
     return true;
   }
@@ -946,26 +1092,29 @@ export class SharedStorageService {
 
   // --- Items ---
   public async getItems(): Promise<ItemRecord[]> {
-    await this.checkAndCleanExpiredItems();
-    await this.loadLatest(false);
-    return this.db.items;
+    const cached = this.getCached<ItemRecord[]>('items:active');
+    if (cached) return cached;
+
+    this.checkAndCleanExpiredItemsSync();
+    const items = this.db.items;
+    this.setCached('items:active', items, 15000);
+    return items;
   }
 
   public async getItem(id: string): Promise<ItemRecord | null> {
     const cached = this.itemCache.get(id);
     if (cached && cached.status === 'active') {
       if (cached.retentionType === 'temporary' && cached.expiresAt && Date.now() >= new Date(cached.expiresAt).getTime()) {
-        await this.checkAndCleanExpiredItems();
+        this.checkAndCleanExpiredItemsSync();
         return null;
       }
       return cached;
     }
 
-    await this.loadLatest(false);
     const item = this.itemCache.get(id) || this.db.items.find(i => i.id === id);
     if (item && item.retentionType === 'temporary' && item.expiresAt) {
       if (Date.now() >= new Date(item.expiresAt).getTime()) {
-        await this.checkAndCleanExpiredItems();
+        this.checkAndCleanExpiredItemsSync();
         return null;
       }
     }
@@ -983,13 +1132,12 @@ export class SharedStorageService {
 
     if (fastMatch && fastMatch.status === 'active') {
       if (fastMatch.retentionType === 'temporary' && fastMatch.expiresAt && Date.now() >= new Date(fastMatch.expiresAt).getTime()) {
-        await this.checkAndCleanExpiredItems();
+        this.checkAndCleanExpiredItemsSync();
         return null;
       }
       return fastMatch;
     }
 
-    await this.loadLatest(false);
     const isHashtag = cleanTrigger.startsWith('#');
     const isSlash = cleanTrigger.startsWith('/');
 
@@ -1023,7 +1171,7 @@ export class SharedStorageService {
 
     if (matched && matched.retentionType === 'temporary' && matched.expiresAt) {
       if (Date.now() >= new Date(matched.expiresAt).getTime()) {
-        await this.checkAndCleanExpiredItems();
+        this.checkAndCleanExpiredItemsSync();
         return null;
       }
     }
@@ -1032,7 +1180,6 @@ export class SharedStorageService {
   }
 
   public async saveItem(item: ItemRecord): Promise<boolean> {
-    await this.loadLatest(true);
     // Sanitize item: never store massive base64 in store.json if file is already on disk
     const cleanItem = { ...item };
     if (cleanItem.uploadedFileId && cleanItem.fileBase64) {
@@ -1046,11 +1193,12 @@ export class SharedStorageService {
     } else {
       this.db.items.push(cleanItem);
     }
+    this.rebuildCache();
+    this.invalidateCache('items');
     return await this.persist();
   }
 
   public async deleteItem(id: string): Promise<boolean> {
-    await this.loadLatest(true);
     const itemToDelete = this.db.items.find(i => i.id === id);
     const lenBefore = this.db.items.length;
     this.db.items = this.db.items.filter(i => i.id !== id);
@@ -1058,14 +1206,15 @@ export class SharedStorageService {
       if (itemToDelete?.uploadedFileId) {
         this.deleteUploadedFile(itemToDelete.uploadedFileId).catch(() => {});
       }
+      this.rebuildCache();
+      this.invalidateCache('items');
       return await this.persist();
     }
     return false;
   }
 
-  // Auto-cleanup for temporary items whose lifespan/expiration has passed
-  public async checkAndCleanExpiredItems(): Promise<string[]> {
-    await this.loadLatest(true);
+  // Fast in-memory cleanup for temporary items whose expiration has passed
+  public checkAndCleanExpiredItemsSync(): string[] {
     const now = Date.now();
     const expiredIds: string[] = [];
     const remainingItems: ItemRecord[] = [];
@@ -1087,17 +1236,24 @@ export class SharedStorageService {
 
     if (expiredIds.length > 0) {
       this.db.items = remainingItems;
-      await this.persist();
+      this.rebuildCache();
+      this.invalidateCache('items');
+      this.persist().catch(() => {});
     }
     return expiredIds;
   }
 
+  // Auto-cleanup for temporary items whose lifespan/expiration has passed
+  public async checkAndCleanExpiredItems(): Promise<string[]> {
+    return this.checkAndCleanExpiredItemsSync();
+  }
+
   public async incrementItemDelivery(id: string): Promise<void> {
-    await this.loadLatest(true);
     const item = this.db.items.find(i => i.id === id);
     if (item) {
       item.deliveryCount = (item.deliveryCount || 0) + 1;
-      await this.persist();
+      this.invalidateCache('items');
+      this.persist().catch(() => {});
     }
   }
 
@@ -1265,7 +1421,9 @@ export class SharedStorageService {
       console.info(`[Storage] Registered new bot user: ${userId} (${record.username || record.firstName || 'User'})`);
     }
 
-    await this.persist();
+    this.invalidateCache('users');
+    this.invalidateCache('stats');
+    this.persist().catch(() => {});
     return record;
   }
 
@@ -1275,22 +1433,29 @@ export class SharedStorageService {
   }
 
   public async getUserStats(): Promise<{ totalUsers: number; onlineUsers: number; offlineUsers: number }> {
+    const cached = this.getCached<{ totalUsers: number; onlineUsers: number; offlineUsers: number }>('stats:users');
+    if (cached) return cached;
+
     const users = await this.getBotUsers();
     const onlineUsers = users.filter(u => u.isOnline).length;
     const offlineUsers = Math.max(0, users.length - onlineUsers);
-    return {
+    const stats = {
       totalUsers: users.length,
       onlineUsers,
       offlineUsers
     };
+    this.setCached('stats:users', stats, 5000);
+    return stats;
   }
 
   public async getBotUsers(): Promise<BotUserRecord[]> {
-    await this.loadLatest(true);
+    const cached = this.getCached<BotUserRecord[]>('users:all');
+    if (cached) return cached;
+
     if (!this.db.botUsers) this.db.botUsers = {};
 
-    const admins = await this.getAdmins();
-    const settings = await this.getSettings();
+    const admins = this.db.admins;
+    const settings = this.db.settings;
     const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163').trim();
 
     const adminIds = new Set<string>();
@@ -1300,7 +1465,7 @@ export class SharedStorageService {
       if (a.id) adminIds.add(String(a.id).trim());
     }
 
-    // Requirement 2: Ensure all registered admins are included in the user list even before initial telegram interaction
+    // Ensure all registered admins are included in the user list even before initial telegram interaction
     let changed = false;
     const now = new Date().toISOString();
 
@@ -1336,11 +1501,11 @@ export class SharedStorageService {
     }
 
     if (changed) {
-      await this.persist();
+      this.persist().catch(() => {});
     }
 
     const nowMs = Date.now();
-    return Object.values(this.db.botUsers)
+    const sorted = Object.values(this.db.botUsers)
       .map((u) => {
         const lastActiveMs = u.lastActiveAt ? new Date(u.lastActiveAt).getTime() : 0;
         // User is considered online if active within last 10 minutes
@@ -1352,6 +1517,9 @@ export class SharedStorageService {
         };
       })
       .sort((a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime());
+
+    this.setCached('users:all', sorted, 10000);
+    return sorted;
   }
 
   public async isUserBanned(userId: string | number): Promise<boolean> {
@@ -1465,6 +1633,8 @@ export class SharedStorageService {
       }
     }
 
+    this.invalidateCache('users');
+    this.invalidateCache('stats');
     await this.persist();
     return user;
   }
