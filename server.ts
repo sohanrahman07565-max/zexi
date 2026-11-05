@@ -19,6 +19,61 @@ process.on('unhandledRejection', (reason: any) => {
   console.error('🛡️ [Process Guard] Caught unhandledRejection (service kept online 24/7):', reason?.message || reason);
 });
 
+// Graceful shutdown: Ensure all in-flight database changes are saved to Firebase Cloud before exit
+process.on('SIGTERM', async () => {
+  console.log('🛑 [Process] SIGTERM received. Flushing storage to Firebase Cloud before shutdown...');
+  await storage.flush().catch(() => {});
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('🛑 [Process] SIGINT received. Flushing storage to Firebase Cloud before shutdown...');
+  await storage.flush().catch(() => {});
+  process.exit(0);
+});
+
+// Render Keep-Alive 24/7 Heartbeat Monitor (Prevents Render Free Tier Idle Sleep)
+function initRenderKeepAlive(port: number) {
+  const PING_INTERVAL_MS = 8 * 60 * 1000; // 8 minutes (Render sleeps after 15 minutes of inactivity)
+  const externalUrl = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || '').trim();
+
+  console.log(`💓 [Render Keep-Alive] Initialized 24/7 heartbeat monitor (interval: 8m, target: "${externalUrl || `http://127.0.0.1:${port}/api/health`}").`);
+
+  async function ping() {
+    const targetUrl = externalUrl
+      ? `${externalUrl.replace(/\/+$/, '')}/api/health`
+      : `http://127.0.0.1:${port}/api/health`;
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(targetUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+
+      if (res.ok) {
+        console.log(`💓 [Render Keep-Alive] Heartbeat ping successful to ${targetUrl} (HTTP ${res.status}) - service kept active 24/7.`);
+      } else {
+        console.warn(`⚠️ [Render Keep-Alive] Heartbeat ping returned HTTP ${res.status}`);
+      }
+    } catch (err: any) {
+      if (externalUrl) {
+        try {
+          const fallbackRes = await fetch(`http://127.0.0.1:${port}/api/health`);
+          if (fallbackRes.ok) {
+            console.log(`💓 [Render Keep-Alive] Local fallback ping successful (HTTP ${fallbackRes.status}).`);
+            return;
+          }
+        } catch {}
+      }
+      console.warn(`⚠️ [Render Keep-Alive] Heartbeat ping notice:`, err?.message || err);
+    }
+  }
+
+  // Initial ping 30s after boot, then recurring every 8 minutes
+  setTimeout(ping, 30000);
+  setInterval(ping, PING_INTERVAL_MS);
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -102,6 +157,7 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on http://0.0.0.0:${PORT}`);
+    initRenderKeepAlive(PORT);
   });
 }
 

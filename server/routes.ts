@@ -10,8 +10,8 @@ dotenv.config({ override: true });
 
 export const apiRouter = Router();
 
-// Lightweight Health check endpoint for network monitoring and offline detection
-apiRouter.all('/health', async (_req: Request, res: Response) => {
+// Lightweight Health check and ping endpoint for network monitoring and Render keep-alive
+apiRouter.all(['/health', '/ping'], async (_req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   const settings = await storage.getSettings().catch(() => null);
   const botToken = await TelegramService.getBotToken().catch(() => '');

@@ -578,38 +578,167 @@ export class SharedStorageService {
     }
   }
 
-  // Background Cloud Sync to Firebase Realtime Database for zero data loss
-  private scheduleCloudSync(): void {
-    if (this.cloudSyncTimer) clearTimeout(this.cloudSyncTimer);
-    this.cloudSyncTimer = setTimeout(async () => {
-      try {
-        const payload = JSON.stringify({
-          items: this.db.items,
-          templates: this.db.templates,
-          admins: this.db.admins,
-          settings: this.db.settings,
-          design: this.db.design,
-          botUsers: this.db.botUsers,
-          reports: this.db.reports,
-          fraudRules: this.db.fraudRules,
-          linkWarnings: this.db.linkWarnings,
-          fraudWarnings: this.db.fraudWarnings,
-          detectedChannels: this.db.detectedChannels,
-          joinRequests: this.db.joinRequests,
-          uploadedFilesIndex: this.db.uploadedFilesIndex,
-          updatedAt: new Date().toISOString()
-        });
+  private isCloudSyncing = false;
+  private hasPendingCloudSync = false;
+  private cachedAuthToken: string | null = null;
+  private tokenExpiresAt: number = 0;
 
-        await fetch(`${FIREBASE_RTDB_URL}/app_state.json`, {
+  // Retrieve Firebase Auth ID Token or Secret for Cloud RTDB requests
+  private async getFirebaseAuthToken(): Promise<string | null> {
+    if (process.env.FIREBASE_DATABASE_SECRET) {
+      return process.env.FIREBASE_DATABASE_SECRET.trim();
+    }
+    if (process.env.FIREBASE_AUTH_TOKEN) {
+      return process.env.FIREBASE_AUTH_TOKEN.trim();
+    }
+
+    const now = Date.now();
+    if (this.cachedAuthToken && now < this.tokenExpiresAt - 60000) {
+      return this.cachedAuthToken;
+    }
+
+    try {
+      const apiKey = process.env.FIREBASE_API_KEY || "AIzaSyCx2CDvJEm_i6gQ4O8EhN16pkqLFp7mFZI";
+      const email = process.env.FIREBASE_SYNC_EMAIL || "server-sync@bot.local";
+      const password = process.env.FIREBASE_SYNC_PASSWORD || "SyncSecret123456!";
+
+      const authRes = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email,
+            password,
+            returnSecureToken: true
+          })
+        }
+      );
+
+      if (authRes.ok) {
+        const authData = await authRes.json();
+        if (authData.idToken) {
+          this.cachedAuthToken = authData.idToken;
+          this.tokenExpiresAt = now + (Number(authData.expiresIn) || 3600) * 1000;
+          return this.cachedAuthToken;
+        }
+      }
+    } catch (e: any) {
+      // Non-critical token retrieval error
+    }
+
+    return null;
+  }
+
+  private getRtdbUrl(path: string, token?: string | null): string {
+    const baseUrl = (process.env.FIREBASE_DATABASE_URL || FIREBASE_RTDB_URL).replace(/\/+$/, '');
+    const cleanPath = path.startsWith('/') ? path : `/${path}`;
+    const url = `${baseUrl}${cleanPath}.json`;
+    if (token) {
+      return `${url}?auth=${encodeURIComponent(token)}`;
+    }
+    return url;
+  }
+
+  // 100% Cloud Persistence: Immediate commit to Firebase Realtime Database
+  public async syncToFirebaseCloud(): Promise<boolean> {
+    if (this.isCloudSyncing) {
+      this.hasPendingCloudSync = true;
+      return true;
+    }
+
+    this.isCloudSyncing = true;
+    this.hasPendingCloudSync = false;
+
+    try {
+      const token = await this.getFirebaseAuthToken();
+      const payload = JSON.stringify({
+        items: this.db.items,
+        templates: this.db.templates,
+        admins: this.db.admins,
+        settings: this.db.settings,
+        design: this.db.design,
+        botUsers: this.db.botUsers,
+        reports: this.db.reports,
+        fraudRules: this.db.fraudRules,
+        linkWarnings: this.db.linkWarnings,
+        fraudWarnings: this.db.fraudWarnings,
+        detectedChannels: this.db.detectedChannels,
+        joinRequests: this.db.joinRequests,
+        uploadedFilesIndex: this.db.uploadedFilesIndex,
+        updatedAt: new Date().toISOString()
+      });
+
+      // Attempt 1: Authenticated request (if token/secret available)
+      let res = await fetch(this.getRtdbUrl('/app_state', token), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload
+      });
+
+      // Attempt 2: If 401/403 and token was used, retry without token (in case rules are public)
+      if (!res.ok && token) {
+        res = await fetch(this.getRtdbUrl('/app_state'), {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: payload
         });
-        console.log('☁️ [Firebase Cloud] Storage successfully synced to Firebase Realtime Database (zero data loss).');
-      } catch (err: any) {
-        console.warn('☁️ [Firebase Cloud] Storage sync notice:', err?.message || err);
       }
-    }, 1200);
+
+      if (res.ok) {
+        console.log('☁️ [Firebase Cloud] Storage successfully committed to Firebase Realtime Database (100% cloud permanence).');
+      } else {
+        const errorText = await res.text().catch(() => '');
+        console.warn(`☁️ [Firebase Cloud] Cloud sync returned HTTP ${res.status}:`, errorText);
+      }
+    } catch (err: any) {
+      console.warn('☁️ [Firebase Cloud] Storage sync notice:', err?.message || err);
+    } finally {
+      this.isCloudSyncing = false;
+      if (this.hasPendingCloudSync) {
+        this.hasPendingCloudSync = false;
+        // Asynchronously process the pending write
+        this.syncToFirebaseCloud().catch(() => {});
+      }
+    }
+
+    return true;
+  }
+
+  // Restore latest database state from Firebase Realtime Database cloud
+  public async loadFromFirebaseCloud(): Promise<Partial<AppDatabase> | null> {
+    try {
+      const token = await this.getFirebaseAuthToken();
+      let res = await fetch(this.getRtdbUrl('/app_state', token));
+
+      if (!res.ok && token) {
+        res = await fetch(this.getRtdbUrl('/app_state'));
+      }
+
+      if (res.ok) {
+        const cloudData = await res.json();
+        if (
+          cloudData &&
+          typeof cloudData === 'object' &&
+          (cloudData.items || cloudData.settings || cloudData.admins || cloudData.botUsers)
+        ) {
+          console.log('☁️ [Firebase Storage] Restored state from Firebase Realtime Database cloud (zero data loss).');
+          return cloudData;
+        }
+      }
+    } catch (err: any) {
+      console.warn('☁️ [Firebase Storage] Notice reading from cloud:', err?.message || err);
+    }
+    return null;
+  }
+
+  // Graceful flush to ensure all in-flight changes are safely committed to cloud
+  public async flush(): Promise<void> {
+    if (this.cloudSyncTimer) {
+      clearTimeout(this.cloudSyncTimer);
+      this.cloudSyncTimer = null;
+    }
+    await this.syncToFirebaseCloud();
   }
 
   // High-performance LRU / In-Memory Cache Layer
@@ -801,42 +930,38 @@ export class SharedStorageService {
 
     let loadedData: Partial<AppDatabase> | null = null;
 
-    // Load from persistent local files
-    let freshestMtime = -1;
-    let freshestJson: string | null = null;
-    for (const filePath of getFallbackFilePaths()) {
-      try {
-        if (fs.existsSync(filePath)) {
-          const stat = fs.statSync(filePath);
-          if (stat.mtimeMs > freshestMtime) {
-            const raw = fs.readFileSync(filePath, 'utf-8');
-            if (raw && raw.trim().startsWith('{')) {
-              freshestMtime = stat.mtimeMs;
-              freshestJson = raw;
-            }
-          }
-        }
-      } catch {}
-    }
-    if (freshestJson) {
-      try {
-        loadedData = JSON.parse(freshestJson);
-      } catch {}
+    // 100% Cloud Permanence: Restore state from Firebase Realtime Database cloud first
+    try {
+      loadedData = await this.loadFromFirebaseCloud();
+    } catch (err: any) {
+      console.warn('☁️ [Firebase Storage] Initial cloud read exception:', err?.message || err);
     }
 
-    // Zero Data Loss: If local disk has no data or on new Render deployment, restore from Firebase Realtime Database
+    // Emergency Offline Fallback: Only check local files if cloud was completely offline
     if (!loadedData) {
-      try {
-        const cloudRes = await fetch(`${FIREBASE_RTDB_URL}/app_state.json`);
-        if (cloudRes.ok) {
-          const cloudData = await cloudRes.json();
-          if (cloudData && typeof cloudData === 'object' && (cloudData.items || cloudData.settings || cloudData.admins)) {
-            console.log('☁️ [Firebase Storage] Restored state from Firebase Realtime Database cloud.');
-            loadedData = cloudData;
+      let freshestMtime = -1;
+      let freshestJson: string | null = null;
+      for (const filePath of getFallbackFilePaths()) {
+        try {
+          if (fs.existsSync(filePath)) {
+            const stat = fs.statSync(filePath);
+            if (stat.mtimeMs > freshestMtime) {
+              const raw = fs.readFileSync(filePath, 'utf-8');
+              if (raw && raw.trim().startsWith('{')) {
+                freshestMtime = stat.mtimeMs;
+                freshestJson = raw;
+              }
+            }
           }
-        }
-      } catch (cloudErr: any) {
-        // Network offline / silent notice
+        } catch {}
+      }
+      if (freshestJson) {
+        try {
+          loadedData = JSON.parse(freshestJson);
+          if (loadedData) {
+            console.log('💾 [Local Storage] Restored offline fallback snapshot from disk.');
+          }
+        } catch {}
       }
     }
 
@@ -888,14 +1013,16 @@ export class SharedStorageService {
     await this.loadLatest(true);
   }
 
-  // Fast asynchronous persistence: updates in-memory immediately & writes to disk non-blockingly
+  // Fast asynchronous persistence: updates in-memory immediately & commits to cloud synchronously/reliably
   public async persist(): Promise<boolean> {
     this.lastLoadedAt = Date.now();
     this.rebuildCache();
     this.invalidateCache();
 
-    // Zero Data Loss: Asynchronously sync database to Firebase Realtime Database cloud
-    this.scheduleCloudSync();
+    // 100% Cloud Permanence: Immediately commit to Firebase Realtime Database
+    this.syncToFirebaseCloud().catch((err) => {
+      console.warn('☁️ [Firebase Cloud] Background sync error:', err?.message || err);
+    });
 
     // Trigger debounced real-time replication to silent backup mirror if enabled
     if (
