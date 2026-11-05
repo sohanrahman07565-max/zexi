@@ -297,8 +297,6 @@ export class TelegramService {
       update.callback_query?.from ||
       update.inline_query?.from ||
       update.chosen_inline_result?.from ||
-      update.channel_post?.from ||
-      update.edited_channel_post?.from ||
       update.shipping_query?.from ||
       update.pre_checkout_query?.from ||
       update.poll_answer?.user ||
@@ -308,7 +306,25 @@ export class TelegramService {
       update.message_reaction?.user ||
       update.message?.forward_from;
 
+    const SERVICE_IDS = ['777000', '1087968824', '136817688'];
+
     if (rawUser && rawUser.id) {
+      const rawIdStr = String(rawUser.id).trim();
+      const rawUsername = (rawUser.username || '').toLowerCase().trim();
+
+      // Exclude negative IDs (groups/supergroups/channels)
+      if (rawIdStr.startsWith('-') || Number(rawIdStr) <= 0) {
+        return null;
+      }
+      // Exclude Telegram service accounts
+      if (SERVICE_IDS.includes(rawIdStr)) {
+        return null;
+      }
+      // Exclude Telegram bots
+      if (rawUser.is_bot || rawUsername.endsWith('bot')) {
+        return null;
+      }
+
       return {
         id: rawUser.id,
         username: rawUser.username ? `@${rawUser.username.replace(/^@+/, '').trim()}` : undefined,
@@ -320,12 +336,22 @@ export class TelegramService {
     // Fallback: If sent in a private chat, chat object contains user info
     const chat = update.message?.chat || update.edited_message?.chat || update.callback_query?.message?.chat;
     if (chat && chat.type === 'private' && chat.id) {
-      return {
-        id: chat.id,
-        username: chat.username ? `@${chat.username.replace(/^@+/, '').trim()}` : undefined,
-        firstName: chat.first_name,
-        lastName: chat.last_name
-      };
+      const chatIdStr = String(chat.id).trim();
+      const chatUsername = (chat.username || '').toLowerCase().trim();
+
+      if (
+        !chatIdStr.startsWith('-') &&
+        Number(chatIdStr) > 0 &&
+        !SERVICE_IDS.includes(chatIdStr) &&
+        !chatUsername.endsWith('bot')
+      ) {
+        return {
+          id: chat.id,
+          username: chat.username ? `@${chat.username.replace(/^@+/, '').trim()}` : undefined,
+          firstName: chat.first_name,
+          lastName: chat.last_name
+        };
+      }
     }
 
     return null;
@@ -783,9 +809,9 @@ export class TelegramService {
 
           if (!inviteLink && isAdmin) {
             try {
-              const exp = await this.callTelegramApi('exportChatInviteLink', { chat_id: targetChat });
-              if (exp && exp.ok && exp.result) {
-                inviteLink = exp.result;
+              const renewed = await this.generateOrRenewInviteLink(targetChat, chat.title);
+              if (renewed) {
+                inviteLink = renewed;
               }
             } catch {}
           }
@@ -823,6 +849,131 @@ export class TelegramService {
     return updatedSettings.requiredChannels || syncedList;
   }
 
+  // Auto-generate or renew fresh invite links using Telegram API createChatInviteLink
+  public static async generateOrRenewInviteLink(
+    chatId: string | number,
+    channelName?: string
+  ): Promise<string | null> {
+    const rawChat = String(chatId).trim();
+    if (!rawChat) return null;
+    const targetChat = /^-?\d+$/.test(rawChat) ? Number(rawChat) : (rawChat.startsWith('@') ? rawChat : `@${rawChat}`);
+
+    try {
+      const createRes = await this.callTelegramApi('createChatInviteLink', {
+        chat_id: targetChat,
+        name: `ForceSub - ${(channelName || 'AutoRenew').slice(0, 20)}`,
+        creates_join_request: false
+      });
+      if (createRes && createRes.ok && createRes.result?.invite_link) {
+        const newLink = createRes.result.invite_link;
+        await storage.updateChannelInviteLink(rawChat, newLink);
+        return newLink;
+      }
+    } catch (err: any) {
+      console.warn(`[Telegram] createChatInviteLink failed for ${rawChat}:`, err?.message || err);
+    }
+
+    try {
+      const expRes = await this.callTelegramApi('exportChatInviteLink', { chat_id: targetChat });
+      if (expRes && expRes.ok && expRes.result) {
+        const newLink = expRes.result;
+        await storage.updateChannelInviteLink(rawChat, newLink);
+        return newLink;
+      }
+    } catch (expErr: any) {
+      console.warn(`[Telegram] exportChatInviteLink failed for ${rawChat}:`, expErr?.message || expErr);
+    }
+
+    return null;
+  }
+
+  // Forward-based Private Channel / Group Setup handler
+  public static async handleForwardedChannelSetup(
+    fromId: string,
+    replyChatId: string | number,
+    forwardChat: any
+  ): Promise<void> {
+    const rawChatId = String(forwardChat.id);
+    const chatTitle = forwardChat.title || forwardChat.username || 'Private Channel';
+    const chatType = forwardChat.type || (rawChatId.startsWith('-100') ? 'channel' : 'group');
+    const username = forwardChat.username ? `@${forwardChat.username.replace(/^@/, '')}` : undefined;
+
+    // Send processing status
+    const statusMsg = await this.callTelegramApi('sendMessage', {
+      chat_id: replyChatId,
+      text: `🔄 <b>Detected forwarded post from:</b> <i>${this.escapeHtml(chatTitle)}</i>\n` +
+            `Connecting private channel and generating fresh invite link...`,
+      parse_mode: 'HTML'
+    });
+
+    // Generate or renew invite link using createChatInviteLink
+    let inviteLink = await this.generateOrRenewInviteLink(rawChatId, chatTitle);
+    if (!inviteLink && username) {
+      inviteLink = `https://t.me/${username.replace(/^@/, '')}`;
+    }
+
+    // Check bot administrator status in the channel
+    let isAdminInChat = false;
+    try {
+      const me = await this.callTelegramApi('getMe', {});
+      const botId = me.result?.id;
+      if (botId) {
+        const memRes = await this.callTelegramApi('getChatMember', {
+          chat_id: /^-?\d+$/.test(rawChatId) ? Number(rawChatId) : rawChatId,
+          user_id: botId
+        });
+        if (memRes && memRes.ok && memRes.result) {
+          const st = memRes.result.status;
+          isAdminInChat = st === 'administrator' || st === 'creator';
+        }
+      }
+    } catch {}
+
+    // Register channel into storage (both detectedChannels and settings.requiredChannels)
+    const channelRecord = await storage.registerDetectedChannel({
+      chatId: rawChatId,
+      name: chatTitle,
+      inviteLink: inviteLink || '',
+      username,
+      type: chatType as any,
+      isAdmin: isAdminInChat,
+      enabled: true
+    });
+
+    // Ensure forceSubEnabled is turned on
+    await storage.updateSettings({ forceSubEnabled: true });
+
+    const responseText = 
+      `✅ <b>Private Channel Connected Successfully via Forward!</b>\n\n` +
+      `📢 <b>Channel Name:</b> <b>${this.escapeHtml(channelRecord.name)}</b>\n` +
+      `🆔 <b>Chat ID:</b> <code>${channelRecord.chatId}</code>\n` +
+      `🏷️ <b>Type:</b> <code>${channelRecord.type || 'channel'}</code>\n` +
+      (channelRecord.inviteLink ? `🔗 <b>Invite Link:</b> ${channelRecord.inviteLink}\n` : '') +
+      (isAdminInChat
+        ? `👑 <b>Bot Status:</b> Administrator (Active & Verified) ✅\n`
+        : `⚠️ <b>Important Note:</b> Please ensure you add this bot as an <b>Administrator</b> in this channel with invite permissions so force-subscription checks and member auto-approvals succeed.\n`
+      ) +
+      `\n✨ <i>Added to Force Sub channels with toggle ON. You can manage or toggle it anytime from the Admin Panel or with <code>/disconnect ${channelRecord.chatId}</code>.</i>`;
+
+    if (statusMsg?.result?.message_id) {
+      try {
+        await this.callTelegramApi('editMessageText', {
+          chat_id: replyChatId,
+          message_id: statusMsg.result.message_id,
+          text: responseText,
+          parse_mode: 'HTML'
+        });
+        return;
+      } catch {}
+    }
+
+    await this.callTelegramApi('sendMessage', {
+      chat_id: replyChatId,
+      text: responseText,
+      parse_mode: 'HTML'
+    });
+  }
+
   // Admin /connect Command: Connect channel/group by ID or Username
   public static async handleConnectCommand(
     fromId: string,
@@ -839,12 +990,24 @@ export class TelegramService {
       return;
     }
 
-    const match = text.match(/^\/(?:connect|addchannel)(?:@\w+)?(?:\s+(.+))?$/i);
+    const match = text.match(/^\/(?:connect|addchannel|setchannel)(?:@\w+)?(?:\s+(.+))?$/i);
     const rawTarget = match?.[1]?.trim() || (fallbackChatId ? String(fallbackChatId) : '');
     if (!rawTarget) {
+      const botName = await this.getBotUsername();
       await this.callTelegramApi('sendMessage', {
         chat_id: replyChatId,
-        text: `ℹ️ <b>Connect Channel / Group</b>\n\nUsage: <code>/connect &lt;channel_id_or_username&gt;</code>\n\nExamples:\n• <code>/connect @mychannel</code>\n• <code>/connect -1001234567890</code>\n• <code>/connect https://t.me/mychannel</code>`,
+        text: `📢 <b>Connect Private Channel / Group</b>\n\n` +
+              `You can connect channels in two easy ways:\n\n` +
+              `<b>1️⃣ Forward-Based Setup (Recommended for Private Channels):</b>\n` +
+              `• Add @${botName || 'this bot'} as an <b>Administrator</b> in your private channel or group.\n` +
+              `• <b>Simply forward any post or message from your private channel directly here!</b>\n` +
+              `• The bot will automatically detect the chat ID, title, and create a fresh invite link for force-subscription.\n\n` +
+              `<b>2️⃣ Command Setup:</b>\n` +
+              `• <code>/connect &lt;channel_id_or_username&gt;</code>\n` +
+              `• Examples:\n` +
+              `  🔹 <code>/connect @mychannel</code>\n` +
+              `  🔹 <code>/connect -1001234567890</code>\n` +
+              `  🔹 <code>/connect https://t.me/+AbCdEfGh</code>`,
         parse_mode: 'HTML'
       });
       return;
@@ -892,12 +1055,12 @@ export class TelegramService {
       console.warn('[Telegram] /connect getChat error:', err?.message);
     }
 
-    // If still no invite link, try exportChatInviteLink
+    // If still no invite link, try auto-generating or exporting
     if (!inviteLink) {
       try {
-        const linkRes = await this.callTelegramApi('exportChatInviteLink', { chat_id: queryChat });
-        if (linkRes && linkRes.ok && linkRes.result) {
-          inviteLink = linkRes.result;
+        const fresh = await this.generateOrRenewInviteLink(resolvedChatId, chatTitle);
+        if (fresh) {
+          inviteLink = fresh;
         }
       } catch {}
     }
@@ -1136,6 +1299,18 @@ export class TelegramService {
     for (let i = 0; i < unjoinedChannels.length; i++) {
       const ch = unjoinedChannels[i];
       let channelUrl = ch.inviteLink ? ch.inviteLink.trim() : '';
+
+      // Auto-renew missing or expired invite link via Telegram API createChatInviteLink
+      if (!channelUrl && ch.chatId) {
+        try {
+          const freshLink = await this.generateOrRenewInviteLink(ch.chatId, ch.name);
+          if (freshLink) {
+            channelUrl = freshLink;
+            ch.inviteLink = freshLink;
+          }
+        } catch {}
+      }
+
       if (!channelUrl) {
         if (ch.chatId && ch.chatId.startsWith('@')) {
           channelUrl = `https://t.me/${ch.chatId.slice(1)}`;
@@ -1418,10 +1593,19 @@ export class TelegramService {
             await storage.setBotUserBanned(fromId, true);
             await storage.resetUserLinkWarning(message.chat.id, fromId);
 
-            const banNotice = `🚫 <b>USER AUTO-BANNED (Strike 3/3)</b>\n\n` +
-              `👤 <b>User:</b> ${userMention} (${this.escapeHtml(realName)})\n` +
-              `🆔 <b>User ID:</b> <code>${fromId}</code>\n` +
-              `⚠️ <b>Reason:</b> Exceeded maximum 3-strike warnings for unauthorized links / external forward spam.`;
+            // Dynamic customizable Ban Notice template (supports {name}, {username}, {user_id}, {strikes})
+            const templates = await storage.getTemplates();
+            const banTemplate = templates.BAN_NOTICE?.content ||
+              '🚫 <b>USER AUTO-BANNED (Strike {strikes}/{strikes})</b>\n\n👤 <b>User:</b> {name} (@{username} | ID: <code>{user_id}</code>)\n⚠️ <b>Reason:</b> Exceeded maximum {strikes}-strike warnings for unauthorized links / external forward spam.';
+
+            const cleanUsername = userObj.username ? userObj.username.replace(/^@+/, '') : '';
+            const banNotice = banTemplate
+              .replace(/{name}/g, TelegramService.escapeHtml(realName))
+              .replace(/{user_name}/g, TelegramService.escapeHtml(realName))
+              .replace(/{username}/g, cleanUsername ? TelegramService.escapeHtml(cleanUsername) : 'N/A')
+              .replace(/{user_id}/g, String(fromId))
+              .replace(/{strikes}/g, '3');
+
             await this.callTelegramApi('sendMessage', {
               chat_id: message.chat.id,
               text: banNotice,
@@ -2512,8 +2696,21 @@ export class TelegramService {
       return;
     }
 
-    // Admin /connect or /addchannel command
-    if (/^\/(?:connect|addchannel)(?:@\w+)?(?:\s+.*)?$/i.test(text.trim())) {
+    // Forward-based Private Channel / Group Setup:
+    // If an authorized admin forwards a post from a channel or group in private chat:
+    const forwardChat = message.forward_from_chat ||
+      (message.forward_origin && (message.forward_origin.chat || message.forward_origin.sender_chat));
+
+    if (forwardChat && forwardChat.id) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      if (isAdmin) {
+        await this.handleForwardedChannelSetup(fromId, chatId, forwardChat);
+        return;
+      }
+    }
+
+    // Admin /connect, /addchannel, or /setchannel command
+    if (/^\/(?:connect|addchannel|setchannel)(?:@\w+)?(?:\s+.*)?$/i.test(text.trim())) {
       await this.handleConnectCommand(fromId, chatId, text);
       return;
     }
@@ -2653,7 +2850,8 @@ export class TelegramService {
     if (!rawPayload) return;
 
     // Automatically register recipient UID whenever a user receives/takes anything from the bot
-    if (chatId) {
+    const strChatId = String(chatId || '').trim();
+    if (strChatId && !strChatId.startsWith('-') && Number(strChatId) > 0) {
       try {
         await storage.trackBotUser({ id: chatId });
       } catch (err: any) {

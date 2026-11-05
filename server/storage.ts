@@ -419,6 +419,13 @@ export const DEFAULT_TEMPLATES: Record<string, MessageTemplate> = {
     content: 'First Warning: Links are not allowed in this group. If you share a link again, you will be banned from the group.',
     variables: ['user_name', 'user_id']
   },
+  BAN_NOTICE: {
+    key: 'BAN_NOTICE',
+    name: 'User Ban Notice',
+    description: 'Notification sent when a user reaches 3 strikes (link/forward spam or fraud words) and is automatically banned',
+    content: '🚫 <b>USER AUTO-BANNED (Strike {strikes}/{strikes})</b>\n\n👤 <b>User:</b> {name} (@{username} | ID: <code>{user_id}</code>)\n⚠️ <b>Reason:</b> Exceeded maximum {strikes}-strike warnings for unauthorized links / external forward spam.',
+    variables: ['name', 'username', 'user_id', 'strikes']
+  },
   FRAUD_KEYWORD_DEFAULT_REPLY: {
     key: 'FRAUD_KEYWORD_DEFAULT_REPLY',
     name: 'Restricted Word Auto-Reply / Warning',
@@ -1371,10 +1378,34 @@ export class SharedStorageService {
     username?: string;
     firstName?: string;
     lastName?: string;
+    is_bot?: boolean;
   }): Promise<BotUserRecord | null> {
     if (!user || !user.id) return null;
     const userId = String(user.id).trim();
     if (!userId) return null;
+
+    // Filter out Telegram groups, supergroups, and channels (all have negative IDs)
+    if (userId.startsWith('-') || Number(userId) <= 0) return null;
+
+    // Filter out official Telegram system service accounts
+    // 777000: Telegram Service Notifications
+    // 1087968824: GroupAnonymousBot
+    // 136817688: ChannelBot
+    const SERVICE_IDS = ['777000', '1087968824', '136817688'];
+    if (SERVICE_IDS.includes(userId)) return null;
+
+    // Filter out accounts marked as bot
+    if (user.is_bot) return null;
+
+    // Check if this user has admin privileges
+    const admins = await this.getAdmins();
+    const settings = await this.getSettings();
+    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163').trim();
+    const isAdmin = userId === rootAdminId || rootAdminId.includes(userId) || admins.some(a => String(a.telegramId).trim() === userId || String(a.id).trim() === userId);
+
+    // Exclude usernames ending with 'bot' (unless it's an authorized admin)
+    const rawUsername = (user.username || '').replace(/^@+/, '').trim().toLowerCase();
+    if (rawUsername.endsWith('bot') && !isAdmin) return null;
 
     await this.loadLatest(true);
     if (!this.db.botUsers) {
@@ -1388,12 +1419,6 @@ export class SharedStorageService {
     const cleanFirstName = user.firstName ? String(user.firstName).trim() : undefined;
     const cleanLastName = user.lastName ? String(user.lastName).trim() : undefined;
 
-    // Check if this user has admin privileges
-    const admins = await this.getAdmins();
-    const settings = await this.getSettings();
-    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163').trim();
-    const isAdmin = userId === rootAdminId || rootAdminId.includes(userId) || admins.some(a => String(a.telegramId).trim() === userId || String(a.id).trim() === userId);
-
     let record = this.db.botUsers[userId];
     if (record) {
       // User exists: update last active timestamp and live online status
@@ -1405,7 +1430,7 @@ export class SharedStorageService {
       if (cleanLastName) record.lastName = cleanLastName;
       if (isAdmin) record.isAdmin = true;
     } else {
-      // User does NOT exist: save them instantly as a new user
+      // User does NOT exist: save them instantly as a new real user
       record = {
         id: userId,
         username: cleanUsername,
@@ -1418,7 +1443,7 @@ export class SharedStorageService {
         isAdmin: isAdmin
       };
       this.db.botUsers[userId] = record;
-      console.info(`[Storage] Registered new bot user: ${userId} (${record.username || record.firstName || 'User'})`);
+      console.info(`[Storage] Registered new human bot user: ${userId} (${record.username || record.firstName || 'User'})`);
     }
 
     this.invalidateCache('users');
@@ -1465,8 +1490,27 @@ export class SharedStorageService {
       if (a.id) adminIds.add(String(a.id).trim());
     }
 
-    // Ensure all registered admins are included in the user list even before initial telegram interaction
+    // Clean up / Purge any non-human entries (groups, channels, service bots, or 3rd party bots) from database
+    const SERVICE_IDS = ['777000', '1087968824', '136817688'];
     let changed = false;
+
+    for (const [id, u] of Object.entries(this.db.botUsers)) {
+      const strId = String(id).trim();
+      const uname = (u.username || '').replace(/^@+/, '').trim().toLowerCase();
+      const isAdminUser = adminIds.has(strId) || Boolean(u.isAdmin);
+      const isInvalid = strId.startsWith('-') ||
+        Number(strId) <= 0 ||
+        SERVICE_IDS.includes(strId) ||
+        Boolean((u as any).is_bot) ||
+        (uname.endsWith('bot') && !isAdminUser);
+
+      if (isInvalid) {
+        delete this.db.botUsers[id];
+        changed = true;
+      }
+    }
+
+    // Ensure all registered admins are included in the user list even before initial telegram interaction
     const now = new Date().toISOString();
 
     for (const admin of admins) {
@@ -1745,6 +1789,36 @@ export class SharedStorageService {
 
     await this.persist();
     return channelRecord;
+  }
+
+  public async updateChannelInviteLink(chatId: string, inviteLink: string): Promise<boolean> {
+    if (!chatId || !inviteLink) return false;
+    await this.loadLatest(true);
+    let updated = false;
+    const cleanId = String(chatId).trim();
+
+    if (Array.isArray(this.db.settings?.requiredChannels)) {
+      for (const ch of this.db.settings.requiredChannels) {
+        if (String(ch.chatId).trim() === cleanId) {
+          ch.inviteLink = inviteLink;
+          updated = true;
+        }
+      }
+    }
+    if (Array.isArray(this.db.detectedChannels)) {
+      for (const ch of this.db.detectedChannels) {
+        if (String(ch.chatId).trim() === cleanId) {
+          ch.inviteLink = inviteLink;
+          updated = true;
+        }
+      }
+    }
+
+    if (updated) {
+      this.invalidateCache('settings');
+      await this.persist();
+    }
+    return updated;
   }
 
   public async toggleForceSubChannel(channelId: string, enabled?: boolean): Promise<ForceSubChannel | null> {
