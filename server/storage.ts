@@ -500,7 +500,7 @@ export const DEFAULT_SETTINGS: BotSettings = {
 };
 
 // Persistent storage paths for standalone Render Web Service and local environment
-const FIREBASE_RTDB_URL = "https://zexiofficial8-default-rtdb.asia-southeast1.firebasedatabase.app";
+const FIREBASE_RTDB_URL = "https://zexiofficial844-default-rtdb.asia-southeast1.firebasedatabase.app";
 
 function getFallbackFilePaths(): string[] {
   const paths: string[] = [];
@@ -598,7 +598,7 @@ export class SharedStorageService {
     }
 
     try {
-      const apiKey = process.env.FIREBASE_API_KEY || "AIzaSyCx2CDvJEm_i6gQ4O8EhN16pkqLFp7mFZI";
+      const apiKey = process.env.FIREBASE_API_KEY || "AIzaSyAvuHW-o4Rl-Ry8Fx5I3xp_Op1ujBT24Ls";
       const email = process.env.FIREBASE_SYNC_EMAIL || "server-sync@bot.local";
       const password = process.env.FIREBASE_SYNC_PASSWORD || "SyncSecret123456!";
 
