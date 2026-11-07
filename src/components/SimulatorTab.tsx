@@ -11,7 +11,7 @@ interface SimulatorTabProps {
   items: ItemRecord[];
 }
 
-export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '#ff', items }) => {
+export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '', items }) => {
   const [inputText, setInputText] = useState(initialTrigger);
   const [simulationResult, setSimulationResult] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
@@ -44,18 +44,10 @@ export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '#f
     }
   };
 
-  // Quick preset triggers for convenience
-  const samplePresets = [
-    '/filters',
-    '/add',
-    '#driver',
-    '#ff',
-    '#carrom',
-    '#144',
-    '#rapidcore',
-    'ff',
-    'hello'
-  ];
+  // Quick preset triggers generated dynamically from user's configured items
+  const samplePresets = items.length > 0 
+    ? Array.from(new Set(items.flatMap(i => i.triggers))).slice(0, 6) 
+    : ['/filters', '/add'];
 
   return (
     <div className="space-y-4 pb-24">
@@ -65,7 +57,7 @@ export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '#f
           <Sparkles className="w-4 h-4" /> Live Telegram Exact-Trigger Simulator
         </div>
         <p className="text-xs text-zinc-400">
-          Tests real configured triggers against group matching rules. If a trigger is unconfigured (e.g. <code className="text-zinc-300">ff</code> vs <code className="text-zinc-300">#ff</code>), the bot remains completely silent.
+          Tests real configured triggers against group matching rules. If a trigger is unconfigured, the bot remains completely silent.
         </p>
 
         {/* Quick Chips */}
@@ -94,7 +86,7 @@ export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '#f
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSimulate()}
-            placeholder="Type group message (e.g. #ff, /ff, ff, #ai)..."
+            placeholder="Type group message to test trigger..."
             className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl py-2.5 pl-3.5 pr-10 text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors font-mono"
           />
         </div>
@@ -247,11 +239,7 @@ export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '#f
                           const rawText = btn.text || '';
                           const isTagBtn = rawText.startsWith('📥 ');
                           const tag = isTagBtn ? rawText.replace(/^📥\s*/, '') : '';
-                          // Completely remove any leading bullet emojis, dots, or icons (such as 🔵, 🔴, etc.)
-                          const cleanText = rawText
-                            .replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{200D}🔴🔵🟢🟡🟣⚫⚪🔘❌✅⭕🛑🔹🔷🔸🔶▪️▫️•🔒📥\s]+/gu, '')
-                            .replace(/[🔴🔵🟢🟡🟣⚫⚪🔘❌✅⭕🛑🔹🔷🔸🔶▪️▫️]/gu, '')
-                            .trim() || rawText;
+                          const cleanText = rawText.trim();
 
                           const textLower = cleanText.toLowerCase();
                           const isDanger = btn.style === 'danger' || /cancel|delete|remove|block|reject|stop/i.test(textLower);
@@ -373,10 +361,7 @@ export const SimulatorTab: React.FC<SimulatorTabProps> = ({ initialTrigger = '#f
                               className="py-2.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center justify-center transition-all block text-center shadow-md shadow-blue-600/30 border border-blue-500"
                             >
                               <span>
-                                {(simulationResult.privateDeliveryPreview?.buttonText || (simulationResult.privateDeliveryPreview?.openMode === 'webapp' ? 'Launch Mini App' : 'Open Link'))
-                                  .replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{200D}🔴🔵🟢🟡🟣⚫⚪🔘❌✅⭕🛑🔹🔷🔸🔶▪️▫️•📱🌐🛠️\s]+/gu, '')
-                                  .replace(/[🔴🔵🟢🟡🟣⚫⚪🔘❌✅⭕🛑🔹🔷🔸🔶▪️▫️]/gu, '')
-                                  .trim() || 'Open Link'}
+                                {(simulationResult.privateDeliveryPreview?.buttonText || (simulationResult.privateDeliveryPreview?.openMode === 'webapp' ? '📱 Launch Mini App' : '🌐 Open Link')).trim()}
                               </span>
                             </a>
 

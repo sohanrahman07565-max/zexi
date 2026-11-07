@@ -84,17 +84,17 @@ function requirePermission(permKey: keyof AdminUser['permissions']) {
 
 // POST /api/auth/login
 apiRouter.post('/auth/login', async (req: Request, res: Response) => {
-  const telegramId = req.body.telegramId || req.body.username || req.body.adminName;
+  const telegramId = req.body.telegramId || req.body.username || req.body.adminName || req.body.email;
   const { password } = req.body;
   if (!telegramId || !password) {
-    return res.status(400).json({ error: 'Admin Name and password required' });
+    return res.status(400).json({ error: 'Username/Email and password are required' });
   }
 
-  const cleanId = String(telegramId).trim().replace(/^@/, '');
+  const cleanId = String(telegramId).trim();
   const cleanPassword = String(password).trim();
-  console.info('[Auth] Admin login attempt for identifier/name:', cleanId);
+  console.info('[Auth] Admin login attempt for identifier:', cleanId);
 
-  // Force-reload fresh data from persistent storage
+  // Force-reload fresh data from persistent storage (Firebase RTDB)
   await storage.loadLatest(true);
 
   // Reload latest environment variables if .env was changed
@@ -102,65 +102,83 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
     dotenv.config({ override: true });
   } catch {}
 
-  // Read environment variables for Admin Name and Password
+  // Read environment variables for primary Owner / Administrator
+  const envAdminEmail = (process.env.ADMIN_EMAIL || 'sohanrahman07565@gmail.com').trim().toLowerCase();
   const envAdminName = (process.env.ADMIN_NAME || process.env.ADMIN_USERNAME || process.env.ROOT_ADMIN_NAME || '').trim();
   const envAdminPassword = (process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS || process.env.ROOT_ADMIN_PASSWORD || '').trim();
-  const envRootId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '').trim();
+  const envRootId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '8153757163').trim();
 
-  const cleanNormalized = cleanId.replace(/\s+/g, '').toLowerCase();
-  const envNameNormalized = envAdminName.replace(/\s+/g, '').toLowerCase();
-
-  const isEnvNameMatch = !!envAdminName && (
-    cleanId.toLowerCase() === envAdminName.toLowerCase() ||
-    cleanNormalized === envNameNormalized
-  );
-  const isEnvRootMatch = !!envRootId && cleanId === envRootId;
-  const isEnvPasswordMatch = !!envAdminPassword && cleanPassword === envAdminPassword;
+  const cleanLower = cleanId.toLowerCase().replace(/^@/, '');
+  const cleanNormalized = cleanLower.replace(/\s+/g, '');
 
   const allAdmins = await storage.getAdmins();
+  const ownerAdmin = allAdmins.find(a => a.role === 'owner');
 
-  // 1. First, search for admin by exact or normalized ID/name
-  let admin = await storage.getAdmin(cleanId);
+  // Known authorized owner emails
+  const ownerEmails = new Set<string>([
+    'sohanrahman07565@gmail.com',
+    'zexiofficial8884@gmail.com',
+    ...(envAdminEmail ? [envAdminEmail] : [])
+  ]);
 
-  // 2. If not found by getAdmin, check if cleanId matches owner aliases or env name
-  if (!admin) {
-    const isOwnerAlias = ['admin', 'owner', 'owner admin', 'owneradmin', 'root', 'sohan'].includes(cleanNormalized);
-    if (isOwnerAlias || isEnvNameMatch || isEnvRootMatch) {
-      admin = allAdmins.find(a => a.role === 'owner') || null;
+  let matchedAdmin: AdminUser | null = null;
+  let isOwnerAttempt = false;
+
+  // 1. Check if the entered identifier matches the MAIN OWNER/ADMIN credentials defined in ENV:
+  // - Matches owner email (e.g. ADMIN_EMAIL, sohanrahman07565@gmail.com)
+  // - Matches owner Telegram ID (ADMIN_ID / ROOT_ADMIN_ID, e.g. 8153757163)
+  // - Matches owner Admin Name (ADMIN_NAME / ADMIN_USERNAME)
+  // - Matches existing owner account in database (by id, telegramId, name)
+  if (
+    ownerEmails.has(cleanLower) ||
+    (envRootId && cleanId === envRootId) ||
+    (envAdminName && (cleanLower === envAdminName.toLowerCase() || cleanNormalized === envAdminName.toLowerCase().replace(/\s+/g, ''))) ||
+    (ownerAdmin && (
+      String(ownerAdmin.id).trim().toLowerCase() === cleanLower ||
+      String(ownerAdmin.telegramId).trim().toLowerCase() === cleanLower ||
+      (ownerAdmin.name && ownerAdmin.name.trim().toLowerCase() === cleanLower) ||
+      (ownerAdmin.name && ownerAdmin.name.replace(/\s+/g, '').toLowerCase() === cleanNormalized)
+    ))
+  ) {
+    isOwnerAttempt = true;
+    matchedAdmin = ownerAdmin || null;
+  }
+
+  // 2. If not owner, check if the identifier matches an AUTHORIZED SUB-ADMIN explicitly stored in the database
+  if (!matchedAdmin && !isOwnerAttempt) {
+    const subAdmin = allAdmins.find(a => 
+      a.role !== 'owner' &&
+      a.enabled &&
+      (
+        String(a.id).trim().toLowerCase() === cleanLower ||
+        String(a.telegramId).trim().toLowerCase() === cleanLower ||
+        (a.name && a.name.trim().toLowerCase() === cleanLower) ||
+        (a.name && a.name.replace(/\s+/g, '').toLowerCase() === cleanNormalized) ||
+        ((a as any).email && String((a as any).email).trim().toLowerCase() === cleanLower)
+      )
+    );
+    if (subAdmin) {
+      matchedAdmin = subAdmin;
     }
   }
 
-  // 3. If there is only one admin/owner account in the entire system, any valid entered identifier resolves to that owner
-  if (!admin && allAdmins.length === 1 && allAdmins[0].role === 'owner') {
-    admin = allAdmins[0];
+  // 3. STRICT REJECTION: If neither owner nor an authorized sub-admin -> Reject immediately!
+  if (!matchedAdmin && !isOwnerAttempt) {
+    console.warn('[Auth] Login REJECTED: unauthorized account/email attempted:', cleanId);
+    return res.status(401).json({ 
+      error: 'Access Denied: This account is not an authorized administrator. Access is restricted to the owner and approved sub-admins only.' 
+    });
   }
 
-  // 4. Fallback search across all admins
-  if (!admin) {
-    for (const a of allAdmins) {
-      if (
-        String(a.id).trim() === cleanId ||
-        String(a.telegramId).trim() === cleanId ||
-        (a.name && a.name.trim().toLowerCase() === cleanId.toLowerCase()) ||
-        (a.name && a.name.replace(/\s+/g, '').toLowerCase() === cleanNormalized)
-      ) {
-        admin = a;
-        break;
-      }
-    }
-  }
-
-  // 5. If still no admin exists in the system, initialize Owner Admin from entered credentials
-  if (!admin) {
-    if (allAdmins.length === 0 || (isEnvPasswordMatch && (isEnvNameMatch || !envAdminName))) {
-      console.info('[Auth] Initializing Owner Admin account from credentials/ENV:', cleanId);
-      const hash = await hashPassword(cleanPassword);
+  // If owner attempt and no owner in database yet: auto-bootstrap owner only if credentials match
+  if (!matchedAdmin && isOwnerAttempt) {
+    if (envAdminPassword && cleanPassword === envAdminPassword) {
       const newOwner: AdminUser = {
-        id: envRootId || cleanId || '8153757163',
-        telegramId: envRootId || cleanId || '8153757163',
-        name: envAdminName || cleanId || 'Owner Admin',
+        id: envRootId || 'sohan',
+        telegramId: envRootId || 'sohan',
+        name: envAdminName || 'Sohan',
         role: 'owner',
-        passwordHash: hash,
+        passwordHash: await hashPassword(cleanPassword),
         permissions: {
           files_view: true, files_add: true, files_edit: true, files_delete: true,
           links_view: true, links_add: true, links_edit: true, links_delete: true,
@@ -171,49 +189,45 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
         createdAt: new Date().toISOString()
       };
       await storage.saveAdmin(newOwner);
-      admin = newOwner;
+      matchedAdmin = newOwner;
+    } else {
+      return res.status(401).json({ error: 'Incorrect password for Owner account.' });
     }
   }
 
-  if (!admin || !admin.enabled) {
-    console.warn('[Auth] Login failed: admin account not found or disabled for identifier/name:', cleanId);
-    return res.status(401).json({ error: 'Invalid Admin Name or account not found' });
+  if (!matchedAdmin || !matchedAdmin.enabled) {
+    return res.status(401).json({ error: 'Access Denied: This administrator account has been disabled.' });
   }
 
-  // Verify password: check stored hash, env password, and fallback defaults ('123456' / 'admin')
-  let validPassword = await verifyPassword(cleanPassword, admin.passwordHash);
+  // 4. STRICT PASSWORD VERIFICATION
+  let isPasswordValid = false;
 
-  if (!validPassword && isEnvPasswordMatch) {
-    validPassword = true;
+  // Check stored password hash
+  if (matchedAdmin.passwordHash) {
+    isPasswordValid = await verifyPassword(cleanPassword, matchedAdmin.passwordHash);
   }
 
-  if (!validPassword && admin.role === 'owner') {
-    if (cleanPassword === '123456' || cleanPassword === 'admin') {
-      validPassword = true;
+  // For owner, also allow env password if defined
+  if (!isPasswordValid && isOwnerAttempt && envAdminPassword) {
+    if (cleanPassword === envAdminPassword) {
+      isPasswordValid = true;
+      matchedAdmin.passwordHash = await hashPassword(envAdminPassword);
+      await storage.saveAdmin(matchedAdmin);
     }
   }
 
-  // Sync hash if password was validated via ENV or default
-  if (validPassword && isEnvPasswordMatch && admin.role === 'owner') {
-    admin.passwordHash = await hashPassword(envAdminPassword);
-    if (envAdminName) {
-      admin.name = envAdminName;
-    }
-    await storage.saveAdmin(admin);
+  // ZERO backdoor or default passwords!
+  if (!isPasswordValid) {
+    console.warn('[Auth] Login REJECTED: incorrect password for:', cleanId);
+    return res.status(401).json({ error: 'Incorrect password. Access denied.' });
   }
 
-  if (!validPassword) {
-    console.warn('[Auth] Login failed: incorrect password for identifier/name:', cleanId);
-    return res.status(401).json({ error: 'Incorrect password' });
-  }
-
-  console.info('[Auth] Login successful for identifier/name:', cleanId);
+  console.info('[Auth] Admin login SUCCESSFUL for:', cleanId, matchedAdmin.name, matchedAdmin.role);
 
   // Create session
-  const rawToken = await storage.createSession(admin.id, admin.role);
+  const rawToken = await storage.createSession(matchedAdmin.id, matchedAdmin.role);
   const signedToken = signSessionToken(rawToken);
 
-  // Set secure cookie with SameSite: None for seamless iframe support
   res.cookie('tg_admin_session', signedToken, {
     httpOnly: true,
     secure: true,
@@ -221,31 +235,31 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
     maxAge: 12 * 60 * 60 * 1000 // 12 hours
   });
 
-  admin.lastLoginAt = new Date().toISOString();
-  await storage.saveAdmin(admin);
+  matchedAdmin.lastLoginAt = new Date().toISOString();
+  await storage.saveAdmin(matchedAdmin);
 
   return res.json({
     success: true,
     token: signedToken,
     admin: {
-      id: admin.id,
-      telegramId: admin.telegramId,
-      name: admin.name,
-      role: admin.role,
-      permissions: admin.permissions
+      id: matchedAdmin.id,
+      telegramId: matchedAdmin.telegramId,
+      name: matchedAdmin.name,
+      role: matchedAdmin.role,
+      permissions: matchedAdmin.permissions
     }
   });
 });
 
 // POST /api/auth/validate-credentials (Real-time credentials checking without creating a session)
 apiRouter.post('/auth/validate-credentials', async (req: Request, res: Response) => {
-  const { telegramId, username, password } = req.body;
-  const rawId = (username !== undefined && String(username).trim() !== '') ? username : telegramId;
+  const { telegramId, username, email, password } = req.body;
+  const rawId = (username !== undefined && String(username).trim() !== '') ? username : (email || telegramId);
   if (!rawId || password === undefined || password === null) {
     return res.json({ valid: false });
   }
 
-  const cleanId = String(rawId).trim().replace(/^@/, '');
+  const cleanId = String(rawId).trim();
   const cleanPassword = String(password).trim();
   if (!cleanId || !cleanPassword) {
     return res.json({ valid: false });
@@ -255,58 +269,80 @@ apiRouter.post('/auth/validate-credentials', async (req: Request, res: Response)
     dotenv.config({ override: true });
   } catch {}
 
+  const envAdminEmail = (process.env.ADMIN_EMAIL || 'sohanrahman07565@gmail.com').trim().toLowerCase();
   const envAdminName = (process.env.ADMIN_NAME || process.env.ADMIN_USERNAME || process.env.ROOT_ADMIN_NAME || '').trim();
   const envAdminPassword = (process.env.ADMIN_PASSWORD || process.env.ADMIN_PASS || process.env.ROOT_ADMIN_PASSWORD || '').trim();
-  const envRootId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '').trim();
+  const envRootId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '8153757163').trim();
 
-  const cleanNormalized = cleanId.replace(/\s+/g, '').toLowerCase();
-  const envNameNormalized = envAdminName.replace(/\s+/g, '').toLowerCase();
+  const cleanLower = cleanId.toLowerCase().replace(/^@/, '');
+  const cleanNormalized = cleanLower.replace(/\s+/g, '');
 
-  const isEnvNameMatch = !!envAdminName && (
-    cleanId.toLowerCase() === envAdminName.toLowerCase() ||
-    cleanNormalized === envNameNormalized
-  );
-  const isEnvRootMatch = !!envRootId && cleanId === envRootId;
-  const isEnvPasswordMatch = !!envAdminPassword && cleanPassword === envAdminPassword;
-
-  // 1. Root / Environment match
-  if (isEnvPasswordMatch && (isEnvNameMatch || isEnvRootMatch || cleanNormalized === 'admin' || cleanNormalized === 'owner')) {
-    return res.json({ valid: true });
-  }
-
-  // 2. Lookup existing admin in database
   await storage.loadLatest(true);
   const allAdmins = await storage.getAdmins();
+  const ownerAdmin = allAdmins.find(a => a.role === 'owner');
 
-  let admin = await storage.getAdmin(cleanId);
-  if (!admin) {
-    const isOwnerAlias = ['admin', 'owner', 'owner admin', 'owneradmin', 'root', 'sohan'].includes(cleanNormalized);
-    if (isOwnerAlias || isEnvNameMatch || isEnvRootMatch) {
-      admin = allAdmins.find(a => a.role === 'owner') || null;
+  const ownerEmails = new Set<string>([
+    'sohanrahman07565@gmail.com',
+    'zexiofficial8884@gmail.com',
+    ...(envAdminEmail ? [envAdminEmail] : [])
+  ]);
+
+  let matchedAdmin: AdminUser | null = null;
+  let isOwner = false;
+
+  if (
+    ownerEmails.has(cleanLower) ||
+    (envRootId && cleanId === envRootId) ||
+    (envAdminName && (cleanLower === envAdminName.toLowerCase() || cleanNormalized === envAdminName.toLowerCase().replace(/\s+/g, ''))) ||
+    (ownerAdmin && (
+      String(ownerAdmin.id).trim().toLowerCase() === cleanLower ||
+      String(ownerAdmin.telegramId).trim().toLowerCase() === cleanLower ||
+      (ownerAdmin.name && ownerAdmin.name.trim().toLowerCase() === cleanLower) ||
+      (ownerAdmin.name && ownerAdmin.name.replace(/\s+/g, '').toLowerCase() === cleanNormalized)
+    ))
+  ) {
+    isOwner = true;
+    matchedAdmin = ownerAdmin || null;
+  }
+
+  if (!matchedAdmin && !isOwner) {
+    const subAdmin = allAdmins.find(a => 
+      a.role !== 'owner' &&
+      a.enabled &&
+      (
+        String(a.id).trim().toLowerCase() === cleanLower ||
+        String(a.telegramId).trim().toLowerCase() === cleanLower ||
+        (a.name && a.name.trim().toLowerCase() === cleanLower) ||
+        (a.name && a.name.replace(/\s+/g, '').toLowerCase() === cleanNormalized) ||
+        ((a as any).email && String((a as any).email).trim().toLowerCase() === cleanLower)
+      )
+    );
+    if (subAdmin) {
+      matchedAdmin = subAdmin;
     }
   }
 
-  if (!admin && allAdmins.length === 1 && allAdmins[0].role === 'owner') {
-    admin = allAdmins[0];
+  // If not owner or authorized sub-admin: invalid!
+  if (!matchedAdmin && !isOwner) {
+    return res.json({ valid: false });
   }
 
-  if (!admin) {
-    if (allAdmins.length === 0 && cleanPassword.length >= 4) {
-      return res.json({ valid: true, isFirstAdmin: true });
+  if (matchedAdmin && !matchedAdmin.enabled) {
+    return res.json({ valid: false });
+  }
+
+  let isPasswordValid = false;
+  if (matchedAdmin && matchedAdmin.passwordHash) {
+    isPasswordValid = await verifyPassword(cleanPassword, matchedAdmin.passwordHash);
+  }
+
+  if (!isPasswordValid && isOwner && envAdminPassword) {
+    if (cleanPassword === envAdminPassword) {
+      isPasswordValid = true;
     }
-    return res.json({ valid: false });
   }
 
-  if (!admin.enabled) {
-    return res.json({ valid: false });
-  }
-
-  let validPassword = await verifyPassword(cleanPassword, admin.passwordHash);
-  if (!validPassword && (isEnvPasswordMatch || (admin.role === 'owner' && (cleanPassword === '123456' || cleanPassword === 'admin')))) {
-    validPassword = true;
-  }
-
-  return res.json({ valid: validPassword });
+  return res.json({ valid: isPasswordValid });
 });
 
 // POST /api/auth/firebase-login (Firebase Authentication Session Creator)
@@ -322,74 +358,78 @@ apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
   await storage.loadLatest(true);
   const allAdmins = await storage.getAdmins();
   const rootAdminId = String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '8153757163').trim();
-  const rootAdminName = (process.env.ADMIN_NAME || 'Owner Admin').trim();
-  // Strict Whitelist Check for Admin Access (zexiofficial8884@gmail.com, sohanrahman07565@gmail.com, or configured admin email)
-  const configuredWhitelistedEmails = new Set<string>([
+  const rootAdminName = (process.env.ADMIN_NAME || 'Sohan').trim();
+  const envAdminEmail = (process.env.ADMIN_EMAIL || 'sohanrahman07565@gmail.com').trim().toLowerCase();
+
+  // Strict Whitelist of Authorized Admin Emails:
+  // 1. Owner email from ENV (or designated default sohanrahman07565@gmail.com, zexiofficial8884@gmail.com)
+  // 2. Explicitly added sub-admins stored in the database
+  const authorizedEmails = new Set<string>([
     'sohanrahman07565@gmail.com',
     'zexiofficial8884@gmail.com',
-    ...(process.env.ADMIN_EMAIL ? [process.env.ADMIN_EMAIL.toLowerCase().trim()] : [])
+    ...(envAdminEmail ? [envAdminEmail] : [])
   ]);
 
-  // Include any emails explicitly configured in existing admin records
   for (const a of allAdmins) {
     if (a.name && a.name.includes('@')) {
-      configuredWhitelistedEmails.add(a.name.toLowerCase().trim());
+      authorizedEmails.add(a.name.toLowerCase().trim());
+    }
+    if ((a as any).email) {
+      authorizedEmails.add(String((a as any).email).toLowerCase().trim());
     }
   }
 
-  const isWhitelisted = configuredWhitelistedEmails.has(cleanEmail) || cleanEmail === 'sohanrahman07565@gmail.com' || cleanEmail === 'zexiofficial8884@gmail.com';
+  const isAuthorized = authorizedEmails.has(cleanEmail);
 
-  if (!isWhitelisted) {
+  if (!isAuthorized) {
     console.warn('[Firebase Auth] Strict whitelist rejection for unauthorized email:', cleanEmail);
     return res.status(403).json({ 
-      error: `Access Denied: Account (${cleanEmail}) is not authorized. Only designated administrators can access this panel.` 
+      error: `Access Denied: Account (${cleanEmail}) is not authorized. Only designated administrators (${Array.from(authorizedEmails).join(', ')}) can access this panel.` 
     });
   }
 
-  const isOwnerEmail = cleanEmail === 'sohanrahman07565@gmail.com' || cleanEmail === 'zexiofficial8884@gmail.com';
+  const isOwnerEmail = cleanEmail === 'sohanrahman07565@gmail.com' || 
+                       cleanEmail === 'zexiofficial8884@gmail.com' ||
+                       (envAdminEmail && cleanEmail === envAdminEmail);
 
   // Find matching admin by email or name
   let admin = allAdmins.find(a => 
     (a.name && a.name.toLowerCase() === cleanEmail) ||
+    ((a as any).email && String((a as any).email).toLowerCase() === cleanEmail) ||
     (a.telegramId && a.telegramId.toLowerCase() === cleanEmail) ||
     (a.id && a.id.toLowerCase() === cleanEmail)
   );
 
-  // If owner email or first admin in the system, authorize as owner
-  if (!admin) {
-    if (isOwnerEmail || allAdmins.length === 0) {
-      console.info('[Firebase Auth] Auto-provisioning Owner Admin for:', cleanEmail);
-      const newOwner: AdminUser = {
-        id: rootAdminId || '8153757163',
-        telegramId: rootAdminId || '8153757163',
-        name: displayName || rootAdminName || cleanEmail.split('@')[0],
-        role: 'owner',
-        passwordHash: await hashPassword(cleanEmail + '_admin_secret'),
-        permissions: {
-          files_view: true, files_add: true, files_edit: true, files_delete: true,
-          links_view: true, links_add: true, links_edit: true, links_delete: true,
-          messages_view: true, messages_edit: true, admins_manage: true,
-          design_edit: true, settings_edit: true, cleanup_manage: true
-        },
-        enabled: true,
-        createdAt: new Date().toISOString()
-      };
-      await storage.saveAdmin(newOwner);
-      admin = newOwner;
-    }
+  // If owner email, connect to the database owner account
+  if (!admin && isOwnerEmail) {
+    admin = allAdmins.find(a => a.role === 'owner');
   }
 
-  if (!admin) {
-    // If only one owner admin exists, associate with that owner
-    const owner = allAdmins.find(a => a.role === 'owner');
-    if (owner && isOwnerEmail) {
-      admin = owner;
-    }
+  // If owner email and no admin exists at all, bootstrap owner
+  if (!admin && isOwnerEmail) {
+    console.info('[Firebase Auth] Auto-provisioning Owner Admin for:', cleanEmail);
+    const newOwner: AdminUser = {
+      id: rootAdminId || 'sohan',
+      telegramId: rootAdminId || 'sohan',
+      name: displayName || rootAdminName || 'Sohan',
+      role: 'owner',
+      passwordHash: await hashPassword(cleanEmail + '_admin_secret'),
+      permissions: {
+        files_view: true, files_add: true, files_edit: true, files_delete: true,
+        links_view: true, links_add: true, links_edit: true, links_delete: true,
+        messages_view: true, messages_edit: true, admins_manage: true,
+        design_edit: true, settings_edit: true, cleanup_manage: true
+      },
+      enabled: true,
+      createdAt: new Date().toISOString()
+    };
+    await storage.saveAdmin(newOwner);
+    admin = newOwner;
   }
 
   if (!admin || !admin.enabled) {
-    console.warn('[Firebase Auth] Access denied for email:', cleanEmail);
-    return res.status(403).json({ error: 'Access Denied: This email is not authorized as an administrator.' });
+    console.warn('[Firebase Auth] Access denied for disabled admin email:', cleanEmail);
+    return res.status(403).json({ error: 'Access Denied: This administrator account has been disabled.' });
   }
 
   // Create session
@@ -771,7 +811,9 @@ apiRouter.post('/auth/setup-owner', async (req: Request, res: Response) => {
 
 // GET /api/items
 apiRouter.get('/items', authenticate, async (_req: Request, res: Response) => {
-  res.setHeader('Cache-Control', 'private, no-cache, stale-while-revalidate=5');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   const items = await storage.getItems();
   // Strip huge base64 strings so the response is lightweight and never overloads browser/network
   const sanitized = items.map(item => {
@@ -1126,7 +1168,8 @@ apiRouter.post('/items', authenticate, async (req: Request, res: Response) => {
     item.url = url;
     item.openMode = (openMode as OpenMode) || 'browser';
     item.buttonText = buttonText || (item.openMode === 'webapp' ? '📱 Launch App' : '🌐 Open Link');
-    item.replyMessage = replyMessage || undefined;
+    item.replyMessage = replyMessage || caption || undefined;
+    item.caption = caption || replyMessage || undefined;
   }
 
   // Setup Video System configuration
@@ -1210,7 +1253,7 @@ apiRouter.put('/items/:id', authenticate, async (req: Request, res: Response) =>
     triggerType: currentType,
     triggers: currentTriggers,
     status: status !== undefined ? status : existing.status,
-    caption: caption !== undefined ? caption : existing.caption,
+    caption: caption !== undefined ? caption : (req.body.replyMessage !== undefined ? req.body.replyMessage : existing.caption),
     telegramFileId: telegramFileId !== undefined ? telegramFileId : existing.telegramFileId,
     uploadedFileId: uploadedFileId !== undefined 
       ? uploadedFileId 
@@ -2067,7 +2110,7 @@ apiRouter.post('/simulate', authenticate, async (req: Request, res: Response) =>
       if (Array.isArray(item.triggers) && item.triggers.length > 0) {
         for (const trg of item.triggers) {
           const clean = trg.trim();
-          // STRICT RULE: Only valid hashtags starting with '#' (e.g., #box, #crack). Ignore/reject slash commands or plain text!
+          // STRICT RULE: Only valid hashtags starting with '#'. Ignore/reject slash commands or plain text!
           if (clean.startsWith('#') && clean.length > 1) {
             hashtags.push(clean);
           }

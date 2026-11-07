@@ -33,6 +33,7 @@ export interface AdminUser {
   id: string; // Telegram user id
   telegramId: string;
   name: string;
+  username?: string;
   role: AdminRole;
   passwordHash: string;
   permissions: AdminPermissions;
@@ -244,7 +245,7 @@ export interface FraudKeywordRule {
   keyword: string;
   matchType: 'contains' | 'exact' | 'regex';
   action: 'warn' | 'delete' | 'delete_and_warn' | 'mute' | 'ban';
-  duration?: 'permanent' | '1h' | '6h' | '24h' | '7d' | '30d';
+  duration?: string; // Supports custom minutes/hours/days e.g. "30m", "2h", "1d" or "permanent"
   maxWarnings?: number; // e.g. 1 to 10 (default: 3)
   customMessage?: string;
   warningText?: string;
@@ -323,7 +324,7 @@ export const DEFAULT_TEMPLATES: Record<string, MessageTemplate> = {
     key: 'START_MESSAGE',
     name: 'Start / Welcome Message',
     description: 'Welcome message sent to users when they send /start to the bot in private chat with optional Photo or Video attachment',
-    content: "👋 <b>Welcome {user_name}!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> {bot_name}\n\n✨ <i>Send any hashtag (e.g., #box, #crack) in your group or here to receive your files privately!</i>",
+    content: "👋 <b>Welcome {user_name}!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> {bot_name}\n\n✨ <i>Send any configured trigger hashtag in your group or here to receive your files privately!</i>",
     variables: ['user_name', 'user_id', 'bot_name'],
     mediaType: 'none',
     mediaUrl: ''
@@ -1226,16 +1227,20 @@ export class SharedStorageService {
 
   // --- Items ---
   public async getItems(): Promise<ItemRecord[]> {
-    const cached = this.getCached<ItemRecord[]>('items:active');
-    if (cached) return cached;
-
+    // True real-time synchronization: always load latest items from persistent cloud storage
+    await this.loadLatest(true);
     this.checkAndCleanExpiredItemsSync();
-    const items = this.db.items;
-    this.setCached('items:active', items, 15000);
+    // Strictly sequential chronological order (FIFO): first added stays at top/first position
+    const items = [...this.db.items].sort((a, b) => {
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return timeA - timeB;
+    });
     return items;
   }
 
   public async getItem(id: string): Promise<ItemRecord | null> {
+    await this.loadLatest(true);
     const cached = this.itemCache.get(id);
     if (cached && cached.status === 'active') {
       if (cached.retentionType === 'temporary' && cached.expiresAt && Date.now() >= new Date(cached.expiresAt).getTime()) {
@@ -1278,7 +1283,7 @@ export class SharedStorageService {
     const matched = this.db.items.find(item => {
       if (item.status !== 'active' || !Array.isArray(item.triggers) || item.triggers.length === 0) return false;
 
-      // 1. Hashtag Commands (e.g., #box, #crack)
+      // 1. Hashtag Commands
       if (isHashtag) {
         return item.triggers.some(t => {
           const ct = t.trim().toLowerCase();
@@ -1286,7 +1291,7 @@ export class SharedStorageService {
         });
       }
 
-      // 2. Slash Commands (e.g., /box)
+      // 2. Slash Commands
       if (isSlash) {
         const cleanSlash = lowerTrigger.replace(/@\w+$/, '');
         return item.triggers.some(t => {
@@ -1314,12 +1319,22 @@ export class SharedStorageService {
   }
 
   public async saveItem(item: ItemRecord): Promise<boolean> {
+    await this.loadLatest(true);
     // Sanitize item: never store massive base64 in store.json if file is already on disk
     const cleanItem = { ...item };
     if (cleanItem.uploadedFileId && cleanItem.fileBase64) {
       delete cleanItem.fileBase64;
     } else if (cleanItem.fileBase64 && cleanItem.fileBase64.length > 50000) {
       delete cleanItem.fileBase64;
+    }
+    // Synchronize caption and replyMessage so whatever is added via bot or admin panel is identical
+    if (cleanItem.caption && !cleanItem.replyMessage) {
+      cleanItem.replyMessage = cleanItem.caption;
+    } else if (cleanItem.replyMessage && !cleanItem.caption) {
+      cleanItem.caption = cleanItem.replyMessage;
+    }
+    if (cleanItem.buttonText) {
+      cleanItem.buttonText = cleanItem.buttonText.trim();
     }
     const index = this.db.items.findIndex(i => i.id === cleanItem.id);
     if (index >= 0) {
@@ -1328,11 +1343,12 @@ export class SharedStorageService {
       this.db.items.push(cleanItem);
     }
     this.rebuildCache();
-    this.invalidateCache('items');
+    this.invalidateCache();
     return await this.persist();
   }
 
   public async deleteItem(id: string): Promise<boolean> {
+    await this.loadLatest(true);
     const itemToDelete = this.db.items.find(i => i.id === id);
     const lenBefore = this.db.items.length;
     this.db.items = this.db.items.filter(i => i.id !== id);
@@ -1341,7 +1357,7 @@ export class SharedStorageService {
         this.deleteUploadedFile(itemToDelete.uploadedFileId).catch(() => {});
       }
       this.rebuildCache();
-      this.invalidateCache('items');
+      this.invalidateCache();
       return await this.persist();
     }
     return false;

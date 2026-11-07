@@ -516,4 +516,65 @@
   animation: float-no-signal 2.8s ease-in-out infinite;
 }
 
+/* Continuous Gradient Color Loop for Footer & Accents */
+@keyframes gradient-loop {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.animate-gradient-loop {
+  background-size: 250% 250%;
+  animation: gradient-loop 4s ease-in-out infinite;
+}
+
+/* Smooth Infinite Horizontal Marquee Ticker */
+@keyframes marquee-scroll {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+.animate-marquee {
+  display: inline-flex;
+  white-space: nowrap;
+  animation: marquee-scroll 24s linear infinite;
+  will-change: transform;
+}
+
+.animate-marquee:hover {
+  animation-play-state: paused;
+}
+
+/* Continuous Scale/Pulse, Dynamic Gradient Color Loop & Drop Shadow for Login Footer */
+@keyframes zexi-footer-pulse {
+  0%, 100% {
+    transform: scale(1) translateY(0);
+    background-position: 0% 50%;
+    filter: drop-shadow(0 2px 8px rgba(239, 68, 68, 0.45));
+  }
+  50% {
+    transform: scale(1.08) translateY(-2px);
+    background-position: 100% 50%;
+    filter: drop-shadow(0 6px 18px rgba(244, 63, 94, 0.75)) drop-shadow(0 0 10px rgba(251, 191, 36, 0.4));
+  }
+}
+
+.animate-zexi-footer {
+  background-size: 250% 250%;
+  animation: zexi-footer-pulse 3.2s ease-in-out infinite;
+  display: inline-block;
+  will-change: transform, filter;
+}
+
+
 

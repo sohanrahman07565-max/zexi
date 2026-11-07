@@ -2155,11 +2155,21 @@ export class TelegramService {
             // If threshold reached and action is mute or ban, execute penalty
             if (isFinalThreshold && (action === 'mute' || action === 'ban')) {
               let durationSec = 0;
-              if (duration === '1h') durationSec = 3600;
-              else if (duration === '6h') durationSec = 6 * 3600;
-              else if (duration === '24h') durationSec = 24 * 3600;
-              else if (duration === '7d') durationSec = 7 * 86400;
-              else if (duration === '30d') durationSec = 30 * 86400;
+              const durLower = (duration || '').trim().toLowerCase();
+              if (durLower && durLower !== 'permanent') {
+                const match = durLower.match(/^(\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$/);
+                if (match) {
+                  const val = parseFloat(match[1]);
+                  const unit = match[2] || 'm';
+                  if (unit.startsWith('h')) durationSec = Math.round(val * 3600);
+                  else if (unit.startsWith('d')) durationSec = Math.round(val * 86400);
+                  else durationSec = Math.round(val * 60); // default minutes
+                } else if (durLower === '1h') durationSec = 3600;
+                else if (durLower === '6h') durationSec = 6 * 3600;
+                else if (durLower === '24h') durationSec = 24 * 3600;
+                else if (durLower === '7d') durationSec = 7 * 86400;
+                else if (durLower === '30d') durationSec = 30 * 86400;
+              }
 
               const untilDate = durationSec > 0 ? Math.floor(Date.now() / 1000) + durationSec : undefined;
 
@@ -2277,7 +2287,7 @@ export class TelegramService {
       const payload = getItemPayload(matchedItem);
       const deepLink = `https://t.me/${cleanBotUsername}?start=${payload}`;
 
-      const buttonText = (buttonTemplate.content || (isTextOnly ? 'View Message Privately' : 'Get File Privately')).replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\s🔒💬]+/u, '').trim() || (isTextOnly ? 'View Message Privately' : 'Get File Privately');
+      const buttonText = buttonTemplate.content?.trim() || (isTextOnly ? '💬 View Message Privately' : '📁 Get File Privately');
       const keyboard = [[{ text: buttonText, url: deepLink, style: 'primary' }]];
 
       const res = await this.sendGroupTriggerReply(
@@ -2293,7 +2303,7 @@ export class TelegramService {
       }
     } else if (matchedItem.type === 'link') {
       const template = templates.GROUP_LINK_REPLY || { content: "👇 Tap below — I'll send the link privately." };
-      const buttonTemplate = templates.GET_LINK_BUTTON || { content: 'Open Privately' };
+      const buttonTemplate = templates.GET_LINK_BUTTON || { content: '🔗 Open Privately' };
 
       const replyText = template.content
         .replace('{user_name}', userName)
@@ -2305,7 +2315,7 @@ export class TelegramService {
       const payload = getItemPayload(matchedItem);
       const deepLink = `https://t.me/${cleanBotUsername}?start=${payload}`;
 
-      const buttonText = (buttonTemplate.content || 'Open Privately').replace(/^[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\s🔒]+/u, '').trim() || 'Open Privately';
+      const buttonText = buttonTemplate.content?.trim() || '🔗 Open Privately';
       const keyboard = [[{ text: buttonText, url: deepLink, style: 'primary' }]];
 
       const res = await this.sendGroupTriggerReply(
@@ -2393,7 +2403,7 @@ export class TelegramService {
   ): Promise<void> {
     const templates = await storage.getTemplates();
     const startTemplate = templates.START_MESSAGE;
-    let startMsg = startTemplate?.content || "👋 <b>Welcome {user_name}!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> {bot_name}\n\n✨ <i>Send any hashtag (e.g., #box, #crack) in your group or here to receive your files privately!</i>";
+    let startMsg = startTemplate?.content || "👋 <b>Welcome {user_name}!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> {bot_name}\n\n✨ <i>Send any configured trigger hashtag in your group or here to receive your files privately!</i>";
     
     // Comprehensive Username & Name variables
     const cleanUsername = message?.from?.username ? `@${message.from.username.replace(/^@+/, '')}` : '';
@@ -3314,8 +3324,7 @@ export class TelegramService {
         }
       } else if (item.type === 'link') {
         const messageText = item.replyMessage || `🔗 ${item.name}`;
-        const rawButtonText = item.buttonText || (item.openMode === 'webapp' ? 'Launch App' : 'Open Link');
-        const buttonText = rawButtonText.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '').trim() || 'Open Link';
+        const buttonText = (item.buttonText && item.buttonText.trim()) || (item.openMode === 'webapp' ? '📱 Launch App' : '🌐 Open Link');
 
         const isHttps = /^https:\/\//i.test(item.url || '');
         const canUseWebApp = item.openMode === 'webapp' && isHttps;
@@ -3722,7 +3731,7 @@ export class TelegramService {
       if (Array.isArray(item.triggers) && item.triggers.length > 0) {
         for (const trg of item.triggers) {
           const clean = trg.trim();
-          // STRICT RULE: Only valid hashtags starting with '#' (e.g., #box, #crack). Ignore/reject slash commands or plain text!
+          // STRICT RULE: Only valid hashtags starting with '#'. Ignore/reject slash commands or plain text!
           if (clean.startsWith('#') && clean.length > 1) {
             hashtags.push(clean);
           }
@@ -3730,9 +3739,8 @@ export class TelegramService {
       }
     }
 
-    const uniqueTags = Array.from(new Set(hashtags)).sort((a, b) =>
-      a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
-    );
+    // Strictly sequential chronological order (FIFO): first added hashtag stays at the very top position
+    const uniqueTags = Array.from(new Set(hashtags));
 
     let formattedKeywords = '';
     if (uniqueTags.length === 0) {
@@ -4542,7 +4550,7 @@ export class TelegramService {
     // Stage 6 (Link Mandatory Step 2): Awaiting Open Button Text
     if (session.stage === 'awaiting_link_button_text') {
       const customBtn = rawInput.trim();
-      session.buttonText = customBtn ? customBtn.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '').trim() : 'Open Link';
+      session.buttonText = customBtn ? customBtn.trim() : 'Open Link';
       if (session.linkData) session.linkData.buttonText = session.buttonText;
       session.stage = 'awaiting_retention_choice';
 
@@ -4856,6 +4864,7 @@ export class TelegramService {
         fileSize: session.fileData?.fileSize || 0,
         mimeType: session.fileData?.mimeType || 'application/octet-stream',
         caption: session.caption || undefined,
+        replyMessage: session.caption || undefined,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         status: 'active',
@@ -4873,11 +4882,11 @@ export class TelegramService {
     } else {
       const url = session.linkData?.url || 'https://';
       const name = session.linkData?.name || `Link (${rawKeyword})`;
-      const defaultBtn = openMode === 'webapp' ? 'Launch App' : 'Open Link';
+      const defaultBtn = openMode === 'webapp' ? '📱 Launch App' : '🌐 Open Link';
       const rawBtn = session.buttonText || session.linkData?.buttonText || defaultBtn;
-      const buttonText = rawBtn.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '').trim() || 'Open Link';
+      const buttonText = (rawBtn && rawBtn.trim()) ? rawBtn.trim() : defaultBtn;
       const defaultReply = `🔗 Here is your requested link: ${url}`;
-      const replyMessage = session.replyMessage || session.linkData?.replyMessage || defaultReply;
+      const replyMessage = session.replyMessage || session.linkData?.replyMessage || session.caption || defaultReply;
       newItem = {
         id,
         type: 'link',
@@ -4886,6 +4895,7 @@ export class TelegramService {
         openMode,
         buttonText,
         replyMessage,
+        caption: replyMessage,
         triggers,
         triggerType,
         rawKeyword,
@@ -5278,18 +5288,18 @@ export class TelegramService {
         activeAddSessions.set(fromId, session);
         await storage.saveAddSession(fromId, session);
 
-        const promptExample = session.triggerType === 'hashtag'
-          ? 'e.g., #box or #crack'
+        const promptHint = session.triggerType === 'hashtag'
+          ? 'starting with #'
           : session.triggerType === 'slash'
-          ? 'e.g., /download or /play'
-          : 'e.g., box or tutorial';
+          ? 'starting with /'
+          : 'plain text keyword';
 
         const stepHeader = session.type === 'file' ? 'Step 2/4' : 'Step 2/7';
 
         if (chatId) {
           const promptId = await TelegramService.sendOrEditSetupPrompt(
             chatId,
-            `<b>${stepHeader}: Trigger Name</b>\nPlease enter the trigger keyword for this ${session.type === 'file' ? 'file' : 'link'} (${promptExample}):`,
+            `<b>${stepHeader}: Trigger Name</b>\nPlease enter the trigger keyword for this ${session.type === 'file' ? 'file' : 'link'} (${promptHint}):`,
             {
               inline_keyboard: [
                 [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
@@ -5407,6 +5417,7 @@ export class TelegramService {
     if (data === 'add_link_default_msg') {
       if (session) {
         session.replyMessage = `🔗 Here is your requested link: ${session.linkData?.url || ''}`;
+        session.caption = session.replyMessage;
         if (session.linkData) session.linkData.replyMessage = session.replyMessage;
         session.stage = 'awaiting_link_button_text';
         activeAddSessions.set(fromId, session);
@@ -5568,7 +5579,7 @@ export class TelegramService {
       if (chatId) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: `ℹ️ <b>How to Use This Bot:</b>\n\n• Type any file hashtag (e.g. <code>#box</code>, <code>#crack</code>) in your group or here to receive your file privately.\n• All files are delivered securely and privately in direct message.\n• Type <code>/filters</code> anytime to see the full list of available file hashtags.\n• To open public links, tap the button provided in group responses.`,
+          text: `ℹ️ <b>How to Use This Bot:</b>\n\n• Type any file hashtag in your group or here to receive your file privately.\n• All files are delivered securely and privately in direct message.\n• Type <code>/filters</code> anytime to see the full list of available file hashtags.\n• To open public links, tap the button provided in group responses.`,
           parse_mode: 'HTML'
         });
       }

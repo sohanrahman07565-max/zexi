@@ -52,9 +52,16 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
     return items.filter((item) => item.status === 'active' && item.inFiltersList === true);
   }, [items]);
 
-  // Filtered list based on search and tab filter
+  // Filtered list strictly ordered sequentially (FIFO / chronological):
+  // The first filter added stays at the very top/first position, second right below it, and so on.
   const displayedItems = useMemo(() => {
-    return items.filter((item) => {
+    const sorted = [...items].sort((a, b) => {
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return timeA - timeB;
+    });
+
+    return sorted.filter((item) => {
       const isVisible = item.inFiltersList === true;
       if (filterMode === 'in_filters' && !isVisible) return false;
       if (filterMode === 'hidden' && isVisible) return false;
@@ -321,7 +328,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search keyword (e.g. #box, /download) or name..."
+              placeholder="Search keyword or trigger name..."
               className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl py-2 pl-9 pr-3 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
             />
           </div>

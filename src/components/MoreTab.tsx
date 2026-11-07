@@ -8,7 +8,7 @@ import {
   MessageSquare, Users, Trash2, Settings, Smartphone, LogOut, 
   ChevronRight, Edit2, Check, RefreshCw, Plus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi, WifiOff,
   Megaphone, Image as ImageIcon, Video as VideoIcon, Music, Mic, Pin, Paperclip, Loader2, Radio,
-  Flag, AlertTriangle, Ban, CheckCircle, ShieldAlert, Eye, ExternalLink,
+  Flag, AlertTriangle, Ban, CheckCircle, ShieldAlert, Eye, ExternalLink, ShieldCheck,
   Server, Database, Copy, Download, Upload, Activity, HardDrive, Key, CheckSquare, Square
 } from 'lucide-react';
 import { EmojiStore } from './EmojiStore';
@@ -84,199 +84,27 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [newFraudKeyword, setNewFraudKeyword] = useState<string>('');
   const [newFraudMatchType, setNewFraudMatchType] = useState<'contains' | 'exact' | 'regex'>('contains');
   const [newFraudAction, setNewFraudAction] = useState<'delete_and_warn' | 'delete' | 'warn' | 'mute' | 'ban'>('delete_and_warn');
-  const [newFraudDuration, setNewFraudDuration] = useState<'permanent' | '1h' | '6h' | '24h' | '7d' | '30d'>('permanent');
+  const [newFraudDuration, setNewFraudDuration] = useState<string>('30m');
+  const [newFraudDurationUnit, setNewFraudDurationUnit] = useState<'minutes' | 'hours' | 'days' | 'permanent'>('minutes');
+  const [newFraudDurationValue, setNewFraudDurationValue] = useState<number>(30);
   const [newFraudMaxWarnings, setNewFraudMaxWarnings] = useState<number>(3);
   const [newFraudWarningText, setNewFraudWarningText] = useState<string>('');
   const [newFraudMediaUrl, setNewFraudMediaUrl] = useState<string>('');
+  const [newFraudVideoFile, setNewFraudVideoFile] = useState<File | null>(null);
+  const [newFraudVideoName, setNewFraudVideoName] = useState<string>('');
+  const fraudVideoInputRef = useRef<HTMLInputElement>(null);
   const [newFraudMediaType, setNewFraudMediaType] = useState<'text' | 'photo' | 'video' | 'audio' | 'voice'>('text');
   const [savingFraudRule, setSavingFraudRule] = useState<boolean>(false);
 
-  // Backup Server state
-  const [backupConfig, setBackupConfig] = useState<any>(null);
-  const [backupLocalStats, setBackupLocalStats] = useState<any>(null);
-  const [backupLoading, setBackupLoading] = useState<boolean>(false);
-  const [backupSaving, setBackupSaving] = useState<boolean>(false);
-  const [backupSyncing, setBackupSyncing] = useState<boolean>(false);
-  const [backupTesting, setBackupTesting] = useState<boolean>(false);
-  const [backupSwitchingRole, setBackupSwitchingRole] = useState<boolean>(false);
-  const [backupRestoring, setBackupRestoring] = useState<boolean>(false);
 
-  // Form states
-  const [backupEnabled, setBackupEnabled] = useState<boolean>(false);
-  const [backupServerUrl, setBackupServerUrl] = useState<string>('');
-  const [backupSecretKey, setBackupSecretKey] = useState<string>('');
-  const [backupAutoSync, setBackupAutoSync] = useState<boolean>(true);
-  const [backupInterval, setBackupInterval] = useState<number>(5);
-  const [backupTestResult, setBackupTestResult] = useState<{
-    success: boolean;
-    message: string;
-    latencyMs?: number;
-    role?: string;
-  } | null>(null);
 
-  const loadBackupStatus = async () => {
-    setBackupLoading(true);
-    try {
-      const data = await api.getBackupServerStatus();
-      setBackupConfig(data.config);
-      setBackupLocalStats(data.localStats);
-      setBackupEnabled(data.config.enabled);
-      setBackupServerUrl(data.config.serverUrl || '');
-      setBackupSecretKey(data.config.secretKey || '');
-      setBackupAutoSync(data.config.autoSyncOnSave !== false);
-      setBackupInterval(data.config.syncIntervalMinutes || 5);
-    } catch (err: any) {
-      console.warn('Failed to load backup status:', err);
-    } finally {
-      setBackupLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadBackupStatus();
-  }, []);
-
-  useEffect(() => {
-    if (subView === 'backup') {
-      loadBackupStatus();
-    }
-  }, [subView]);
-
-  const handleSaveBackupConfig = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setBackupSaving(true);
-    try {
-      const res = await api.updateBackupServerConfig({
-        enabled: backupEnabled,
-        serverUrl: backupServerUrl.trim(),
-        secretKey: backupSecretKey.trim(),
-        autoSyncOnSave: backupAutoSync,
-        syncIntervalMinutes: backupInterval
-      });
-      setBackupConfig(res.config);
-      toast.success('Backup server configuration saved successfully!');
-    } catch (err: any) {
-      toast.error(err.message || 'Failed to save backup configuration');
-    } finally {
-      setBackupSaving(false);
-    }
-  };
-
-  const handleSyncNow = async () => {
-    if (!backupServerUrl.trim()) {
-      toast.error('Please configure a designated backup server URL first');
-      return;
-    }
-    setBackupSyncing(true);
-    try {
-      const res = await api.syncNowBackupServer();
-      toast.success(res.message || 'Live database and files mirrored successfully!');
-      await loadBackupStatus();
-    } catch (err: any) {
-      toast.error(err.message || 'Failed to sync to backup server');
-    } finally {
-      setBackupSyncing(false);
-    }
-  };
-
-  const handleTestConnection = async () => {
-    if (!backupServerUrl.trim()) {
-      toast.error('Please enter a target backup server URL');
-      return;
-    }
-    setBackupTesting(true);
-    setBackupTestResult(null);
-    try {
-      const res = await api.testBackupServerConnection(backupServerUrl.trim(), backupSecretKey.trim());
-      setBackupTestResult({
-        success: true,
-        message: res.message,
-        latencyMs: res.latencyMs,
-        role: res.backupServerRole
-      });
-      toast.success(`Handshake verified! Latency: ${res.latencyMs || 0}ms`);
-    } catch (err: any) {
-      setBackupTestResult({
-        success: false,
-        message: err.message || 'Connection failed'
-      });
-      toast.error(err.message || 'Connection test failed');
-    } finally {
-      setBackupTesting(false);
-    }
-  };
-
-  const handleSwitchRole = async () => {
-    const isCurrentlyBackup = backupConfig?.role === 'backup';
-    const targetRole = isCurrentlyBackup ? 'primary' : 'backup';
-    const confirmMsg = isCurrentlyBackup
-      ? 'ACTIVATE FAILOVER: Promote this backup server to Active Primary? Bot operations will resume immediately on this server.'
-      : 'STANDBY SWITCH: Switch this server to Silent Backup mirror? Bot polling will become dormant.';
-
-    if (!window.confirm(confirmMsg)) return;
-
-    setBackupSwitchingRole(true);
-    try {
-      const res = await api.switchBackupServerRole(targetRole);
-      setBackupConfig(res.config);
-      toast.success(res.message);
-      await loadBackupStatus();
-      onRefreshSettings();
-    } catch (err: any) {
-      toast.error(err.message || 'Failed to switch role');
-    } finally {
-      setBackupSwitchingRole(false);
-    }
-  };
-
-  const handleGenerateNewSecretKey = () => {
-    const newKey = 'bsk_' + Math.random().toString(36).substring(2, 10) + Math.random().toString(36).substring(2, 10);
-    setBackupSecretKey(newKey);
-    toast.info('New replication token generated. Click "Save Configuration" to apply.');
-  };
-
-  const handleCopySecretKey = () => {
-    if (!backupSecretKey) return;
-    navigator.clipboard.writeText(backupSecretKey);
-    toast.success('Replication token copied to clipboard!');
-  };
-
-  const handleRestoreFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!window.confirm(`Restore all database tables and files from "${file.name}"? This will update current data.`)) {
-      e.target.value = '';
-      return;
-    }
-
-    setBackupRestoring(true);
-    try {
-      const text = await file.text();
-      const parsed = JSON.parse(text);
-      const res = await api.restoreBackupSnapshot(parsed);
-      toast.success(res.message || 'Snapshot successfully restored!');
-      await loadBackupStatus();
-      onRefreshSettings();
-      onRefreshTemplates();
-    } catch (err: any) {
-      toast.error(err.message || 'Failed to restore snapshot from file');
-    } finally {
-      setBackupRestoring(false);
-      e.target.value = '';
-    }
-  };
-
-  const handleDownloadSnapshot = () => {
-    window.open('/api/backup-server/export-snapshot', '_blank');
-  };
-
-  // Secret 7-tap quick action gesture on Header Card to automatically set up Webhook
+  // Admin Details Popup State & 7-Tap Gesture Trigger
   const tapCountRef = useRef(0);
   const lastTapTimeRef = useRef(0);
   const [gestureFeedback, setGestureFeedback] = useState(false);
+  const [showAdminDetailsPopup, setShowAdminDetailsPopup] = useState(false);
 
-  const handleHeaderSecretTap = async () => {
+  const handleHeaderSecretTap = () => {
     const now = Date.now();
     // Reset if more than 2 seconds between taps
     if (now - lastTapTimeRef.current > 2000) {
@@ -286,35 +114,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     }
     lastTapTimeRef.current = now;
 
-    if (tapCountRef.current === 7) {
+    if (tapCountRef.current >= 7) {
       tapCountRef.current = 0;
       setGestureFeedback(true);
-      setTimeout(() => setGestureFeedback(false), 1200);
-
-      const targetUrl = typeof window !== 'undefined' ? window.location.origin : '';
-      if (!targetUrl) {
-        toast.error('Unable to detect web application URL for webhook setup.', 'Webhook Error');
-        return;
-      }
-
-      toast.info('Secret 7-tap gesture detected: Configuring Webhook...', 'Quick Action');
-
-      try {
-        const res = await api.setWebhook(targetUrl.trim());
-        if (res && res.ok) {
-          toast.success(
-            `Telegram Webhook connected successfully! (${targetUrl})`,
-            'Webhook Activated'
-          );
-        } else {
-          toast.error(
-            res?.description || res?.message || 'Webhook registration error from Telegram',
-            'Webhook Failed'
-          );
-        }
-      } catch (err: any) {
-        toast.error(err.message || 'Failed to setup webhook', 'Webhook Error');
-      }
+      setShowAdminDetailsPopup(true);
+      setTimeout(() => setGestureFeedback(false), 800);
     }
   };
 
@@ -596,6 +400,21 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     }
     setSavingFraudRule(true);
     try {
+      let finalMediaUrl = newFraudMediaUrl.trim();
+      let finalMediaType = newFraudMediaType;
+
+      // Handle direct video file upload if provided from device/gallery
+      if (newFraudVideoFile) {
+        toast.info('Uploading video file from device...');
+        const vFd = new FormData();
+        vFd.append('file', newFraudVideoFile);
+        vFd.append('fileName', newFraudVideoFile.name);
+        vFd.append('fileType', 'video');
+        const vRes = await api.uploadFile(vFd);
+        finalMediaUrl = vRes.uploadedFileId || vRes.fileId;
+        finalMediaType = 'video';
+      }
+
       await api.createFraudRule({
         keyword: newFraudKeyword.trim(),
         matchType: newFraudMatchType,
@@ -603,16 +422,20 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         duration: (newFraudAction === 'mute' || newFraudAction === 'ban') ? newFraudDuration : undefined,
         maxWarnings: newFraudMaxWarnings,
         warningText: newFraudWarningText.trim() || undefined,
-        mediaUrl: newFraudMediaUrl.trim() || undefined,
-        mediaType: newFraudMediaType !== 'text' ? (newFraudMediaType as any) : undefined,
+        mediaUrl: finalMediaUrl || undefined,
+        mediaType: finalMediaType !== 'text' ? (finalMediaType as any) : undefined,
         enabled: true
       });
       toast.success(`Rule for "${newFraudKeyword.trim()}" created!`);
       setNewFraudKeyword('');
       setNewFraudWarningText('');
       setNewFraudMediaUrl('');
+      setNewFraudVideoFile(null);
+      setNewFraudVideoName('');
+      setNewFraudMediaType('text');
       setNewFraudMaxWarnings(3);
       setNewFraudDuration('permanent');
+      if (fraudVideoInputRef.current) fraudVideoInputRef.current.value = '';
       setShowAddFraudRule(false);
       await loadFraudRules();
     } catch (err: any) {
@@ -1300,6 +1123,75 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </div>
         </div>
 
+        {/* Smooth Animated Admin Details Popup */}
+        {showAdminDetailsPopup && (
+          <div 
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
+            onClick={() => setShowAdminDetailsPopup(false)}
+          >
+            <div 
+              className="w-full max-w-sm rounded-3xl bg-[#0c0c14]/98 border border-white/20 p-5 shadow-[0_20px_50px_rgba(0,0,0,0.9),0_0_30px_rgba(239,68,68,0.2)] text-white relative animate-in zoom-in-95 duration-200"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header Title */}
+              <div className="flex items-center justify-between pb-3.5 border-b border-zinc-800">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-red-500/15 border border-red-500/30 flex items-center justify-center text-red-400">
+                    <ShieldCheck className="w-4 h-4" />
+                  </div>
+                  <h3 className="text-sm font-bold text-white tracking-tight">Admin Details</h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowAdminDetailsPopup(false)}
+                  className="w-7 h-7 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Full Telegram Details */}
+              <div className="space-y-3 pt-4">
+                <div className="p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800 space-y-1">
+                  <span className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider block">Admin ID</span>
+                  <span className="text-sm font-mono font-bold text-white block select-all">{currentUser.telegramId || currentUser.id || 'N/A'}</span>
+                </div>
+
+                <div className="p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800 space-y-1">
+                  <span className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider block">Username</span>
+                  <span className="text-sm font-mono font-bold text-red-400 block select-all">
+                    {currentUser.username ? (currentUser.username.startsWith('@') ? currentUser.username : `@${currentUser.username}`) : `@${(currentUser.name || 'admin').toLowerCase().replace(/\s+/g, '_')}`}
+                  </span>
+                </div>
+
+                <div className="p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800 space-y-1">
+                  <span className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider block">Role</span>
+                  <span className="text-xs font-bold text-amber-400 block uppercase tracking-wide">
+                    {currentUser.role === 'owner' ? 'Owner / Super Administrator' : 'Administrator'}
+                  </span>
+                </div>
+
+                <div className="p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800 space-y-1">
+                  <span className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider block">Credentials</span>
+                  <span className="text-xs font-mono text-zinc-300 block break-all">
+                    Authorized Session Token ({currentUser.role || 'admin'})
+                  </span>
+                </div>
+              </div>
+
+              <div className="pt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowAdminDetailsPopup(false)}
+                  className="w-full py-2.5 px-4 rounded-xl bg-white/10 hover:bg-white/15 border border-white/20 text-white font-bold text-xs transition-colors cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Menu Items */}
         <div className="glass-panel rounded-2xl divide-y divide-zinc-800/80 border border-zinc-800 overflow-hidden">
           {/* Templates */}
@@ -1419,35 +1311,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             <ChevronRight className="w-4 h-4 text-zinc-500" />
           </button>
 
-          {/* Backup Server & Live Failover Mirror */}
-          <button
-            onClick={() => setSubView('backup')}
-            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
-          >
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-cyan-500/10 text-cyan-400 flex items-center justify-center border border-cyan-500/20">
-                <Server className="w-4 h-4" />
-              </div>
-              <div>
-                <div className="text-xs font-semibold text-white flex items-center gap-1.5">
-                  <span>Backup Server</span>
-                  <span className={`text-[10px] px-1.5 py-0.2 rounded-md font-mono font-semibold ${
-                    backupConfig?.role === 'backup'
-                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                      : backupConfig?.enabled
-                      ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/30'
-                      : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
-                  }`}>
-                    {backupConfig?.role === 'backup' ? 'Silent Mirror' : backupConfig?.enabled ? 'Real-Time Sync' : 'Standby'}
-                  </span>
-                </div>
-                <p className="text-[10px] text-zinc-400 mt-0.5">
-                  Real-time database &amp; file replication, failover mirror
-                </p>
-              </div>
-            </div>
-            <ChevronRight className="w-4 h-4 text-zinc-500" />
-          </button>
+
 
           {/* Emoji Store */}
           <button
@@ -3320,411 +3184,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   }
 
   // -------------------------------------------------------------
-  // SUB-VIEW: BACKUP SERVER & LIVE FAILOVER MIRROR
-  // -------------------------------------------------------------
-  if (subView === 'backup') {
-    const isPrimaryRole = (backupConfig?.role || 'primary') === 'primary';
-    const isBackupRole = backupConfig?.role === 'backup';
-    const isFailoverActive = Boolean(backupConfig?.failoverActive);
-
-    return (
-      <div className="space-y-4 pb-28">
-        {/* Top Header & Back Button */}
-        <div className="flex items-center justify-between">
-          <button
-            onClick={() => setSubView('menu')}
-            className="text-xs text-red-400 hover:text-sky-300 font-medium cursor-pointer"
-          >
-            ← Back to More
-          </button>
-          <div className="flex items-center gap-2">
-            <span
-              className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border ${
-                isBackupRole
-                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
-                  : backupConfig?.enabled
-                  ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
-                  : 'bg-zinc-800 text-zinc-400 border-zinc-700'
-              }`}
-            >
-              {isBackupRole ? (isFailoverActive ? '⚡ Failover Active' : '🛡️ Silent Backup Mirror') : (backupConfig?.enabled ? '🟢 Real-Time Primary Active' : 'Standby Master')}
-            </span>
-          </div>
-        </div>
-
-        {/* Server Role & Failover Status Banner */}
-        <div className={`p-4 rounded-2xl glass-panel border space-y-3 ${
-          isBackupRole 
-            ? 'bg-gradient-to-br from-amber-950/30 via-zinc-900 to-zinc-950 border-amber-500/30' 
-            : 'bg-gradient-to-br from-cyan-950/30 via-zinc-900 to-zinc-950 border-cyan-500/30'
-        }`}>
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex items-center gap-3">
-              <div className={`w-10 h-10 rounded-2xl flex items-center justify-center border shadow-md ${
-                isBackupRole 
-                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' 
-                  : 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40'
-              }`}>
-                <Server className="w-5 h-5" />
-              </div>
-              <div>
-                <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                  <span>{isBackupRole ? 'Backup Server (Silent Mirror)' : 'Primary Master Server'}</span>
-                </h3>
-                <p className="text-[11px] text-zinc-400 mt-0.5">
-                  {isBackupRole 
-                    ? 'Receives all database records, ZIPs, files, users, and templates silently in real-time. Dormant bot listener awaits failover.' 
-                    : 'Active server hosting Telegram bot operations. Continuously replicates all data and files to your designated backup mirror.'}
-                </p>
-              </div>
-            </div>
-
-            {/* Quick Refresh */}
-            <button
-              onClick={loadBackupStatus}
-              disabled={backupLoading}
-              className="p-2 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors cursor-pointer"
-              title="Refresh status"
-            >
-              <RefreshCw className={`w-4 h-4 ${backupLoading ? 'animate-spin' : ''}`} />
-            </button>
-          </div>
-
-          {/* Role Switcher & Failover Action */}
-          <div className="pt-3 border-t border-zinc-800/80 flex flex-wrap items-center justify-between gap-2.5">
-            <div className="text-[11px] text-zinc-300">
-              <span className="text-zinc-500">Current Mode: </span>
-              <b className={isBackupRole ? 'text-amber-400' : 'text-cyan-400'}>
-                {isBackupRole ? 'Standby Failover Copy' : 'Active Primary Source'}
-              </b>
-            </div>
-
-            <button
-              onClick={handleSwitchRole}
-              disabled={backupSwitchingRole}
-              className={`px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-md active:scale-95 disabled:opacity-50 ${
-                isBackupRole
-                  ? 'bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-black'
-                  : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700'
-              }`}
-            >
-              {backupSwitchingRole ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Radio className="w-3.5 h-3.5" />
-              )}
-              <span>
-                {isBackupRole
-                  ? (isFailoverActive ? 'Demote to Silent Mirror' : 'ACTIVATE FAILOVER (Promote to Primary)')
-                  : 'Switch to Silent Backup Mode'}
-              </span>
-            </button>
-          </div>
-        </div>
-
-        {/* Live Mirror Vault & Local Data Stats */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-          <div className="p-3 rounded-2xl glass-panel border border-zinc-800 bg-zinc-950/60 space-y-1">
-            <div className="flex items-center gap-1.5 text-zinc-400 text-[10px]">
-              <Database className="w-3 h-3 text-cyan-400" />
-              <span>Items &amp; Triggers</span>
-            </div>
-            <div className="text-base font-bold text-white font-mono">
-              {backupLocalStats?.itemsCount ?? 0}
-            </div>
-            <div className="text-[9px] text-zinc-500">
-              {backupConfig?.mirroredStats?.itemsCount ? `Mirrored: ${backupConfig.mirroredStats.itemsCount}` : 'Fully synced'}
-            </div>
-          </div>
-
-          <div className="p-3 rounded-2xl glass-panel border border-zinc-800 bg-zinc-950/60 space-y-1">
-            <div className="flex items-center gap-1.5 text-zinc-400 text-[10px]">
-              <HardDrive className="w-3 h-3 text-emerald-400" />
-              <span>Files &amp; ZIPs</span>
-            </div>
-            <div className="text-base font-bold text-white font-mono">
-              {backupLocalStats?.filesCount ?? 0}
-            </div>
-            <div className="text-[9px] text-zinc-500">
-              {backupConfig?.mirroredStats?.filesCount ? `Mirrored: ${backupConfig.mirroredStats.filesCount}` : 'Binary mirrored'}
-            </div>
-          </div>
-
-          <div className="p-3 rounded-2xl glass-panel border border-zinc-800 bg-zinc-950/60 space-y-1">
-            <div className="flex items-center gap-1.5 text-zinc-400 text-[10px]">
-              <Users className="w-3 h-3 text-purple-400" />
-              <span>Bot Users</span>
-            </div>
-            <div className="text-base font-bold text-white font-mono">
-              {backupLocalStats?.usersCount ?? 0}
-            </div>
-            <div className="text-[9px] text-zinc-500">
-              {backupConfig?.mirroredStats?.usersCount ? `Mirrored: ${backupConfig.mirroredStats.usersCount}` : 'User ledger'}
-            </div>
-          </div>
-
-          <div className="p-3 rounded-2xl glass-panel border border-zinc-800 bg-zinc-950/60 space-y-1">
-            <div className="flex items-center gap-1.5 text-zinc-400 text-[10px]">
-              <ShieldAlert className="w-3 h-3 text-amber-400" />
-              <span>Rules &amp; Reports</span>
-            </div>
-            <div className="text-base font-bold text-white font-mono">
-              {(backupLocalStats?.reportsCount ?? 0) + (backupLocalStats?.rulesCount ?? 0)}
-            </div>
-            <div className="text-[9px] text-zinc-500">
-              Security settings
-            </div>
-          </div>
-        </div>
-
-        {/* Sync Status Feedback Banner */}
-        {backupConfig?.lastSyncStatus && (
-          <div className={`p-3 rounded-2xl border text-xs flex items-center justify-between gap-3 ${
-            backupConfig.lastSyncStatus === 'success'
-              ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-              : backupConfig.lastSyncStatus === 'failed'
-              ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-              : backupConfig.lastSyncStatus === 'in_progress'
-              ? 'bg-cyan-500/10 border-cyan-500/30 text-cyan-300'
-              : 'bg-zinc-900 border-zinc-800 text-zinc-400'
-          }`}>
-            <div className="flex items-center gap-2 min-w-0">
-              {backupConfig.lastSyncStatus === 'in_progress' ? (
-                <Loader2 className="w-4 h-4 animate-spin shrink-0 text-cyan-400" />
-              ) : backupConfig.lastSyncStatus === 'success' ? (
-                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
-              ) : backupConfig.lastSyncStatus === 'failed' ? (
-                <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-              ) : (
-                <Clock className="w-4 h-4 shrink-0 text-zinc-400" />
-              )}
-              <div className="truncate">
-                <span className="font-semibold block">{backupConfig.lastSyncMessage || 'Ready for replication'}</span>
-                {backupConfig.lastSyncAt && (
-                  <span className="text-[10px] opacity-75">
-                    Last sync: {new Date(backupConfig.lastSyncAt).toLocaleString()}
-                  </span>
-                )}
-              </div>
-            </div>
-
-            <button
-              onClick={handleSyncNow}
-              disabled={backupSyncing}
-              className="px-3 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs shrink-0 flex items-center gap-1.5 cursor-pointer shadow-sm disabled:opacity-50 transition-all active:scale-95"
-            >
-              {backupSyncing ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-              <span>Sync Now</span>
-            </button>
-          </div>
-        )}
-
-        {/* Replication Configuration Form */}
-        <form onSubmit={handleSaveBackupConfig} className="p-4 rounded-2xl glass-panel border border-zinc-800 space-y-3.5">
-          <div className="flex items-center justify-between border-b border-zinc-800 pb-2.5">
-            <div className="flex items-center gap-2">
-              <Settings className="w-4 h-4 text-cyan-400" />
-              <h4 className="text-xs font-bold text-white uppercase tracking-wider">
-                Replication &amp; Mirror Settings
-              </h4>
-            </div>
-
-            {/* Enable toggle switch */}
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={backupEnabled}
-                onChange={(e) => setBackupEnabled(e.target.checked)}
-                className="sr-only peer"
-              />
-              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-cyan-500"></div>
-            </label>
-          </div>
-
-          <div>
-            <label className="text-[11px] font-semibold text-zinc-300 block mb-1">
-              Designated Backup Server URL <span className="text-rose-400">*</span>
-            </label>
-            <input
-              type="url"
-              value={backupServerUrl}
-              onChange={(e) => setBackupServerUrl(e.target.value)}
-              placeholder="https://backup-bot.yourdomain.com"
-              className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-cyan-500 font-mono"
-            />
-            <span className="text-[10px] text-zinc-500 mt-1 block">
-              The public URL of your secondary bot instance where mirror snapshots are automatically delivered.
-            </span>
-          </div>
-
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-[11px] font-semibold text-zinc-300">
-                Replication Secret Token <span className="text-rose-400">*</span>
-              </label>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleCopySecretKey}
-                  className="text-[10px] text-cyan-400 hover:text-cyan-300 flex items-center gap-1 cursor-pointer"
-                >
-                  <Copy className="w-3 h-3" />
-                  <span>Copy</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleGenerateNewSecretKey}
-                  className="text-[10px] text-zinc-400 hover:text-zinc-200 cursor-pointer"
-                >
-                  Regenerate
-                </button>
-              </div>
-            </div>
-            <input
-              type="text"
-              value={backupSecretKey}
-              onChange={(e) => setBackupSecretKey(e.target.value)}
-              placeholder="e.g. bsk_abc123xyz"
-              className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-cyan-500 font-mono"
-            />
-            <span className="text-[10px] text-zinc-500 mt-1 block">
-              Both Primary and Backup instances must use this identical token in headers to authenticate replication.
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-            <div className="flex items-center justify-between p-2.5 rounded-xl bg-zinc-950/80 border border-zinc-800/80">
-              <div>
-                <div className="text-xs font-semibold text-white">Auto-Sync on Changes</div>
-                <div className="text-[10px] text-zinc-400">Mirror files and triggers instantly on save</div>
-              </div>
-              <input
-                type="checkbox"
-                checked={backupAutoSync}
-                onChange={(e) => setBackupAutoSync(e.target.checked)}
-                className="w-4 h-4 accent-cyan-500 rounded cursor-pointer"
-              />
-            </div>
-
-            <div className="flex items-center justify-between p-2.5 rounded-xl bg-zinc-950/80 border border-zinc-800/80">
-              <div>
-                <div className="text-xs font-semibold text-white">Heartbeat Interval</div>
-                <div className="text-[10px] text-zinc-400">Periodic mirror check</div>
-              </div>
-              <select
-                value={backupInterval}
-                onChange={(e) => setBackupInterval(Number(e.target.value) || 5)}
-                className="px-2 py-1 rounded-lg bg-zinc-900 border border-zinc-700 text-xs text-white"
-              >
-                <option value={5}>5 minutes</option>
-                <option value={15}>15 minutes</option>
-                <option value={30}>30 minutes</option>
-                <option value={60}>1 hour</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Test Result Callout */}
-          {backupTestResult && (
-            <div className={`p-3 rounded-xl border text-xs ${
-              backupTestResult.success
-                ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-            }`}>
-              <div className="font-semibold flex items-center gap-1.5">
-                {backupTestResult.success ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />}
-                <span>{backupTestResult.message}</span>
-              </div>
-              {backupTestResult.latencyMs !== undefined && (
-                <div className="text-[10px] opacity-75 mt-0.5">
-                  Handshake Latency: {backupTestResult.latencyMs}ms | Remote Role: {backupTestResult.role || 'silent-mirror'}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Action Buttons */}
-          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-zinc-800">
-            <button
-              type="button"
-              onClick={handleTestConnection}
-              disabled={backupTesting}
-              className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold flex items-center gap-1.5 cursor-pointer disabled:opacity-50 transition-colors"
-            >
-              {backupTesting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Activity className="w-3.5 h-3.5 text-cyan-400" />}
-              <span>Test Connection</span>
-            </button>
-
-            <button
-              type="submit"
-              disabled={backupSaving}
-              className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-md transition-all active:scale-95"
-            >
-              {backupSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              <span>Save Configuration</span>
-            </button>
-          </div>
-        </form>
-
-        {/* Offline Snapshot & Disaster Recovery Tools */}
-        <div className="p-4 rounded-2xl glass-panel border border-zinc-800 space-y-3">
-          <div className="flex items-center gap-2">
-            <HardDrive className="w-4 h-4 text-purple-400" />
-            <h4 className="text-xs font-bold text-white uppercase tracking-wider">
-              Offline Disaster Recovery &amp; Snapshots
-            </h4>
-          </div>
-          <p className="text-[11px] text-zinc-400 leading-relaxed">
-            Download a complete standalone JSON archive containing all database tables, bot users, settings, and uploaded files. You can restore this archive on any instance at any time.
-          </p>
-
-          <div className="flex flex-wrap items-center gap-2.5 pt-1">
-            <button
-              type="button"
-              onClick={handleDownloadSnapshot}
-              className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors border border-zinc-700"
-            >
-              <Download className="w-3.5 h-3.5 text-purple-400" />
-              <span>Download Snapshot (.json)</span>
-            </button>
-
-            <label className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors border border-zinc-700">
-              {backupRestoring ? <Loader2 className="w-3.5 h-3.5 animate-spin text-purple-400" /> : <Upload className="w-3.5 h-3.5 text-purple-400" />}
-              <span>Restore from File</span>
-              <input
-                type="file"
-                accept=".json"
-                onChange={handleRestoreFile}
-                disabled={backupRestoring}
-                className="hidden"
-              />
-            </label>
-          </div>
-        </div>
-
-        {/* Architecture & Disaster Recovery Guide */}
-        <div className="p-4 rounded-2xl glass-panel border border-zinc-800/80 bg-zinc-950/40 space-y-2 text-xs">
-          <div className="font-bold text-white flex items-center gap-1.5">
-            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-            <span>How the Silent Mirror &amp; Failover Works</span>
-          </div>
-          <div className="space-y-1.5 text-zinc-400 text-[11px] leading-relaxed">
-            <p>
-              1. <b>Silent Mirroring:</b> When configured, the Primary Server pushes a complete snapshot of all files, documents, ZIPs, triggers, and user records to the Backup Server without interrupting active Telegram sessions.
-            </p>
-            <p>
-              2. <b>Zero Collision:</b> While in Backup Mirror mode, bot listeners remain dormant so Telegram updates are never doubled or duplicated.
-            </p>
-            <p>
-              3. <b>Instant Failover:</b> If the Primary server ever encounters downtime, simply open the Backup Server panel and tap <b>ACTIVATE FAILOVER</b>. Operations resume instantly with the mirrored database.
-            </p>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // -------------------------------------------------------------
   // SUB-VIEW: USER REPORTS
   // -------------------------------------------------------------
   if (subView === 'reports') {
@@ -4037,23 +3496,85 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             </div>
 
             {(newFraudAction === 'mute' || newFraudAction === 'ban') && (
-              <div className="grid grid-cols-2 gap-2 p-3 rounded-xl bg-zinc-950/80 border border-amber-500/20">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3.5 rounded-xl bg-zinc-950/80 border border-amber-500/25">
                 <div>
-                  <label className="text-[11px] font-semibold text-amber-300 block mb-1">
-                    Penalty Duration
-                  </label>
-                  <select
-                    value={newFraudDuration}
-                    onChange={(e) => setNewFraudDuration(e.target.value as any)}
-                    className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-white focus:outline-none focus:border-amber-500"
-                  >
-                    <option value="permanent">Permanent</option>
-                    <option value="1h">1 Hour</option>
-                    <option value="6h">6 Hours</option>
-                    <option value="24h">24 Hours (1 Day)</option>
-                    <option value="7d">7 Days</option>
-                    <option value="30d">30 Days</option>
-                  </select>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[11px] font-semibold text-amber-300">
+                      Custom Penalty Duration *
+                    </label>
+                    <span className="text-[10px] text-zinc-400 font-mono">
+                      Current: {newFraudDuration}
+                    </span>
+                  </div>
+
+                  {/* Custom Number + Unit Input */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      max={9999}
+                      value={newFraudDurationValue}
+                      disabled={newFraudDurationUnit === 'permanent'}
+                      onChange={(e) => {
+                        const val = Math.max(1, parseInt(e.target.value) || 1);
+                        setNewFraudDurationValue(val);
+                        if (newFraudDurationUnit === 'minutes') setNewFraudDuration(`${val}m`);
+                        else if (newFraudDurationUnit === 'hours') setNewFraudDuration(`${val}h`);
+                        else if (newFraudDurationUnit === 'days') setNewFraudDuration(`${val}d`);
+                      }}
+                      className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-white focus:outline-none focus:border-amber-500 font-mono disabled:opacity-40"
+                      placeholder="e.g. 30"
+                    />
+                    <select
+                      value={newFraudDurationUnit}
+                      onChange={(e) => {
+                        const unit = e.target.value as any;
+                        setNewFraudDurationUnit(unit);
+                        if (unit === 'permanent') setNewFraudDuration('permanent');
+                        else if (unit === 'minutes') setNewFraudDuration(`${newFraudDurationValue}m`);
+                        else if (unit === 'hours') setNewFraudDuration(`${newFraudDurationValue}h`);
+                        else if (unit === 'days') setNewFraudDuration(`${newFraudDurationValue}d`);
+                      }}
+                      className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-white focus:outline-none focus:border-amber-500"
+                    >
+                      <option value="minutes">Minutes (m)</option>
+                      <option value="hours">Hours (h)</option>
+                      <option value="days">Days (d)</option>
+                      <option value="permanent">Permanent</option>
+                    </select>
+                  </div>
+
+                  {/* Quick Select Preset Duration Chips */}
+                  <div className="flex items-center gap-1.5 mt-2 flex-wrap">
+                    {['10m', '30m', '1h', '6h', '12h', '24h', 'permanent'].map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => {
+                          setNewFraudDuration(d);
+                          if (d === 'permanent') {
+                            setNewFraudDurationUnit('permanent');
+                          } else if (d.endsWith('m')) {
+                            setNewFraudDurationUnit('minutes');
+                            setNewFraudDurationValue(parseInt(d));
+                          } else if (d.endsWith('h')) {
+                            setNewFraudDurationUnit('hours');
+                            setNewFraudDurationValue(parseInt(d));
+                          } else if (d.endsWith('d')) {
+                            setNewFraudDurationUnit('days');
+                            setNewFraudDurationValue(parseInt(d));
+                          }
+                        }}
+                        className={`text-[10px] px-2 py-0.5 rounded-lg border font-mono transition-all cursor-pointer ${
+                          newFraudDuration === d
+                            ? 'bg-amber-500/25 border-amber-500 text-amber-300 font-bold'
+                            : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
+                        }`}
+                      >
+                        {d}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 <div>
@@ -4069,8 +3590,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-white focus:outline-none focus:border-amber-500"
                     placeholder="3"
                   />
-                  <span className="text-[9px] text-zinc-500 mt-0.5 block">
-                    Warnings before enforcing final {newFraudAction}
+                  <span className="text-[9px] text-zinc-500 mt-1 block">
+                    Offenses before enforcing final {newFraudAction}
                   </span>
                 </div>
               </div>
@@ -4089,31 +3610,110 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               />
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-              <div>
-                <label className="text-[11px] font-semibold text-zinc-300 block mb-1">Optional Media URL</label>
-                <input
-                  type="text"
-                  value={newFraudMediaUrl}
-                  onChange={(e) => setNewFraudMediaUrl(e.target.value)}
-                  placeholder="https://... or Telegram file ID"
-                  className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500"
-                />
+            {/* Optional Media URL, Type & Direct Video Upload Option */}
+            <div className="space-y-2.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <label className="text-[11px] font-semibold text-zinc-300 block mb-1">Optional Media URL</label>
+                  <input
+                    type="text"
+                    value={newFraudMediaUrl}
+                    onChange={(e) => {
+                      setNewFraudMediaUrl(e.target.value);
+                      if (e.target.value && newFraudVideoFile) {
+                        setNewFraudVideoFile(null);
+                        setNewFraudVideoName('');
+                        if (fraudVideoInputRef.current) fraudVideoInputRef.current.value = '';
+                      }
+                    }}
+                    placeholder="https://... or Telegram file ID"
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-semibold text-zinc-300 block mb-1">Media Type</label>
+                  <select
+                    value={newFraudMediaType}
+                    onChange={(e) => setNewFraudMediaType(e.target.value as any)}
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white focus:outline-none focus:border-amber-500"
+                  >
+                    <option value="text">None / Text Only</option>
+                    <option value="video">Video</option>
+                    <option value="photo">Photo / Image</option>
+                    <option value="voice">Voice Note</option>
+                    <option value="audio">Audio</option>
+                  </select>
+                </div>
               </div>
 
-              <div>
-                <label className="text-[11px] font-semibold text-zinc-300 block mb-1">Media Type</label>
-                <select
-                  value={newFraudMediaType}
-                  onChange={(e) => setNewFraudMediaType(e.target.value as any)}
-                  className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white focus:outline-none focus:border-amber-500"
-                >
-                  <option value="text">None / Text Only</option>
-                  <option value="photo">Photo / Image</option>
-                  <option value="video">Video</option>
-                  <option value="voice">Voice Note</option>
-                  <option value="audio">Audio</option>
-                </select>
+              {/* Direct Video File Upload Option from Device / Gallery */}
+              <div className="p-3 rounded-xl bg-zinc-950/70 border border-dashed border-zinc-700/80 hover:border-amber-500/50 transition-colors">
+                <input
+                  type="file"
+                  ref={fraudVideoInputRef}
+                  accept="video/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      setNewFraudVideoFile(file);
+                      setNewFraudVideoName(file.name);
+                      setNewFraudMediaType('video');
+                      setNewFraudMediaUrl('');
+                    }
+                  }}
+                />
+
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-8 h-8 rounded-lg bg-amber-500/15 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+                      <VideoIcon className="w-4 h-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                        <span>Upload Video File</span>
+                        <span className="text-[10px] text-amber-400/90 font-normal">(Device / Gallery)</span>
+                      </div>
+                      <p className="text-[10px] text-zinc-400 truncate">
+                        {newFraudVideoName 
+                          ? `Selected: ${newFraudVideoName} (${newFraudVideoFile ? (newFraudVideoFile.size / (1024 * 1024)).toFixed(1) + ' MB' : ''})` 
+                          : 'Select video file directly from your device/gallery'}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 shrink-0 w-full sm:w-auto">
+                    {newFraudVideoName ? (
+                      <div className="flex items-center gap-1.5 w-full sm:w-auto">
+                        <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 text-xs font-medium border border-amber-500/40 truncate max-w-[150px]">
+                          {newFraudVideoName}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNewFraudVideoFile(null);
+                            setNewFraudVideoName('');
+                            if (fraudVideoInputRef.current) fraudVideoInputRef.current.value = '';
+                          }}
+                          className="p-1 rounded-lg bg-zinc-800 hover:bg-rose-500/20 text-zinc-400 hover:text-rose-400 transition-colors"
+                          title="Remove video file"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => fraudVideoInputRef.current?.click()}
+                        className="w-full sm:w-auto px-3.5 py-1.5 rounded-xl bg-zinc-800 hover:bg-amber-500 hover:text-zinc-950 text-zinc-200 text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-xs active:scale-95"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>Upload Video File</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
 

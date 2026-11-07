@@ -1,12 +1,12 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { api, AdminUser } from '../lib/api';
 import { toast } from '../lib/toast';
 import { auth } from '../lib/firebase';
 import { 
-  signInWithEmailAndPassword, 
-  createUserWithEmailAndPassword,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signOut
 } from 'firebase/auth';
 import { 
@@ -27,8 +27,8 @@ interface LoginScreenProps {
 
 const DEFAULT_LOGO_URL = 'https://host.tscv.workers.dev/img/df6c9e167caf42c6';
 const AUTHORIZED_ADMIN_EMAILS = [
-  'zexiofficial8884@gmail.com',
-  'sohanrahman07565@gmail.com'
+  'sohanrahman07565@gmail.com',
+  'zexiofficial8884@gmail.com'
 ];
 
 export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) => {
@@ -39,7 +39,63 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
   const [error, setError] = useState<string | null>(null);
   const [isSuccessExiting, setIsSuccessExiting] = useState(false);
 
-  // Dual Login Submission: Supports Telegram Admin ID, Admin Username, and Email Credentials
+  // Check for redirect result from Google Sign-In if returning from redirect flow
+  useEffect(() => {
+    let isMounted = true;
+    getRedirectResult(auth)
+      .then(async (result) => {
+        if (!isMounted || !result || !result.user) return;
+        setLoading(true);
+        await processGoogleUser(result.user);
+      })
+      .catch((err) => {
+        console.warn('[Google Auth] Redirect verification:', err?.message || err);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Shared handler for authenticated Google user
+  const processGoogleUser = async (user: any) => {
+    const userEmail = (user.email || '').trim().toLowerCase();
+
+    // Verify authorized administrator email
+    const isAuthorized = AUTHORIZED_ADMIN_EMAILS.includes(userEmail);
+    if (!isAuthorized) {
+      await signOut(auth).catch(() => {});
+      const unauthorizedMsg = `Access Denied: Account (${userEmail || 'Selected account'}) is not authorized. Only designated administrators (${AUTHORIZED_ADMIN_EMAILS.join(', ')}) may access this panel.`;
+      setError(unauthorizedMsg);
+      toast.error(unauthorizedMsg);
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const idToken = await user.getIdToken();
+      const res = await api.firebaseLogin({
+        idToken,
+        email: user.email,
+        displayName: user.displayName || 'Owner Admin'
+      });
+
+      setIsSuccessExiting(true);
+      toast.success(`Welcome back, ${res.admin.name || 'Admin'}!`);
+
+      setTimeout(() => {
+        onSuccess(res.admin);
+      }, 450);
+    } catch (err: any) {
+      console.error('[Google Sign-In] Backend verification error:', err);
+      const msg = err.message || 'Google authorization failed on server.';
+      setError(msg);
+      toast.error(msg);
+      setLoading(false);
+      setIsSuccessExiting(false);
+    }
+  };
+
+  // Login Submission: Strictly checks credentials against ENV and authorized sub-admins
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (loading || isSuccessExiting) return;
@@ -58,39 +114,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
     setError(null);
 
     try {
-      let res: { success: boolean; admin: AdminUser; token?: string };
-
-      if (cleanId.includes('@')) {
-        // Email path
-        let idToken = '';
-        let firebaseUser: any = null;
-        try {
-          const userCredential = await signInWithEmailAndPassword(auth, cleanId, cleanPassword);
-          firebaseUser = userCredential.user;
-          idToken = await firebaseUser.getIdToken();
-        } catch (fbErr: any) {
-          if (AUTHORIZED_ADMIN_EMAILS.includes(cleanId.toLowerCase())) {
-            try {
-              const signup = await createUserWithEmailAndPassword(auth, cleanId, cleanPassword);
-              firebaseUser = signup.user;
-              idToken = await firebaseUser.getIdToken();
-            } catch {}
-          }
-        }
-
-        if (idToken) {
-          res = await api.firebaseLogin({
-            idToken,
-            email: firebaseUser?.email || cleanId,
-            displayName: firebaseUser?.displayName || cleanId.split('@')[0]
-          });
-        } else {
-          res = await api.login(cleanId, cleanPassword);
-        }
-      } else {
-        // Direct Telegram Admin ID (numeric ID or username) authentication
-        res = await api.login(cleanId, cleanPassword);
-      }
+      // Authenticate strictly with backend (checks ENV Owner credentials & approved database sub-admins)
+      const res = await api.login(cleanId, cleanPassword);
 
       setIsSuccessExiting(true);
       toast.success(`Welcome back, ${res.admin.name || 'Admin'}!`);
@@ -108,7 +133,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
     }
   };
 
-  // Interactive Google Sign-In with strict admin whitelist verification
+  // Interactive Google Sign-In with popup & redirect support
   const handleGoogleSignIn = async () => {
     if (loading || isSuccessExiting) return;
 
@@ -119,39 +144,33 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
       const provider = new GoogleAuthProvider();
       provider.setCustomParameters({ prompt: 'select_account' });
 
-      const userCredential = await signInWithPopup(auth, provider);
-      const user = userCredential.user;
-      const userEmail = (user.email || '').trim().toLowerCase();
-
-      // Strict whitelist check: only allow designated administrator
-      const isAuthorized = AUTHORIZED_ADMIN_EMAILS.includes(userEmail);
-      if (!isAuthorized) {
-        await signOut(auth).catch(() => {});
-        const unauthorizedMsg = `Access Denied: Account (${userEmail || 'Selected user'}) is not authorized. Only designated administrators (${AUTHORIZED_ADMIN_EMAILS.join(', ')}) may access this panel.`;
-        setError(unauthorizedMsg);
-        toast.error(unauthorizedMsg);
-        setLoading(false);
-        return;
+      let userCredential;
+      try {
+        userCredential = await signInWithPopup(auth, provider);
+      } catch (popupErr: any) {
+        // If popup was blocked by browser, trigger redirect flow
+        if (
+          popupErr.code === 'auth/popup-blocked' ||
+          popupErr.code === 'auth/cancelled-popup-request'
+        ) {
+          console.info('[Google Auth] Popup blocked, redirecting...');
+          await signInWithRedirect(auth, provider);
+          return;
+        }
+        throw popupErr;
       }
 
-      // Authorized administrator - exchange ID token for session
-      const idToken = await user.getIdToken();
-      const res = await api.firebaseLogin({
-        idToken,
-        email: user.email,
-        displayName: user.displayName || 'Owner Admin'
-      });
-
-      setIsSuccessExiting(true);
-      toast.success(`Welcome back, ${res.admin.name || 'Admin'}!`);
-
-      setTimeout(() => {
-        onSuccess(res.admin);
-      }, 450);
+      if (userCredential?.user) {
+        await processGoogleUser(userCredential.user);
+      }
     } catch (err: any) {
       console.error('[Google Sign-In] Authentication error:', err);
       if (err.code === 'auth/popup-closed-by-user') {
         setError('Google sign-in was cancelled.');
+      } else if (err.code === 'auth/unauthorized-domain') {
+        const domainMsg = `Firebase Auth Domain Error: "${window.location.hostname}" is not authorized. Please add this domain to Firebase Console -> Authentication -> Settings -> Authorized domains.`;
+        setError(domainMsg);
+        toast.error(domainMsg);
       } else {
         const msg = err.message || 'Google authentication failed. Please try again.';
         setError(msg);
@@ -323,6 +342,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
               </button>
             </div>
           </form>
+
+          {/* Powered by Zexi Team Footer Credit with Smooth Scale/Pulse, Dynamic Gradient Color Loop & Drop Shadow */}
+          <div className="mt-8 text-center select-none pt-2">
+            <span className="text-xs font-black tracking-widest uppercase bg-gradient-to-r from-red-500 via-rose-400 via-amber-300 via-pink-400 to-red-500 bg-clip-text text-transparent animate-zexi-footer">
+              Powered by Zexi Team
+            </span>
+          </div>
 
         </div>
       </div>

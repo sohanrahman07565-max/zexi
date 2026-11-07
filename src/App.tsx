@@ -419,15 +419,11 @@ export default function App() {
 
       {/* Mobile Screen Container */}
       <div className="relative z-10 w-full max-w-md min-h-screen flex flex-col px-4 pt-1 pb-28 sm:pb-32">
-        {/* Top App Bar (Curved Card / Capsule Header Shape with Both Sides Rounded) */}
-        <header className="sticky top-1.5 z-30 flex items-center justify-between px-3.5 py-2.5 mb-3 rounded-2xl sm:rounded-3xl border border-zinc-800/80 bg-[#0c0c14]/90 backdrop-blur-xl shadow-[0_10px_25px_-10px_rgba(0,0,0,0.6)] shrink-0 transition-all">
+        {/* Top App Bar (Transparent Frosted Glassmorphism Card Shape with Both Sides Rounded) */}
+        <header className="sticky top-1.5 z-30 flex items-center justify-between px-3.5 py-2.5 mb-3 rounded-2xl sm:rounded-3xl border border-white/15 bg-white/[0.04] backdrop-blur-2xl shadow-[0_8px_32px_0_rgba(0,0,0,0.45)] shrink-0 transition-all text-white">
           <div className="flex items-center gap-2.5 min-w-0 pr-2">
             <div
-              className="w-8 h-8 rounded-xl flex items-center justify-center text-white font-bold shadow-md overflow-hidden shrink-0 relative"
-              style={{
-                background: `linear-gradient(135deg, #ef4444, #dc2626)`,
-                boxShadow: '0 0 16px rgba(239, 68, 68, 0.35)'
-              }}
+              className="w-8 h-8 rounded-xl flex items-center justify-center text-white font-bold shadow-md overflow-hidden shrink-0 relative bg-white/10 border border-white/20 backdrop-blur-md"
             >
               {design.loginLogoUrl ? (
                 <>
@@ -442,11 +438,11 @@ export default function App() {
                     }}
                   />
                   <div className="appbar-fallback hidden w-full h-full items-center justify-center text-white">
-                    <Send className="w-4 h-4" />
+                    <Send className="w-4 h-4 text-white" />
                   </div>
                 </>
               ) : (
-                <Send className="w-4 h-4" />
+                <Send className="w-4 h-4 text-white" />
               )}
             </div>
             <div className="min-w-0">
@@ -467,14 +463,14 @@ export default function App() {
                 {isBotConnected ? (
                   <>
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)] shrink-0" />
-                    <span className="truncate font-medium text-zinc-300">
+                    <span className="truncate font-medium text-white/80">
                       Connected to {botDisplayName ? (botDisplayName.startsWith('@') ? botDisplayName : `@${botDisplayName}`) : 'Bot'}
                     </span>
                   </>
                 ) : (
                   <>
-                    <span className="w-1.5 h-1.5 rounded-full bg-zinc-500 shadow-[0_0_4px_rgba(161,161,170,0.5)] shrink-0" />
-                    <span className="truncate font-medium text-zinc-400">
+                    <span className="w-1.5 h-1.5 rounded-full bg-white/40 shadow-[0_0_4px_rgba(255,255,255,0.4)] shrink-0" />
+                    <span className="truncate font-medium text-white/60">
                       Not Connected
                     </span>
                   </>
@@ -489,11 +485,7 @@ export default function App() {
               type="button"
               onClick={() => setCurrentTab('more')}
               title={`Logged in as ${currentUser.role === 'owner' ? 'Owner' : 'Administrator'} (${currentUser.name})`}
-              className={`px-3 py-1.5 rounded-full border text-xs font-bold tracking-wide transition-all cursor-pointer active:scale-95 shadow-xs ${
-                currentUser.role === 'owner'
-                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 hover:bg-amber-500/25 shadow-[0_0_12px_rgba(245,158,11,0.2)]'
-                  : 'bg-cyan-500/15 border-cyan-500/40 text-cyan-300 hover:bg-cyan-500/25 shadow-[0_0_12px_rgba(6,182,212,0.2)]'
-              }`}
+              className="px-3 py-1.5 rounded-full border border-white/20 bg-white/10 hover:bg-white/20 text-white text-xs font-bold tracking-wide transition-all cursor-pointer active:scale-95 shadow-[0_0_12px_rgba(255,255,255,0.15)] backdrop-blur-md"
             >
               {currentUser.role === 'owner' ? 'Owner' : 'Admin'}
             </button>

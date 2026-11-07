@@ -5,6 +5,7 @@ export interface AdminUser {
   id: string;
   telegramId: string;
   name: string;
+  username?: string;
   role: 'owner' | 'subadmin';
   enabled?: boolean;
   lastLoginAt?: string;
@@ -189,7 +190,7 @@ export interface FraudKeywordRule {
   keyword: string;
   matchType: 'contains' | 'exact' | 'regex';
   action: 'delete' | 'warn' | 'delete_and_warn' | 'mute' | 'ban';
-  duration?: 'permanent' | '1h' | '6h' | '24h' | '7d' | '30d';
+  duration?: string; // Custom minutes/hours e.g. "30m", "2h", "1d" or "permanent"
   maxWarnings?: number;
   customMessage?: string;
   warningText?: string;

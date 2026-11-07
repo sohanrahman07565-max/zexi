@@ -176,7 +176,30 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-2">
+            {/* Sleek Single Toggle Button in Header Area */}
+            <button
+              type="button"
+              onClick={() => setUserTab((prev) => (prev === 'active' ? 'banned' : 'active'))}
+              title={`Currently viewing ${userTab === 'active' ? 'Active' : 'Banned'} users. Tap to switch.`}
+              className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-xs ${
+                userTab === 'banned'
+                  ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 shadow-[0_0_12px_rgba(244,63,94,0.3)] hover:bg-rose-500/30'
+                  : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 shadow-[0_0_12px_rgba(16,185,129,0.3)] hover:bg-emerald-500/30'
+              }`}
+            >
+              {userTab === 'active' ? (
+                <>
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Active ({activeCount})</span>
+                </>
+              ) : (
+                <>
+                  <Ban className="w-3.5 h-3.5 text-rose-400" />
+                  <span>Banned ({bannedCount})</span>
+                </>
+              )}
+            </button>
             <button
               onClick={fetchUsers}
               disabled={loading}
@@ -220,51 +243,6 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
             </button>
           </div>
         )}
-
-        {/* Active vs Banned Tabs */}
-        <div className="shrink-0 px-3 sm:px-4 pt-3 pb-2 border-b border-zinc-800/80 bg-[#0a0a10]">
-          <div className="grid grid-cols-2 gap-2 p-1 rounded-2xl bg-[#13131c] border border-zinc-800">
-            <button
-              type="button"
-              onClick={() => setUserTab('active')}
-              className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                userTab === 'active'
-                  ? 'bg-gradient-to-r from-emerald-600/30 to-teal-600/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40'
-              }`}
-            >
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-              <span>Active Users</span>
-              <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
-                userTab === 'active'
-                  ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                  : 'bg-zinc-800 text-zinc-400'
-              }`}>
-                {activeCount}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setUserTab('banned')}
-              className={`flex items-center justify-center gap-2 py-2 px-3 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
-                userTab === 'banned'
-                  ? 'bg-gradient-to-r from-red-600/30 to-rose-600/20 text-red-300 border border-red-500/40 shadow-sm'
-                  : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40'
-              }`}
-            >
-              <Ban className="w-3.5 h-3.5 text-red-400" />
-              <span>Banned Users</span>
-              <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
-                userTab === 'banned'
-                  ? 'bg-red-500/20 text-red-300 border border-red-500/30'
-                  : 'bg-zinc-800 text-zinc-400'
-              }`}>
-                {bannedCount}
-              </span>
-            </button>
-          </div>
-        </div>
 
         {/* Search Bar */}
         <div className="shrink-0 p-3 sm:p-4 border-b border-zinc-800/80 bg-[#0a0a10]">
