@@ -6,7 +6,7 @@ import {
 import { toast } from '../lib/toast';
 import { 
   MessageSquare, Users, Trash2, Settings, Smartphone, LogOut, 
-  ChevronRight, Edit2, Check, RefreshCw, Plus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi, WifiOff,
+  ChevronRight, Edit2, Check, RefreshCw, Plus, Minus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi, WifiOff,
   Megaphone, Image as ImageIcon, Video as VideoIcon, Music, Mic, Pin, Paperclip, Loader2, Radio,
   Flag, AlertTriangle, Ban, CheckCircle, ShieldAlert, Eye, ExternalLink, ShieldCheck,
   Server, Database, Copy, Download, Upload, Activity, HardDrive, Key, CheckSquare, Square
@@ -314,6 +314,29 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       setCleanupStatus(data);
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleUpdateDeliveryTimeout = async (newMins: number) => {
+    const mins = Math.max(1, Math.min(10080, Math.round(Number(newMins) || 10)));
+    setBotSettings((prev: any) => ({ ...prev, deliveryTimeoutMinutes: mins }));
+    setCleanupStatus((prev: any) => ({ ...prev, deliveryTimeoutMinutes: mins }));
+    try {
+      const res = await api.updateSettings({
+        ...botSettings,
+        deliveryTimeoutMinutes: mins
+      });
+      if (res && res.settings) {
+        setBotSettings((prev: any) => ({
+          ...prev,
+          ...res.settings,
+          deliveryTimeoutMinutes: res.settings.deliveryTimeoutMinutes || mins
+        }));
+      }
+      onRefreshSettings();
+      toast.success(`File auto-delete timer set to ${mins} minute${mins === 1 ? '' : 's'}!`);
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to update auto-delete timer');
     }
   };
 
@@ -1242,6 +1265,30 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             <ChevronRight className="w-4 h-4 text-zinc-500" />
           </button>
 
+          {/* File Auto-Delete & Cleanup */}
+          <button
+            onClick={() => {
+              loadCleanupStatus();
+              setSubView('cleanup');
+            }}
+            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-rose-500/10 text-rose-400 flex items-center justify-center border border-rose-500/20">
+                <Clock className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-xs font-semibold text-white flex items-center gap-1.5">
+                  <span>File Auto-Delete &amp; Cleanup</span>
+                  <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-rose-500/20 text-rose-300 font-mono font-semibold">
+                    {botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10}m Timeout
+                  </span>
+                </div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-zinc-500" />
+          </button>
+
           {/* Broadcast Notification System */}
           <button
             onClick={() => setSubView('broadcast')}
@@ -2038,15 +2085,157 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </button>
         </div>
 
-        {/* Delivery Files Auto-Destruct Status */}
-        <div className="glass-panel rounded-2xl p-4 border border-rose-500/30 bg-rose-950/10 space-y-3">
-          <div className="flex items-center gap-2 text-xs font-bold text-white">
-            <Clock className="w-4 h-4 text-rose-400" />
-            <span>Delivery File Auto-Destruct (10-Minute Timeout)</span>
+        {/* Delivery Files Auto-Destruct Status & Configurable Timer */}
+        <div className="glass-panel rounded-2xl p-4 border border-rose-500/30 bg-rose-950/15 space-y-3.5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400">
+                <Clock className="w-4 h-4" />
+              </div>
+              <div>
+                <div className="text-xs font-bold text-white">
+                  Delivery File Auto-Delete ({botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10}m Timeout)
+                </div>
+                <div className="text-[10px] text-zinc-400">Configurable self-destruct timer for delivered files</div>
+              </div>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={botSettings.autoDeleteDeliveryEnabled}
+                onChange={async (e) => {
+                  const enabled = e.target.checked;
+                  setBotSettings((prev: any) => ({ ...prev, autoDeleteDeliveryEnabled: enabled }));
+                  setCleanupStatus((prev: any) => ({ ...prev, autoDeleteDeliveryEnabled: enabled }));
+                  try {
+                    await api.updateSettings({ ...botSettings, autoDeleteDeliveryEnabled: enabled });
+                    onRefreshSettings();
+                    toast.success(enabled ? 'File auto-delete enabled' : 'File auto-delete disabled');
+                  } catch (err: any) {
+                    toast.error(err.message || 'Failed to update setting');
+                  }
+                }}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-rose-500"></div>
+            </label>
           </div>
+
           <p className="text-xs text-zinc-400">
-            Files delivered in Telegram private chat will automatically be deleted from chat after the configured timeout period (default: 10 minutes).
+            Files delivered in Telegram private chat remain accessible for the exact configured duration, and then automatically delete themselves from the user's chat. They will not be deleted prematurely before this timer expires.
           </p>
+
+          {/* Quick Preset Buttons */}
+          <div className="space-y-1.5 pt-1 border-t border-rose-500/20">
+            <div className="flex items-center justify-between text-[11px]">
+              <span className="font-semibold text-zinc-300">Quick Timer Presets:</span>
+              <span className="text-rose-400 font-mono font-bold">
+                Current: {botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10} min
+              </span>
+            </div>
+            <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5">
+              {[1, 3, 5, 10, 15, 30, 60, 120].map((presetMins) => {
+                const isSelected = (botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10) === presetMins;
+                return (
+                  <button
+                    key={presetMins}
+                    type="button"
+                    onClick={() => handleUpdateDeliveryTimeout(presetMins)}
+                    className={`py-1.5 px-2 rounded-xl text-xs font-semibold font-mono flex items-center justify-center transition-all cursor-pointer ${
+                      isSelected
+                        ? 'bg-rose-500 text-white shadow-md shadow-rose-500/30 ring-1 ring-white/30 scale-102 font-bold'
+                        : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-800'
+                    }`}
+                  >
+                    {presetMins}m
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Stepper & Custom Duration Input */}
+          <div className="p-3 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-2.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div>
+                <label className="block text-[11px] font-semibold text-zinc-200">
+                  Custom Expiration Duration
+                </label>
+                <span className="text-[10px] text-zinc-400">Set exact minutes (e.g. 5, 10, 45, 120)</span>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const cur = botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10;
+                    handleUpdateDeliveryTimeout(Math.max(1, cur - 1));
+                  }}
+                  className="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                  title="Decrease 1 minute"
+                >
+                  <Minus className="w-3.5 h-3.5" />
+                </button>
+
+                <input
+                  type="number"
+                  min="1"
+                  max="10080"
+                  value={botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10}
+                  onChange={(e) => {
+                    const val = Math.max(1, Number(e.target.value) || 1);
+                    setBotSettings((prev: any) => ({ ...prev, deliveryTimeoutMinutes: val }));
+                    setCleanupStatus((prev: any) => ({ ...prev, deliveryTimeoutMinutes: val }));
+                  }}
+                  onBlur={(e) => {
+                    const val = Math.max(1, Number(e.target.value) || 10);
+                    handleUpdateDeliveryTimeout(val);
+                  }}
+                  className="w-20 bg-zinc-950 border border-rose-500/40 rounded-lg py-1 px-2 text-center text-xs text-white font-mono font-bold focus:outline-none focus:border-rose-400"
+                />
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const cur = botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10;
+                    handleUpdateDeliveryTimeout(cur + 1);
+                  }}
+                  className="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                  title="Increase 1 minute"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleUpdateDeliveryTimeout(botSettings.deliveryTimeoutMinutes || 10)}
+                  className="py-1 px-3 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition-all cursor-pointer active:scale-95 shadow-sm"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+
+            <label className="flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer pt-1 border-t border-zinc-800/80">
+              <input
+                type="checkbox"
+                checked={botSettings.autoDeleteNoticeEnabled}
+                onChange={async (e) => {
+                  const notice = e.target.checked;
+                  setBotSettings((prev: any) => ({ ...prev, autoDeleteNoticeEnabled: notice }));
+                  try {
+                    await api.updateSettings({ ...botSettings, autoDeleteNoticeEnabled: notice });
+                    onRefreshSettings();
+                    toast.success(notice ? 'Notice enabled' : 'Notice disabled');
+                  } catch (err: any) {
+                    toast.error(err.message || 'Failed to update setting');
+                  }
+                }}
+                className="rounded accent-rose-500"
+              />
+              <span>Send companion self-destruct notice message with delivered file</span>
+            </label>
+          </div>
 
           <div className="p-3 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-2 text-xs text-zinc-300">
             <div className="flex justify-between items-center">
@@ -2057,7 +2246,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             </div>
             <div className="flex justify-between items-center">
               <span className="text-zinc-400">Timeout duration:</span>
-              <span className="font-semibold text-rose-400">{cleanupStatus?.deliveryTimeoutMinutes || 10} Minutes</span>
+              <span className="font-semibold text-rose-400">{botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10} Minutes</span>
             </div>
             <div className="flex justify-between items-center">
               <span className="text-zinc-400">Active pending self-destruct timers:</span>
@@ -2127,33 +2316,92 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               </div>
 
               {botSettings.autoDeleteDeliveryEnabled && (
-                <div className="space-y-2.5 pt-1 border-t border-rose-500/20 text-xs">
-                  <div>
-                    <label className="block text-[11px] font-semibold text-zinc-300 mb-1">
-                      Delivery Timeout (Minutes)
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        min="1"
-                        max="1440"
-                        value={botSettings.deliveryTimeoutMinutes}
-                        onChange={(e) => setBotSettings({ ...botSettings, deliveryTimeoutMinutes: Math.max(1, Number(e.target.value) || 10) })}
-                        placeholder="e.g. 10"
-                        className="w-24 bg-zinc-900 border border-zinc-700 rounded-xl py-1.5 px-3 text-xs text-white font-mono font-bold"
-                      />
-                      <span className="text-rose-400 font-semibold text-xs">Minutes</span>
+                <div className="space-y-3 pt-1 border-t border-rose-500/20 text-xs">
+                  {/* Quick Preset Buttons */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="font-semibold text-zinc-300">Quick Duration Presets:</span>
+                      <span className="text-rose-400 font-mono font-bold">
+                        {botSettings.deliveryTimeoutMinutes || 10} min
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5">
+                      {[1, 3, 5, 10, 15, 30, 60, 120].map((presetMins) => {
+                        const isSelected = (botSettings.deliveryTimeoutMinutes || 10) === presetMins;
+                        return (
+                          <button
+                            key={presetMins}
+                            type="button"
+                            onClick={() => {
+                              setBotSettings({ ...botSettings, deliveryTimeoutMinutes: presetMins });
+                            }}
+                            className={`py-1.5 px-2 rounded-xl text-xs font-semibold font-mono flex items-center justify-center transition-all cursor-pointer ${
+                              isSelected
+                                ? 'bg-rose-500 text-white shadow-md shadow-rose-500/30 ring-1 ring-white/30 scale-102 font-bold'
+                                : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-800'
+                            }`}
+                          >
+                            {presetMins}m
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
 
-                  <label className="flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer pt-1">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-zinc-300 mb-1">
+                      Custom Duration (Minutes)
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const cur = botSettings.deliveryTimeoutMinutes || 10;
+                          setBotSettings({ ...botSettings, deliveryTimeoutMinutes: Math.max(1, cur - 1) });
+                        }}
+                        className="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                        title="Decrease 1 minute"
+                      >
+                        <Minus className="w-3.5 h-3.5" />
+                      </button>
+
+                      <input
+                        type="number"
+                        min="1"
+                        max="10080"
+                        value={botSettings.deliveryTimeoutMinutes}
+                        onChange={(e) => setBotSettings({ ...botSettings, deliveryTimeoutMinutes: Math.max(1, Number(e.target.value) || 1) })}
+                        placeholder="e.g. 10"
+                        className="w-24 bg-zinc-950 border border-zinc-700 rounded-xl py-1.5 px-3 text-xs text-white font-mono font-bold text-center focus:outline-none focus:border-rose-400"
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const cur = botSettings.deliveryTimeoutMinutes || 10;
+                          setBotSettings({ ...botSettings, deliveryTimeoutMinutes: cur + 1 });
+                        }}
+                        className="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                        title="Increase 1 minute"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                      </button>
+
+                      <span className="text-rose-400 font-semibold text-xs ml-1">Minutes</span>
+                    </div>
+                    <span className="text-[10px] text-zinc-400 block mt-1">
+                      Files will remain accessible for exactly {botSettings.deliveryTimeoutMinutes || 10} minute(s) before self-destructing.
+                    </span>
+                  </div>
+
+                  <label className="flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer pt-1 border-t border-zinc-800/80">
                     <input
                       type="checkbox"
                       checked={botSettings.autoDeleteNoticeEnabled}
                       onChange={(e) => setBotSettings({ ...botSettings, autoDeleteNoticeEnabled: e.target.checked })}
                       className="rounded accent-rose-500"
                     />
-                    <span>Send self-destruct warning notice message with the file</span>
+                    <span>Send companion self-destruct warning notice message with the file</span>
                   </label>
                 </div>
               )}

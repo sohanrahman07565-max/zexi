@@ -36,7 +36,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [emailError, setEmailError] = useState<string | null>(null);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
   const [isSuccessExiting, setIsSuccessExiting] = useState(false);
 
   // Check for redirect result from Google Sign-In if returning from redirect flow
@@ -59,14 +60,14 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
   // Shared handler for authenticated Google user
   const processGoogleUser = async (user: any) => {
     const userEmail = (user.email || '').trim().toLowerCase();
+    setEmailError(null);
+    setPasswordError(null);
 
-    // Verify authorized administrator email
+    // Verify authorized administrator email securely without exposing emails
     const isAuthorized = AUTHORIZED_ADMIN_EMAILS.includes(userEmail);
     if (!isAuthorized) {
       await signOut(auth).catch(() => {});
-      const unauthorizedMsg = `Access Denied: Account (${userEmail || 'Selected account'}) is not authorized. Only designated administrators (${AUTHORIZED_ADMIN_EMAILS.join(', ')}) may access this panel.`;
-      setError(unauthorizedMsg);
-      toast.error(unauthorizedMsg);
+      setEmailError('Access Denied');
       setLoading(false);
       return;
     }
@@ -87,9 +88,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
       }, 450);
     } catch (err: any) {
       console.error('[Google Sign-In] Backend verification error:', err);
-      const msg = err.message || 'Google authorization failed on server.';
-      setError(msg);
-      toast.error(msg);
+      setEmailError('Access Denied');
       setLoading(false);
       setIsSuccessExiting(false);
     }
@@ -103,15 +102,19 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
     const cleanId = identifier.trim();
     const cleanPassword = password.trim();
 
-    if (!cleanId || !cleanPassword) {
-      const msg = 'Please enter both your email and password';
-      setError(msg);
-      toast.error(msg);
+    setEmailError(null);
+    setPasswordError(null);
+
+    if (!cleanId) {
+      setEmailError('Access Denied');
+      return;
+    }
+    if (!cleanPassword) {
+      setPasswordError('Incorrect password');
       return;
     }
 
     setLoading(true);
-    setError(null);
 
     try {
       // Authenticate strictly with backend (checks ENV Owner credentials & approved database sub-admins)
@@ -125,9 +128,12 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
       }, 450);
     } catch (err: any) {
       console.error('[Login] Authentication error:', err);
-      const msg = err.message || 'Invalid credentials or unauthorized account.';
-      setError(msg);
-      toast.error(msg);
+      const msg = String(err.message || '');
+      if (err.field === 'password' || /password/i.test(msg)) {
+        setPasswordError('Incorrect password');
+      } else {
+        setEmailError('Access Denied');
+      }
       setLoading(false);
       setIsSuccessExiting(false);
     }
@@ -137,8 +143,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
   const handleGoogleSignIn = async () => {
     if (loading || isSuccessExiting) return;
 
+    setEmailError(null);
+    setPasswordError(null);
     setLoading(true);
-    setError(null);
 
     try {
       const provider = new GoogleAuthProvider();
@@ -165,16 +172,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
       }
     } catch (err: any) {
       console.error('[Google Sign-In] Authentication error:', err);
-      if (err.code === 'auth/popup-closed-by-user') {
-        setError('Google sign-in was cancelled.');
-      } else if (err.code === 'auth/unauthorized-domain') {
-        const domainMsg = `Firebase Auth Domain Error: "${window.location.hostname}" is not authorized. Please add this domain to Firebase Console -> Authentication -> Settings -> Authorized domains.`;
-        setError(domainMsg);
-        toast.error(domainMsg);
-      } else {
-        const msg = err.message || 'Google authentication failed. Please try again.';
-        setError(msg);
-        toast.error(msg);
+      if (err.code !== 'auth/popup-closed-by-user' && err.code !== 'auth/cancelled-popup-request') {
+        setEmailError('Access Denied');
       }
       setLoading(false);
       setIsSuccessExiting(false);
@@ -236,14 +235,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
             </div>
           </div>
 
-          {/* Error Banner */}
-          {error && (
-            <div className="p-3.5 rounded-2xl bg-rose-500/10 border border-rose-500/25 text-rose-300 text-xs flex items-center gap-2.5 animate-in fade-in duration-200">
-              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-              <span className="leading-snug">{error}</span>
-            </div>
-          )}
-
           {/* Dual Login Form: Telegram Admin ID or Email */}
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Email Field */}
@@ -258,11 +249,25 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
                   autoComplete="username"
                   required
                   value={identifier}
-                  onChange={(e) => setIdentifier(e.target.value)}
+                  onChange={(e) => {
+                    setIdentifier(e.target.value);
+                    if (emailError) setEmailError(null);
+                  }}
                   placeholder="Enter Email"
-                  className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl py-3 pl-10 pr-4 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/30 transition-all duration-200"
+                  className={`w-full bg-zinc-900/90 border rounded-xl py-3 pl-10 pr-4 text-sm text-white placeholder:text-zinc-600 focus:outline-none transition-all duration-200 ${
+                    emailError 
+                      ? 'border-red-500 ring-1 ring-red-500/50' 
+                      : 'border-zinc-800 focus:border-red-500 focus:ring-2 focus:ring-red-500/30'
+                  }`}
                 />
               </div>
+              {/* Targeted Error Directly Below Email Input */}
+              {emailError && (
+                <div className="flex items-center gap-1.5 mt-1.5 text-xs text-rose-400 font-medium animate-in fade-in duration-150">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-400" />
+                  <span>{emailError}</span>
+                </div>
+              )}
             </div>
 
             {/* Password Field */}
@@ -277,9 +282,16 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
                   autoComplete="current-password"
                   required
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(e) => {
+                    setPassword(e.target.value);
+                    if (passwordError) setPasswordError(null);
+                  }}
                   placeholder="Enter Password"
-                  className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl py-3 pl-10 pr-11 text-sm text-white placeholder:text-zinc-600 focus:outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/30 transition-all duration-200"
+                  className={`w-full bg-zinc-900/90 border rounded-xl py-3 pl-10 pr-11 text-sm text-white placeholder:text-zinc-600 focus:outline-none transition-all duration-200 ${
+                    passwordError 
+                      ? 'border-red-500 ring-1 ring-red-500/50' 
+                      : 'border-zinc-800 focus:border-red-500 focus:ring-2 focus:ring-red-500/30'
+                  }`}
                 />
                 <button
                   type="button"
@@ -290,6 +302,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
                   {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                 </button>
               </div>
+              {/* Targeted Error Directly Below Password Input */}
+              {passwordError && (
+                <div className="flex items-center gap-1.5 mt-1.5 text-xs text-rose-400 font-medium animate-in fade-in duration-150">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-400" />
+                  <span>{passwordError}</span>
+                </div>
+              )}
             </div>
 
             {/* Vibrant Glowing Red Sign In Button */}

@@ -81,6 +81,50 @@ function isDuplicateDelivery(chatId: string | number, payload: string): boolean 
   return false;
 }
 
+// Global update & message deduplication cache to prevent duplicate bot replies
+const processedUpdateKeys = new Map<string, number>();
+
+function isDuplicateTelegramUpdate(update: any): boolean {
+  if (!update) return false;
+  const now = Date.now();
+
+  // Prune entries older than 2 minutes
+  if (processedUpdateKeys.size > 2000) {
+    for (const [k, time] of processedUpdateKeys.entries()) {
+      if (now - time > 120000) processedUpdateKeys.delete(k);
+    }
+  }
+
+  const keys: string[] = [];
+  if (update.update_id !== undefined && update.update_id !== null) {
+    keys.push(`uid_${update.update_id}`);
+  }
+
+  const msg = update.message || update.edited_message || update.channel_post || update.edited_channel_post;
+  if (msg?.message_id && msg?.chat?.id) {
+    keys.push(`msg_${msg.chat.id}_${msg.message_id}`);
+  }
+
+  if (update.callback_query?.id) {
+    keys.push(`cb_${update.callback_query.id}`);
+  }
+
+  // Check if any identifier was already processed within the last 60 seconds
+  for (const key of keys) {
+    const lastSeen = processedUpdateKeys.get(key);
+    if (lastSeen && now - lastSeen < 60000) {
+      return true;
+    }
+  }
+
+  // Mark all keys as processed
+  for (const key of keys) {
+    processedUpdateKeys.set(key, now);
+  }
+
+  return false;
+}
+
 export function getItemPayload(item: ItemRecord): string {
   if (item.id.startsWith('f_') || item.id.startsWith('l_')) {
     return item.id;
@@ -406,6 +450,11 @@ export class TelegramService {
   // Process incoming webhook or polling update
   public static async handleUpdate(update: any): Promise<void> {
     if (!update) return;
+
+    // Strict update deduplication: prevent double execution and double replies
+    if (isDuplicateTelegramUpdate(update)) {
+      return;
+    }
 
     // 1. AUTOMATIC UNIQUE UID TRACKING & DATABASE SAVING (Requirement 1 & 2):
     // Intercept every incoming update (message, command like /start, callback query, etc.) from any user.
@@ -2548,13 +2597,7 @@ export class TelegramService {
       }
 
       if (rawPayload) {
-        // Clean user trigger message so the private chat is clean
-        try {
-          await this.callTelegramApi('deleteMessage', {
-            chat_id: chatId,
-            message_id: message.message_id
-          });
-        } catch {}
+        // Bypass start message deletion for instant delivery speed
         await this.handleDeepLinkDelivery(chatId, rawPayload);
         return;
       } else {
@@ -2827,15 +2870,6 @@ export class TelegramService {
           return;
         }
 
-        if (message.message_id) {
-          try {
-            await this.callTelegramApi('deleteMessage', {
-              chat_id: chatId,
-              message_id: message.message_id
-            });
-          } catch {}
-        }
-
         await this.handleDeepLinkDelivery(chatId, payload);
         return;
       }
@@ -2883,27 +2917,6 @@ export class TelegramService {
     if (!forceCheck.allJoined) {
       await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, rawPayload);
       return;
-    }
-
-    // FRESH CHAT / PREVIOUS MESSAGE CLEANUP ON NEW DELIVERY:
-    // When a user requests a new file or link, automatically delete previous bot delivery messages/bubbles
-    // sent to that user to keep the chat screen completely clean and fresh with only the latest requested file.
-    try {
-      const targetChat = /^-?\d+$/.test(String(chatId)) ? Number(chatId) : String(chatId);
-      const prevMessageIds = await storage.clearChatDeliveryMessages(targetChat);
-      if (prevMessageIds && prevMessageIds.length > 0) {
-        for (const oldMsgId of prevMessageIds) {
-          try {
-            await this.callTelegramApi('deleteMessage', {
-              chat_id: targetChat,
-              message_id: Number(oldMsgId)
-            });
-          } catch {}
-        }
-      }
-      TelegramService.cancelActiveTimersForChat(targetChat);
-    } catch (cleanErr) {
-      console.warn('[Telegram FreshChat] Could not purge previous deliveries:', cleanErr);
     }
 
     const cleanPayload = rawPayload.trim();
@@ -3074,7 +3087,7 @@ export class TelegramService {
               if (autoDeleteEnabled && settings.autoDeleteNoticeEnabled) {
                 const noticeRes = await this.callTelegramApi('sendMessage', {
                   chat_id: chatId,
-                  text: `⏳ <i>This message will automatically self-destruct in ${timeoutMinutes} minutes.</i>`,
+                  text: `⏳ <i>This message will automatically self-destruct in ${timeoutMinutes} ${timeoutMinutes === 1 ? 'minute' : 'minutes'}.</i>`,
                   parse_mode: 'HTML'
                 });
                 if (noticeRes && noticeRes.ok && noticeRes.result?.message_id) {
@@ -3287,7 +3300,7 @@ export class TelegramService {
               if (autoDeleteEnabled && settings.autoDeleteNoticeEnabled) {
                 const noticeRes = await this.callTelegramApi('sendMessage', {
                   chat_id: chatId,
-                  text: `⏳ <i>This file will automatically self-destruct in ${timeoutMinutes} minutes. Please save or forward it now.</i>`,
+                  text: `⏳ <i>This file will automatically self-destruct in ${timeoutMinutes} ${timeoutMinutes === 1 ? 'minute' : 'minutes'}. Please save or forward it now.</i>`,
                   parse_mode: 'HTML'
                 });
                 if (noticeRes && noticeRes.ok && noticeRes.result?.message_id) {
@@ -6132,62 +6145,72 @@ export class TelegramService {
   // =========================================================================
   private static pollingActive = false;
   private static pollingOffset = 0;
+  private static isInitializing = false;
+  private static isLoopRunning = false;
 
   public static async initPollingWorker(): Promise<void> {
-    if (this.pollingActive) return;
-
-    // If server is designated as a silent backup mirror (and failover is not active), stay dormant
-    try {
-      const backupConfig = await storage.getBackupConfig();
-      if (backupConfig?.role === 'backup' && !backupConfig?.failoverActive) {
-        console.info('[Telegram] Server is running in Silent Backup Mirror mode. Bot listener is dormant awaiting failover signal.');
-        return;
-      }
-    } catch {}
-
-    const token = await this.getBotToken();
-    if (!token) {
-      console.info('[Telegram] No bot token configured, polling worker waiting.');
+    if (this.pollingActive || this.isInitializing || this.isLoopRunning) {
+      console.info('[Telegram] Polling worker is already initialized or active. Skipping redundant startup.');
       return;
     }
 
+    this.isInitializing = true;
     try {
-      const webhookInfo = await this.callTelegramApi('getWebhookInfo', {});
-      if (webhookInfo?.result?.url) {
-        console.info(`[Telegram Render Service] Found active webhook (${webhookInfo.result.url}). Deleting webhook for continuous Render long-polling...`);
-        await this.callTelegramApi('deleteWebhook', { drop_pending_updates: false });
-        console.info('[Telegram Render Service] Webhook cleared. Continuous background polling is now active.');
-      }
-    } catch (err: any) {
-      console.warn('[Telegram Render Service] Webhook cleanup check:', err?.message || err);
-    }
-
-    // Verify Telegram connection & ensure username is saved
-    try {
-      const me = await this.callTelegramApi('getMe', {});
-      if (me?.ok && me.result) {
-        console.info(`[Telegram] Connection verified for @${me.result.username || 'Bot'} (ID: ${me.result.id})`);
-        const settings = await storage.getSettings();
-        if (!settings.botUsername || settings.botUsername !== me.result.username) {
-          await storage.updateSettings({ botUsername: me.result.username || '' });
+      // If server is designated as a silent backup mirror (and failover is not active), stay dormant
+      try {
+        const backupConfig = await storage.getBackupConfig();
+        if (backupConfig?.role === 'backup' && !backupConfig?.failoverActive) {
+          console.info('[Telegram] Server is running in Silent Backup Mirror mode. Bot listener is dormant awaiting failover signal.');
+          return;
         }
+      } catch {}
+
+      const token = await this.getBotToken();
+      if (!token) {
+        console.info('[Telegram] No bot token configured, polling worker waiting.');
+        return;
       }
-    } catch (e: any) {
-      console.warn('[Telegram] Could not verify bot profile on worker init:', e?.message || e);
-    }
 
-    this.pollingActive = true;
-    console.info('[Telegram Render Service] Persistent background polling worker active (24/7 continuous mode).');
+      try {
+        const webhookInfo = await this.callTelegramApi('getWebhookInfo', {});
+        if (webhookInfo?.result?.url) {
+          console.info(`[Telegram Render Service] Found active webhook (${webhookInfo.result.url}). Deleting webhook for continuous Render long-polling...`);
+          await this.callTelegramApi('deleteWebhook', { drop_pending_updates: false });
+          console.info('[Telegram Render Service] Webhook cleared. Continuous background polling is now active.');
+        }
+      } catch (err: any) {
+        console.warn('[Telegram Render Service] Webhook cleanup check:', err?.message || err);
+      }
 
-    const launchPolling = () => {
+      // Verify Telegram connection & ensure username is saved
+      try {
+        const me = await this.callTelegramApi('getMe', {});
+        if (me?.ok && me.result) {
+          console.info(`[Telegram] Connection verified for @${me.result.username || 'Bot'} (ID: ${me.result.id})`);
+          const settings = await storage.getSettings();
+          if (!settings.botUsername || settings.botUsername !== me.result.username) {
+            await storage.updateSettings({ botUsername: me.result.username || '' });
+          }
+        }
+      } catch (e: any) {
+        console.warn('[Telegram] Could not verify bot profile on worker init:', e?.message || e);
+      }
+
       this.pollingActive = true;
-      this.runPollingLoop().catch((err) => {
-        console.warn('[Telegram Render Service] Polling loop caught error, auto-recovering in 2s...', err?.message || err);
-        setTimeout(launchPolling, 2000);
-      });
-    };
+      console.info('[Telegram Render Service] Persistent background polling worker active (24/7 continuous mode).');
 
-    launchPolling();
+      const launchPolling = () => {
+        if (!this.pollingActive) return;
+        this.runPollingLoop().catch((err) => {
+          console.warn('[Telegram Render Service] Polling loop caught error, auto-recovering in 2s...', err?.message || err);
+          setTimeout(launchPolling, 2000);
+        });
+      };
+
+      launchPolling();
+    } finally {
+      this.isInitializing = false;
+    }
   }
 
   public static isPollingActive(): boolean {
@@ -6199,40 +6222,50 @@ export class TelegramService {
   }
 
   private static async runPollingLoop(): Promise<void> {
-    while (this.pollingActive) {
-      try {
-        const res = await this.callTelegramApi('getUpdates', {
-          offset: this.pollingOffset,
-          timeout: 10,
-          allowed_updates: [
-            'message', 'edited_message', 'channel_post', 'edited_channel_post',
-            'inline_query', 'chosen_inline_result', 'callback_query',
-            'my_chat_member', 'chat_member', 'chat_join_request'
-          ]
-        });
+    if (this.isLoopRunning) {
+      console.warn('[Telegram Polling] Polling loop already active. Skipping duplicate loop invocation.');
+      return;
+    }
 
-        if (res && res.ok && Array.isArray(res.result)) {
-          for (const update of res.result) {
-            this.pollingOffset = Math.max(this.pollingOffset, update.update_id + 1);
-            try {
-              await this.handleUpdate(update);
-            } catch (updateErr: any) {
-              console.error('[Telegram Polling] Error handling update (swallowed to prevent crash):', updateErr?.message || updateErr);
+    this.isLoopRunning = true;
+    try {
+      while (this.pollingActive) {
+        try {
+          const res = await this.callTelegramApi('getUpdates', {
+            offset: this.pollingOffset,
+            timeout: 10,
+            allowed_updates: [
+              'message', 'edited_message', 'channel_post', 'edited_channel_post',
+              'inline_query', 'chosen_inline_result', 'callback_query',
+              'my_chat_member', 'chat_member', 'chat_join_request'
+            ]
+          });
+
+          if (res && res.ok && Array.isArray(res.result)) {
+            for (const update of res.result) {
+              this.pollingOffset = Math.max(this.pollingOffset, update.update_id + 1);
+              try {
+                await this.handleUpdate(update);
+              } catch (updateErr: any) {
+                console.error('[Telegram Polling] Error handling update (swallowed to prevent crash):', updateErr?.message || updateErr);
+              }
             }
           }
-        }
-      } catch (err: any) {
-        if (err?.message && err.message.includes('409')) {
-          console.info('[Telegram Polling] Webhook conflict detected (409). Deleting webhook to resume continuous Render polling...');
-          try {
-            await this.callTelegramApi('deleteWebhook', { drop_pending_updates: false });
-          } catch {}
+        } catch (err: any) {
+          if (err?.message && err.message.includes('409')) {
+            console.info('[Telegram Polling] Webhook conflict detected (409). Deleting webhook to resume continuous Render polling...');
+            try {
+              await this.callTelegramApi('deleteWebhook', { drop_pending_updates: false });
+            } catch {}
+            await new Promise((r) => setTimeout(r, 2000));
+            continue;
+          }
+          // Silently wait and retry on network drop or timeout
           await new Promise((r) => setTimeout(r, 2000));
-          continue;
         }
-        // Silently wait and retry on network drop or timeout
-        await new Promise((r) => setTimeout(r, 2000));
       }
+    } finally {
+      this.isLoopRunning = false;
     }
   }
 }

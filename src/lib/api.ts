@@ -262,7 +262,11 @@ export const api = {
       body: JSON.stringify({ telegramId, username: telegramId, password })
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Login failed');
+    if (!res.ok) {
+      const err: any = new Error(data.error || 'Login failed');
+      err.field = data.field;
+      throw err;
+    }
     if (data.token) {
       try {
         if (typeof window !== 'undefined' && window.localStorage) {
@@ -280,7 +284,11 @@ export const api = {
       body: JSON.stringify(payload)
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Firebase authentication failed');
+    if (!res.ok) {
+      const err: any = new Error(data.error || 'Firebase authentication failed');
+      err.field = data.field;
+      throw err;
+    }
     if (data.token) {
       try {
         if (typeof window !== 'undefined' && window.localStorage) {

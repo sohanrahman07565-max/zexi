@@ -1234,7 +1234,8 @@ export class SharedStorageService {
     const items = [...this.db.items].sort((a, b) => {
       const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
       const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      return timeA - timeB;
+      if (timeA !== timeB) return timeA - timeB;
+      return (a.id || '').localeCompare(b.id || '');
     });
     return items;
   }
@@ -1335,6 +1336,9 @@ export class SharedStorageService {
     }
     if (cleanItem.buttonText) {
       cleanItem.buttonText = cleanItem.buttonText.trim();
+    }
+    if (!cleanItem.createdAt) {
+      cleanItem.createdAt = new Date().toISOString();
     }
     const index = this.db.items.findIndex(i => i.id === cleanItem.id);
     if (index >= 0) {
@@ -2133,7 +2137,10 @@ export class SharedStorageService {
     itemTitle?: string;
   }): Promise<ScheduledDeletion> {
     await this.loadLatest(true);
-    const timeoutMins = data.timeoutMinutes && data.timeoutMinutes > 0 ? data.timeoutMinutes : 10;
+    const configuredTimeout = this.db.settings?.deliveryTimeoutMinutes;
+    const timeoutMins = (typeof data.timeoutMinutes === 'number' && data.timeoutMinutes > 0)
+      ? data.timeoutMinutes
+      : ((typeof configuredTimeout === 'number' && configuredTimeout > 0) ? configuredTimeout : 10);
     const deleteAt = Date.now() + timeoutMins * 60 * 1000;
     const record: ScheduledDeletion = {
       id: `sd_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`,
@@ -2228,27 +2235,8 @@ export class SharedStorageService {
     if (this.db.chatDeliveryMessages && this.db.chatDeliveryMessages[key]) {
       this.db.chatDeliveryMessages[key] = [];
     }
-
-    // Also include any message IDs currently in scheduledDeletions for this chat
-    const scheduledMsgIds: number[] = [];
-    if (Array.isArray(this.db.scheduledDeletions)) {
-      const remaining: ScheduledDeletion[] = [];
-      for (const item of this.db.scheduledDeletions) {
-        if (String(item.chatId) === key) {
-          scheduledMsgIds.push(item.messageId);
-          if (item.companionNoticeId) scheduledMsgIds.push(item.companionNoticeId);
-        } else {
-          remaining.push(item);
-        }
-      }
-      this.db.scheduledDeletions = remaining;
-    }
-
     await this.persist();
-
-    // Return unique message IDs that need deletion
-    const allMsgIds = Array.from(new Set([...recordedList, ...scheduledMsgIds])).filter(Boolean);
-    return allMsgIds;
+    return recordedList;
   }
 
   // --- Uploaded Files Storage (Direct phone / storage upload support) ---

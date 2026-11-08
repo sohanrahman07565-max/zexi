@@ -58,7 +58,8 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
     const sorted = [...items].sort((a, b) => {
       const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
       const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      return timeA - timeB;
+      if (timeA !== timeB) return timeA - timeB;
+      return (a.id || '').localeCompare(b.id || '');
     });
 
     return sorted.filter((item) => {
@@ -393,7 +394,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
             )}
           </div>
         ) : (
-          displayedItems.map((item) => {
+          displayedItems.map((item, index) => {
             const isVisible = item.inFiltersList === true;
             const triggerType = item.triggerType || 'hashtag';
             const primaryTrigger = item.triggers?.[0] || (
@@ -418,9 +419,17 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
                     : 'border-zinc-800/50 bg-zinc-950/40 opacity-75'
                 }`}
               >
-                {/* Card Top Row: Trigger Badge + Type Badge + Show/Hide Toggle */}
+                {/* Card Top Row: Sequence # + Trigger Badge + Type Badge + Show/Hide Toggle */}
                 <div className="flex items-start justify-between gap-2 flex-wrap mb-3">
                   <div className="flex items-center gap-2 flex-wrap min-w-0">
+                    {/* Sequential FIFO Index Badge */}
+                    <span 
+                      className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-lg bg-zinc-800/90 text-zinc-300 border border-zinc-700/60 shadow-xs" 
+                      title={`Filter #${index + 1} (Sequential chronological FIFO order)`}
+                    >
+                      #{index + 1}
+                    </span>
+
                     {/* Trigger Keyword Badge */}
                     <button
                       type="button"

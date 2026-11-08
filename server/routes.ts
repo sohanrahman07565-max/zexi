@@ -166,7 +166,8 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   if (!matchedAdmin && !isOwnerAttempt) {
     console.warn('[Auth] Login REJECTED: unauthorized account/email attempted:', cleanId);
     return res.status(401).json({ 
-      error: 'Access Denied: This account is not an authorized administrator. Access is restricted to the owner and approved sub-admins only.' 
+      error: 'Access Denied', 
+      field: 'email' 
     });
   }
 
@@ -191,12 +192,12 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
       await storage.saveAdmin(newOwner);
       matchedAdmin = newOwner;
     } else {
-      return res.status(401).json({ error: 'Incorrect password for Owner account.' });
+      return res.status(401).json({ error: 'Incorrect password', field: 'password' });
     }
   }
 
   if (!matchedAdmin || !matchedAdmin.enabled) {
-    return res.status(401).json({ error: 'Access Denied: This administrator account has been disabled.' });
+    return res.status(401).json({ error: 'Access Denied: This administrator account has been disabled.', field: 'email' });
   }
 
   // 4. STRICT PASSWORD VERIFICATION
@@ -219,7 +220,7 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   // ZERO backdoor or default passwords!
   if (!isPasswordValid) {
     console.warn('[Auth] Login REJECTED: incorrect password for:', cleanId);
-    return res.status(401).json({ error: 'Incorrect password. Access denied.' });
+    return res.status(401).json({ error: 'Incorrect password', field: 'password' });
   }
 
   console.info('[Auth] Admin login SUCCESSFUL for:', cleanId, matchedAdmin.name, matchedAdmin.role);
@@ -384,7 +385,8 @@ apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
   if (!isAuthorized) {
     console.warn('[Firebase Auth] Strict whitelist rejection for unauthorized email:', cleanEmail);
     return res.status(403).json({ 
-      error: `Access Denied: Account (${cleanEmail}) is not authorized. Only designated administrators (${Array.from(authorizedEmails).join(', ')}) can access this panel.` 
+      error: 'Access Denied',
+      field: 'email'
     });
   }
 
@@ -1655,7 +1657,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
   if (dailyCleanupEnabled !== undefined) updates.dailyCleanupEnabled = Boolean(dailyCleanupEnabled);
   if (cleanupAgeHours !== undefined) updates.cleanupAgeHours = Number(cleanupAgeHours) || 24;
   if (autoDeleteDeliveryEnabled !== undefined) updates.autoDeleteDeliveryEnabled = Boolean(autoDeleteDeliveryEnabled);
-  if (deliveryTimeoutMinutes !== undefined) updates.deliveryTimeoutMinutes = Number(deliveryTimeoutMinutes) || 10;
+  if (deliveryTimeoutMinutes !== undefined) updates.deliveryTimeoutMinutes = Math.max(1, Number(deliveryTimeoutMinutes) || 10);
   if (autoDeleteNoticeEnabled !== undefined) updates.autoDeleteNoticeEnabled = Boolean(autoDeleteNoticeEnabled);
   if (req.body.maintenanceMode !== undefined) updates.maintenanceMode = Boolean(req.body.maintenanceMode);
   if (req.body.maintenanceNotice !== undefined) updates.maintenanceNotice = String(req.body.maintenanceNotice).trim();

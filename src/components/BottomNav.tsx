@@ -118,18 +118,18 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
 
   return (
     <div className="fixed bottom-3.5 sm:bottom-4 inset-x-3 sm:inset-x-0 z-40 max-w-[420px] mx-auto pointer-events-none select-none">
-      {/* Modern Liquid Capsule Navigation Bar */}
+      {/* Modern Translucent Frosted Glass Navigation Bar */}
       <nav
         aria-label="Bottom Navigation"
-        className="pointer-events-auto relative h-16 sm:h-[68px] rounded-full bg-[#070b12]/92 backdrop-blur-2xl border border-cyan-500/25 p-1.5 shadow-[0_16px_40px_-6px_rgba(0,0,0,0.92),0_0_24px_rgba(6,182,212,0.22),inset_0_1px_1.5px_rgba(255,255,255,0.15)] select-none flex items-center"
+        className="pointer-events-auto relative h-16 sm:h-[68px] rounded-full bg-black/40 backdrop-blur-2xl border border-white/20 p-1.5 shadow-[0_16px_40px_-6px_rgba(0,0,0,0.85),0_0_24px_rgba(255,255,255,0.1),inset_0_1px_2px_rgba(255,255,255,0.25)] select-none flex items-center"
       >
-        {/* Ambient Cyan/Aqua Glow under capsule */}
+        {/* Soft Ambient White Glass Glow under capsule */}
         <div
           className="absolute -bottom-2 inset-x-8 h-4 rounded-full blur-xl pointer-events-none -z-10"
-          style={{ background: 'radial-gradient(ellipse at center, rgba(6,182,212,0.38) 0%, transparent 70%)' }}
+          style={{ background: 'radial-gradient(ellipse at center, rgba(255,255,255,0.18) 0%, transparent 70%)' }}
         />
 
-        {/* Tab Items Row with Interactive Draggable Glowing Pill */}
+        {/* Tab Items Row with Interactive Draggable Frosted Glass Pill */}
         <div
           ref={containerRef}
           onPointerDown={handlePointerDown}
@@ -139,9 +139,8 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
           className="relative flex items-center w-full h-full touch-none cursor-grab active:cursor-grabbing"
         >
           {/* =========================================================================
-              DRAGGABLE FLUID SLIDING PILL (Clean Glowing Liquid Container)
-              Follows touch/cursor in real-time, snaps to nearest tab on release.
-              White horizontal dash/line removed per specification.
+              DRAGGABLE TRANSLUCENT FROSTED GLASS SLIDING PILL
+              Water-like translucent blur aesthetic with pure white illumination
               ========================================================================= */}
           <div
             className="absolute top-1 bottom-1 left-0 pointer-events-none z-0 px-0.5"
@@ -153,16 +152,16 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
               boxSizing: 'border-box'
             }}
           >
-            {/* Clean Glowing Fluid Pill without any underlying white line */}
+            {/* Frosted Translucent Glass Switcher with Water-like Blur */}
             <div
-              className={`relative w-full h-full rounded-2xl sm:rounded-3xl bg-gradient-to-r from-cyan-500/90 via-teal-400/95 to-sky-500/90 border border-cyan-300/70 shadow-[0_0_22px_rgba(6,182,212,0.7),inset_0_1.5px_2.5px_rgba(255,255,255,0.75)] flex items-center justify-center transition-all ${
+              className={`relative w-full h-full rounded-2xl sm:rounded-3xl bg-white/20 backdrop-blur-2xl border border-white/40 shadow-[0_0_22px_rgba(255,255,255,0.3),inset_0_1.5px_2.5px_rgba(255,255,255,0.6)] flex items-center justify-center transition-all ${
                 isDragging
-                  ? 'scale-x-[1.06] scale-y-[1.03] shadow-[0_0_28px_rgba(6,182,212,0.9),inset_0_1.5px_2.5px_rgba(255,255,255,0.9)] brightness-110'
+                  ? 'scale-x-[1.06] scale-y-[1.03] shadow-[0_0_28px_rgba(255,255,255,0.45),inset_0_1.5px_2.5px_rgba(255,255,255,0.75)] brightness-110'
                   : 'scale-x-[1.03] scale-y-[1.02]'
               }`}
             >
-              {/* Subtle Soft Specular Top Reflection for Liquid 3D Depth */}
-              <div className="absolute top-0.5 inset-x-3 h-1 rounded-full bg-white/40 blur-[0.5px] pointer-events-none" />
+              {/* Soft Specular Top Highlight for Liquid Glass 3D Depth */}
+              <div className="absolute top-0.5 inset-x-3 h-1 rounded-full bg-white/50 blur-[0.5px] pointer-events-none" />
             </div>
           </div>
 
@@ -187,25 +186,25 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
                 aria-selected={isTabActive}
                 title={tab.label}
               >
-                {/* Vertical Stack: Icon above, Label underneath with dynamic illumination */}
+                {/* Vertical Stack: Icon above, Label underneath with pure white illumination */}
                 <div
                   className={`flex flex-col items-center justify-center gap-0.5 min-w-0 transition-transform duration-200 ${
                     isVisualFocus ? 'scale-105' : 'scale-100 group-hover:scale-105'
                   }`}
                 >
                   <Icon
-                    className={`w-5 h-5 transition-all duration-200 shrink-0 ${
+                    className={`w-5 h-5 transition-all duration-200 shrink-0 text-white ${
                       isVisualFocus
-                        ? 'text-white scale-110 drop-shadow-[0_0_10px_rgba(255,255,255,0.95)]'
-                        : 'text-zinc-400 group-hover:text-zinc-200'
+                        ? 'scale-110 opacity-100 drop-shadow-[0_0_10px_rgba(255,255,255,0.95)]'
+                        : 'opacity-65 group-hover:opacity-100'
                     }`}
                   />
 
                   <span
-                    className={`text-[10px] sm:text-[11px] tracking-tight transition-all duration-200 leading-none truncate max-w-full ${
+                    className={`text-[10px] sm:text-[11px] tracking-tight transition-all duration-200 leading-none truncate max-w-full text-white ${
                       isVisualFocus
-                        ? 'text-white font-bold drop-shadow-[0_1px_3px_rgba(0,0,0,0.6)]'
-                        : 'text-zinc-400 group-hover:text-zinc-300 font-medium'
+                        ? 'font-bold opacity-100 drop-shadow-[0_1px_4px_rgba(0,0,0,0.8)]'
+                        : 'font-medium opacity-65 group-hover:opacity-100'
                     }`}
                   >
                     {tab.label}
