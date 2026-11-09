@@ -2,14 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 
 export const DEFAULT_LOGO_URL = 'https://host.tscv.workers.dev/img/df6c9e167caf42c6';
 
-// Eagerly pre-cache custom logo in browser memory immediately
-if (typeof window !== 'undefined') {
-  try {
-    const preImg = new Image();
-    preImg.src = DEFAULT_LOGO_URL;
-  } catch {}
-}
-
 interface SplashScreenProps {
   onComplete: () => void;
   logoSymbol?: string;
@@ -20,274 +12,335 @@ interface SplashScreenProps {
 
 export const SplashScreen: React.FC<SplashScreenProps> = ({
   onComplete,
-  logoSymbol = '惡',
-  logoUrl = DEFAULT_LOGO_URL,
-  title = 'ADMIN PANEL',
-  accentColor = '#ef4444'
+  title = 'Zexi Official',
 }) => {
-  const [progress, setProgress] = useState(1);
-  const [statusText, setStatusText] = useState('INITIALIZING SECURE PROTOCOL...');
-  const [isExiting, setIsExiting] = useState(false);
-
-  // Guarantee single execution of the 1 to 100 loading sequence without double-loading
+  const [progress, setProgress] = useState(0);
+  const [isHiding, setIsHiding] = useState(false);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
   const startedRef = useRef(false);
 
-  const finalLogoUrl = (!logoUrl || logoUrl.trim() === '' || logoUrl.includes('4fae5ca52db64590'))
-    ? DEFAULT_LOGO_URL
-    : logoUrl.trim();
+  // Dynamic branding text (defaults to Zexi Official)
+  const displayBrand = !title || title === 'ADMIN PANEL' ? 'Zexi Official' : title;
 
   useEffect(() => {
     if (startedRef.current) return;
     startedRef.current = true;
 
-    // Single smooth progress animation counting from 1% to 100% exactly once
-    const duration = 2100; // 2.1 seconds total duration
-    const intervalTime = 25; // updates every 25ms
-    const totalSteps = duration / intervalTime;
-    let currentStep = 0;
+    const duration = 3200; // 3.2 seconds smooth progress animation
+    const startTime = performance.now();
+    let animationFrameId: number;
+    let isFinished = false;
 
-    const timer = setInterval(() => {
-      currentStep++;
-      const t = currentStep / totalSteps;
-      // Smooth easing progression from 1 to 100
-      const easedProgress = Math.max(1, Math.min(100, Math.round((1 - Math.pow(1 - t, 2.2)) * 100)));
+    const animate = (now: number) => {
+      if (isFinished) return;
 
-      setProgress(easedProgress);
+      const elapsed = now - startTime;
+      // Progress moves smoothly up to 95%
+      let currentProgress = Math.min(95, (elapsed / duration) * 95);
 
-      if (easedProgress < 30) {
-        setStatusText('INITIALIZING SECURE PROTOCOL...');
-      } else if (easedProgress < 65) {
-        setStatusText('LOADING ENCRYPTED MODULES...');
-      } else if (easedProgress < 95) {
-        setStatusText('ESTABLISHING ACCESS GATEWAY...');
-      } else {
-        setStatusText('SYSTEM READY');
+      // Finish to 100% when elapsed exceeds duration
+      if (elapsed >= duration) {
+        currentProgress = 100;
       }
 
-      if (currentStep >= totalSteps) {
-        clearInterval(timer);
-        setProgress(100);
-        setStatusText('SYSTEM READY');
+      const value = Math.floor(currentProgress);
+      setProgress(value);
 
-        // Smooth fade-out transition after reaching 100%
+      if (value >= 100) {
+        isFinished = true;
+        // Small final hold matching user script (350ms)
         setTimeout(() => {
-          setIsExiting(true);
+          setIsHiding(true);
+          // Complete transition and unmount after 1.1s
           setTimeout(() => {
             onCompleteRef.current();
-          }, 500);
-        }, 200);
+          }, 1100);
+        }, 350);
+        return;
       }
-    }, intervalTime);
 
-    return () => clearInterval(timer);
+      animationFrameId = requestAnimationFrame(animate);
+    };
+
+    animationFrameId = requestAnimationFrame(animate);
+
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+    };
   }, []);
 
-  // Dynamic color transformation that smoothly shifts as progress fills up
-  const getDynamicProgressStyle = (p: number) => {
-    if (p < 25) {
-      return {
-        gradient: 'linear-gradient(90deg, #06b6d4, #0ea5e9, #38bdf8)',
-        color: '#38bdf8',
-        glow: '0 0 18px rgba(14, 165, 233, 0.7)'
-      };
-    } else if (p < 50) {
-      return {
-        gradient: 'linear-gradient(90deg, #0ea5e9, #6366f1, #8b5cf6)',
-        color: '#a855f7',
-        glow: '0 0 18px rgba(99, 102, 241, 0.7)'
-      };
-    } else if (p < 75) {
-      return {
-        gradient: 'linear-gradient(90deg, #8b5cf6, #d946ef, #f43f5e)',
-        color: '#f43f5e',
-        glow: '0 0 18px rgba(244, 63, 94, 0.75)'
-      };
-    } else {
-      return {
-        gradient: 'linear-gradient(90deg, #f43f5e, #10b981, #06b6d4)',
-        color: '#10b981',
-        glow: '0 0 20px rgba(16, 185, 129, 0.8)'
-      };
-    }
-  };
-
-  const dynamicColorStyle = getDynamicProgressStyle(progress);
-
   return (
-    <div
-      className={`fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#050508] text-white overflow-hidden select-none transition-all duration-700 cubic-bezier(0.4,0,0.2,1) ${
-        isExiting ? 'opacity-0 scale-125 blur-md pointer-events-none' : 'opacity-100 scale-100'
-      }`}
-    >
-      {/* Background: Deep dark/black with a subtle neon red gradient & ambient glow */}
-      <div
-        className="absolute inset-0 pointer-events-none"
-        style={{
-          background: `radial-gradient(circle at 50% 45%, ${accentColor}26 0%, ${accentColor}0a 45%, rgba(5, 5, 8, 0.98) 75%)`
-        }}
-      />
-      <div
-        className="absolute w-[500px] h-[500px] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full blur-[120px] pointer-events-none animate-pulse"
-        style={{
-          backgroundColor: `${accentColor}18`,
-          animationDuration: '3s'
-        }}
-      />
+    <div id="zexi-splash-root">
+      <style>{`
+        #loader {
+          position: fixed;
+          inset: 0;
+          z-index: 99999;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          background: radial-gradient(ellipse at 50% 45%, #252044 0%, #101020 42%, #080811 85%);
+          transition:
+            opacity 1.1s cubic-bezier(.7,0,.2,1),
+            transform 1.3s cubic-bezier(.7,0,.2,1),
+            visibility 1.1s;
+          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+          overflow: hidden;
+          user-select: none;
+        }
 
-      {/* Subtle background tech grid */}
-      <div 
-        className="absolute inset-0 opacity-[0.035] pointer-events-none"
-        style={{
-          backgroundImage: `linear-gradient(to right, ${accentColor} 1px, transparent 1px), linear-gradient(to bottom, ${accentColor} 1px, transparent 1px)`,
-          backgroundSize: '40px 40px'
-        }}
-      />
+        #loader.hide {
+          opacity: 0;
+          visibility: hidden;
+          transform: scale(1.07);
+          pointer-events: none;
+        }
 
-      {/* Central Interactive Animation Box */}
-      <div className="relative z-10 flex flex-col items-center px-6">
-        {/* Rotating Ring + Central Logo Container */}
-        <div className="relative w-44 h-44 sm:w-48 sm:h-48 flex items-center justify-center mb-8">
-          {/* Subtle Outer Glowing Track */}
-          <div 
-            className="absolute inset-0 rounded-full border border-red-500/15"
-            style={{
-              boxShadow: `0 0 30px -5px ${accentColor}20`
-            }}
-          />
+        /* BACKGROUND LIGHT */
+        .splash-light {
+          position: absolute;
+          width: 280px;
+          height: 280px;
+          border-radius: 50%;
+          filter: blur(110px);
+          opacity: .22;
+          animation: lightMove 8s ease-in-out infinite alternate;
+          pointer-events: none;
+        }
 
-          {/* SVG Rotating Glowing Ring Spinner */}
-          <svg
-            className="absolute inset-0 w-full h-full animate-[spin_2.4s_linear_infinite]"
-            viewBox="0 0 100 100"
-          >
-            <defs>
-              <linearGradient id="ringGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor={accentColor} stopOpacity="1" />
-                <stop offset="50%" stopColor="#f43f5e" stopOpacity="0.8" />
-                <stop offset="100%" stopColor={accentColor} stopOpacity="0.05" />
-              </linearGradient>
-              <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
-                <feGaussianBlur stdDeviation="2.5" result="blur" />
-                <feComposite in="SourceGraphic" in2="blur" operator="over" />
-              </filter>
-            </defs>
+        .splash-light.one {
+          background: #7654ff;
+          top: 5%;
+          left: -120px;
+        }
 
-            {/* Orbiting Ring Arc */}
-            <circle
-              cx="50"
-              cy="50"
-              r="44"
-              fill="none"
-              stroke="url(#ringGradient)"
-              strokeWidth="2.8"
-              strokeDasharray="95 180"
-              strokeLinecap="round"
-              filter="url(#glow)"
-            />
+        .splash-light.two {
+          background: #e44b9d;
+          right: -130px;
+          bottom: 5%;
+          animation-delay: -4s;
+        }
 
-            {/* Glowing Orbiting Leading Dot */}
-            <circle
-              cx="50"
-              cy="6"
-              r="2.5"
-              fill="#ffffff"
-              filter="url(#glow)"
-              style={{
-                boxShadow: `0 0 10px #ffffff, 0 0 20px ${accentColor}`
-              }}
-            />
-          </svg>
+        @keyframes lightMove {
+          to {
+            transform: translate(70px, -40px) scale(1.3);
+          }
+        }
 
-          {/* Secondary Counter-Rotating Subtle Arc for Depth */}
-          <svg
-            className="absolute inset-2 w-[calc(100%-16px)] h-[calc(100%-16px)] animate-[spin_4s_linear_infinite_reverse] opacity-40"
-            viewBox="0 0 100 100"
-          >
-            <circle
-              cx="50"
-              cy="50"
-              r="42"
-              fill="none"
-              stroke={accentColor}
-              strokeWidth="1.2"
-              strokeDasharray="40 120"
-              strokeLinecap="round"
-            />
-          </svg>
+        /* SUBTLE BACKGROUND GRID */
+        .splash-grid {
+          position: absolute;
+          inset: 0;
+          background-image:
+            linear-gradient(#ffffff08 1px, transparent 1px),
+            linear-gradient(90deg, #ffffff08 1px, transparent 1px);
+          background-size: 65px 65px;
+          mask-image: radial-gradient(ellipse, black, transparent 80%);
+          -webkit-mask-image: radial-gradient(ellipse, black, transparent 80%);
+          pointer-events: none;
+        }
 
-          {/* Central Element: Circular user logo/avatar badge with crown & Zexi Tools */}
-          <div
-            className="relative z-10 w-28 h-28 sm:w-32 sm:h-32 rounded-full flex items-center justify-center overflow-hidden transition-transform duration-500 shadow-2xl p-0.5"
-            style={{
-              background: `radial-gradient(circle, #2a0814 0%, #0c0408 100%)`,
-              boxShadow: `0 0 38px ${accentColor}aa, inset 0 1px 3px rgba(255, 255, 255, 0.45)`,
-              border: `2px solid ${accentColor}`
-            }}
-          >
-            {/* Instant custom logo rendering from frame 0 with zero flickering */}
-            <img
-              src={finalLogoUrl}
-              alt={title}
-              className="w-full h-full object-cover rounded-full"
-              loading="eager"
-              decoding="sync"
-            />
+        /* CENTER CONTENT */
+        .splash-content {
+          position: relative;
+          z-index: 2;
+          width: 88%;
+          max-width: 500px;
+          text-align: center;
+        }
 
-            {/* Subtle gloss highlight on logo */}
-            <div className="absolute inset-0 bg-gradient-to-tr from-transparent via-white/10 to-transparent pointer-events-none rounded-full" />
+        /* TOP SMALL LIGHT */
+        .splash-top-light {
+          width: 35px;
+          height: 2px;
+          margin: 0 auto 35px;
+          background: linear-gradient(90deg, transparent, #a58cff, transparent);
+          box-shadow: 0 0 18px #a58cff;
+          animation: lightPulse 2s infinite;
+        }
+
+        @keyframes lightPulse {
+          50% {
+            opacity: .3;
+            width: 65px;
+          }
+        }
+
+        /* WELCOME TEXT */
+        .splash-welcome {
+          color: #ffffff;
+          font-size: clamp(27px, 7vw, 43px);
+          font-weight: 700;
+          letter-spacing: 1.5px;
+          line-height: 1.35;
+          opacity: 0;
+          transform: translateY(22px);
+          animation: textReveal 1.3s .3s forwards;
+        }
+
+        .splash-welcome span {
+          display: block;
+          background: linear-gradient(
+            100deg,
+            #ffffff 0%,
+            #c6b5ff 25%,
+            #ffffff 45%,
+            #a68aff 65%,
+            #ffffff 85%
+          );
+          background-size: 250% auto;
+          background-clip: text;
+          -webkit-background-clip: text;
+          color: transparent;
+          animation: shine 4s 1.5s linear infinite;
+        }
+
+        @keyframes shine {
+          to {
+            background-position: 250% center;
+          }
+        }
+
+        @keyframes textReveal {
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+
+        /* UNDERLINE */
+        .splash-underline {
+          width: 0;
+          height: 1px;
+          margin: 24px auto 0;
+          background: linear-gradient(
+            90deg, transparent, #a78bff, #f1baff, transparent
+          );
+          box-shadow: 0 0 12px #a78bff;
+          animation: lineGrow 1.2s 1s forwards;
+        }
+
+        @keyframes lineGrow {
+          to {
+            width: 75%;
+          }
+        }
+
+        /* LOADING AREA */
+        .splash-loading-area {
+          margin-top: 70px;
+          opacity: 0;
+          transform: translateY(12px);
+          animation: loadReveal 1s 1.1s forwards;
+        }
+
+        @keyframes loadReveal {
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+
+        .splash-loading-info {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          margin-bottom: 13px;
+        }
+
+        .splash-loading-label {
+          font-size: 9px;
+          letter-spacing: 3px;
+          color: #a5a1bb;
+          font-weight: 600;
+        }
+
+        .splash-percent {
+          font-size: 12px;
+          font-weight: 600;
+          color: #d5caff;
+          font-variant-numeric: tabular-nums;
+        }
+
+        /* PROGRESS BAR TRACK & BAR */
+        .splash-track {
+          width: 100%;
+          height: 3px;
+          background: rgba(255, 255, 255, 0.09);
+          border-radius: 20px;
+          overflow: hidden;
+        }
+
+        .splash-bar {
+          height: 100%;
+          border-radius: 20px;
+          background: linear-gradient(
+            90deg, #7555ff, #b38bff, #f0c8ff
+          );
+          box-shadow: 0 0 15px #a78bff;
+          transition: width .12s linear;
+        }
+
+        /* BOTTOM DECORATION */
+        .splash-bottom-light {
+          position: absolute;
+          width: 100px;
+          height: 1px;
+          background: linear-gradient(
+            90deg, transparent, #a78bff, transparent
+          );
+          bottom: 55px;
+          left: 50%;
+          transform: translateX(-50%);
+          opacity: .5;
+        }
+
+        /* RESPONSIVE */
+        @media(max-width: 480px) {
+          .splash-loading-area {
+            margin-top: 58px;
+          }
+
+          .splash-welcome {
+            letter-spacing: .5px;
+          }
+        }
+      `}</style>
+
+      {/* LOADING SCREEN CONTAINER */}
+      <div id="loader" className={isHiding ? 'hide' : ''}>
+        <div className="splash-grid" />
+
+        <div className="splash-light one" />
+        <div className="splash-light two" />
+
+        <div className="splash-content">
+          <div className="splash-top-light" />
+
+          <h1 className="splash-welcome">
+            Welcome to
+            <span>{displayBrand}</span>
+          </h1>
+
+          <div className="splash-underline" />
+
+          <div className="splash-loading-area">
+            <div className="splash-loading-info">
+              <span className="splash-loading-label">LOADING</span>
+              <span className="splash-percent">{progress}%</span>
+            </div>
+
+            <div className="splash-track">
+              <div
+                className="splash-bar"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
           </div>
         </div>
 
-        {/* Branding Title */}
-        <div className="text-center mb-6">
-          <h2
-            className="text-lg sm:text-xl font-black uppercase tracking-[0.25em] font-mono"
-            style={{
-              color: accentColor,
-              textShadow: `0 0 18px ${accentColor}aa`
-            }}
-          >
-            {title}
-          </h2>
-          <p className="text-[10px] font-bold tracking-[0.3em] text-zinc-500 uppercase mt-1">
-            SECURE ACCESS SYSTEM
-          </p>
-        </div>
-
-        {/* Thick Linear Progress Bar with Smooth Dynamic Color Sequence (No Light Streak) */}
-        <div className="w-64 sm:w-72 flex flex-col gap-2.5">
-          {/* Progress bar track & fill: Slightly thicker, rounded-full with high-end glass container */}
-          <div className="w-full h-3 sm:h-3.5 bg-zinc-950/90 rounded-full border border-zinc-700/60 overflow-hidden p-[2px] relative shadow-[inset_0_2px_4px_rgba(0,0,0,0.8)]">
-            <div
-              className="h-full rounded-full relative"
-              style={{
-                width: `${progress}%`,
-                background: dynamicColorStyle.gradient,
-                boxShadow: dynamicColorStyle.glow,
-                transition: 'width 75ms linear, background 350ms ease, box-shadow 350ms ease'
-              }}
-            />
-          </div>
-
-          {/* Percentage and Status Indicator with Dynamic Color Matching */}
-          <div className="flex items-center justify-between text-[11px] font-mono tracking-wider">
-            <span className="text-zinc-400 text-[10px] truncate max-w-[200px]">
-              {statusText}
-            </span>
-            <span
-              className="font-bold shrink-0 ml-2"
-              style={{
-                color: dynamicColorStyle.color,
-                textShadow: `0 0 10px ${dynamicColorStyle.color}80`,
-                transition: 'color 350ms ease, text-shadow 350ms ease'
-              }}
-            >
-              {progress}%
-            </span>
-          </div>
-        </div>
+        <div className="splash-bottom-light" />
       </div>
     </div>
   );
