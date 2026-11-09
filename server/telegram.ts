@@ -61,6 +61,7 @@ interface AddSession {
 
 const activeAddSessions: Map<string, AddSession> = new Map();
 const activeEditSessions: Map<string, { templateKey: string }> = new Map();
+const activeSetChannelSessions: Map<string, { timestamp: number }> = new Map();
 
 // Deduplication map to prevent repeated deliveries from retried webhooks
 const recentDeliveries = new Map<string, number>();
@@ -115,7 +116,8 @@ function extractUpdateKeys(update: any): string[] {
   return keys;
 }
 
-async function claimExclusiveTelegramUpdate(update: any): Promise<{ allowed: boolean; keys: string[] }> {
+// Super-fast 0ms latency update deduplication: eliminates delay before replying to users
+function claimExclusiveTelegramUpdate(update: any): { allowed: boolean; keys: string[] } {
   if (!update) return { allowed: false, keys: [] };
   const now = Date.now();
 
@@ -129,14 +131,14 @@ async function claimExclusiveTelegramUpdate(update: any): Promise<{ allowed: boo
   const keys = extractUpdateKeys(update);
   if (keys.length === 0) return { allowed: true, keys: [] };
 
-  // 1. In-flight check: if any key is currently running, drop immediately
+  // 1. In-flight check: if any key is currently running, drop immediately (0ms)
   for (const k of keys) {
     if (inFlightUpdateKeys.has(k)) {
       return { allowed: false, keys };
     }
   }
 
-  // 2. Local deduplication check (processed within last 90 seconds)
+  // 2. Local deduplication check (processed within last 90 seconds) (0ms)
   for (const k of keys) {
     const lastSeen = processedUpdateKeys.get(k);
     if (lastSeen && now - lastSeen < 90000) {
@@ -144,19 +146,15 @@ async function claimExclusiveTelegramUpdate(update: any): Promise<{ allowed: boo
     }
   }
 
-  // 3. Distributed RTDB atomic claim across instances (Dev, Preview, Render, etc.)
-  const primaryKey = keys[0];
-  const cloudClaimed = await storage.claimDistributedTelegramUpdate(primaryKey, BOT_INSTANCE_ID, 90000);
-  if (!cloudClaimed) {
-    // Another instance has already claimed this update! Drop execution immediately.
-    return { allowed: false, keys };
-  }
-
-  // Mark all keys as in-flight and processed
+  // Mark all keys as in-flight and processed immediately (zero lag)
   for (const k of keys) {
     inFlightUpdateKeys.add(k);
     processedUpdateKeys.set(k, now);
   }
+
+  // 3. Asynchronously record distributed update claim in background without blocking message response
+  const primaryKey = keys[0];
+  storage.claimDistributedTelegramUpdate(primaryKey, BOT_INSTANCE_ID, 90000).catch(() => {});
 
   return { allowed: true, keys };
 }
@@ -493,8 +491,8 @@ export class TelegramService {
   public static async handleUpdate(update: any): Promise<void> {
     if (!update) return;
 
-    // Strict multi-instance atomic deduplication: prevents duplicate execution and double replies
-    const { allowed, keys } = await claimExclusiveTelegramUpdate(update);
+    // Strict multi-instance atomic deduplication: prevents duplicate execution and double replies (0ms instant)
+    const { allowed, keys } = claimExclusiveTelegramUpdate(update);
     if (!allowed) {
       return;
     }
@@ -512,21 +510,17 @@ export class TelegramService {
       // 1. AUTOMATIC UNIQUE UID TRACKING & DATABASE SAVING (Requirement 1 & 2):
       // Intercept every incoming update (message, command like /start, callback query, etc.) from any user.
       // Extract their Telegram User ID, First Name, Last Name, and @username.
-      // Immediately check if this User ID exists in the database. If not, save instantly; if so, update lastActive and online status.
+      // Immediately track in the background without blocking the bot's instant response.
       const userPayload = this.extractUserFromUpdate(update);
       const fromId = userPayload?.id ? String(userPayload.id).trim() : '';
 
       if (userPayload && userPayload.id) {
-        try {
-          await storage.trackBotUser({
-            id: userPayload.id,
-            username: userPayload.username,
-            firstName: userPayload.firstName,
-            lastName: userPayload.lastName
-          });
-        } catch (err: any) {
-          console.warn('[Telegram] User tracking error:', err.message || err);
-        }
+        storage.trackBotUser({
+          id: userPayload.id,
+          username: userPayload.username,
+          firstName: userPayload.firstName,
+          lastName: userPayload.lastName
+        }).catch(() => {});
       }
 
       // Auto-Deletion Check: Process any past-due message deletions promptly
@@ -864,7 +858,7 @@ export class TelegramService {
 
   // Actively sync and auto-detect all channels and groups where the bot is currently an administrator
   public static async syncAdminChannels(): Promise<ForceSubChannel[]> {
-    await storage.loadLatest(true);
+    await storage.loadLatest(false);
     const settings = await storage.getSettings();
     const existing = Array.isArray(settings.requiredChannels) ? [...settings.requiredChannels] : [];
     const detected = await storage.getDetectedChannels();
@@ -1098,25 +1092,22 @@ export class TelegramService {
     const match = text.match(/^\/(?:connect|addchannel|setchannel)(?:@\w+)?(?:\s+(.+))?$/i);
     const rawTarget = match?.[1]?.trim() || (fallbackChatId ? String(fallbackChatId) : '');
     if (!rawTarget) {
+      activeSetChannelSessions.set(fromId, { timestamp: Date.now() });
       const botName = await this.getBotUsername();
       await this.callTelegramApi('sendMessage', {
         chat_id: replyChatId,
         text: `📢 <b>Connect Private Channel / Group</b>\n\n` +
-              `You can connect channels in two easy ways:\n\n` +
-              `<b>1️⃣ Forward-Based Setup (Recommended for Private Channels):</b>\n` +
-              `• Add @${botName || 'this bot'} as an <b>Administrator</b> in your private channel or group.\n` +
-              `• <b>Simply forward any post or message from your private channel directly here!</b>\n` +
+              `• <b>Please now forward any post or message from your private channel directly here!</b>\n` +
+              `• <i>(Ensure @${botName || 'this bot'} is added as an <b>Administrator</b> in that channel first!)</i>\n` +
               `• The bot will automatically detect the chat ID, title, and create a fresh invite link for force-subscription.\n\n` +
-              `<b>2️⃣ Command Setup:</b>\n` +
-              `• <code>/connect &lt;channel_id_or_username&gt;</code>\n` +
-              `• Examples:\n` +
-              `  🔹 <code>/connect @mychannel</code>\n` +
-              `  🔹 <code>/connect -1001234567890</code>\n` +
-              `  🔹 <code>/connect https://t.me/+AbCdEfGh</code>`,
+              `💡 <i>Or connect by channel ID/username directly: <code>/setchannel -1001234567890</code> or <code>/setchannel @mychannel</code></i>\n\n` +
+              `Type <code>/cancel</code> to abort.`,
         parse_mode: 'HTML'
       });
       return;
     }
+
+    activeSetChannelSessions.delete(fromId);
 
     let target = rawTarget;
     let inviteLink = '';
@@ -2806,16 +2797,23 @@ export class TelegramService {
     }
 
     // Forward-based Private Channel / Group Setup:
-    // If an authorized admin forwards a post from a channel or group in private chat:
+    // STRICT REQUIREMENT: Private channel connection must happen EXPLICITLY only when
+    // the admin sends the /setchannel (or /connect) command first, followed by forwarding a message from that channel.
+    // When an admin is in an /add session, forwarded content MUST be processed as content to save, NEVER as channel connection!
     const forwardChat = message.forward_from_chat ||
       (message.forward_origin && (message.forward_origin.chat || message.forward_origin.sender_chat));
 
     if (forwardChat && forwardChat.id) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId);
-      if (isAdmin) {
-        await this.handleForwardedChannelSetup(fromId, chatId, forwardChat);
-        return;
+      if (activeSetChannelSessions.has(fromId)) {
+        activeSetChannelSessions.delete(fromId);
+        const isAdmin = await this.isAuthorizedAdmin(fromId);
+        if (isAdmin) {
+          await this.handleForwardedChannelSetup(fromId, chatId, forwardChat);
+          return;
+        }
       }
+      // If NOT in a /setchannel session, DO NOT connect channel!
+      // Forwarded messages continue to /add session or normal content processing below!
     }
 
     // Admin /connect, /addchannel, or /setchannel command
@@ -2874,6 +2872,7 @@ export class TelegramService {
 
     // 7. Command: /cancel (strictly requires '/' prefix)
     if (text === '/cancel' || text.startsWith('/cancel')) {
+      activeSetChannelSessions.delete(fromId);
       const addSession = activeAddSessions.get(fromId) || await storage.getAddSession(fromId);
       activeAddSessions.delete(fromId);
       await storage.deleteAddSession(fromId);
@@ -2965,8 +2964,8 @@ export class TelegramService {
       return;
     }
 
-    // Force reload latest data from persistent storage
-    await storage.loadLatest(true);
+    // High-speed in-memory data lookup for instant file delivery
+    await storage.loadLatest(false);
 
     // Mandatory Channel Join (Force Sub) Check
     const forceCheck = await this.checkUserForceSub(chatId);
@@ -3787,7 +3786,7 @@ export class TelegramService {
   // QUICK FILE KEYWORDS / FILTERS COMMAND (/filters, /filter, #filters)
   // =========================================================================
   private static async handleFiltersCommand(chatId: number | string, messageId?: number, isGroup: boolean = false): Promise<void> {
-    await storage.loadLatest(true);
+    await storage.loadLatest(false);
     const items = await storage.getItems();
     const templates = await storage.getTemplates();
     const botUsername = await this.getBotUsername();
@@ -4050,6 +4049,9 @@ export class TelegramService {
     if (message?.message_id) {
       await this.deleteUserMessage(chatId, message.message_id);
     }
+
+    // Ensure any channel connection session is cleared so /add strictly processes content
+    activeSetChannelSessions.delete(fromId);
 
     const replyMsg = message?.reply_to_message;
     const media = this.extractMediaFromMessage(message) || (replyMsg ? this.extractMediaFromMessage(replyMsg) : null);

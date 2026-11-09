@@ -500,8 +500,9 @@ export const DEFAULT_SETTINGS: BotSettings = {
   requiredChannels: []
 };
 
-// Persistent storage paths for standalone Render Web Service and local environment
+// Persistent storage paths for standalone Render Web Service and local environment (Dual Firebase projects)
 const FIREBASE_RTDB_URL = "https://zexiofficial844-default-rtdb.asia-southeast1.firebasedatabase.app";
+const SECONDARY_FIREBASE_RTDB_URL = "https://zexi-official-default-rtdb.asia-southeast1.firebasedatabase.app";
 
 function getFallbackFilePaths(): string[] {
   const paths: string[] = [];
@@ -548,7 +549,7 @@ export class SharedStorageService {
     };
   }
 
-  // Fast O(1) in-memory indexing for super-fast Telegram bot responses
+  // Fast O(1) in-memory indexing for super-fast Telegram bot responses with strict trigger-type isolation
   private rebuildCache(): void {
     this.triggerCache.clear();
     this.itemCache.clear();
@@ -557,20 +558,33 @@ export class SharedStorageService {
         this.itemCache.set(item.id, item);
         this.itemCache.set(`f_${item.id.replace(/^f_/, '')}`, item);
         this.itemCache.set(`l_${item.id.replace(/^l_/, '')}`, item);
-        if (item.rawKeyword) {
-          this.triggerCache.set(item.rawKeyword.trim().toLowerCase(), item);
-        }
+
+        const tType: TriggerType = item.triggerType ||
+          (item.triggers?.some(t => t.trim().startsWith('/')) ? 'slash' :
+           (item.triggers?.some(t => t.trim().startsWith('#')) ? 'hashtag' : 'normal'));
+
         if (Array.isArray(item.triggers)) {
           for (const t of item.triggers) {
             const ct = t.trim().toLowerCase();
-            if (ct) {
-              this.triggerCache.set(ct, item);
-              if (ct.startsWith('#')) {
-                this.triggerCache.set(ct.substring(1), item);
+            if (!ct) continue;
+
+            if (tType === 'slash' || ct.startsWith('/')) {
+              // Slash command: strictly indexed under slash: and must start with '/'
+              const slashKey = ct.startsWith('/') ? ct : `/${ct}`;
+              this.triggerCache.set(`slash:${slashKey}`, item);
+              const withoutBot = slashKey.replace(/@\w+$/, '');
+              if (withoutBot !== slashKey) {
+                this.triggerCache.set(`slash:${withoutBot}`, item);
               }
-              if (ct.startsWith('/')) {
-                this.triggerCache.set(ct.substring(1), item);
-                this.triggerCache.set(ct.replace(/@\w+$/, ''), item);
+            } else if (tType === 'hashtag' || ct.startsWith('#')) {
+              // Hashtag filter: strictly indexed under hash: and must start with '#'
+              const hashKey = ct.startsWith('#') ? ct : `#${ct}`;
+              this.triggerCache.set(`hash:${hashKey}`, item);
+            } else {
+              // Normal plain text: strictly indexed under norm: and must NOT start with '/' or '#'
+              const normalKey = ct.replace(/^[/#!]+/, '').trim();
+              if (normalKey) {
+                this.triggerCache.set(`norm:${normalKey}`, item);
               }
             }
           }
@@ -632,7 +646,9 @@ export class SharedStorageService {
   }
 
   private getRtdbUrl(path: string, token?: string | null): string {
-    const baseUrl = (process.env.FIREBASE_DATABASE_URL || FIREBASE_RTDB_URL).replace(/\/+$/, '');
+    const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
+    const defaultUrl = isSecondary ? SECONDARY_FIREBASE_RTDB_URL : FIREBASE_RTDB_URL;
+    const baseUrl = (process.env.FIREBASE_DATABASE_URL || defaultUrl).replace(/\/+$/, '');
     const cleanPath = path.startsWith('/') ? path : `/${path}`;
     const url = `${baseUrl}${cleanPath}.json`;
     if (token) {
@@ -1266,9 +1282,21 @@ export class SharedStorageService {
     if (!cleanTrigger) return null;
     const lowerTrigger = cleanTrigger.toLowerCase();
 
-    // 1. Super-Fast O(1) Cache Lookup
-    const fastMatch = this.triggerCache.get(lowerTrigger) ||
-      (lowerTrigger.startsWith('/') ? this.triggerCache.get(lowerTrigger.replace(/@\w+$/, '')) : null);
+    const isSlash = cleanTrigger.startsWith('/');
+    const isHashtag = cleanTrigger.startsWith('#');
+    const isNormal = !isSlash && !isHashtag;
+
+    // 1. Super-Fast O(1) Cache Lookup strictly isolated by trigger type
+    let fastMatch: ItemRecord | undefined;
+
+    if (isSlash) {
+      const cleanSlash = lowerTrigger.replace(/@\w+$/, '');
+      fastMatch = this.triggerCache.get(`slash:${lowerTrigger}`) || this.triggerCache.get(`slash:${cleanSlash}`);
+    } else if (isHashtag) {
+      fastMatch = this.triggerCache.get(`hash:${lowerTrigger}`);
+    } else if (isNormal) {
+      fastMatch = this.triggerCache.get(`norm:${lowerTrigger}`);
+    }
 
     if (fastMatch && fastMatch.status === 'active') {
       if (fastMatch.retentionType === 'temporary' && fastMatch.expiresAt && Date.now() >= new Date(fastMatch.expiresAt).getTime()) {
@@ -1278,21 +1306,11 @@ export class SharedStorageService {
       return fastMatch;
     }
 
-    const isHashtag = cleanTrigger.startsWith('#');
-    const isSlash = cleanTrigger.startsWith('/');
-
+    // 2. Strict Fallback Scan in db.items if cache missed
     const matched = this.db.items.find(item => {
       if (item.status !== 'active' || !Array.isArray(item.triggers) || item.triggers.length === 0) return false;
 
-      // 1. Hashtag Commands
-      if (isHashtag) {
-        return item.triggers.some(t => {
-          const ct = t.trim().toLowerCase();
-          return ct.startsWith('#') && ct === lowerTrigger;
-        });
-      }
-
-      // 2. Slash Commands
+      // 1. Slash Commands: MUST only match if incoming message starts with '/'
       if (isSlash) {
         const cleanSlash = lowerTrigger.replace(/@\w+$/, '');
         return item.triggers.some(t => {
@@ -1301,12 +1319,24 @@ export class SharedStorageService {
         });
       }
 
-      // 3. Normal Plain Text
-      return item.triggers.some(t => {
-        const ct = t.trim().toLowerCase();
-        if (ct.startsWith('#') || ct.startsWith('/')) return false;
-        return ct === lowerTrigger;
-      });
+      // 2. Hashtags: MUST only match if incoming message starts with '#'
+      if (isHashtag) {
+        return item.triggers.some(t => {
+          const ct = t.trim().toLowerCase();
+          return ct.startsWith('#') && ct === lowerTrigger;
+        });
+      }
+
+      // 3. Normal Plain Text: MUST only match if incoming message is regular text without '/' or '#'
+      if (isNormal) {
+        return item.triggers.some(t => {
+          const ct = t.trim().toLowerCase();
+          if (ct.startsWith('#') || ct.startsWith('/')) return false;
+          return ct === lowerTrigger;
+        });
+      }
+
+      return false;
     });
 
     if (matched && matched.retentionType === 'temporary' && matched.expiresAt) {
