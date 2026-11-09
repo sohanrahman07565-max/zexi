@@ -1781,6 +1781,9 @@ apiRouter.post('/bot/set-webhook', authenticate, requirePermission('settings_edi
     return res.status(400).json({ error: 'App URL is required to set webhook' });
   }
 
+  // Ensure polling loop is completely stopped before activating webhook
+  TelegramService.stopPolling();
+
   const webhookUrl = `${appUrl}/api/telegram-webhook`;
   const result = await TelegramService.callTelegramApi('setWebhook', { 
     url: webhookUrl,
@@ -2272,6 +2275,11 @@ apiRouter.post('/simulate', authenticate, async (req: Request, res: Response) =>
 apiRouter.post('/telegram-webhook', async (req: Request, res: Response) => {
   try {
     const update = req.body;
+    // Strict safeguard: if polling worker is currently active, ignore webhook to eliminate duplicate message processing
+    if (TelegramService.isPollingActive()) {
+      return res.status(200).json({ ok: true, status: 'ignored_polling_active' });
+    }
+
     // Process update asynchronously and return 200 immediately to Telegram
     TelegramService.handleUpdate(update).catch(err => {
       console.error('[Webhook] Update processing failed:', err);

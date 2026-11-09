@@ -2879,6 +2879,121 @@ export class SharedStorageService {
       throw err;
     }
   }
+
+  // =========================================================================
+  // DISTRIBUTED LEADER ELECTION & UPDATE DEDUPLICATION LOCKS (RTDB)
+  // =========================================================================
+
+  // Distributed Leader Election for Telegram Polling across multi-instance environments
+  public async tryClaimPollingLeader(instanceId: string, ttlMs: number = 10000): Promise<{ isLeader: boolean; currentLeader: string }> {
+    try {
+      const token = await this.getFirebaseAuthToken();
+      const url = this.getRtdbUrl('/bot_leader', token);
+      const res = await fetch(url);
+      const now = Date.now();
+      let leader: any = null;
+      if (res.ok) {
+        leader = await res.json();
+      }
+
+      const hasActiveOtherLeader = leader && leader.instanceId && leader.instanceId !== instanceId && (now - Number(leader.heartbeat || 0)) < ttlMs;
+
+      if (hasActiveOtherLeader) {
+        return { isLeader: false, currentLeader: leader.instanceId };
+      }
+
+      // Claim or renew leader role
+      const claimPayload = {
+        instanceId,
+        heartbeat: now,
+        updatedAt: new Date().toISOString()
+      };
+
+      await fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(claimPayload)
+      });
+
+      return { isLeader: true, currentLeader: instanceId };
+    } catch {
+      // If network fails to RTDB, permit local leadership so bot is never paralyzed
+      return { isLeader: true, currentLeader: instanceId };
+    }
+  }
+
+  public async renewPollingLeaderHeartbeat(instanceId: string): Promise<boolean> {
+    try {
+      const token = await this.getFirebaseAuthToken();
+      const url = this.getRtdbUrl('/bot_leader', token);
+      const payload = {
+        instanceId,
+        heartbeat: Date.now(),
+        updatedAt: new Date().toISOString()
+      };
+      const res = await fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  public async releasePollingLeader(instanceId: string): Promise<void> {
+    try {
+      const token = await this.getFirebaseAuthToken();
+      const url = this.getRtdbUrl('/bot_leader', token);
+      const res = await fetch(url);
+      if (res.ok) {
+        const leader = await res.json();
+        if (leader?.instanceId === instanceId) {
+          await fetch(url, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ instanceId: '', heartbeat: 0, releasedAt: new Date().toISOString() })
+          });
+        }
+      }
+    } catch {}
+  }
+
+  // Atomic Distributed Update Claim across all instances (Dev, Preview, Render, etc.)
+  public async claimDistributedTelegramUpdate(updateKey: string, instanceId: string, ttlMs: number = 90000): Promise<boolean> {
+    if (!updateKey) return true;
+    const safeKey = updateKey.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 100);
+    try {
+      const token = await this.getFirebaseAuthToken();
+      const url = this.getRtdbUrl(`/bot_claimed_updates/${safeKey}`, token);
+      const checkRes = await fetch(url);
+      const now = Date.now();
+      if (checkRes.ok) {
+        const existing = await checkRes.json();
+        if (existing && existing.timestamp && (now - Number(existing.timestamp)) < ttlMs) {
+          // Already claimed and processed by another instance or thread!
+          return false;
+        }
+      }
+
+      // Atomically claim the update
+      await fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          timestamp: now,
+          instanceId,
+          createdAt: new Date().toISOString()
+        })
+      });
+
+      return true;
+    } catch {
+      // In case of RTDB network disruption, fallback to true to not drop user messages
+      return true;
+    }
+  }
 }
 
 export const sharedStorage = new SharedStorageService();

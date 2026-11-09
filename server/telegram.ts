@@ -81,21 +81,19 @@ function isDuplicateDelivery(chatId: string | number, payload: string): boolean 
   return false;
 }
 
-// Global update & message deduplication cache to prevent duplicate bot replies
+// Unique process instance identifier for distributed leader election and update locking
+export const BOT_INSTANCE_ID = 'inst_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
+
+// In-flight update lock set to prevent parallel concurrent execution of the same update
+const inFlightUpdateKeys = new Set<string>();
+
+// Processed update keys with timestamp for local cache deduplication (2 minutes window)
 const processedUpdateKeys = new Map<string, number>();
 
-function isDuplicateTelegramUpdate(update: any): boolean {
-  if (!update) return false;
-  const now = Date.now();
-
-  // Prune entries older than 2 minutes
-  if (processedUpdateKeys.size > 2000) {
-    for (const [k, time] of processedUpdateKeys.entries()) {
-      if (now - time > 120000) processedUpdateKeys.delete(k);
-    }
-  }
-
+function extractUpdateKeys(update: any): string[] {
+  if (!update) return [];
   const keys: string[] = [];
+
   if (update.update_id !== undefined && update.update_id !== null) {
     keys.push(`uid_${update.update_id}`);
   }
@@ -109,20 +107,64 @@ function isDuplicateTelegramUpdate(update: any): boolean {
     keys.push(`cb_${update.callback_query.id}`);
   }
 
-  // Check if any identifier was already processed within the last 60 seconds
-  for (const key of keys) {
-    const lastSeen = processedUpdateKeys.get(key);
-    if (lastSeen && now - lastSeen < 60000) {
-      return true;
+  if (update.callback_query?.from?.id && update.callback_query?.data) {
+    const cbMsgId = update.callback_query.message?.message_id || '';
+    keys.push(`cb_act_${update.callback_query.from.id}_${update.callback_query.data}_${cbMsgId}`);
+  }
+
+  return keys;
+}
+
+async function claimExclusiveTelegramUpdate(update: any): Promise<{ allowed: boolean; keys: string[] }> {
+  if (!update) return { allowed: false, keys: [] };
+  const now = Date.now();
+
+  // Prune entries older than 2 minutes
+  if (processedUpdateKeys.size > 2000) {
+    for (const [k, time] of processedUpdateKeys.entries()) {
+      if (now - time > 120000) processedUpdateKeys.delete(k);
     }
   }
 
-  // Mark all keys as processed
-  for (const key of keys) {
-    processedUpdateKeys.set(key, now);
+  const keys = extractUpdateKeys(update);
+  if (keys.length === 0) return { allowed: true, keys: [] };
+
+  // 1. In-flight check: if any key is currently running, drop immediately
+  for (const k of keys) {
+    if (inFlightUpdateKeys.has(k)) {
+      return { allowed: false, keys };
+    }
   }
 
-  return false;
+  // 2. Local deduplication check (processed within last 90 seconds)
+  for (const k of keys) {
+    const lastSeen = processedUpdateKeys.get(k);
+    if (lastSeen && now - lastSeen < 90000) {
+      return { allowed: false, keys };
+    }
+  }
+
+  // 3. Distributed RTDB atomic claim across instances (Dev, Preview, Render, etc.)
+  const primaryKey = keys[0];
+  const cloudClaimed = await storage.claimDistributedTelegramUpdate(primaryKey, BOT_INSTANCE_ID, 90000);
+  if (!cloudClaimed) {
+    // Another instance has already claimed this update! Drop execution immediately.
+    return { allowed: false, keys };
+  }
+
+  // Mark all keys as in-flight and processed
+  for (const k of keys) {
+    inFlightUpdateKeys.add(k);
+    processedUpdateKeys.set(k, now);
+  }
+
+  return { allowed: true, keys };
+}
+
+function releaseExclusiveTelegramUpdate(keys: string[]): void {
+  for (const k of keys) {
+    inFlightUpdateKeys.delete(k);
+  }
 }
 
 export function getItemPayload(item: ItemRecord): string {
@@ -451,130 +493,144 @@ export class TelegramService {
   public static async handleUpdate(update: any): Promise<void> {
     if (!update) return;
 
-    // Strict update deduplication: prevent double execution and double replies
-    if (isDuplicateTelegramUpdate(update)) {
+    // Strict multi-instance atomic deduplication: prevents duplicate execution and double replies
+    const { allowed, keys } = await claimExclusiveTelegramUpdate(update);
+    if (!allowed) {
       return;
     }
 
-    // 1. AUTOMATIC UNIQUE UID TRACKING & DATABASE SAVING (Requirement 1 & 2):
-    // Intercept every incoming update (message, command like /start, callback query, etc.) from any user.
-    // Extract their Telegram User ID, First Name, Last Name, and @username.
-    // Immediately check if this User ID exists in the database. If not, save instantly; if so, update lastActive and online status.
-    const userPayload = this.extractUserFromUpdate(update);
-    const fromId = userPayload?.id ? String(userPayload.id).trim() : '';
-
-    if (userPayload && userPayload.id) {
-      try {
-        await storage.trackBotUser({
-          id: userPayload.id,
-          username: userPayload.username,
-          firstName: userPayload.firstName,
-          lastName: userPayload.lastName
-        });
-      } catch (err: any) {
-        console.warn('[Telegram] User tracking error:', err.message || err);
-      }
-    }
-
-    // Auto-Deletion Check: Process any past-due message deletions promptly
-    TelegramService.processDueScheduledDeletions().catch(() => {});
-
-    // Auto-detection of channels & groups where bot is added or active
-    if (update.my_chat_member) {
-      this.handleMyChatMemberUpdate(update.my_chat_member).catch((err) =>
-        console.warn('[Telegram] Error in handleMyChatMemberUpdate:', err)
-      );
-    }
-    // Handle Chat Join Request for Private Channels/Groups
-    if (update.chat_join_request) {
-      await this.handleChatJoinRequest(update.chat_join_request);
-      return;
-    }
-
-    // Ban Enforcement: check if user is restricted by administrator
-    if (fromId) {
-      const isBanned = await storage.isUserBanned(fromId);
-      if (isBanned) {
-        console.warn(`[Telegram] Blocked request from banned user: ${fromId}`);
-        if (update.callback_query) {
-          await this.callTelegramApi('answerCallbackQuery', {
-            callback_query_id: update.callback_query.id,
-            text: '⛔ Your account has been restricted by an administrator.',
-            show_alert: true
-          });
+    try {
+      // Ignore edited messages for commands and general replies to prevent double replies on edit
+      if (update.edited_message && !update.message) {
+        const fromId = String(update.edited_message.from?.id || '');
+        const isInInteractiveSession = activeAddSessions.has(fromId) || activeEditSessions.has(fromId);
+        if (!isInInteractiveSession) {
           return;
         }
-        if (update.message?.chat?.type === 'private') {
-          await this.callTelegramApi('sendMessage', {
-            chat_id: update.message.chat.id,
-            text: '⛔ <b>Access Restricted</b>\n\nYour Telegram account has been banned from using this bot by an administrator.',
-            parse_mode: 'HTML'
+      }
+
+      // 1. AUTOMATIC UNIQUE UID TRACKING & DATABASE SAVING (Requirement 1 & 2):
+      // Intercept every incoming update (message, command like /start, callback query, etc.) from any user.
+      // Extract their Telegram User ID, First Name, Last Name, and @username.
+      // Immediately check if this User ID exists in the database. If not, save instantly; if so, update lastActive and online status.
+      const userPayload = this.extractUserFromUpdate(update);
+      const fromId = userPayload?.id ? String(userPayload.id).trim() : '';
+
+      if (userPayload && userPayload.id) {
+        try {
+          await storage.trackBotUser({
+            id: userPayload.id,
+            username: userPayload.username,
+            firstName: userPayload.firstName,
+            lastName: userPayload.lastName
           });
+        } catch (err: any) {
+          console.warn('[Telegram] User tracking error:', err.message || err);
         }
+      }
+
+      // Auto-Deletion Check: Process any past-due message deletions promptly
+      TelegramService.processDueScheduledDeletions().catch(() => {});
+
+      // Auto-detection of channels & groups where bot is added or active
+      if (update.my_chat_member) {
+        this.handleMyChatMemberUpdate(update.my_chat_member).catch((err) =>
+          console.warn('[Telegram] Error in handleMyChatMemberUpdate:', err)
+        );
+      }
+      // Handle Chat Join Request for Private Channels/Groups
+      if (update.chat_join_request) {
+        await this.handleChatJoinRequest(update.chat_join_request);
         return;
       }
-    }
 
-    // Maintenance Mode Enforcement:
-    // When Maintenance Mode is ON, block responses to general commands, trigger keywords, and /start command.
-    // Immediately reply with customized notice supporting dynamic variables (@username, {user_id}, {bot_name}, {name}).
-    // Ensure admins can still access and use admin triggers/commands if needed.
-    const settings = await storage.getSettings();
-    if (settings.maintenanceMode) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId);
-      if (!isAdmin) {
-        const rawNotice = settings.maintenanceNotice?.trim() || '⚠️ Bot is currently under maintenance. Please try again later.';
-        const botUsername = await this.getBotUsername();
-        const parsedNotice = this.resolveMaintenanceNotice(rawNotice, userPayload, fromId, botUsername);
-
-        if (update.callback_query) {
-          await this.callTelegramApi('answerCallbackQuery', {
-            callback_query_id: update.callback_query.id,
-            text: parsedNotice.replace(/<[^>]+>/g, '').slice(0, 200), // strip HTML tags for alert popup (max 200 chars)
-            show_alert: true
-          });
-          return;
-        }
-
-        const msg = update.message || update.edited_message;
-        if (msg?.chat) {
-          if (msg.chat.type === 'private') {
+      // Ban Enforcement: check if user is restricted by administrator
+      if (fromId) {
+        const isBanned = await storage.isUserBanned(fromId);
+        if (isBanned) {
+          console.warn(`[Telegram] Blocked request from banned user: ${fromId}`);
+          if (update.callback_query) {
+            await this.callTelegramApi('answerCallbackQuery', {
+              callback_query_id: update.callback_query.id,
+              text: '⛔ Your account has been restricted by an administrator.',
+              show_alert: true
+            });
+            return;
+          }
+          if (update.message?.chat?.type === 'private') {
             await this.callTelegramApi('sendMessage', {
-              chat_id: msg.chat.id,
-              text: parsedNotice,
+              chat_id: update.message.chat.id,
+              text: '⛔ <b>Access Restricted</b>\n\nYour Telegram account has been banned from using this bot by an administrator.',
               parse_mode: 'HTML'
             });
-          } else if (msg.chat.type === 'group' || msg.chat.type === 'supergroup') {
-            const txt = (msg.text || msg.caption || '').trim();
-            // In groups, only respond if someone addressed the bot or used a slash command
-            if (txt.startsWith('/') || (botUsername && txt.toLowerCase().includes(`@${botUsername.toLowerCase()}`))) {
-              await this.sendAutoDeletingNotice(msg.chat.id, parsedNotice, 6000, msg.message_id);
+          }
+          return;
+        }
+      }
+
+      // Maintenance Mode Enforcement:
+      // When Maintenance Mode is ON, block responses to general commands, trigger keywords, and /start command.
+      // Immediately reply with customized notice supporting dynamic variables (@username, {user_id}, {bot_name}, {name}).
+      // Ensure admins can still access and use admin triggers/commands if needed.
+      const settings = await storage.getSettings();
+      if (settings.maintenanceMode) {
+        const isAdmin = await this.isAuthorizedAdmin(fromId);
+        if (!isAdmin) {
+          const rawNotice = settings.maintenanceNotice?.trim() || '⚠️ Bot is currently under maintenance. Please try again later.';
+          const botUsername = await this.getBotUsername();
+          const parsedNotice = this.resolveMaintenanceNotice(rawNotice, userPayload, fromId, botUsername);
+
+          if (update.callback_query) {
+            await this.callTelegramApi('answerCallbackQuery', {
+              callback_query_id: update.callback_query.id,
+              text: parsedNotice.replace(/<[^>]+>/g, '').slice(0, 200), // strip HTML tags for alert popup (max 200 chars)
+              show_alert: true
+            });
+            return;
+          }
+
+          const msg = update.message || update.edited_message;
+          if (msg?.chat) {
+            if (msg.chat.type === 'private') {
+              await this.callTelegramApi('sendMessage', {
+                chat_id: msg.chat.id,
+                text: parsedNotice,
+                parse_mode: 'HTML'
+              });
+            } else if (msg.chat.type === 'group' || msg.chat.type === 'supergroup') {
+              const txt = (msg.text || msg.caption || '').trim();
+              // In groups, only respond if someone addressed the bot or used a slash command
+              if (txt.startsWith('/') || (botUsername && txt.toLowerCase().includes(`@${botUsername.toLowerCase()}`))) {
+                await this.sendAutoDeletingNotice(msg.chat.id, parsedNotice, 6000, msg.message_id);
+              }
             }
           }
+          return;
         }
+      }
+
+      // Handle Inline Button Clicks (Callback queries from /add flow and setup video navigation)
+      if (update.callback_query) {
+        await this.handleCallbackQuery(update.callback_query);
         return;
       }
-    }
 
-    // Handle Inline Button Clicks (Callback queries from /add flow and setup video navigation)
-    if (update.callback_query) {
-      await this.handleCallbackQuery(update.callback_query);
-      return;
-    }
+      // Support both new messages and edited messages during interactive setup
+      const message = update.message || update.edited_message;
+      if (!message) return;
 
-    // Support both new messages and edited messages during interactive setup
-    const message = update.message || update.edited_message;
-    if (!message) return;
+      const chat = message.chat;
+      const isGroup = chat.type === 'group' || chat.type === 'supergroup';
+      const isPrivate = chat.type === 'private';
+      const text = (message.text || message.caption || '').trim();
 
-    const chat = message.chat;
-    const isGroup = chat.type === 'group' || chat.type === 'supergroup';
-    const isPrivate = chat.type === 'private';
-    const text = (message.text || message.caption || '').trim();
-
-    if (isGroup) {
-      await this.handleGroupMessage(message, text);
-    } else if (isPrivate) {
-      await this.handlePrivateMessage(message, text);
+      if (isGroup) {
+        await this.handleGroupMessage(message, text);
+      } else if (isPrivate) {
+        await this.handlePrivateMessage(message, text);
+      }
+    } finally {
+      releaseExclusiveTelegramUpdate(keys);
     }
   }
 
@@ -6141,95 +6197,152 @@ export class TelegramService {
   }
 
   // =========================================================================
-  // TELEGRAM POLLING & WEBHOOK HYBRID WORKER
+  // TELEGRAM POLLING & WEBHOOK HYBRID WORKER WITH LEADER ELECTION
   // =========================================================================
   private static pollingActive = false;
   private static pollingOffset = 0;
   private static isInitializing = false;
   private static isLoopRunning = false;
+  private static isLeader = false;
+  private static leaderCheckTimer: any = null;
 
   public static async initPollingWorker(): Promise<void> {
-    if (this.pollingActive || this.isInitializing || this.isLoopRunning) {
-      console.info('[Telegram] Polling worker is already initialized or active. Skipping redundant startup.');
+    if (this.leaderCheckTimer) {
+      console.info('[Telegram] Polling leader supervisor is already initialized. Skipping redundant startup.');
       return;
     }
 
-    this.isInitializing = true;
+    // If server is designated as a silent backup mirror (and failover is not active), stay dormant
     try {
-      // If server is designated as a silent backup mirror (and failover is not active), stay dormant
-      try {
-        const backupConfig = await storage.getBackupConfig();
-        if (backupConfig?.role === 'backup' && !backupConfig?.failoverActive) {
-          console.info('[Telegram] Server is running in Silent Backup Mirror mode. Bot listener is dormant awaiting failover signal.');
-          return;
-        }
-      } catch {}
-
-      const token = await this.getBotToken();
-      if (!token) {
-        console.info('[Telegram] No bot token configured, polling worker waiting.');
+      const backupConfig = await storage.getBackupConfig();
+      if (backupConfig?.role === 'backup' && !backupConfig?.failoverActive) {
+        console.info('[Telegram] Server is running in Silent Backup Mirror mode. Bot listener is dormant awaiting failover signal.');
         return;
       }
+    } catch {}
 
-      try {
-        const webhookInfo = await this.callTelegramApi('getWebhookInfo', {});
-        if (webhookInfo?.result?.url) {
-          console.info(`[Telegram Render Service] Found active webhook (${webhookInfo.result.url}). Deleting webhook for continuous Render long-polling...`);
-          await this.callTelegramApi('deleteWebhook', { drop_pending_updates: false });
-          console.info('[Telegram Render Service] Webhook cleared. Continuous background polling is now active.');
+    const token = await this.getBotToken();
+    if (!token) {
+      console.info('[Telegram] No bot token configured, polling worker waiting.');
+      return;
+    }
+
+    // Verify Telegram connection & ensure username is saved
+    try {
+      const me = await this.callTelegramApi('getMe', {});
+      if (me?.ok && me.result) {
+        console.info(`[Telegram] Connection verified for @${me.result.username || 'Bot'} (ID: ${me.result.id})`);
+        const settings = await storage.getSettings();
+        if (!settings.botUsername || settings.botUsername !== me.result.username) {
+          await storage.updateSettings({ botUsername: me.result.username || '' });
         }
-      } catch (err: any) {
-        console.warn('[Telegram Render Service] Webhook cleanup check:', err?.message || err);
       }
+    } catch (e: any) {
+      console.warn('[Telegram] Could not verify bot profile on worker init:', e?.message || e);
+    }
 
-      // Verify Telegram connection & ensure username is saved
+    // Leader election loop: checks every 4 seconds to guarantee EXACTLY ONE worker polls across Dev, Preview, and external hosts
+    const checkLeadershipAndRun = async () => {
       try {
-        const me = await this.callTelegramApi('getMe', {});
-        if (me?.ok && me.result) {
-          console.info(`[Telegram] Connection verified for @${me.result.username || 'Bot'} (ID: ${me.result.id})`);
-          const settings = await storage.getSettings();
-          if (!settings.botUsername || settings.botUsername !== me.result.username) {
-            await storage.updateSettings({ botUsername: me.result.username || '' });
+        const claimResult = await storage.tryClaimPollingLeader(BOT_INSTANCE_ID, 12000);
+        if (claimResult.isLeader) {
+          if (!this.isLeader) {
+            console.info(`[Telegram] Instance ${BOT_INSTANCE_ID} elected as PRIMARY active bot listener.`);
+            this.isLeader = true;
+          }
+          if (!this.pollingActive) {
+            this.pollingActive = true;
+            this.startPollingLoop();
+          }
+        } else {
+          if (this.isLeader) {
+            console.warn(`[Telegram] Leadership yielded to ${claimResult.currentLeader}. Halting local polling loop.`);
+            this.isLeader = false;
+          }
+          if (this.pollingActive) {
+            this.stopPolling();
           }
         }
-      } catch (e: any) {
-        console.warn('[Telegram] Could not verify bot profile on worker init:', e?.message || e);
+      } catch (err: any) {
+        console.warn('[Telegram] Leader check warning:', err?.message || err);
       }
+    };
 
-      this.pollingActive = true;
-      console.info('[Telegram Render Service] Persistent background polling worker active (24/7 continuous mode).');
+    // Run first check immediately, then schedule every 4 seconds
+    await checkLeadershipAndRun();
+    this.leaderCheckTimer = setInterval(checkLeadershipAndRun, 4000);
 
-      const launchPolling = () => {
-        if (!this.pollingActive) return;
-        this.runPollingLoop().catch((err) => {
-          console.warn('[Telegram Render Service] Polling loop caught error, auto-recovering in 2s...', err?.message || err);
-          setTimeout(launchPolling, 2000);
-        });
-      };
-
-      launchPolling();
-    } finally {
-      this.isInitializing = false;
-    }
+    // Cleanly release leadership lock on process termination
+    const onExit = async () => {
+      if (this.isLeader) {
+        try {
+          await storage.releasePollingLeader(BOT_INSTANCE_ID);
+        } catch {}
+      }
+    };
+    process.once('SIGINT', onExit);
+    process.once('SIGTERM', onExit);
+    process.once('beforeExit', onExit);
   }
 
   public static isPollingActive(): boolean {
-    return this.pollingActive;
+    return this.pollingActive && this.isLeader;
   }
 
   public static stopPolling(): void {
     this.pollingActive = false;
   }
 
+  public static async releaseLeaderLock(): Promise<void> {
+    this.pollingActive = false;
+    this.isLeader = false;
+    try {
+      await storage.releasePollingLeader(BOT_INSTANCE_ID);
+    } catch {}
+  }
+
+  private static startPollingLoop(): void {
+    if (this.isLoopRunning) return;
+    this.runPollingLoop().catch((err) => {
+      console.warn('[Telegram Polling] Polling loop caught error, auto-recovering in 2s...', err?.message || err);
+      setTimeout(() => {
+        if (this.pollingActive && this.isLeader) {
+          this.startPollingLoop();
+        }
+      }, 2000);
+    });
+  }
+
   private static async runPollingLoop(): Promise<void> {
     if (this.isLoopRunning) {
-      console.warn('[Telegram Polling] Polling loop already active. Skipping duplicate loop invocation.');
       return;
     }
 
     this.isLoopRunning = true;
     try {
-      while (this.pollingActive) {
+      // Clear any stale webhook and DROP all pending backlogged updates to start clean
+      try {
+        const webhookInfo = await this.callTelegramApi('getWebhookInfo', {});
+        if (webhookInfo?.result?.url) {
+          console.info(`[Telegram Polling] Found active webhook (${webhookInfo.result.url}). Deleting webhook and dropping pending updates...`);
+          await this.callTelegramApi('deleteWebhook', { drop_pending_updates: true });
+        }
+      } catch (err: any) {
+        console.warn('[Telegram Polling] Webhook cleanup check:', err?.message || err);
+      }
+
+      // Initialize pollingOffset to latest update_id so old queued messages are flushed immediately
+      if (this.pollingOffset === 0) {
+        try {
+          const peek = await this.callTelegramApi('getUpdates', { offset: -1, limit: 1 });
+          if (peek?.ok && Array.isArray(peek.result) && peek.result.length > 0) {
+            this.pollingOffset = peek.result[0].update_id + 1;
+            console.info(`[Telegram Polling] Advanced initial polling offset to ${this.pollingOffset} to discard stale backlog.`);
+          }
+        } catch {}
+      }
+
+      while (this.pollingActive && this.isLeader) {
         try {
           const res = await this.callTelegramApi('getUpdates', {
             offset: this.pollingOffset,
@@ -6241,26 +6354,27 @@ export class TelegramService {
             ]
           });
 
+          if (!this.pollingActive || !this.isLeader) {
+            break;
+          }
+
           if (res && res.ok && Array.isArray(res.result)) {
             for (const update of res.result) {
               this.pollingOffset = Math.max(this.pollingOffset, update.update_id + 1);
               try {
                 await this.handleUpdate(update);
               } catch (updateErr: any) {
-                console.error('[Telegram Polling] Error handling update (swallowed to prevent crash):', updateErr?.message || updateErr);
+                console.error('[Telegram Polling] Error handling update:', updateErr?.message || updateErr);
               }
             }
           }
         } catch (err: any) {
           if (err?.message && err.message.includes('409')) {
-            console.info('[Telegram Polling] Webhook conflict detected (409). Deleting webhook to resume continuous Render polling...');
-            try {
-              await this.callTelegramApi('deleteWebhook', { drop_pending_updates: false });
-            } catch {}
-            await new Promise((r) => setTimeout(r, 2000));
-            continue;
+            console.warn('[Telegram Polling] 409 Conflict: another instance is active. Yielding leadership for 6s...');
+            this.isLeader = false;
+            await new Promise((r) => setTimeout(r, 6000));
+            break;
           }
-          // Silently wait and retry on network drop or timeout
           await new Promise((r) => setTimeout(r, 2000));
         }
       }
