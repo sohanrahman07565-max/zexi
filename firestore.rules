@@ -11,12 +11,20 @@ service cloud.firestore {
     }
 
     function isOwner(adminId) {
-      return isSignedIn() && (request.auth.uid == adminId || request.auth.token.email == 'sohanrahman07565@gmail.com');
+      return isSignedIn() && (
+        request.auth.uid == adminId || 
+        request.auth.token.email == 'sohanrahman07565@gmail.com' ||
+        request.auth.token.email == 'zexiofficial8884@gmail.com'
+      );
     }
 
     match /admins/{adminId} {
       allow read: if isSignedIn();
       allow write: if isOwner(adminId);
+    }
+
+    match /cloned_bots/{botId} {
+      allow read, write: if isSignedIn();
     }
   }
 }

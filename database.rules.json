@@ -1,0 +1,30 @@
+{
+  "rules": {
+    ".read": "auth != null",
+    ".write": "auth != null",
+    "app_state": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "admins": {
+      ".read": "auth != null",
+      ".write": "auth != null && (auth.token.email == 'sohanrahman07565@gmail.com' || auth.token.email == 'zexiofficial8884@gmail.com' || auth.token.admin == true)"
+    },
+    "bot_config": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "users": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "cloned_bots": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
+    "cloned_bots_meta": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    }
+  }
+}

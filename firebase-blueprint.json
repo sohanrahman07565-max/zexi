@@ -12,12 +12,30 @@
         "createdAt": { "type": "string" }
       },
       "required": ["id", "email", "role"]
+    },
+    "ClonedBot": {
+      "title": "ClonedBot",
+      "description": "Metadata for cloned Telegram bot instances with isolated databases",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "token": { "type": "string" },
+        "name": { "type": "string" },
+        "username": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "stopped"] },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["id", "token", "name"]
     }
   },
   "firestore": {
     "/admins/{adminId}": {
       "schema": "Admin",
       "description": "Registered administrator accounts with role-based access"
+    },
+    "/cloned_bots/{botId}": {
+      "schema": "ClonedBot",
+      "description": "Cloned Telegram bot instances with isolated database namespace"
     }
   }
 }

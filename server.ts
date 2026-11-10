@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { apiRouter } from './server/routes';
 import { storage } from './server/storage';
-import { TelegramService } from './server/telegram';
+import { TelegramService, TelegramBotManager } from './server/telegram';
 
 dotenv.config();
 
@@ -134,6 +134,9 @@ async function startServer() {
 
   // Initialize Telegram background polling worker immediately
   await TelegramService.initPollingWorker();
+
+  // Initialize and run all active cloned Telegram bots
+  await TelegramBotManager.initAllBots();
 
   // Mount API Router
   app.use('/api', apiRouter);

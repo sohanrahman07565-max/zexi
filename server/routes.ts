@@ -2,13 +2,23 @@ import { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
 import multer from 'multer';
 import dotenv from 'dotenv';
-import { storage, AdminUser, ItemRecord, TriggerType, OpenMode } from './storage';
-import { TelegramService, getItemPayload } from './telegram';
+import { storage, StorageManager, storageContext, AdminUser, ItemRecord, TriggerType, OpenMode } from './storage';
+import { TelegramService, TelegramBotManager, getItemPayload } from './telegram';
 import { hashPassword, verifyPassword, signSessionToken, verifySessionToken } from './auth';
 
 dotenv.config({ override: true });
 
 export const apiRouter = Router();
+
+// Multi-Bot Request Routing Middleware:
+// Sets active bot storage context for the current HTTP request via x-bot-id header or ?botId=
+apiRouter.use((req: Request, _res: Response, next: NextFunction) => {
+  const botId = (req.headers['x-bot-id'] as string) || (req.query.botId as string) || 'main';
+  const botStorage = StorageManager.getStorage(botId);
+  storageContext.run(botStorage, () => {
+    next();
+  });
+});
 
 // Lightweight Health check and ping endpoint for network monitoring and Render keep-alive
 apiRouter.all(['/health', '/ping'], async (_req: Request, res: Response) => {
@@ -45,13 +55,14 @@ async function authenticate(req: Request, res: Response, next: NextFunction) {
 
   // Verify HMAC signature if token was signed, or fallback to raw token for backward compatibility
   const verifiedToken = verifySessionToken(rawHeader) || rawHeader;
+  const mainStorage = StorageManager.getMainStorage();
 
-  const session = await storage.getSession(verifiedToken);
+  const session = await mainStorage.getSession(verifiedToken);
   if (!session) {
     return res.status(401).json({ error: 'Session expired or invalid' });
   }
 
-  const admin = await storage.getAdmin(session.adminId);
+  const admin = await mainStorage.getAdmin(session.adminId);
   if (!admin || !admin.enabled) {
     return res.status(401).json({ error: 'Admin account disabled or not found' });
   }
@@ -445,6 +456,10 @@ apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
     maxAge: 12 * 60 * 60 * 1000 // 12 hours
   });
 
+  if (idToken) {
+    storage.setCloudAuthToken(idToken);
+  }
+
   admin.lastLoginAt = new Date().toISOString();
   await storage.saveAdmin(admin);
 
@@ -472,6 +487,46 @@ apiRouter.post('/auth/logout', async (req: Request, res: Response) => {
   }
   res.clearCookie('tg_admin_session');
   return res.json({ success: true, message: 'Logged out' });
+});
+
+// GET /api/firebase-rules (Returns active secured RTDB rules & Firestore rules)
+apiRouter.get('/firebase-rules', authenticate, async (_req: Request, res: Response) => {
+  const rtdbRules = {
+    rules: {
+      ".read": "auth != null",
+      ".write": "auth != null",
+      "app_state": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      },
+      "admins": {
+        ".read": "auth != null",
+        ".write": "auth != null && (auth.token.email == 'sohanrahman07565@gmail.com' || auth.token.email == 'zexiofficial8884@gmail.com' || auth.token.admin == true)"
+      },
+      "bot_config": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      },
+      "users": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      }
+    }
+  };
+
+  return res.json({
+    success: true,
+    rtdbRules,
+    rtdbRulesFormatted: JSON.stringify(rtdbRules, null, 2),
+    authorizedAdmins: [
+      'sohanrahman07565@gmail.com',
+      'zexiofficial8884@gmail.com'
+    ],
+    publicAccessBlocked: true,
+    backendSyncSecured: true,
+    primaryProject: 'zexiofficial844',
+    secondaryProject: 'zexi-official'
+  });
 });
 
 // GET /api/auth/me
@@ -1794,6 +1849,57 @@ apiRouter.post('/bot/set-webhook', authenticate, requirePermission('settings_edi
     ]
   });
   return res.json(result);
+});
+
+// ============================================================================
+// DYNAMIC BOT CLONING & FLEET MANAGEMENT
+// ============================================================================
+
+// GET /api/bots - List all active bots (main bot + all cloned bots)
+apiRouter.get('/bots', authenticate, async (_req: Request, res: Response) => {
+  try {
+    const bots = await TelegramBotManager.getAllBots();
+    return res.json({ ok: true, bots });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to list bots' });
+  }
+});
+
+// POST /api/bots/clone - Dynamically clone a Telegram bot with its isolated database
+apiRouter.post('/bots/clone', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const { token } = req.body;
+    if (!token || typeof token !== 'string' || !token.trim()) {
+      return res.status(400).json({ error: 'Valid Telegram bot token is required' });
+    }
+
+    const admin = (req as any).admin;
+    const createdBy = admin?.username || admin?.name || 'admin';
+    const result = await TelegramBotManager.cloneBot(token.trim(), createdBy);
+
+    if (!result.success) {
+      return res.status(400).json({ error: result.error || 'Failed to clone bot' });
+    }
+
+    return res.json({ ok: true, bot: result.bot });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to clone bot' });
+  }
+});
+
+// DELETE /api/bots/:id - Delete a cloned bot instance and stop its runner
+apiRouter.delete('/bots/:id', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    if (id === 'main') {
+      return res.status(400).json({ error: 'Cannot delete the primary main bot' });
+    }
+
+    const success = await TelegramBotManager.deleteClonedBot(id);
+    return res.json({ ok: success });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to delete cloned bot' });
+  }
 });
 
 let cachedBotInfoPayload: { data: any; expiresAt: number; token: string } | null = null;

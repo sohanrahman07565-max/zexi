@@ -1,5 +1,8 @@
-import { storage, ItemRecord, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel } from './storage';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { storage, ItemRecord, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord } from './storage';
 import { hashPassword } from './auth';
+
+export const botTokenContext = new AsyncLocalStorage<string>();
 
 // In-memory conversation state for interactive private chat commands (like /add)
 interface AddSession {
@@ -91,33 +94,40 @@ const inFlightUpdateKeys = new Set<string>();
 // Processed update keys with timestamp for local cache deduplication (2 minutes window)
 const processedUpdateKeys = new Map<string, number>();
 
-function extractUpdateKeys(update: any): string[] {
+function extractUpdateKeys(update: any, botId: string = 'main'): string[] {
   if (!update) return [];
   const keys: string[] = [];
 
   if (update.update_id !== undefined && update.update_id !== null) {
-    keys.push(`uid_${update.update_id}`);
+    keys.push(`${botId}_uid_${update.update_id}`);
   }
 
   const msg = update.message || update.edited_message || update.channel_post || update.edited_channel_post;
   if (msg?.message_id && msg?.chat?.id) {
-    keys.push(`msg_${msg.chat.id}_${msg.message_id}`);
+    keys.push(`${botId}_msg_${msg.chat.id}_${msg.message_id}`);
+
+    // Command & text-level active debounce to prevent rapid double-processing of identical message
+    const txt = (msg.text || msg.caption || '').trim();
+    if (txt && msg.from?.id) {
+      const cleanSnippet = txt.slice(0, 32).toLowerCase();
+      keys.push(`${botId}_deb_${msg.chat.id}_${msg.from.id}_${cleanSnippet}`);
+    }
   }
 
   if (update.callback_query?.id) {
-    keys.push(`cb_${update.callback_query.id}`);
+    keys.push(`${botId}_cb_${update.callback_query.id}`);
   }
 
   if (update.callback_query?.from?.id && update.callback_query?.data) {
     const cbMsgId = update.callback_query.message?.message_id || '';
-    keys.push(`cb_act_${update.callback_query.from.id}_${update.callback_query.data}_${cbMsgId}`);
+    keys.push(`${botId}_cb_act_${update.callback_query.from.id}_${update.callback_query.data}_${cbMsgId}`);
   }
 
   return keys;
 }
 
 // Super-fast 0ms latency update deduplication: eliminates delay before replying to users
-function claimExclusiveTelegramUpdate(update: any): { allowed: boolean; keys: string[] } {
+function claimExclusiveTelegramUpdate(update: any, botId: string = 'main'): { allowed: boolean; keys: string[] } {
   if (!update) return { allowed: false, keys: [] };
   const now = Date.now();
 
@@ -128,7 +138,7 @@ function claimExclusiveTelegramUpdate(update: any): { allowed: boolean; keys: st
     }
   }
 
-  const keys = extractUpdateKeys(update);
+  const keys = extractUpdateKeys(update, botId);
   if (keys.length === 0) return { allowed: true, keys: [] };
 
   // 1. In-flight check: if any key is currently running, drop immediately (0ms)
@@ -138,11 +148,14 @@ function claimExclusiveTelegramUpdate(update: any): { allowed: boolean; keys: st
     }
   }
 
-  // 2. Local deduplication check (processed within last 90 seconds) (0ms)
+  // 2. Local deduplication check (processed within TTL window) (0ms)
   for (const k of keys) {
     const lastSeen = processedUpdateKeys.get(k);
-    if (lastSeen && now - lastSeen < 90000) {
-      return { allowed: false, keys };
+    if (lastSeen) {
+      const ttl = k.includes('_deb_') ? 1500 : 90000;
+      if (now - lastSeen < ttl) {
+        return { allowed: false, keys };
+      }
     }
   }
 
@@ -187,8 +200,9 @@ export class TelegramService {
     return (settings?.botToken || '').trim().replace(/^["']|["']$/g, '');
   }
 
-  public static async callTelegramApi(method: string, payload: Record<string, any>): Promise<any> {
-    const token = await this.getBotToken();
+  public static async callTelegramApi(method: string, payload: Record<string, any>, tokenOverride?: string): Promise<any> {
+    const rawToken = tokenOverride || botTokenContext.getStore() || await this.getBotToken();
+    const token = (rawToken || '').trim().replace(/^["']|["']$/g, '');
     if (!token) {
       console.warn(`[Telegram] Skipping ${method}: No TELEGRAM_BOT_TOKEN configured.`);
       return { ok: false, description: 'No bot token configured' };
@@ -488,13 +502,17 @@ export class TelegramService {
   }
 
   // Process incoming webhook or polling update
-  public static async handleUpdate(update: any): Promise<void> {
+  public static async handleUpdate(update: any, tokenOverride?: string, botId: string = 'main'): Promise<void> {
     if (!update) return;
 
     // Strict multi-instance atomic deduplication: prevents duplicate execution and double replies (0ms instant)
-    const { allowed, keys } = claimExclusiveTelegramUpdate(update);
+    const { allowed, keys } = claimExclusiveTelegramUpdate(update, botId);
     if (!allowed) {
       return;
+    }
+
+    if (tokenOverride && !botTokenContext.getStore()) {
+      return botTokenContext.run(tokenOverride, () => this.handleUpdate(update, undefined, botId));
     }
 
     try {
@@ -1953,6 +1971,44 @@ export class TelegramService {
     // MODERATION, BAN/UNBAN, REPORT & ANTI-FRAUD IN GROUPS
     // =========================================================================
 
+    // Admin /clone command in groups: /clone <bot_token>
+    const groupCloneMatch = text.match(/^\/clone(?:@\w+)?(?:\s+(.+))?$/i);
+    if (groupCloneMatch) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      if (isAdmin) {
+        const tokenArg = groupCloneMatch[1]?.trim();
+        if (!tokenArg) {
+          await this.sendAutoDeletingNotice(
+            message.chat.id,
+            `ℹ️ <b>How to Clone Bot:</b>\nType <code>/clone &lt;bot_token&gt;</code>\nExample: <code>/clone 123456789:ABCdef...</code>`,
+            7000,
+            message.message_id
+          );
+          return;
+        }
+
+        const result = await TelegramBotManager.cloneBot(tokenArg, fromId);
+        if (!result.success) {
+          await this.sendAutoDeletingNotice(
+            message.chat.id,
+            `❌ <b>Failed to Clone Bot:</b> ${result.error || 'Invalid token'}`,
+            8000,
+            message.message_id
+          );
+          return;
+        }
+
+        const bot = result.bot!;
+        await this.sendAutoDeletingNotice(
+          message.chat.id,
+          `🤖 <b>Bot Cloned Successfully:</b> @${bot.username} (ID: <code>${bot.id}</code>). Isolated database ready!`,
+          10000,
+          message.message_id
+        );
+        return;
+      }
+    }
+
     // 1. /ban Command: Admin replies /ban or runs /ban <user_id_or_username>
     const banMatch = text.match(/^\/ban(?:@\w+)?(?:\s+(.+))?$/i);
     if (banMatch) {
@@ -2653,6 +2709,54 @@ export class TelegramService {
       }
     }
 
+    // Admin /clone command in private chat: /clone <bot_token>
+    const cloneMatch = text.match(/^\/clone(?:@\w+)?(?:\s+(.+))?$/i);
+    if (cloneMatch) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      if (!isAdmin) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <i>Access Denied. Only authorized administrators can clone bots.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+
+      const tokenArg = cloneMatch[1]?.trim();
+      if (!tokenArg) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: `ℹ️ <b>How to Clone Telegram Bot:</b>\n\n1. Open @BotFather on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>The new bot will automatically start with its own isolated database for files and users.</i>`,
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+
+      const result = await TelegramBotManager.cloneBot(tokenArg, fromId);
+      if (!result.success) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: `❌ <b>Failed to Clone Bot:</b>\n${result.error || 'Invalid bot token or failed to verify with Telegram.'}`,
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+
+      const bot = result.bot!;
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `🤖 <b>Bot Cloned & Activated Successfully!</b>\n\n` +
+          `• <b>Bot Name:</b> ${bot.name}\n` +
+          `• <b>Username:</b> @${bot.username}\n` +
+          `• <b>Bot ID:</b> <code>${bot.id}</code>\n` +
+          `• <b>Status:</b> 🟢 Active & Polling\n\n` +
+          `✅ <i>This bot is completely isolated with its own private database. Files, links, and filters created on your main bot or other clones will not bleed into each other.\n` +
+          `You can switch to and manage this bot directly in the Admin Panel!</i>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
     // Admin /ban command in private chat
     const privBanMatch = text.match(/^\/ban(?:@\w+)?(?:\s+(.+))?$/i);
     if (privBanMatch) {
@@ -2948,14 +3052,10 @@ export class TelegramService {
   ): Promise<void> {
     if (!rawPayload) return;
 
-    // Automatically register recipient UID whenever a user receives/takes anything from the bot
+    // Asynchronously record recipient UID without blocking delivery response
     const strChatId = String(chatId || '').trim();
     if (strChatId && !strChatId.startsWith('-') && Number(strChatId) > 0) {
-      try {
-        await storage.trackBotUser({ id: chatId });
-      } catch (err: any) {
-        console.warn('[Telegram] User tracking in delivery error:', err.message || err);
-      }
+      storage.trackBotUser({ id: chatId }).catch(() => {});
     }
 
     // Deduplication check for retried webhooks
@@ -2963,9 +3063,6 @@ export class TelegramService {
       console.info('[Telegram] Skipping duplicate delivery for chat:', chatId, 'payload:', rawPayload);
       return;
     }
-
-    // High-speed in-memory data lookup for instant file delivery
-    await storage.loadLatest(false);
 
     // Mandatory Channel Join (Force Sub) Check
     const forceCheck = await this.checkUserForceSub(chatId);
@@ -2977,8 +3074,11 @@ export class TelegramService {
     const cleanPayload = rawPayload.trim();
     const normalizedId = cleanPayload.replace(/^(?:f_|l_)+/, '');
 
-    // Resolve item using raw payload, prefixed, normalized ID, or trigger match
-    let item: ItemRecord | null = await storage.getItem(cleanPayload);
+    // Super-fast 0ms in-memory item resolution
+    let item: ItemRecord | null = (storage as any).resolveItemFast ? (storage as any).resolveItemFast(cleanPayload) : null;
+    if (!item) {
+      item = await storage.getItem(cleanPayload);
+    }
     if (!item) {
       item = await storage.getItem(`f_${normalizedId}`);
     }
@@ -3037,50 +3137,22 @@ export class TelegramService {
 
     const isTextOnlyItem = Boolean(item.isTextOnly || (item.type === 'file' && item.fileEnabled === false));
 
-    // 1. Progress indicator: ONLY send temporary status for actual files that need transfer
-    let deliveryStatusMsgId: number | null = null;
-    if (item.type === 'file' && !isTextOnlyItem) {
-      // If a previous menu message exists, remove it so the file cleanly replaces it
-      if (options?.messageIdToEdit) {
-        try {
-          await this.callTelegramApi('deleteMessage', {
-            chat_id: chatId,
-            message_id: options.messageIdToEdit
-          });
-        } catch {}
-      }
-      try {
-        const templates = await storage.getTemplates();
-        let statusText = templates.DELIVERY_STATUS_MESSAGE?.content || '⏳ Delivering your file...';
-        statusText = statusText
-          .replace(/\{name\}/g, item.fileName || item.name || '')
-          .replace(/\{type\}/g, item.type || 'file');
-
-        // Send appropriate chat action (uploading)
-        const chatAction = item.fileType === 'video' ? 'upload_video' : item.fileType === 'photo' ? 'upload_photo' : 'upload_document';
-        this.callTelegramApi('sendChatAction', {
-          chat_id: chatId,
-          action: chatAction
-        }).catch(() => {});
-
-        const statusRes = await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text: statusText
-        });
-
-        if (statusRes.ok && statusRes.result?.message_id) {
-          deliveryStatusMsgId = statusRes.result.message_id;
-        }
-      } catch (statusErr) {
-        console.warn('[Telegram] Could not send initial delivery progress message:', statusErr);
-      }
-    } else {
-      // For links and only-text items: send typing action, deliver directly without temporary placeholder
-      this.callTelegramApi('sendChatAction', {
+    // Instant delivery: delete previous interactive menu message if editing is requested
+    if (options?.messageIdToEdit) {
+      this.callTelegramApi('deleteMessage', {
         chat_id: chatId,
-        action: 'typing'
+        message_id: options.messageIdToEdit
       }).catch(() => {});
     }
+
+    // Trigger instant chat action in background (zero blocking)
+    const chatAction = item.type === 'file' && !isTextOnlyItem
+      ? (item.fileType === 'video' ? 'upload_video' : item.fileType === 'photo' ? 'upload_photo' : 'upload_document')
+      : 'typing';
+    this.callTelegramApi('sendChatAction', {
+      chat_id: chatId,
+      action: chatAction
+    }).catch(() => {});
 
     try {
       if (isTextOnlyItem) {
@@ -3481,19 +3553,8 @@ export class TelegramService {
           await storage.incrementItemDelivery(item.id);
         }
       }
-    } finally {
-      // 2. Automatically delete the temporary delivery status message once delivery completes
-      if (deliveryStatusMsgId) {
-        try {
-          await this.callTelegramApi('deleteMessage', {
-            chat_id: chatId,
-            message_id: deliveryStatusMsgId
-          });
-          console.info('[Telegram] Deleted temporary delivery progress message:', deliveryStatusMsgId);
-        } catch (delErr) {
-          console.warn('[Telegram] Could not delete delivery progress message:', delErr);
-        }
-      }
+    } catch (err: any) {
+      console.error('[Telegram] Error in delivery execution:', err?.message || err);
     }
   }
 
@@ -6305,7 +6366,9 @@ export class TelegramService {
 
   private static startPollingLoop(): void {
     if (this.isLoopRunning) return;
+    this.isLoopRunning = true;
     this.runPollingLoop().catch((err) => {
+      this.isLoopRunning = false;
       console.warn('[Telegram Polling] Polling loop caught error, auto-recovering in 2s...', err?.message || err);
       setTimeout(() => {
         if (this.pollingActive && this.isLeader) {
@@ -6316,11 +6379,6 @@ export class TelegramService {
   }
 
   private static async runPollingLoop(): Promise<void> {
-    if (this.isLoopRunning) {
-      return;
-    }
-
-    this.isLoopRunning = true;
     try {
       // Clear any stale webhook and DROP all pending backlogged updates to start clean
       try {
@@ -6383,5 +6441,221 @@ export class TelegramService {
     } finally {
       this.isLoopRunning = false;
     }
+  }
+}
+
+export class ClonedBotRunner {
+  private isRunning: boolean = false;
+  private pollingOffset: number = 0;
+  private abortController: AbortController | null = null;
+
+  constructor(public readonly bot: ClonedBotRecord) {}
+
+  public async start(): Promise<void> {
+    if (this.isRunning) return;
+    this.isRunning = true;
+    this.abortController = new AbortController();
+
+    console.info(`[ClonedBot ${this.bot.id}] Starting isolated runner for @${this.bot.username}...`);
+
+    // Clean any webhooks
+    try {
+      await TelegramService.callTelegramApi('deleteWebhook', { drop_pending_updates: true }, this.bot.token);
+    } catch {}
+
+    this.runLoop().catch(err => {
+      console.warn(`[ClonedBot ${this.bot.id}] Runner error:`, err?.message || err);
+    });
+  }
+
+  public stop(): void {
+    this.isRunning = false;
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
+    }
+    console.info(`[ClonedBot ${this.bot.id}] Runner stopped.`);
+  }
+
+  private async runLoop(): Promise<void> {
+    const botStorage = StorageManager.getStorage(this.bot.id);
+    await botStorage.init();
+
+    while (this.isRunning) {
+      try {
+        const res = await TelegramService.callTelegramApi('getUpdates', {
+          offset: this.pollingOffset,
+          timeout: 10,
+          allowed_updates: [
+            'message', 'edited_message', 'channel_post', 'edited_channel_post',
+            'inline_query', 'chosen_inline_result', 'callback_query',
+            'my_chat_member', 'chat_member', 'chat_join_request'
+          ]
+        }, this.bot.token);
+
+        if (!this.isRunning) break;
+
+        if (res && res.ok && Array.isArray(res.result)) {
+          for (const update of res.result) {
+            this.pollingOffset = Math.max(this.pollingOffset, update.update_id + 1);
+            try {
+              await storageContext.run(botStorage, async () => {
+                await botTokenContext.run(this.bot.token, async () => {
+                  await TelegramService.handleUpdate(update, this.bot.token, this.bot.id);
+                });
+              });
+            } catch (err: any) {
+              console.error(`[ClonedBot ${this.bot.id}] Update error:`, err?.message || err);
+            }
+          }
+        }
+      } catch (err: any) {
+        if (!this.isRunning) break;
+        await new Promise(r => setTimeout(r, 2000));
+      }
+    }
+  }
+}
+
+export class TelegramBotManager {
+  private static runners: Map<string, ClonedBotRunner> = new Map();
+
+  public static async verifyBotToken(token: string): Promise<{ ok: boolean; info?: any; error?: string }> {
+    try {
+      const clean = token.trim().replace(/^["']|["']$/g, '');
+      const res = await fetch(`https://api.telegram.org/bot${clean}/getMe`);
+      const data = await res.json();
+      if (data?.ok && data.result) {
+        return { ok: true, info: data.result };
+      }
+      return { ok: false, error: data?.description || 'Invalid bot token' };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || 'Network error verifying bot token' };
+    }
+  }
+
+  public static async initAllBots(): Promise<void> {
+    try {
+      const mainStorage = StorageManager.getMainStorage();
+      const bots = await mainStorage.getClonedBots();
+      console.info(`[TelegramBotManager] Initializing ${bots.length} cloned bots...`);
+      for (const bot of bots) {
+        if (bot.status !== 'stopped') {
+          this.startBotInstance(bot);
+        }
+      }
+    } catch (err: any) {
+      console.error('[TelegramBotManager] Error initializing cloned bots:', err?.message || err);
+    }
+  }
+
+  public static startBotInstance(bot: ClonedBotRecord): void {
+    if (this.runners.has(bot.id)) {
+      this.runners.get(bot.id)?.stop();
+    }
+    const runner = new ClonedBotRunner(bot);
+    this.runners.set(bot.id, runner);
+    runner.start().catch(() => {});
+  }
+
+  public static async cloneBot(token: string, createdBy?: string): Promise<{ success: boolean; bot?: ClonedBotRecord; error?: string }> {
+    const cleanToken = token.trim().replace(/^["']|["']$/g, '');
+    const verification = await this.verifyBotToken(cleanToken);
+    if (!verification.ok || !verification.info) {
+      return { success: false, error: verification.error || 'Invalid bot token' };
+    }
+
+    const info = verification.info;
+    const botId = `clone_${info.id}`;
+
+    const mainStorage = StorageManager.getMainStorage();
+    const existing = await mainStorage.getClonedBots();
+    const foundExisting = existing.find((b: ClonedBotRecord) => b.token === cleanToken || b.id === botId);
+    if (foundExisting) {
+      this.startBotInstance(foundExisting);
+      return { success: true, bot: foundExisting };
+    }
+
+    const newBot: ClonedBotRecord = {
+      id: botId,
+      token: cleanToken,
+      name: info.first_name || 'Cloned Bot',
+      username: info.username || '',
+      status: 'active',
+      createdAt: new Date().toISOString(),
+      createdBy: createdBy || 'admin',
+      filesCount: 0,
+      usersCount: 0
+    };
+
+    await mainStorage.saveClonedBot(newBot);
+
+    // Initialize isolated storage for this cloned bot
+    const botStorage = StorageManager.getStorage(botId);
+    await botStorage.init();
+    await botStorage.updateSettings({
+      botToken: cleanToken,
+      botUsername: info.username || ''
+    });
+
+    this.startBotInstance(newBot);
+    console.info(`[TelegramBotManager] Cloned bot @${newBot.username} (${newBot.id}) started successfully!`);
+    return { success: true, bot: newBot };
+  }
+
+  public static async deleteClonedBot(id: string): Promise<boolean> {
+    if (id === 'main') return false;
+    if (this.runners.has(id)) {
+      this.runners.get(id)?.stop();
+      this.runners.delete(id);
+    }
+    const mainStorage = StorageManager.getMainStorage();
+    await mainStorage.deleteClonedBot(id);
+    return true;
+  }
+
+  public static async getAllBots(): Promise<Array<{
+    id: string;
+    name: string;
+    username: string;
+    isMain: boolean;
+    status: 'active' | 'stopped';
+    filesCount: number;
+    usersCount: number;
+    createdAt?: string;
+  }>> {
+    const mainStorage = StorageManager.getMainStorage();
+    const mainSettings = await mainStorage.getSettings().catch(() => ({} as any));
+    const mainItems = await mainStorage.getItems().catch(() => []);
+    const mainUsers = await mainStorage.getBotUsers().catch(() => []);
+
+    const list: any[] = [{
+      id: 'main',
+      name: mainSettings.botUsername ? `@${mainSettings.botUsername}` : 'Main Bot',
+      username: mainSettings.botUsername || '',
+      isMain: true,
+      status: 'active',
+      filesCount: mainItems.length,
+      usersCount: mainUsers.length
+    }];
+
+    const cloned = await mainStorage.getClonedBots().catch(() => []);
+    for (const c of cloned) {
+      const cStorage = StorageManager.getStorage(c.id);
+      const cItems = await cStorage.getItems().catch(() => []);
+      const cUsers = await cStorage.getBotUsers().catch(() => []);
+      list.push({
+        id: c.id,
+        name: c.name || `@${c.username}`,
+        username: c.username,
+        isMain: false,
+        status: this.runners.has(c.id) ? 'active' : (c.status || 'active'),
+        filesCount: cItems.length,
+        usersCount: cUsers.length,
+        createdAt: c.createdAt
+      });
+    }
+
+    return list;
   }
 }

@@ -14,13 +14,15 @@ import { BottomNav } from './components/BottomNav';
 import { BackgroundEffects } from './components/BackgroundEffects';
 import { DynamicWeatherBackground } from './components/DynamicWeatherBackground';
 import { ToastContainer } from './components/ToastContainer';
-import { Shield, Sparkles, Send, Bell, Crown, ShieldCheck } from 'lucide-react';
+import { BotSwitcherModal } from './components/BotSwitcherModal';
+import { Shield, Sparkles, Send, Bell, Crown, ShieldCheck, Bot } from 'lucide-react';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<AdminUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [showSplash, setShowSplash] = useState(true);
   const [currentTab, setCurrentTab] = useState('dashboard');
+  const [isBotSwitcherOpen, setIsBotSwitcherOpen] = useState(false);
 
   // Network Monitoring State (Wi-Fi / Mobile Data)
   const [isOnline, setIsOnline] = useState<boolean>(() => {
@@ -459,28 +461,46 @@ export default function App() {
                   ? 'App Design'
                   : 'More Options'}
               </h1>
-              <div className="flex items-center gap-1.5 text-[10px] mt-0.5 min-w-0">
+              <button
+                type="button"
+                onClick={() => setIsBotSwitcherOpen(true)}
+                title="Click to Switch Telegram Bot"
+                className="flex items-center gap-1.5 text-[10px] mt-0.5 min-w-0 hover:opacity-90 cursor-pointer text-left group"
+              >
                 {isBotConnected ? (
                   <>
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)] shrink-0" />
-                    <span className="truncate font-medium text-white/80">
+                    <span className="truncate font-medium text-white/80 group-hover:text-red-400 transition-colors">
                       Connected to {botDisplayName ? (botDisplayName.startsWith('@') ? botDisplayName : `@${botDisplayName}`) : 'Bot'}
+                    </span>
+                    <span className="text-[9px] px-1 py-0.2 rounded bg-white/10 text-white/60 group-hover:bg-red-500/20 group-hover:text-red-300 transition-colors">
+                      Switch
                     </span>
                   </>
                 ) : (
                   <>
                     <span className="w-1.5 h-1.5 rounded-full bg-white/40 shadow-[0_0_4px_rgba(255,255,255,0.4)] shrink-0" />
-                    <span className="truncate font-medium text-white/60">
-                      Not Connected
+                    <span className="truncate font-medium text-white/60 group-hover:text-red-400 transition-colors">
+                      Switch Bot (Offline)
                     </span>
                   </>
                 )}
-              </div>
+              </button>
             </div>
           </div>
 
-          {/* Top-Right Header Area: Role Badge */}
-          <div className="flex items-center shrink-0">
+          {/* Top-Right Header Area: Switch Bot & Role Badge */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setIsBotSwitcherOpen(true)}
+              title="Switch Active Telegram Bot"
+              className="px-2.5 py-1.5 rounded-full border border-red-500/30 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs font-semibold tracking-wide transition-all cursor-pointer active:scale-95 flex items-center gap-1.5 shadow-[0_0_10px_rgba(239,68,68,0.2)]"
+            >
+              <Bot className="w-3.5 h-3.5 text-red-400" />
+              <span className="hidden xs:inline">Switch Bot</span>
+            </button>
+
             <button
               type="button"
               onClick={() => setCurrentTab('more')}
@@ -553,6 +573,7 @@ export default function App() {
               onRefreshTemplates={refreshAllData}
               onRefreshSettings={refreshAllData}
               onLogout={handleLogout}
+              onOpenBotSwitcher={() => setIsBotSwitcherOpen(true)}
             />
           </div>
         </main>
@@ -562,6 +583,17 @@ export default function App() {
           currentTab={currentTab}
           onSelectTab={handleNavigate}
           accentColor={design.primaryColor}
+        />
+
+        {/* Telegram Bot Fleet Switcher & Cloner Modal */}
+        <BotSwitcherModal
+          isOpen={isBotSwitcherOpen}
+          onClose={() => setIsBotSwitcherOpen(false)}
+          onBotSwitched={() => {
+            refreshAllData();
+            fetchBotStatus();
+          }}
+          currentBotUsername={botDisplayName}
         />
 
         {/* Global Slide-Down Error & Success Toasts */}

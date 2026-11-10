@@ -200,7 +200,36 @@ export interface FraudKeywordRule {
   createdAt: string;
 }
 
+export interface BotInstance {
+  id: string;
+  name: string;
+  username: string;
+  isMain: boolean;
+  status: 'active' | 'stopped';
+  filesCount: number;
+  usersCount: number;
+  createdAt?: string;
+}
+
 const TOKEN_KEY = 'tg_admin_token';
+const BOT_ID_KEY = 'tg_active_bot_id';
+
+export function getActiveBotId(): string {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return localStorage.getItem(BOT_ID_KEY) || 'main';
+    }
+  } catch {}
+  return 'main';
+}
+
+export function setActiveBotId(botId: string): void {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      localStorage.setItem(BOT_ID_KEY, botId || 'main');
+    }
+  } catch {}
+}
 
 function getStoredToken(): string | null {
   try {
@@ -213,9 +242,13 @@ function getStoredToken(): string | null {
 
 export function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
   const token = getStoredToken();
+  const activeBotId = getActiveBotId();
   const headers = new Headers(options.headers || {});
   if (token && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${token}`);
+  }
+  if (!headers.has('x-bot-id')) {
+    headers.set('x-bot-id', activeBotId);
   }
   return fetch(url, {
     ...options,
@@ -836,5 +869,56 @@ export const api = {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to restore snapshot');
     return data;
+  },
+
+  async getFirebaseRules(): Promise<{
+    success: boolean;
+    rtdbRules: any;
+    rtdbRulesFormatted: string;
+    authorizedAdmins: string[];
+    publicAccessBlocked: boolean;
+    backendSyncSecured: boolean;
+    primaryProject: string;
+    secondaryProject: string;
+  }> {
+    const res = await authFetch('/api/firebase-rules');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to fetch Firebase rules');
+    return data;
+  },
+
+  getActiveBotId(): string {
+    return getActiveBotId();
+  },
+
+  setActiveBotId(botId: string): void {
+    setActiveBotId(botId);
+  },
+
+  async getBots(): Promise<BotInstance[]> {
+    const res = await authFetch('/api/bots');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to fetch bots');
+    return data.bots || [];
+  },
+
+  async cloneBot(token: string): Promise<any> {
+    const res = await authFetch('/api/bots/clone', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: token.trim() })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to clone bot');
+    return data.bot;
+  },
+
+  async deleteClonedBot(id: string): Promise<boolean> {
+    const res = await authFetch(`/api/bots/${id}`, {
+      method: 'DELETE'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to delete bot');
+    return Boolean(data.ok);
   }
 };

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import dotenv from 'dotenv';
 import { hashPassword, verifyPassword } from './auth';
 
@@ -288,6 +289,18 @@ export const DEFAULT_BACKUP_SERVER_CONFIG: BackupServerConfig = {
   lastSyncMessage: 'No synchronization performed yet'
 };
 
+export interface ClonedBotRecord {
+  id: string; // telegram bot id (numeric string)
+  token: string;
+  name: string;
+  username: string;
+  status: 'active' | 'paused' | 'stopped';
+  createdAt: string;
+  createdBy?: string;
+  filesCount?: number;
+  usersCount?: number;
+}
+
 export interface AppDatabase {
   items: ItemRecord[];
   templates: Record<string, MessageTemplate>;
@@ -300,6 +313,7 @@ export interface AppDatabase {
   design: DesignConfig;
   settings: BotSettings;
   backupServer?: BackupServerConfig;
+  clonedBots?: ClonedBotRecord[];
   addSessions?: Record<string, any>;
   botUsers?: Record<string, BotUserRecord>;
   reports?: UserReportRecord[];
@@ -504,17 +518,18 @@ export const DEFAULT_SETTINGS: BotSettings = {
 const FIREBASE_RTDB_URL = "https://zexiofficial844-default-rtdb.asia-southeast1.firebasedatabase.app";
 const SECONDARY_FIREBASE_RTDB_URL = "https://zexi-official-default-rtdb.asia-southeast1.firebasedatabase.app";
 
-function getFallbackFilePaths(): string[] {
+function getFallbackFilePaths(botId: string = 'main'): string[] {
+  const suffix = botId === 'main' ? '' : `_${botId}`;
   const paths: string[] = [];
   if (process.env.DATA_FILE_PATH) {
     try {
-      paths.push(path.resolve(process.env.DATA_FILE_PATH));
+      paths.push(path.resolve(process.env.DATA_FILE_PATH.replace(/\.json$/, `${suffix}.json`)));
     } catch {}
   }
   try {
-    paths.push(path.resolve(process.cwd(), '.data', 'store.json'));
+    paths.push(path.resolve(process.cwd(), '.data', `store${suffix}.json`));
   } catch {}
-  paths.push('/tmp/tg_bot_store.json');
+  paths.push(`/tmp/tg_bot_store${suffix}.json`);
   return paths;
 }
 
@@ -525,7 +540,7 @@ export class SharedStorageService {
   private itemCache = new Map<string, ItemRecord>();
   private cloudSyncTimer: NodeJS.Timeout | null = null;
 
-  constructor() {
+  constructor(public readonly botId: string = 'main') {
     this.db = {
       items: [],
       templates: { ...DEFAULT_TEMPLATES },
@@ -535,6 +550,7 @@ export class SharedStorageService {
       trackedMessages: {},
       scheduledDeletions: [],
       uploadedFilesIndex: {},
+      clonedBots: [],
       addSessions: {},
       botUsers: {},
       reports: [],
@@ -547,6 +563,46 @@ export class SharedStorageService {
       settings: { ...DEFAULT_SETTINGS },
       backupServer: { ...DEFAULT_BACKUP_SERVER_CONFIG }
     };
+  }
+
+  // Zero-latency in-memory item lookup: O(1) instant resolution for super-fast file delivery
+  public resolveItemFast(cleanPayload: string): ItemRecord | null {
+    if (!cleanPayload) return null;
+    const p = cleanPayload.trim();
+    if (!p) return null;
+
+    // 1. Direct hit in item cache
+    let it = this.itemCache.get(p) || null;
+    if (it && it.status === 'active') return it;
+
+    // 2. Normalize f_ or l_ prefixes
+    const normalized = p.replace(/^(?:f_|l_)+/, '');
+    it = this.itemCache.get(`f_${normalized}`) || this.itemCache.get(`l_${normalized}`) || this.itemCache.get(normalized) || null;
+    if (it && it.status === 'active') return it;
+
+    // 3. Trigger cache match
+    const lower = p.toLowerCase();
+    it = this.triggerCache.get(`slash:${lower.startsWith('/') ? lower : `/${lower}`}`) ||
+         this.triggerCache.get(`hash:${lower.startsWith('#') ? lower : `#${lower}`}`) ||
+         this.triggerCache.get(`normal:${lower}`) || null;
+    if (it && it.status === 'active') return it;
+
+    // 4. Quick in-memory list scan fallback
+    for (const item of this.db.items) {
+      if (item.status === 'active') {
+        if (item.id === p || item.id === normalized || item.id === `f_${normalized}` || item.id === `l_${normalized}`) {
+          return item;
+        }
+        if (item.rawKeyword && item.rawKeyword.toLowerCase() === lower) {
+          return item;
+        }
+        if (Array.isArray(item.triggers) && item.triggers.some(t => t.trim().toLowerCase() === lower)) {
+          return item;
+        }
+      }
+    }
+
+    return null;
   }
 
   // Fast O(1) in-memory indexing for super-fast Telegram bot responses with strict trigger-type isolation
@@ -597,6 +653,14 @@ export class SharedStorageService {
   private hasPendingCloudSync = false;
   private cachedAuthToken: string | null = null;
   private tokenExpiresAt: number = 0;
+
+  // Explicitly set authenticated admin Firebase ID token (from client login)
+  public setCloudAuthToken(token: string): void {
+    if (token && typeof token === 'string') {
+      this.cachedAuthToken = token.trim();
+      this.tokenExpiresAt = Date.now() + 55 * 60 * 1000; // 55 minutes validity
+    }
+  }
 
   // Retrieve Firebase Auth ID Token or Secret for Cloud RTDB requests
   private async getFirebaseAuthToken(): Promise<string | null> {
@@ -650,7 +714,8 @@ export class SharedStorageService {
     const defaultUrl = isSecondary ? SECONDARY_FIREBASE_RTDB_URL : FIREBASE_RTDB_URL;
     const baseUrl = (process.env.FIREBASE_DATABASE_URL || defaultUrl).replace(/\/+$/, '');
     const cleanPath = path.startsWith('/') ? path : `/${path}`;
-    const url = `${baseUrl}${cleanPath}.json`;
+    const targetPath = this.botId === 'main' ? cleanPath : `/cloned_bots/${this.botId}${cleanPath}`;
+    const url = `${baseUrl}${targetPath}.json`;
     if (token) {
       return `${url}?auth=${encodeURIComponent(token)}`;
     }
@@ -870,7 +935,7 @@ export class SharedStorageService {
     try {
       let newestDiskJson: string | null = null;
       let freshestMtime = -1;
-      for (const filePath of getFallbackFilePaths()) {
+      for (const filePath of getFallbackFilePaths(this.botId)) {
         if (fs.existsSync(filePath)) {
           const stat = await fs.promises.stat(filePath).catch(() => null);
           if (stat && stat.mtimeMs > freshestMtime) {
@@ -958,7 +1023,7 @@ export class SharedStorageService {
     if (!loadedData) {
       let freshestMtime = -1;
       let freshestJson: string | null = null;
-      for (const filePath of getFallbackFilePaths()) {
+      for (const filePath of getFallbackFilePaths(this.botId)) {
         try {
           if (fs.existsSync(filePath)) {
             const stat = fs.statSync(filePath);
@@ -1056,7 +1121,7 @@ export class SharedStorageService {
     this.pendingPersistTimer = setTimeout(async () => {
       try {
         const snapshot = JSON.stringify(this.db, null, 2);
-        for (const filePath of getFallbackFilePaths()) {
+        for (const filePath of getFallbackFilePaths(this.botId)) {
           try {
             const dir = path.dirname(filePath);
             if (!fs.existsSync(dir)) {
@@ -3024,7 +3089,108 @@ export class SharedStorageService {
       return true;
     }
   }
+
+  // =========================================================================
+  // CLONED BOTS REGISTRY & PERSISTENCE
+  // =========================================================================
+  public async getClonedBots(): Promise<ClonedBotRecord[]> {
+    await this.loadLatest(false);
+    return Array.isArray(this.db.clonedBots) ? [...this.db.clonedBots] : [];
+  }
+
+  public async saveClonedBot(cloned: ClonedBotRecord): Promise<void> {
+    if (!cloned || !cloned.id) return;
+    if (!Array.isArray(this.db.clonedBots)) {
+      this.db.clonedBots = [];
+    }
+    const idx = this.db.clonedBots.findIndex(b => b.id === cloned.id);
+    if (idx >= 0) {
+      this.db.clonedBots[idx] = { ...this.db.clonedBots[idx], ...cloned };
+    } else {
+      this.db.clonedBots.push(cloned);
+    }
+    await this.persist();
+
+    // Persist to Firebase RTDB under /cloned_bots_meta/${cloned.id}.json
+    try {
+      const token = await this.getFirebaseAuthToken();
+      const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
+      const baseUrl = (process.env.FIREBASE_DATABASE_URL || (isSecondary ? SECONDARY_FIREBASE_RTDB_URL : FIREBASE_RTDB_URL)).replace(/\/+$/, '');
+      const metaUrl = token ? `${baseUrl}/cloned_bots_meta/${cloned.id}.json?auth=${encodeURIComponent(token)}` : `${baseUrl}/cloned_bots_meta/${cloned.id}.json`;
+      fetch(metaUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(cloned)
+      }).catch(() => {});
+    } catch {}
+  }
+
+  public async deleteClonedBot(id: string): Promise<boolean> {
+    if (!id) return false;
+    if (!Array.isArray(this.db.clonedBots)) {
+      return false;
+    }
+    const prevLen = this.db.clonedBots.length;
+    this.db.clonedBots = this.db.clonedBots.filter(b => b.id !== id);
+    if (this.db.clonedBots.length !== prevLen) {
+      await this.persist();
+
+      try {
+        const token = await this.getFirebaseAuthToken();
+        const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
+        const baseUrl = (process.env.FIREBASE_DATABASE_URL || (isSecondary ? SECONDARY_FIREBASE_RTDB_URL : FIREBASE_RTDB_URL)).replace(/\/+$/, '');
+        const metaUrl = token ? `${baseUrl}/cloned_bots_meta/${id}.json?auth=${encodeURIComponent(token)}` : `${baseUrl}/cloned_bots_meta/${id}.json`;
+        fetch(metaUrl, { method: 'DELETE' }).catch(() => {});
+      } catch {}
+      return true;
+    }
+    return false;
+  }
 }
 
-export const sharedStorage = new SharedStorageService();
-export const storage = sharedStorage;
+export const sharedStorage = new SharedStorageService('main');
+
+// Storage Manager for Multi-Bot Isolation
+export class StorageManager {
+  private static instances = new Map<string, SharedStorageService>();
+
+  public static getMainStorage(): SharedStorageService {
+    return sharedStorage;
+  }
+
+  public static getStorage(botId: string = 'main'): SharedStorageService {
+    const cleanId = (botId || 'main').trim();
+    if (cleanId === 'main') {
+      return sharedStorage;
+    }
+    let s = this.instances.get(cleanId);
+    if (!s) {
+      s = new SharedStorageService(cleanId);
+      this.instances.set(cleanId, s);
+      s.loadLatest(true).catch(() => {});
+    }
+    return s;
+  }
+
+  public getMainStorage(): SharedStorageService {
+    return StorageManager.getMainStorage();
+  }
+
+  public getStorage(botId: string = 'main'): SharedStorageService {
+    return StorageManager.getStorage(botId);
+  }
+}
+
+export const storageManager = new StorageManager();
+export const storageContext = new AsyncLocalStorage<SharedStorageService>();
+
+export const storage = new Proxy(sharedStorage, {
+  get(target, prop, receiver) {
+    const active = storageContext.getStore() || target;
+    const val = Reflect.get(active, prop, receiver);
+    if (typeof val === 'function') {
+      return val.bind(active);
+    }
+    return val;
+  }
+});
