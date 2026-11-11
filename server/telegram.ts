@@ -2005,9 +2005,9 @@ export class TelegramService {
         await this.sendAutoDeletingNotice(
           message.chat.id,
           `🤖 <b>Bot Cloned Successfully:</b> @${bot.username}\n` +
-          `• <b>Panel URL:</b> <code>${bot.panelUrl || `/panel?bot_id=${bot.id}`}</code>\n` +
+          `• <b>Panel URL:</b> <a href="${bot.panelUrl}">${bot.panelUrl}</a>\n` +
           `• <b>Admin:</b> <code>${bot.adminUsername}</code> | <b>Pass:</b> <code>${bot.adminPassword}</code>`,
-          14000,
+          20000,
           message.message_id
         );
         return;
@@ -2759,7 +2759,7 @@ export class TelegramService {
           `• <b>Bot ID:</b> <code>${bot.id}</code>\n` +
           `• <b>Status:</b> 🟢 Active & Polling\n\n` +
           `🔐 <b>Dedicated Sub-Admin Credentials:</b>\n` +
-          `• <b>Panel URL:</b> <code>${bot.panelUrl || `/panel?bot_id=${bot.id}`}</code>\n` +
+          `• <b>Panel URL:</b> <a href="${bot.panelUrl}">${bot.panelUrl}</a>\n` +
           `• <b>Admin Username:</b> <code>${bot.adminUsername}</code>\n` +
           `• <b>Admin Password:</b> <code>${bot.adminPassword}</code>\n\n` +
           `✅ <i>This bot is completely isolated with its own private database. The sub-admin can log into the dedicated panel to manage files, filters, and settings independently!</i>`,
@@ -6560,6 +6560,20 @@ export class TelegramBotManager {
     }
   }
 
+  public static getActiveBaseUrl(customBase?: string): string {
+    if (customBase && typeof customBase === 'string' && customBase.startsWith('http')) {
+      return customBase.trim().replace(/\/+$/, '');
+    }
+    const envUrl = 
+      process.env.BASE_URL ||
+      process.env.APP_URL || 
+      process.env.RENDER_EXTERNAL_URL ||
+      (process.env.RENDER_EXTERNAL_HOSTNAME ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}` : '') ||
+      process.env.URL ||
+      'https://ais-pre-5pmvaj2s66z7xu34aogymi-761412699643.asia-east1.run.app';
+    return envUrl.trim().replace(/\/+$/, '');
+  }
+
   public static startBotInstance(bot: ClonedBotRecord): void {
     if (this.runners.has(bot.id)) {
       this.runners.get(bot.id)?.stop();
@@ -6569,7 +6583,7 @@ export class TelegramBotManager {
     runner.start().catch(() => {});
   }
 
-  public static async cloneBot(token: string, createdBy?: string): Promise<{ success: boolean; bot?: ClonedBotRecord; error?: string }> {
+  public static async cloneBot(token: string, createdBy?: string, customBaseUrl?: string): Promise<{ success: boolean; bot?: ClonedBotRecord; error?: string }> {
     const cleanToken = token.trim().replace(/^["']|["']$/g, '');
     const verification = await this.verifyBotToken(cleanToken);
     if (!verification.ok || !verification.info) {
@@ -6593,13 +6607,14 @@ export class TelegramBotManager {
       return { success: false, error: 'Already this bot is already running.' };
     }
 
-    // 3. Generate unique sub-admin credentials and dedicated panel URL
+    // 3. Generate unique sub-admin credentials and full active web app panel URL
     const cleanUsername = info.username ? info.username.toLowerCase().replace(/[^a-z0-9_]/g, '') : `bot_${info.id}`;
     const adminUsername = `admin_${cleanUsername}`;
     const randPart = Math.random().toString(36).substring(2, 6).toUpperCase();
     const numPart = Math.floor(100 + Math.random() * 900);
     const adminPassword = `Zexi#${randPart}${numPart}`;
-    const panelUrl = `/panel?bot_id=${botId}`;
+    const baseDomain = this.getActiveBaseUrl(customBaseUrl);
+    const panelUrl = `${baseDomain}/panel?bot_id=${botId}`;
 
     const newBot: ClonedBotRecord = {
       id: botId,
@@ -6705,7 +6720,9 @@ export class TelegramBotManager {
         createdAt: c.createdAt,
         adminUsername: c.adminUsername,
         adminPassword: c.adminPassword,
-        panelUrl: c.panelUrl
+        panelUrl: (c.panelUrl && c.panelUrl.startsWith('http'))
+          ? c.panelUrl
+          : `${this.getActiveBaseUrl()}${c.panelUrl || `/panel?bot_id=${c.id}`}`
       });
     }
 

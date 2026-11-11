@@ -298,7 +298,8 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                             type="button"
                             onClick={() => {
                               const base = typeof window !== 'undefined' ? window.location.origin : '';
-                              const url = `${base}${bot.panelUrl || `/?bot_id=${bot.id}`}`;
+                              const rawUrl = bot.panelUrl || `/panel?bot_id=${bot.id}`;
+                              const url = rawUrl.startsWith('http') ? rawUrl : `${base}${rawUrl}`;
                               navigator.clipboard.writeText(`Panel URL: ${url}\nUsername: ${bot.adminUsername || 'admin'}\nPassword: ${bot.adminPassword || 'secret'}`);
                               toast.success('Sub-Admin credentials copied!');
                             }}
@@ -311,7 +312,21 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                         <div className="space-y-0.5 font-mono text-[10px] text-white/90">
                           <div className="flex items-center justify-between gap-2">
                             <span className="text-white/50">URL:</span>
-                            <span className="text-white/90 truncate select-all">{bot.panelUrl || `/panel?bot_id=${bot.id}`}</span>
+                            {(() => {
+                              const base = typeof window !== 'undefined' ? window.location.origin : '';
+                              const rawUrl = bot.panelUrl || `/panel?bot_id=${bot.id}`;
+                              const fullUrl = rawUrl.startsWith('http') ? rawUrl : `${base}${rawUrl}`;
+                              return (
+                                <a 
+                                  href={fullUrl} 
+                                  target="_blank" 
+                                  rel="noreferrer"
+                                  className="text-sky-300 hover:underline truncate select-all max-w-[210px]"
+                                >
+                                  {fullUrl}
+                                </a>
+                              );
+                            })()}
                           </div>
                           {bot.adminUsername && (
                             <div className="flex items-center justify-between gap-2">

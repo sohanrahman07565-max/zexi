@@ -301,11 +301,12 @@ export const api = {
     }
   },
 
-  async login(telegramId: string, password: string): Promise<{ success: boolean; admin: AdminUser; token?: string; error?: string }> {
+  async login(telegramId: string, password: string): Promise<{ success: boolean; admin: AdminUser; token?: string; botId?: string; error?: string }> {
+    const activeBotId = getActiveBotId();
     const res = await authFetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ telegramId, username: telegramId, password })
+      body: JSON.stringify({ telegramId, username: telegramId, password, bot_id: activeBotId })
     });
     const data = await res.json();
     if (!res.ok) {
@@ -319,6 +320,9 @@ export const api = {
           localStorage.setItem(TOKEN_KEY, data.token);
         }
       } catch {}
+    }
+    if (data.botId) {
+      setActiveBotId(data.botId);
     }
     return data;
   },
@@ -365,10 +369,11 @@ export const api = {
 
   async validateCredentials(username: string, password: string): Promise<{ valid: boolean }> {
     try {
+      const activeBotId = getActiveBotId();
       const res = await authFetch('/api/auth/validate-credentials', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, telegramId: username, password })
+        body: JSON.stringify({ username, telegramId: username, password, bot_id: activeBotId })
       });
       if (!res.ok) return { valid: false };
       return await res.json();

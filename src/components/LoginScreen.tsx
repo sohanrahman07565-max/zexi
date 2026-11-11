@@ -34,6 +34,20 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
   const [emailError, setEmailError] = useState<string | null>(null);
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [isSuccessExiting, setIsSuccessExiting] = useState(false);
+  const [targetBotId, setTargetBotId] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search);
+        const bid = params.get('bot_id') || params.get('botId');
+        if (bid) {
+          setTargetBotId(bid);
+          api.setActiveBotId(bid);
+        }
+      }
+    } catch {}
+  }, []);
 
   // Check for redirect result from Google Sign-In if returning from redirect flow
   useEffect(() => {
@@ -687,16 +701,21 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
 
               <h2 className="zexi-title">{title}</h2>
               <div className="zexi-subtitle">{subtitle}</div>
+              {targetBotId && (
+                <div style={{ marginTop: '8px', display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '4px 10px', borderRadius: '12px', background: 'rgba(255, 49, 91, 0.15)', border: '1px solid rgba(255, 49, 91, 0.35)', fontSize: '11px', color: '#ff789a', fontWeight: 600 }}>
+                  <span>🤖 Cloned Bot Sub-Admin Panel</span>
+                </div>
+              )}
             </div>
 
             {/* Login Form */}
             <form onSubmit={handleSubmit}>
               
-              {/* Email Input */}
+              {/* Username or Email Input */}
               <div className="zexi-form-group">
-                <label className="zexi-label">Enter Email</label>
+                <label className="zexi-label">Enter Username or Email</label>
                 <div className="zexi-input-box">
-                  <span className="zexi-input-icon">✉</span>
+                  <span className="zexi-input-icon">👤</span>
                   <input
                     type="text"
                     autoComplete="username"
@@ -706,11 +725,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
                       setIdentifier(e.target.value);
                       if (emailError) setEmailError(null);
                     }}
-                    placeholder="Enter Email"
+                    placeholder="Enter Username or Email"
                     className={`zexi-input ${emailError ? 'has-error shake' : ''}`}
                   />
                 </div>
-                {/* Targeted Error Message Directly Below Email Box */}
+                {/* Targeted Error Message Directly Below Username Box */}
                 {emailError && (
                   <div className="zexi-field-error">
                     <AlertCircle className="w-3.5 h-3.5 shrink-0" />
