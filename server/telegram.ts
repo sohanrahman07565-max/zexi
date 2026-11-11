@@ -1989,9 +1989,12 @@ export class TelegramService {
 
         const result = await TelegramBotManager.cloneBot(tokenArg, fromId);
         if (!result.success) {
+          const errText = result.error === 'Already this bot is already running.' 
+            ? '❌ <b>Already this bot is already running.</b>' 
+            : `❌ <b>Failed to Clone Bot:</b> ${result.error || 'Invalid token'}`;
           await this.sendAutoDeletingNotice(
             message.chat.id,
-            `❌ <b>Failed to Clone Bot:</b> ${result.error || 'Invalid token'}`,
+            errText,
             8000,
             message.message_id
           );
@@ -2001,8 +2004,10 @@ export class TelegramService {
         const bot = result.bot!;
         await this.sendAutoDeletingNotice(
           message.chat.id,
-          `🤖 <b>Bot Cloned Successfully:</b> @${bot.username} (ID: <code>${bot.id}</code>). Isolated database ready!`,
-          10000,
+          `🤖 <b>Bot Cloned Successfully:</b> @${bot.username}\n` +
+          `• <b>Panel URL:</b> <code>${bot.panelUrl || `/panel?bot_id=${bot.id}`}</code>\n` +
+          `• <b>Admin:</b> <code>${bot.adminUsername}</code> | <b>Pass:</b> <code>${bot.adminPassword}</code>`,
+          14000,
           message.message_id
         );
         return;
@@ -2734,9 +2739,12 @@ export class TelegramService {
 
       const result = await TelegramBotManager.cloneBot(tokenArg, fromId);
       if (!result.success) {
+        const errorMsg = result.error === 'Already this bot is already running.'
+          ? '❌ <b>Already this bot is already running.</b>'
+          : `❌ <b>Failed to Clone Bot:</b>\n${result.error || 'Invalid bot token or failed to verify with Telegram.'}`;
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: `❌ <b>Failed to Clone Bot:</b>\n${result.error || 'Invalid bot token or failed to verify with Telegram.'}`,
+          text: errorMsg,
           parse_mode: 'HTML'
         });
         return;
@@ -2750,8 +2758,11 @@ export class TelegramService {
           `• <b>Username:</b> @${bot.username}\n` +
           `• <b>Bot ID:</b> <code>${bot.id}</code>\n` +
           `• <b>Status:</b> 🟢 Active & Polling\n\n` +
-          `✅ <i>This bot is completely isolated with its own private database. Files, links, and filters created on your main bot or other clones will not bleed into each other.\n` +
-          `You can switch to and manage this bot directly in the Admin Panel!</i>`,
+          `🔐 <b>Dedicated Sub-Admin Credentials:</b>\n` +
+          `• <b>Panel URL:</b> <code>${bot.panelUrl || `/panel?bot_id=${bot.id}`}</code>\n` +
+          `• <b>Admin Username:</b> <code>${bot.adminUsername}</code>\n` +
+          `• <b>Admin Password:</b> <code>${bot.adminPassword}</code>\n\n` +
+          `✅ <i>This bot is completely isolated with its own private database. The sub-admin can log into the dedicated panel to manage files, filters, and settings independently!</i>`,
         parse_mode: 'HTML'
       });
       return;
@@ -6568,13 +6579,27 @@ export class TelegramBotManager {
     const info = verification.info;
     const botId = `clone_${info.id}`;
 
+    // 1. Check if token matches main bot's active token
+    const mainBotToken = await TelegramService.getBotToken();
+    if (cleanToken && mainBotToken && cleanToken === mainBotToken) {
+      return { success: false, error: 'Already this bot is already running.' };
+    }
+
+    // 2. Check if token or bot ID is already in cloned bots registry
     const mainStorage = StorageManager.getMainStorage();
     const existing = await mainStorage.getClonedBots();
     const foundExisting = existing.find((b: ClonedBotRecord) => b.token === cleanToken || b.id === botId);
     if (foundExisting) {
-      this.startBotInstance(foundExisting);
-      return { success: true, bot: foundExisting };
+      return { success: false, error: 'Already this bot is already running.' };
     }
+
+    // 3. Generate unique sub-admin credentials and dedicated panel URL
+    const cleanUsername = info.username ? info.username.toLowerCase().replace(/[^a-z0-9_]/g, '') : `bot_${info.id}`;
+    const adminUsername = `admin_${cleanUsername}`;
+    const randPart = Math.random().toString(36).substring(2, 6).toUpperCase();
+    const numPart = Math.floor(100 + Math.random() * 900);
+    const adminPassword = `Zexi#${randPart}${numPart}`;
+    const panelUrl = `/panel?bot_id=${botId}`;
 
     const newBot: ClonedBotRecord = {
       id: botId,
@@ -6585,7 +6610,10 @@ export class TelegramBotManager {
       createdAt: new Date().toISOString(),
       createdBy: createdBy || 'admin',
       filesCount: 0,
-      usersCount: 0
+      usersCount: 0,
+      adminUsername,
+      adminPassword,
+      panelUrl
     };
 
     await mainStorage.saveClonedBot(newBot);
@@ -6598,8 +6626,27 @@ export class TelegramBotManager {
       botUsername: info.username || ''
     });
 
+    // Create the dedicated sub-admin account in the cloned bot's isolated storage
+    const subAdminAccount = {
+      id: `adm_${info.id}`,
+      telegramId: String(info.id),
+      name: `${info.first_name || 'Bot'} Administrator`,
+      username: adminUsername,
+      role: 'owner' as const,
+      passwordHash: await hashPassword(adminPassword),
+      permissions: {
+        files_view: true, files_add: true, files_edit: true, files_delete: true,
+        links_view: true, links_add: true, links_edit: true, links_delete: true,
+        messages_view: true, messages_edit: true, admins_manage: false,
+        design_edit: true, settings_edit: true, cleanup_manage: true
+      },
+      enabled: true,
+      createdAt: new Date().toISOString()
+    };
+    await botStorage.saveAdmin(subAdminAccount);
+
     this.startBotInstance(newBot);
-    console.info(`[TelegramBotManager] Cloned bot @${newBot.username} (${newBot.id}) started successfully!`);
+    console.info(`[TelegramBotManager] Cloned bot @${newBot.username} (${newBot.id}) started with isolated panel credentials!`);
     return { success: true, bot: newBot };
   }
 
@@ -6623,6 +6670,9 @@ export class TelegramBotManager {
     filesCount: number;
     usersCount: number;
     createdAt?: string;
+    adminUsername?: string;
+    adminPassword?: string;
+    panelUrl?: string;
   }>> {
     const mainStorage = StorageManager.getMainStorage();
     const mainSettings = await mainStorage.getSettings().catch(() => ({} as any));
@@ -6652,7 +6702,10 @@ export class TelegramBotManager {
         status: this.runners.has(c.id) ? 'active' : (c.status || 'active'),
         filesCount: cItems.length,
         usersCount: cUsers.length,
-        createdAt: c.createdAt
+        createdAt: c.createdAt,
+        adminUsername: c.adminUsername,
+        adminPassword: c.adminPassword,
+        panelUrl: c.panelUrl
       });
     }
 

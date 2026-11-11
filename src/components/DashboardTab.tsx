@@ -200,25 +200,25 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
       {/* Metrics Grid */}
       <div className="grid grid-cols-2 gap-3">
         {/* Files Card */}
-        <div className="glass-panel rounded-2xl p-4 border border-zinc-800/80 bg-[#0c0c13]/90 hover:border-red-500/30 transition-all">
-          <div className="flex items-center justify-between text-zinc-400 mb-2">
-            <span className="text-xs font-medium">Files</span>
+        <div className="glass-water-card card-interactive animate-card-entrance rounded-2xl p-4">
+          <div className="flex items-center justify-between text-white/70 mb-2">
+            <span className="text-xs font-semibold">Files</span>
             <FileText className="w-4 h-4 text-red-400" />
           </div>
-          <div className="text-2xl font-bold text-white">{fileItems.length}</div>
-          <div className="text-[11px] text-zinc-500 mt-1 flex items-center gap-1">
+          <div className="text-2xl font-black text-white font-mono">{fileItems.length}</div>
+          <div className="text-[11px] text-white/60 mt-1 flex items-center gap-1">
             <span>Documents, APKs, Media</span>
           </div>
         </div>
 
         {/* Links Card */}
-        <div className="glass-panel rounded-2xl p-4 border border-zinc-800/80 bg-[#0c0c13]/90 hover:border-red-500/30 transition-all">
-          <div className="flex items-center justify-between text-zinc-400 mb-2">
-            <span className="text-xs font-medium">Links</span>
+        <div className="glass-water-card card-interactive animate-card-entrance rounded-2xl p-4">
+          <div className="flex items-center justify-between text-white/70 mb-2">
+            <span className="text-xs font-semibold">Links</span>
             <Link2 className="w-4 h-4 text-rose-400" />
           </div>
-          <div className="text-2xl font-bold text-white">{linkItems.length}</div>
-          <div className="text-[11px] text-zinc-500 mt-1 flex items-center gap-1">
+          <div className="text-2xl font-black text-white font-mono">{linkItems.length}</div>
+          <div className="text-[11px] text-white/60 mt-1 flex items-center gap-1">
             <span>Browser &amp; Mini Apps</span>
           </div>
         </div>
@@ -226,27 +226,27 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
         {/* Triggers / Filters Card */}
         <div 
           onClick={() => onNavigate('filters')}
-          className="glass-panel rounded-2xl p-4 border border-zinc-800/80 bg-[#0c0c13]/90 hover:border-red-500/40 transition-all cursor-pointer group"
+          className="glass-water-card card-interactive animate-card-entrance rounded-2xl p-4 cursor-pointer group"
         >
-          <div className="flex items-center justify-between text-zinc-400 mb-2">
-            <span className="text-xs font-medium group-hover:text-red-400 transition-colors">Filters / Triggers</span>
+          <div className="flex items-center justify-between text-white/70 mb-2">
+            <span className="text-xs font-semibold group-hover:text-red-400 transition-colors">Filters / Triggers</span>
             <Hash className="w-4 h-4 text-red-400" />
           </div>
-          <div className="text-2xl font-bold text-white">{totalTriggers}</div>
-          <div className="text-[11px] text-zinc-500 mt-1 flex items-center justify-between">
+          <div className="text-2xl font-black text-white font-mono">{totalTriggers}</div>
+          <div className="text-[11px] text-white/60 mt-1 flex items-center justify-between">
             <span>Exact match keywords</span>
-            <span className="text-red-400 font-medium">Manage →</span>
+            <span className="text-red-400 font-semibold group-hover:underline">Manage →</span>
           </div>
         </div>
 
         {/* Deliveries Card */}
-        <div className="glass-panel rounded-2xl p-4 border border-zinc-800/80 bg-[#0c0c13]/90">
-          <div className="flex items-center justify-between text-zinc-400 mb-2">
-            <span className="text-xs font-medium">Deliveries</span>
+        <div className="glass-water-card card-interactive animate-card-entrance rounded-2xl p-4">
+          <div className="flex items-center justify-between text-white/70 mb-2">
+            <span className="text-xs font-semibold">Deliveries</span>
             <Sparkles className="w-4 h-4 text-emerald-400" />
           </div>
-          <div className="text-2xl font-bold text-white">{totalDeliveries}</div>
-          <div className="text-[11px] text-zinc-500 mt-1">
+          <div className="text-2xl font-black text-white font-mono">{totalDeliveries}</div>
+          <div className="text-[11px] text-white/60 mt-1">
             Private transfers completed
           </div>
         </div>
@@ -254,48 +254,48 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
 
       {/* Quick Action Buttons */}
       <div className="space-y-2">
-        <h3 className="text-xs font-semibold text-zinc-400 tracking-wider uppercase px-1">
+        <h3 className="text-xs font-bold text-white/70 tracking-wider uppercase px-1">
           Quick Actions
         </h3>
         <div className="grid grid-cols-2 gap-2.5">
           <button
             onClick={() => onOpenAddModal('file')}
-            className="p-3.5 rounded-2xl bg-[#0c0c13]/90 border border-zinc-800/90 hover:border-red-500/40 text-left transition-all active:scale-[0.98] cursor-pointer flex items-center gap-3"
+            className="p-3.5 rounded-2xl glass-water-card card-interactive text-left transition-all active:scale-[0.98] cursor-pointer flex items-center gap-3"
           >
-            <div className="w-9 h-9 rounded-xl bg-red-500/15 text-red-400 flex items-center justify-center shrink-0 border border-red-500/25">
-              <FileText className="w-4 h-4" />
+            <div className="w-9 h-9 rounded-xl bg-white/10 text-white flex items-center justify-center shrink-0 border border-white/20 backdrop-blur-md shadow-xs">
+              <FileText className="w-4 h-4 text-red-400" />
             </div>
             <div>
-              <div className="text-xs font-semibold text-white">Add File</div>
-              <div className="text-[11px] text-zinc-400">Configure trigger</div>
+              <div className="text-xs font-bold text-white">Add File</div>
+              <div className="text-[11px] text-white/60">Configure trigger</div>
             </div>
           </button>
 
           <button
             onClick={() => onOpenAddModal('link')}
-            className="p-3.5 rounded-2xl bg-[#0c0c13]/90 border border-zinc-800/90 hover:border-red-500/40 text-left transition-all active:scale-[0.98] cursor-pointer flex items-center gap-3"
+            className="p-3.5 rounded-2xl glass-water-card card-interactive text-left transition-all active:scale-[0.98] cursor-pointer flex items-center gap-3"
           >
-            <div className="w-9 h-9 rounded-xl bg-rose-500/15 text-rose-400 flex items-center justify-center shrink-0 border border-rose-500/25">
-              <Link2 className="w-4 h-4" />
+            <div className="w-9 h-9 rounded-xl bg-white/10 text-white flex items-center justify-center shrink-0 border border-white/20 backdrop-blur-md shadow-xs">
+              <Link2 className="w-4 h-4 text-rose-400" />
             </div>
             <div>
-              <div className="text-xs font-semibold text-white">Add Link</div>
-              <div className="text-[11px] text-zinc-400">Browser or WebApp</div>
+              <div className="text-xs font-bold text-white">Add Link</div>
+              <div className="text-[11px] text-white/60">Browser or WebApp</div>
             </div>
           </button>
 
           <button
             onClick={() => onNavigate('filters')}
-            className="p-3 rounded-2xl bg-[#0c0c13]/90 border border-zinc-800/90 hover:border-red-500/40 text-left transition-all active:scale-[0.98] cursor-pointer flex items-center gap-3 col-span-2"
+            className="p-3 rounded-2xl glass-water-card card-interactive text-left transition-all active:scale-[0.98] cursor-pointer flex items-center gap-3 col-span-2"
           >
-            <div className="w-9 h-9 rounded-xl bg-red-500/15 text-red-400 flex items-center justify-center shrink-0 border border-red-500/25">
-              <Hash className="w-4 h-4" />
+            <div className="w-9 h-9 rounded-xl bg-white/10 text-white flex items-center justify-center shrink-0 border border-white/20 backdrop-blur-md shadow-xs">
+              <Hash className="w-4 h-4 text-red-400" />
             </div>
             <div className="flex-1">
-              <div className="text-xs font-semibold text-white">Manage All Filters</div>
-              <div className="text-[11px] text-zinc-400">Strict keyword delivery &amp; /filters list</div>
+              <div className="text-xs font-bold text-white">Manage All Filters</div>
+              <div className="text-[11px] text-white/60">Strict keyword delivery &amp; /filters list</div>
             </div>
-            <ArrowUpRight className="w-4 h-4 text-zinc-500" />
+            <ArrowUpRight className="w-4 h-4 text-white/50" />
           </button>
         </div>
       </div>
@@ -303,22 +303,22 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
       {/* Recent Configured Items */}
       <div className="space-y-2.5">
         <div className="flex items-center justify-between px-1">
-          <h3 className="text-xs font-semibold text-zinc-400 tracking-wider uppercase">
+          <h3 className="text-xs font-bold text-white/70 tracking-wider uppercase">
             Active Items ({items.length})
           </h3>
           <button
             onClick={() => onNavigate('files')}
-            className="text-xs text-red-400 hover:text-red-300 transition-colors"
+            className="text-xs text-red-400 hover:text-red-300 font-semibold transition-colors"
           >
             View All
           </button>
         </div>
 
         {items.length === 0 ? (
-          <div className="glass-panel rounded-2xl p-6 text-center border border-zinc-800/80 bg-[#0c0c13]/90">
-            <p className="text-xs text-zinc-400">No items configured yet.</p>
-            <p className="text-[11px] text-zinc-500 mt-1">
-              Tap "Add File" or "Add Link" above, or send <code className="text-zinc-300">/add</code> in Telegram.
+          <div className="glass-water-card rounded-2xl p-6 text-center text-white/70 text-xs">
+            <p className="font-semibold text-white">No items configured yet.</p>
+            <p className="text-[11px] text-white/60 mt-1">
+              Tap "Add File" or "Add Link" above, or send <code className="text-white/80">/add</code> in Telegram.
             </p>
           </div>
         ) : (
@@ -327,16 +327,16 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
               <div
                 key={item.id}
                 onClick={() => onNavigate('files')}
-                className="glass-panel rounded-2xl p-3.5 border border-zinc-800/80 bg-[#0c0c13]/90 hover:border-red-500/40 transition-all flex items-center justify-between cursor-pointer"
+                className="glass-water-card card-interactive animate-card-entrance rounded-2xl p-3.5 flex items-center justify-between cursor-pointer"
               >
                 <div className="flex items-center gap-3 min-w-0">
-                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${item.type === 'file' ? 'bg-red-500/15 text-red-400 border border-red-500/25' : 'bg-rose-500/15 text-rose-400 border border-rose-500/25'}`}>
+                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border border-white/20 backdrop-blur-md ${item.type === 'file' ? 'bg-red-500/15 text-red-400' : 'bg-rose-500/15 text-rose-400'}`}>
                     {item.type === 'file' ? <FileText className="w-4 h-4" /> : <Link2 className="w-4 h-4" />}
                   </div>
                   <div className="min-w-0">
-                    <div className="text-xs font-semibold text-white truncate">{item.name}</div>
-                    <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 mt-0.5">
-                      <span className="font-mono text-red-400 font-semibold">{item.triggers?.[0] || `#${item.rawKeyword}`}</span>
+                    <div className="text-xs font-bold text-white truncate">{item.name}</div>
+                    <div className="flex items-center gap-1.5 text-[11px] text-white/60 mt-0.5">
+                      <span className="font-mono text-red-400 font-bold">{item.triggers?.[0] || `#${item.rawKeyword}`}</span>
                       <span>·</span>
                       <span>{item.type === 'file' ? (item.fileName || 'Document') : (item.openMode === 'webapp' ? 'Telegram Mini App' : 'Browser Link')}</span>
                     </div>
@@ -344,10 +344,10 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
                 </div>
 
                 <div className="text-right shrink-0 pl-2">
-                  <span className="text-xs font-semibold text-zinc-300">
+                  <span className="text-xs font-bold text-white font-mono">
                     {item.deliveryCount || 0}
                   </span>
-                  <span className="text-[10px] text-zinc-500 block">delivered</span>
+                  <span className="text-[10px] text-white/50 block font-semibold">delivered</span>
                 </div>
               </div>
             ))}

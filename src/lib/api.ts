@@ -209,6 +209,9 @@ export interface BotInstance {
   filesCount: number;
   usersCount: number;
   createdAt?: string;
+  adminUsername?: string;
+  adminPassword?: string;
+  panelUrl?: string;
 }
 
 const TOKEN_KEY = 'tg_admin_token';
@@ -216,8 +219,18 @@ const BOT_ID_KEY = 'tg_active_bot_id';
 
 export function getActiveBotId(): string {
   try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      return localStorage.getItem(BOT_ID_KEY) || 'main';
+    if (typeof window !== 'undefined') {
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlBotId = urlParams.get('bot_id');
+      if (urlBotId) {
+        if (window.localStorage) {
+          localStorage.setItem(BOT_ID_KEY, urlBotId);
+        }
+        return urlBotId;
+      }
+      if (window.localStorage) {
+        return localStorage.getItem(BOT_ID_KEY) || 'main';
+      }
     }
   } catch {}
   return 'main';

@@ -143,21 +143,21 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
       className="fixed inset-0 z-50 flex items-center justify-center p-3.5 sm:p-5 pb-24 sm:pb-28 bg-black/85 backdrop-blur-md animate-in fade-in duration-200 overscroll-contain select-none"
     >
       <div 
-        className="w-full max-w-lg max-h-[85vh] sm:max-h-[calc(100vh-120px)] flex flex-col rounded-3xl bg-[#0c0c13]/98 border border-cyan-500/30 shadow-[0_0_60px_-10px_rgba(6,182,212,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] overflow-hidden relative animate-in zoom-in-95 duration-200 select-text"
+        className="w-full max-w-lg max-h-[85vh] sm:max-h-[calc(100vh-120px)] flex flex-col rounded-3xl glass-water-card border border-white/20 shadow-[0_25px_50px_-12px_rgba(0,0,0,0.95),0_0_40px_rgba(255,255,255,0.1)] overflow-hidden relative animate-in zoom-in-95 duration-200 select-text"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Subtle top card border glow accent */}
         <div 
           className="absolute top-0 left-1/2 -translate-x-1/2 w-48 h-[1.5px] pointer-events-none"
           style={{
-            background: 'linear-gradient(90deg, transparent, #06b6d4, transparent)'
+            background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.8), transparent)'
           }}
         />
 
         {/* Modal Header */}
-        <div className="shrink-0 p-4 sm:p-5 border-b border-zinc-800/80 flex items-center justify-between bg-[#0e0e16]/80">
+        <div className="shrink-0 p-4 sm:p-5 border-b border-white/10 flex items-center justify-between bg-white/[0.04]">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-red-500/15 border border-red-500/30 text-red-400 flex items-center justify-center shadow-[0_0_15px_rgba(239,68,68,0.2)]">
+            <div className="w-10 h-10 rounded-2xl bg-white/10 border border-white/20 text-white flex items-center justify-center shadow-[0_0_15px_rgba(255,255,255,0.15)] backdrop-blur-md">
               <Users className="w-5 h-5" />
             </div>
             <div>
@@ -307,12 +307,12 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
               return (
                 <div
                   key={user.id}
-                  className={`p-3.5 rounded-2xl border transition-all flex items-center justify-between gap-3 ${
+                  className={`p-3.5 rounded-2xl glass-water-card card-interactive transition-all flex items-center justify-between gap-3 ${
                     isBanned
-                      ? 'bg-red-950/30 border-red-800/50 shadow-[0_0_15px_rgba(239,68,68,0.15)]'
+                      ? 'border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.25)]'
                       : isAdmin
-                      ? 'bg-[#13131c] border-amber-500/35 shadow-[0_0_15px_rgba(245,158,11,0.1)]'
-                      : 'bg-[#13131c] border-zinc-800/90 hover:border-red-500/35 hover:shadow-[0_0_15px_rgba(239,68,68,0.12)]'
+                      ? 'border-amber-500/40 shadow-[0_0_15px_rgba(245,158,11,0.15)]'
+                      : ''
                   }`}
                 >
                   {/* Left Side: Layout requirements */}

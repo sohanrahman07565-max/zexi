@@ -15,7 +15,7 @@ import { BackgroundEffects } from './components/BackgroundEffects';
 import { DynamicWeatherBackground } from './components/DynamicWeatherBackground';
 import { ToastContainer } from './components/ToastContainer';
 import { BotSwitcherModal } from './components/BotSwitcherModal';
-import { Shield, Sparkles, Send, Bell, Crown, ShieldCheck, Bot } from 'lucide-react';
+import { Shield, Sparkles, Send, Bell, Crown, ShieldCheck } from 'lucide-react';
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<AdminUser | null>(null);
@@ -461,46 +461,30 @@ export default function App() {
                   ? 'App Design'
                   : 'More Options'}
               </h1>
-              <button
-                type="button"
-                onClick={() => setIsBotSwitcherOpen(true)}
-                title="Click to Switch Telegram Bot"
-                className="flex items-center gap-1.5 text-[10px] mt-0.5 min-w-0 hover:opacity-90 cursor-pointer text-left group"
+              <div
+                className="flex items-center gap-1.5 text-[10px] mt-0.5 min-w-0"
               >
                 {isBotConnected ? (
                   <>
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)] shrink-0" />
-                    <span className="truncate font-medium text-white/80 group-hover:text-red-400 transition-colors">
+                    <span className="truncate font-medium text-white/80">
                       Connected to {botDisplayName ? (botDisplayName.startsWith('@') ? botDisplayName : `@${botDisplayName}`) : 'Bot'}
-                    </span>
-                    <span className="text-[9px] px-1 py-0.2 rounded bg-white/10 text-white/60 group-hover:bg-red-500/20 group-hover:text-red-300 transition-colors">
-                      Switch
                     </span>
                   </>
                 ) : (
                   <>
                     <span className="w-1.5 h-1.5 rounded-full bg-white/40 shadow-[0_0_4px_rgba(255,255,255,0.4)] shrink-0" />
-                    <span className="truncate font-medium text-white/60 group-hover:text-red-400 transition-colors">
-                      Switch Bot (Offline)
+                    <span className="truncate font-medium text-white/60">
+                      Bot Offline
                     </span>
                   </>
                 )}
-              </button>
+              </div>
             </div>
           </div>
 
-          {/* Top-Right Header Area: Switch Bot & Role Badge */}
+          {/* Top-Right Header Area: Clean Role Badge */}
           <div className="flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={() => setIsBotSwitcherOpen(true)}
-              title="Switch Active Telegram Bot"
-              className="px-2.5 py-1.5 rounded-full border border-red-500/30 bg-red-500/10 hover:bg-red-500/20 text-red-300 text-xs font-semibold tracking-wide transition-all cursor-pointer active:scale-95 flex items-center gap-1.5 shadow-[0_0_10px_rgba(239,68,68,0.2)]"
-            >
-              <Bot className="w-3.5 h-3.5 text-red-400" />
-              <span className="hidden xs:inline">Switch Bot</span>
-            </button>
-
             <button
               type="button"
               onClick={() => setCurrentTab('more')}

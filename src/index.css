@@ -97,17 +97,50 @@
   background: rgba(239, 68, 68, 0.4);
 }
 
-/* Glassmorphism helpers matching Login Screen dark-red aesthetic */
-/* Glassmorphism helpers matching Login Screen dark-red aesthetic */
-.glass-panel {
-  background: rgba(12, 12, 19, 0.94);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border: 1px solid rgba(239, 68, 68, 0.20);
-  box-shadow: 0 4px 30px -2px rgba(0, 0, 0, 0.8), 0 0 24px -4px rgba(239, 68, 68, 0.08);
+/* Uniform Water-Color Translucent Glassmorphism Cards */
+.glass-panel,
+.glass-water-card {
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.02)) !important;
+  backdrop-filter: blur(25px) saturate(160%) !important;
+  -webkit-backdrop-filter: blur(25px) saturate(160%) !important;
+  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.45), inset 0 1px 1px 0 rgba(255, 255, 255, 0.12) !important;
   transform: translate3d(0, 0, 0);
   backface-visibility: hidden;
-  will-change: transform;
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+
+.glass-panel:hover,
+.glass-water-card:hover {
+  border-color: rgba(255, 255, 255, 0.24) !important;
+  box-shadow: 0 12px 36px 0 rgba(0, 0, 0, 0.55), 0 0 20px -2px rgba(255, 49, 91, 0.15), inset 0 1px 1px 0 rgba(255, 255, 255, 0.2) !important;
+}
+
+/* Card Interactive Hover Lift & Touch Press */
+.card-interactive {
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s ease, border-color 0.2s ease;
+}
+.card-interactive:hover {
+  transform: translateY(-2px);
+}
+.card-interactive:active {
+  transform: translateY(0px) scale(0.99);
+}
+
+/* Smooth Card Entrance Animation */
+@keyframes card-entrance {
+  0% {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-card-entrance {
+  animation: card-entrance 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .glass-nav {

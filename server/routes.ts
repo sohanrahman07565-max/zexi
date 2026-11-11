@@ -57,12 +57,28 @@ async function authenticate(req: Request, res: Response, next: NextFunction) {
   const verifiedToken = verifySessionToken(rawHeader) || rawHeader;
   const mainStorage = StorageManager.getMainStorage();
 
-  const session = await mainStorage.getSession(verifiedToken);
+  let session = await mainStorage.getSession(verifiedToken);
+  let admin: AdminUser | null = null;
+
+  if (session) {
+    admin = await mainStorage.getAdmin(session.adminId);
+  }
+
+  // If not found in mainStorage, check the active storage context (for cloned bot sub-admins)
+  if (!session || !admin) {
+    const activeStorage = storage;
+    if (activeStorage !== mainStorage) {
+      session = await activeStorage.getSession(verifiedToken);
+      if (session) {
+        admin = await activeStorage.getAdmin(session.adminId);
+      }
+    }
+  }
+
   if (!session) {
     return res.status(401).json({ error: 'Session expired or invalid' });
   }
 
-  const admin = await mainStorage.getAdmin(session.adminId);
   if (!admin || !admin.enabled) {
     return res.status(401).json({ error: 'Admin account disabled or not found' });
   }
@@ -238,6 +254,10 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
 
   // Create session
   const rawToken = await storage.createSession(matchedAdmin.id, matchedAdmin.role);
+  const mainStorage = StorageManager.getMainStorage();
+  if (storage !== mainStorage) {
+    await mainStorage.createSessionWithToken(rawToken, matchedAdmin.id, matchedAdmin.role);
+  }
   const signedToken = signSessionToken(rawToken);
 
   res.cookie('tg_admin_session', signedToken, {
@@ -1868,6 +1888,11 @@ apiRouter.get('/bots', authenticate, async (_req: Request, res: Response) => {
 // POST /api/bots/clone - Dynamically clone a Telegram bot with its isolated database
 apiRouter.post('/bots/clone', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
   try {
+    const activeBotId = (req.headers['x-bot-id'] as string) || (req.query.botId as string) || 'main';
+    if (activeBotId !== 'main') {
+      return res.status(403).json({ error: 'Cloned bot panels are not permitted to clone additional bots.' });
+    }
+
     const { token } = req.body;
     if (!token || typeof token !== 'string' || !token.trim()) {
       return res.status(400).json({ error: 'Valid Telegram bot token is required' });
@@ -1905,8 +1930,34 @@ apiRouter.delete('/bots/:id', authenticate, requirePermission('settings_edit'), 
 let cachedBotInfoPayload: { data: any; expiresAt: number; token: string } | null = null;
 
 // GET /api/bot/info - Dynamic bot status & profile directly from process.env.BOT_TOKEN
-apiRouter.get('/bot/info', async (_req: Request, res: Response) => {
+apiRouter.get('/bot/info', async (req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'private, no-cache, stale-while-revalidate=5');
+
+  // Multi-bot support: if targeting a cloned bot instance, return its live status from the bot manager
+  const activeBotId = (req.headers['x-bot-id'] as string) || (req.query.botId as string) || 'main';
+  if (activeBotId !== 'main') {
+    try {
+      const allBots = await TelegramBotManager.getAllBots();
+      const currentCloned = allBots.find(b => b.id === activeBotId);
+      if (currentCloned) {
+        return res.json({
+          ok: true,
+          isConnected: currentCloned.status === 'active',
+          hasToken: true,
+          botUsername: currentCloned.username,
+          displayName: currentCloned.name || `@${currentCloned.username}`,
+          result: {
+            id: currentCloned.id,
+            first_name: currentCloned.name,
+            username: currentCloned.username
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[Routes] Error resolving cloned bot info:', e);
+    }
+  }
+
   const token = await TelegramService.getBotToken().catch(() => '');
 
   // Fast In-Memory Path: serve cached bot info in 0.05ms

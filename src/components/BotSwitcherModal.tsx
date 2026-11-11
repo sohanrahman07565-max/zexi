@@ -96,8 +96,15 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
       }
     } catch (err: any) {
       console.error('Error cloning bot:', err);
-      setCloneError(err?.message || 'Failed to clone bot. Please verify the token.');
-      toast.error(err?.message || 'Failed to clone bot');
+      const isDuplicate = err?.message && (
+        err.message.includes('already running') ||
+        err.message.includes('Already this bot is already running')
+      );
+      const formattedError = isDuplicate 
+        ? 'Already this bot is already running.' 
+        : (err?.message || 'Failed to clone bot. Please verify the token.');
+      setCloneError(formattedError);
+      toast.error(formattedError);
     } finally {
       setCloning(false);
     }
@@ -125,7 +132,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
       <div 
-        className="w-full max-w-md max-h-[92vh] flex flex-col rounded-3xl bg-[#0b0c14] border border-white/15 p-4 sm:p-5 shadow-[0_20px_60px_rgba(0,0,0,0.9),0_0_30px_rgba(239,68,68,0.25)] text-white relative animate-in zoom-in-95 duration-200 overflow-hidden"
+        className="w-full max-w-md max-h-[92vh] flex flex-col rounded-3xl glass-water-card border border-white/20 p-4 sm:p-5 shadow-[0_20px_60px_rgba(0,0,0,0.9),0_0_30px_rgba(239,68,68,0.25)] text-white relative animate-in zoom-in-95 duration-200 overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -191,10 +198,10 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                 return (
                   <div
                     key={bot.id}
-                    className={`p-3.5 rounded-2xl border transition-all ${
+                    className={`p-3.5 rounded-2xl border transition-all card-interactive ${
                       isActive
-                        ? 'bg-red-500/10 border-red-500/50 shadow-[0_0_20px_rgba(239,68,68,0.2)]'
-                        : 'bg-white/[0.03] border-white/10 hover:border-white/20 hover:bg-white/[0.06]'
+                        ? 'bg-red-500/15 border-red-500/50 shadow-[0_0_20px_rgba(239,68,68,0.25)] backdrop-blur-xl'
+                        : 'glass-water-card'
                     }`}
                   >
                     <div className="flex items-start justify-between gap-2.5">
@@ -265,8 +272,8 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                       </div>
                     </div>
 
-                    {/* Stats & Meta Footer */}
-                    <div className="mt-2.5 pt-2 border-t border-white/5 flex items-center justify-between text-[11px] text-zinc-400">
+        {/* Stats & Meta Footer */}
+                    <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[11px] text-white/60">
                       <div className="flex items-center gap-3">
                         <span className="flex items-center gap-1">
                           <span className="font-semibold text-white">{bot.filesCount}</span> files
@@ -281,6 +288,46 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                         <span className="text-[10px] text-emerald-400 font-medium">Running Isolated</span>
                       </div>
                     </div>
+
+                    {/* Dedicated Sub-Admin Panel Credentials for Cloned Bots */}
+                    {!bot.isMain && (bot.adminUsername || bot.adminPassword) && (
+                      <div className="mt-2.5 p-2.5 rounded-xl bg-white/[0.04] border border-white/15 space-y-1.5 text-[11px]">
+                        <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-white/70">
+                          <span>Sub-Admin Panel Credentials</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const base = typeof window !== 'undefined' ? window.location.origin : '';
+                              const url = `${base}${bot.panelUrl || `/?bot_id=${bot.id}`}`;
+                              navigator.clipboard.writeText(`Panel URL: ${url}\nUsername: ${bot.adminUsername || 'admin'}\nPassword: ${bot.adminPassword || 'secret'}`);
+                              toast.success('Sub-Admin credentials copied!');
+                            }}
+                            className="text-red-400 hover:text-red-300 flex items-center gap-1 cursor-pointer transition-colors"
+                          >
+                            <Copy className="w-3 h-3" />
+                            <span>Copy</span>
+                          </button>
+                        </div>
+                        <div className="space-y-0.5 font-mono text-[10px] text-white/90">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-white/50">URL:</span>
+                            <span className="text-white/90 truncate select-all">{bot.panelUrl || `/panel?bot_id=${bot.id}`}</span>
+                          </div>
+                          {bot.adminUsername && (
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-white/50">User:</span>
+                              <span className="text-red-300 font-bold select-all">{bot.adminUsername}</span>
+                            </div>
+                          )}
+                          {bot.adminPassword && (
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-white/50">Pass:</span>
+                              <span className="text-amber-300 font-bold select-all">{bot.adminPassword}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
 
                     {/* Inline Delete Confirmation */}
                     {deleteConfirmId === bot.id && (
@@ -318,9 +365,14 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
             </div>
           )}
 
-          {/* Clone Bot Section */}
+          {/* Clone Bot Section: Available strictly on Primary Main Bot panel */}
           <div className="pt-2">
-            {!showCloneForm ? (
+            {activeBotId !== 'main' ? (
+              <div className="p-3 rounded-2xl bg-white/[0.04] border border-white/10 text-center text-xs text-white/50 flex items-center justify-center gap-2">
+                <Shield className="w-4 h-4 text-white/40" />
+                <span>Cloned Bot Panel Mode · Isolated File &amp; Setting Access</span>
+              </div>
+            ) : !showCloneForm ? (
               <button
                 type="button"
                 onClick={() => setShowCloneForm(true)}

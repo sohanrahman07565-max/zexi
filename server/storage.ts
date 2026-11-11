@@ -299,6 +299,9 @@ export interface ClonedBotRecord {
   createdBy?: string;
   filesCount?: number;
   usersCount?: number;
+  adminUsername?: string;
+  adminPassword?: string;
+  panelUrl?: string;
 }
 
 export interface AppDatabase {
@@ -1291,6 +1294,20 @@ export class SharedStorageService {
 
     await this.persist();
     return token;
+  }
+
+  public async createSessionWithToken(token: string, adminId: string, role: AdminRole, expiresAt?: number): Promise<void> {
+    await this.loadLatest(true);
+    const exp = expiresAt || (Date.now() + 12 * 60 * 60 * 1000);
+    const now = Date.now();
+    this.db.sessions = this.db.sessions.filter(s => s.expiresAt > now && s.token !== token);
+    this.db.sessions.push({
+      token,
+      adminId,
+      role,
+      expiresAt: exp
+    });
+    await this.persist();
   }
 
   public async getSession(token: string): Promise<SessionRecord | null> {
