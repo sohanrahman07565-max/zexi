@@ -646,6 +646,46 @@ export class TelegramService {
     }
   }
 
+  // In-memory cache for group admin statuses: `${chatId}:${userId}` -> { isAdmin: boolean, expiresAt: number }
+  private static groupAdminCache: Map<string, { isAdmin: boolean; expiresAt: number }> = new Map();
+
+  public static async isGroupAdminOrCreator(chatId: string | number, userId: string | number): Promise<boolean> {
+    if (!chatId || !userId) return false;
+    const cleanChatId = String(chatId).trim();
+    const cleanUserId = String(userId).trim();
+
+    // 1. First check if user is a bot system owner/admin
+    const isBotAdmin = await this.isAuthorizedAdmin(cleanUserId);
+    if (isBotAdmin) return true;
+
+    // 2. Check local in-memory cache (valid for 60 seconds)
+    const cacheKey = `${cleanChatId}:${cleanUserId}`;
+    const now = Date.now();
+    const cached = this.groupAdminCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.isAdmin;
+    }
+
+    // 3. Query Telegram getChatMember
+    try {
+      const res = await this.callTelegramApi('getChatMember', {
+        chat_id: /^-?\d+$/.test(cleanChatId) ? Number(cleanChatId) : cleanChatId,
+        user_id: Number(cleanUserId) || cleanUserId
+      });
+
+      if (res && res.ok && res.result) {
+        const status = String(res.result.status || '').toLowerCase();
+        const isAdmin = status === 'administrator' || status === 'creator';
+        this.groupAdminCache.set(cacheKey, { isAdmin, expiresAt: now + 60000 });
+        return isAdmin;
+      }
+    } catch (err: any) {
+      console.warn(`[Telegram] Error querying getChatMember for admin check in chat ${cleanChatId}:`, err?.message || err);
+    }
+
+    return false;
+  }
+
   // =========================================================================
   // ADMIN AUTHORIZATION & AUTO-DELETING NOTICES (STRICT GROUP PRIVACY)
   // =========================================================================
@@ -1607,11 +1647,17 @@ export class TelegramService {
       }
     }
 
-    // 5. Authorized administrator check
+    // 5. Authorized administrator & Telegram group admin/creator check
     if (fromId) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId);
-      if (isAdmin) {
+      const isSystemAdmin = await this.isAuthorizedAdmin(fromId);
+      if (isSystemAdmin) {
         return true;
+      }
+      if (message.chat?.id) {
+        const isGroupAdmin = await this.isGroupAdminOrCreator(message.chat.id, fromId);
+        if (isGroupAdmin) {
+          return true;
+        }
       }
     }
 
@@ -2266,7 +2312,9 @@ export class TelegramService {
     const fraudRules = await storage.getFraudRules();
     const activeFraudRules = fraudRules.filter(r => r.enabled);
     if (activeFraudRules.length > 0) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      const isSystemAdmin = await this.isAuthorizedAdmin(fromId);
+      const isGroupAdmin = message.chat?.id ? await this.isGroupAdminOrCreator(message.chat.id, fromId) : false;
+      const isAdmin = isSystemAdmin || isGroupAdmin;
       if (!isAdmin) {
         const lowerText = text.toLowerCase();
         for (const rule of activeFraudRules) {
@@ -6641,27 +6689,83 @@ export class TelegramBotManager {
       botUsername: info.username || ''
     });
 
-    // Create the dedicated sub-admin account in the cloned bot's isolated storage
+    // 4. Create and register the dedicated Sub-Admin account in the database
     const subAdminAccount = {
       id: `adm_${info.id}`,
       telegramId: String(info.id),
       name: `${info.first_name || 'Bot'} Administrator`,
       username: adminUsername,
-      role: 'owner' as const,
+      role: 'owner' as const, // Owner of this cloned bot instance
       passwordHash: await hashPassword(adminPassword),
       permissions: {
         files_view: true, files_add: true, files_edit: true, files_delete: true,
         links_view: true, links_add: true, links_edit: true, links_delete: true,
-        messages_view: true, messages_edit: true, admins_manage: false,
+        messages_view: true, messages_edit: true, admins_manage: true,
         design_edit: true, settings_edit: true, cleanup_manage: true
       },
+      status: 'active' as const,
       enabled: true,
       createdAt: new Date().toISOString()
     };
+
+    // Save in cloned bot's isolated storage
     await botStorage.saveAdmin(subAdminAccount);
+    await botStorage.syncToFirebaseCloud();
+
+    // Also register sub-admin profile in mainStorage for global lookup
+    const mainSubAdmin = {
+      ...subAdminAccount,
+      id: `subadm_${botId}`,
+      botId: botId,
+      botUsername: info.username || '',
+      role: 'subadmin' as const
+    };
+    await mainStorage.saveAdmin(mainSubAdmin);
+
+    // Commit sub-admin record directly into Firebase Realtime Database
+    try {
+      const rtdbToken = await mainStorage.getFirebaseAuthToken();
+      const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
+      const baseUrl = (process.env.FIREBASE_DATABASE_URL || (isSecondary ? 'https://zexi-official-default-rtdb.asia-southeast1.firebasedatabase.app' : 'https://zexiofficial844-default-rtdb.asia-southeast1.firebasedatabase.app')).replace(/\/+$/, '');
+      
+      const subAdminData = {
+        botId,
+        botName: newBot.name,
+        botUsername: newBot.username,
+        adminUsername,
+        adminPassword,
+        status: 'active',
+        enabled: true,
+        permissions: subAdminAccount.permissions,
+        createdAt: newBot.createdAt,
+        panelUrl
+      };
+
+      // Store under /cloned_bots/{bot_id}/sub_admins
+      const botSubAdminUrl = rtdbToken 
+        ? `${baseUrl}/cloned_bots/${botId}/sub_admins/${adminUsername}.json?auth=${encodeURIComponent(rtdbToken)}`
+        : `${baseUrl}/cloned_bots/${botId}/sub_admins/${adminUsername}.json`;
+      fetch(botSubAdminUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(subAdminData)
+      }).catch(() => {});
+
+      // Store under global /sub_admins/{bot_id}
+      const globalSubAdminUrl = rtdbToken
+        ? `${baseUrl}/sub_admins/${botId}.json?auth=${encodeURIComponent(rtdbToken)}`
+        : `${baseUrl}/sub_admins/${botId}.json`;
+      fetch(globalSubAdminUrl, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(subAdminData)
+      }).catch(() => {});
+    } catch (e: any) {
+      console.warn('[TelegramBotManager] Error writing sub-admin to Firebase RTDB:', e?.message || e);
+    }
 
     this.startBotInstance(newBot);
-    console.info(`[TelegramBotManager] Cloned bot @${newBot.username} (${newBot.id}) started with isolated panel credentials!`);
+    console.info(`[TelegramBotManager] Cloned bot @${newBot.username} (${newBot.id}) started and sub-admin ${adminUsername} registered successfully!`);
     return { success: true, bot: newBot };
   }
 

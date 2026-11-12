@@ -666,7 +666,7 @@ export class SharedStorageService {
   }
 
   // Retrieve Firebase Auth ID Token or Secret for Cloud RTDB requests
-  private async getFirebaseAuthToken(): Promise<string | null> {
+  public async getFirebaseAuthToken(): Promise<string | null> {
     if (process.env.FIREBASE_DATABASE_SECRET) {
       return process.env.FIREBASE_DATABASE_SECRET.trim();
     }
@@ -1148,10 +1148,11 @@ export class SharedStorageService {
     const rootAdminId = (process.env.ROOT_ADMIN_ID || this.db.settings.rootAdminId || '').trim();
     const envAdminName = (process.env.ADMIN_NAME || process.env.ADMIN_USERNAME || process.env.ROOT_ADMIN_NAME || '').trim();
 
-    // 1. Direct match on id, telegramId, or name (case-insensitive)
+    // 1. Direct match on id, telegramId, username, or name (case-insensitive)
     const directMatch = this.db.admins.find(a => 
       String(a.id).trim() === cleanId || 
       String(a.telegramId).trim() === cleanId ||
+      (a.username && a.username.trim().toLowerCase() === cleanId.toLowerCase()) ||
       (a.name && a.name.trim().toLowerCase() === cleanId.toLowerCase())
     );
     if (directMatch) return directMatch;
@@ -1159,6 +1160,7 @@ export class SharedStorageService {
     // 2. Normalized match (ignoring spaces & case e.g. "owneradmin", "admin", "owner")
     const cleanNormalized = cleanId.replace(/\s+/g, '').toLowerCase();
     const nameMatch = this.db.admins.find(a => 
+      (a.username && a.username.replace(/\s+/g, '').toLowerCase() === cleanNormalized) ||
       (a.name && a.name.replace(/\s+/g, '').toLowerCase() === cleanNormalized) ||
       (a.role === 'owner' && (cleanNormalized === 'admin' || cleanNormalized === 'owner' || cleanNormalized === 'owneradmin'))
     );

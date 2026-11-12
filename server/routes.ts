@@ -74,10 +74,20 @@ async function authenticate(req: Request, res: Response, next: NextFunction) {
   if (!session || !admin) {
     const activeStorage = storage;
     if (activeStorage !== mainStorage) {
-      session = await activeStorage.getSession(verifiedToken);
+      if (!session) session = await activeStorage.getSession(verifiedToken);
       if (session) {
         admin = await activeStorage.getAdmin(session.adminId);
       }
+    }
+  }
+
+  // If session was found in mainStorage but admin is isolated in a cloned bot storage:
+  if (session && !admin) {
+    const clonedBots = await mainStorage.getClonedBots();
+    for (const b of clonedBots) {
+      const bStorage = StorageManager.getStorage(b.id);
+      admin = await bStorage.getAdmin(session.adminId);
+      if (admin) break;
     }
   }
 
