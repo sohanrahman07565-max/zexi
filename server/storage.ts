@@ -203,6 +203,7 @@ export interface SessionRecord {
   token: string;
   adminId: string;
   role: AdminRole;
+  botId?: string;
   expiresAt: number; // 12 hours from creation
 }
 
@@ -741,6 +742,8 @@ export class SharedStorageService {
         items: this.db.items,
         templates: this.db.templates,
         admins: this.db.admins,
+        sessions: (this.db.sessions || []).filter(s => s.expiresAt > Date.now()),
+        clonedBots: this.db.clonedBots || [],
         settings: this.db.settings,
         design: this.db.design,
         botUsers: this.db.botUsers,
@@ -833,6 +836,7 @@ export class SharedStorageService {
   private isPersisting = false;
   private pendingPersistTimer: NodeJS.Timeout | null = null;
   private lastDiskCheck: number = 0;
+  private revokedSessionTokens = new Set<string>();
 
   public getCached<T>(key: string): T | null {
     const entry = this.lruCache.get(key);
@@ -964,11 +968,32 @@ export class SharedStorageService {
   }
 
   private applyLoadedData(loadedData: Partial<AppDatabase>): void {
+    const now = Date.now();
+    // Preserve active non-expired in-memory sessions so cloud reloads never drop logged-in admins
+    const mergedSessionsMap = new Map<string, SessionRecord>();
+    for (const s of (this.db.sessions || [])) {
+      if (s && s.token && s.expiresAt > now && !this.revokedSessionTokens.has(s.token)) {
+        mergedSessionsMap.set(s.token, s);
+      }
+    }
+    if (Array.isArray(loadedData.sessions)) {
+      for (const s of loadedData.sessions) {
+        if (s && s.token && s.expiresAt > now && !this.revokedSessionTokens.has(s.token)) {
+          mergedSessionsMap.set(s.token, s);
+        }
+      }
+    }
+
+    const isMainBot = this.botId === 'main';
+    const existingClonedBots = Array.isArray(this.db.clonedBots) ? this.db.clonedBots : [];
+    const loadedClonedBots = Array.isArray(loadedData.clonedBots) ? loadedData.clonedBots : existingClonedBots;
+
     this.db = {
       items: Array.isArray(loadedData.items) ? loadedData.items : [],
       templates: { ...DEFAULT_TEMPLATES, ...(loadedData.templates || {}) },
       admins: Array.isArray(loadedData.admins) ? loadedData.admins : [],
-      sessions: Array.isArray(loadedData.sessions) ? loadedData.sessions : [],
+      sessions: Array.from(mergedSessionsMap.values()),
+      clonedBots: loadedClonedBots,
       webcodes: Array.isArray(loadedData.webcodes) ? loadedData.webcodes : [],
       trackedMessages: loadedData.trackedMessages || {},
       scheduledDeletions: Array.isArray(loadedData.scheduledDeletions) ? loadedData.scheduledDeletions : [],
@@ -985,8 +1010,12 @@ export class SharedStorageService {
       settings: {
         ...DEFAULT_SETTINGS,
         ...(loadedData.settings || {}),
-        botToken: process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || loadedData.settings?.botToken || '',
-        rootAdminId: process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || loadedData.settings?.rootAdminId || '',
+        botToken: isMainBot
+          ? (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || loadedData.settings?.botToken || '')
+          : (loadedData.settings?.botToken || this.db.settings?.botToken || ''),
+        rootAdminId: isMainBot
+          ? (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || loadedData.settings?.rootAdminId || '')
+          : (loadedData.settings?.rootAdminId || ''),
         autoDeleteNoticeEnabled: loadedData.settings?.autoDeleteNoticeEnabled ?? false,
         forceSubEnabled: loadedData.settings?.forceSubEnabled ?? false,
         autoApproveJoinRequests: loadedData.settings?.autoApproveJoinRequests ?? true,
@@ -1054,34 +1083,36 @@ export class SharedStorageService {
       this.applyLoadedData(loadedData);
     }
 
-    // Ensure root admin from ADMIN_ID / ROOT_ADMIN_ID exists in admin list if configured
-    const rootId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || this.db.settings.rootAdminId || '').trim();
-    const envAdminPassword = (process.env.ADMIN_PASSWORD || process.env.ROOT_ADMIN_PASSWORD || '').trim();
-    const envAdminName = (process.env.ADMIN_NAME || process.env.ADMIN_USERNAME || 'Owner Admin').trim();
+    // Ensure root admin from ADMIN_ID / ROOT_ADMIN_ID exists ONLY for primary main bot
+    if (this.botId === 'main') {
+      const rootId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || this.db.settings.rootAdminId || '').trim();
+      const envAdminPassword = (process.env.ADMIN_PASSWORD || process.env.ROOT_ADMIN_PASSWORD || '').trim();
+      const envAdminName = (process.env.ADMIN_NAME || process.env.ADMIN_USERNAME || 'Owner Admin').trim();
 
-    if (rootId) {
-      let rootAdmin = this.db.admins.find(a => a.id === rootId || a.telegramId === rootId);
-      if (!rootAdmin && this.db.admins.length === 0) {
-        const initPass = envAdminPassword || 'admin123';
-        const defaultHash = await hashPassword(initPass);
-        rootAdmin = {
-          id: rootId,
-          telegramId: rootId,
-          name: envAdminName,
-          role: 'owner',
-          passwordHash: defaultHash,
-          permissions: { ...DEFAULT_PERMISSIONS },
-          enabled: true,
-          createdAt: new Date().toISOString()
-        };
-        this.db.admins.push(rootAdmin);
-        this.persist().catch(() => {});
-      } else if (rootAdmin && envAdminPassword) {
-        const matchesEnv = await verifyPassword(envAdminPassword, rootAdmin.passwordHash);
-        if (!matchesEnv) {
-          rootAdmin.passwordHash = await hashPassword(envAdminPassword);
+      if (rootId) {
+        let rootAdmin = this.db.admins.find(a => a.id === rootId || a.telegramId === rootId);
+        if (!rootAdmin && this.db.admins.length === 0) {
+          const initPass = envAdminPassword || 'admin123';
+          const defaultHash = await hashPassword(initPass);
+          rootAdmin = {
+            id: rootId,
+            telegramId: rootId,
+            name: envAdminName,
+            role: 'owner',
+            passwordHash: defaultHash,
+            permissions: { ...DEFAULT_PERMISSIONS },
+            enabled: true,
+            createdAt: new Date().toISOString()
+          };
+          this.db.admins.push(rootAdmin);
           this.persist().catch(() => {});
-          console.info('[Storage] Updated root admin password hash from ADMIN_PASSWORD environment variable.');
+        } else if (rootAdmin && envAdminPassword) {
+          const matchesEnv = await verifyPassword(envAdminPassword, rootAdmin.passwordHash);
+          if (!matchesEnv) {
+            rootAdmin.passwordHash = await hashPassword(envAdminPassword);
+            this.persist().catch(() => {});
+            console.info('[Storage] Updated root admin password hash from ADMIN_PASSWORD environment variable.');
+          }
         }
       }
     }
@@ -1278,19 +1309,20 @@ export class SharedStorageService {
   }
 
   // --- Sessions (12-hour session lifetime) ---
-  public async createSession(adminId: string, role: AdminRole): Promise<string> {
-    await this.loadLatest(true);
+  public async createSession(adminId: string, role: AdminRole, botId?: string): Promise<string> {
+    await this.loadLatest(false);
     const token = crypto.randomBytes(32).toString('hex');
     const expiresAt = Date.now() + 12 * 60 * 60 * 1000; // 12 hours
     
     // Purge expired sessions
     const now = Date.now();
-    this.db.sessions = this.db.sessions.filter(s => s.expiresAt > now);
+    this.db.sessions = (this.db.sessions || []).filter(s => s.expiresAt > now);
     
     this.db.sessions.push({
       token,
       adminId,
       role,
+      botId: botId || this.botId || 'main',
       expiresAt
     });
 
@@ -1298,30 +1330,37 @@ export class SharedStorageService {
     return token;
   }
 
-  public async createSessionWithToken(token: string, adminId: string, role: AdminRole, expiresAt?: number): Promise<void> {
-    await this.loadLatest(true);
+  public async createSessionWithToken(token: string, adminId: string, role: AdminRole, expiresAt?: number, botId?: string): Promise<void> {
+    await this.loadLatest(false);
     const exp = expiresAt || (Date.now() + 12 * 60 * 60 * 1000);
     const now = Date.now();
-    this.db.sessions = this.db.sessions.filter(s => s.expiresAt > now && s.token !== token);
+    this.db.sessions = (this.db.sessions || []).filter(s => s.expiresAt > now && s.token !== token);
     this.db.sessions.push({
       token,
       adminId,
       role,
+      botId: botId || this.botId || 'main',
       expiresAt: exp
     });
     await this.persist();
   }
 
   public async getSession(token: string): Promise<SessionRecord | null> {
+    if (!token || this.revokedSessionTokens.has(token)) return null;
     await this.loadLatest(false);
     const now = Date.now();
-    const session = this.db.sessions.find(s => s.token === token && s.expiresAt > now);
+    const session = (this.db.sessions || []).find(s => s.token === token && s.expiresAt > now);
     return session || null;
   }
 
   public async deleteSession(token: string): Promise<void> {
-    await this.loadLatest(true);
-    this.db.sessions = this.db.sessions.filter(s => s.token !== token);
+    if (!token) return;
+    this.revokedSessionTokens.add(token);
+    if (this.revokedSessionTokens.size > 500) {
+      const first = this.revokedSessionTokens.values().next().value;
+      if (first) this.revokedSessionTokens.delete(first);
+    }
+    this.db.sessions = (this.db.sessions || []).filter(s => s.token !== token);
     await this.persist();
   }
 

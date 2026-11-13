@@ -186,7 +186,40 @@ export function getItemPayload(item: ItemRecord): string {
 }
 
 export class TelegramService {
+  private static forceSubCache = new Map<string, { allJoined: boolean; unjoinedChannels: ForceSubChannel[]; expiresAt: number }>();
+
+  public static invalidateForceSubCache(userId?: string | number): void {
+    if (!userId) {
+      this.forceSubCache.clear();
+      return;
+    }
+    const uid = String(userId).trim();
+    for (const k of this.forceSubCache.keys()) {
+      if (k.endsWith(`_${uid}`)) this.forceSubCache.delete(k);
+    }
+  }
+
   public static async getBotToken(): Promise<string> {
+    const ctxToken = botTokenContext.getStore();
+    if (ctxToken) {
+      return String(ctxToken).trim().replace(/^["']|["']$/g, '');
+    }
+
+    const activeBotId = (storage as any)?.botId || 'main';
+    if (activeBotId !== 'main') {
+      const settings = await storage.getSettings().catch(() => ({} as any));
+      if (settings?.botToken) {
+        return String(settings.botToken).trim().replace(/^["']|["']$/g, '');
+      }
+      const mainStorage = StorageManager.getMainStorage();
+      const cloned = await mainStorage.getClonedBots().catch(() => []);
+      const found = cloned.find(b => b.id === activeBotId);
+      if (found?.token) {
+        return String(found.token).trim().replace(/^["']|["']$/g, '');
+      }
+      return '';
+    }
+
     const envToken = (
       process.env.BOT_TOKEN ||
       process.env.TELEGRAM_BOT_TOKEN ||
@@ -1333,8 +1366,6 @@ export class TelegramService {
         return { allJoined: true, unjoinedChannels: [] };
       }
 
-      // CRITICAL: Filter only ACTIVE channels where enabled !== false!
-      // If a channel/group toggle is turned OFF by the admin, it should instantly hide from the mandatory join list and no longer be required for users.
       const activeChannels = settings.requiredChannels.filter(c => c.enabled !== false);
       if (activeChannels.length === 0) {
         return { allJoined: true, unjoinedChannels: [] };
@@ -1343,19 +1374,26 @@ export class TelegramService {
       const cleanUserId = String(userId).trim();
       if (!cleanUserId) return { allJoined: true, unjoinedChannels: [] };
 
+      const botScopeId = (storage as any)?.botId || 'main';
+      const cacheKey = `${botScopeId}_${cleanUserId}`;
+      const cached = this.forceSubCache.get(cacheKey);
+      if (cached && cached.allJoined && Date.now() < cached.expiresAt) {
+        return { allJoined: true, unjoinedChannels: [] };
+      }
+
       // Exempt authorized administrators from force sub verification
       const isAdmin = await this.isAuthorizedAdmin(cleanUserId);
       if (isAdmin) {
         return { allJoined: true, unjoinedChannels: [] };
       }
 
-      const unjoined: ForceSubChannel[] = [];
+      const numericUserId = Number(cleanUserId) || cleanUserId;
 
-      for (const channel of activeChannels) {
+      // Parallelize channel membership checks for near-zero latency
+      const checks = await Promise.all(activeChannels.map(async (channel) => {
         let rawChatId = (channel.chatId || '').trim();
-        if (!rawChatId) continue;
+        if (!rawChatId) return null;
 
-        // Clean chatId: strip URLs like https://t.me/channel or t.me/channel
         if (rawChatId.startsWith('https://t.me/')) {
           rawChatId = '@' + rawChatId.replace('https://t.me/', '').replace(/\/.*$/, '').replace(/^\+/, '');
         } else if (rawChatId.startsWith('t.me/')) {
@@ -1365,30 +1403,21 @@ export class TelegramService {
         }
 
         const targetChat = /^-?\d+$/.test(rawChatId) ? Number(rawChatId) : rawChatId;
-        const numericUserId = Number(cleanUserId) || cleanUserId;
-
         let isMember = false;
 
         try {
-          // getChatMember takes numeric ID or @channel_username
           const res = await this.callTelegramApi('getChatMember', {
             chat_id: targetChat,
             user_id: numericUserId
           });
-
           if (res && res.ok && res.result) {
             const status = res.result.status;
-            // Valid member status in Telegram: creator, administrator, member, or restricted (where is_member is not false)
             isMember = status === 'creator' || status === 'administrator' || status === 'member' || (status === 'restricted' && res.result.is_member !== false);
           }
         } catch (err: any) {
           console.warn(`[ForceSub] Error querying getChatMember for ${cleanUserId} in ${targetChat}:`, err?.message);
         }
 
-        // --- SEAMLESS VERIFICATION FOR PRIVATE CHANNELS WITH JOIN REQUESTS ---
-        // For private channels or groups where users submit a "Join Request", getChatMember can return 'left'
-        // or fail if approval propagation is pending.
-        // 1. Check if user has an approved or pending join request recorded in the system
         if (!isMember) {
           const hasJoinRequest = await storage.isJoinRequestApprovedOrPending(
             String(targetChat),
@@ -1398,9 +1427,7 @@ export class TelegramService {
           );
           if (hasJoinRequest) {
             isMember = true;
-            console.info(`[ForceSub] User ${cleanUserId} verified via recorded Join Request for "${channel.name}" (${targetChat})`);
           } else {
-            // 2. Also try proactive auto-approval in case a join request was submitted and is waiting
             try {
               const approveRes = await this.callTelegramApi('approveChatJoinRequest', {
                 chat_id: targetChat,
@@ -1412,27 +1439,30 @@ export class TelegramService {
                 approveRes.description?.includes('ALREADY_PARTICIPANT')
               )) {
                 isMember = true;
-                await storage.recordJoinRequest({
+                storage.recordJoinRequest({
                   chatId: String(targetChat),
                   chatTitle: channel.name,
                   userId: String(cleanUserId),
                   status: 'approved'
-                });
-                console.info(`[ForceSub] User ${cleanUserId} auto-approved on verification check for "${channel.name}" (${targetChat})`);
+                }).catch(() => {});
               }
             } catch {}
           }
         }
 
-        if (!isMember) {
-          unjoined.push(channel);
-        }
-      }
+        return isMember ? null : channel;
+      }));
 
-      return {
+      const unjoined = checks.filter((c): c is ForceSubChannel => c !== null);
+      const result = {
         allJoined: unjoined.length === 0,
         unjoinedChannels: unjoined
       };
+
+      if (result.allJoined) {
+        this.forceSubCache.set(cacheKey, { ...result, expiresAt: Date.now() + 15000 });
+      }
+      return result;
     } catch (err: any) {
       console.error('[ForceSub] Unexpected error in checkUserForceSub:', err);
       return { allJoined: true, unjoinedChannels: [] };
@@ -2454,6 +2484,11 @@ export class TelegramService {
       }
     }
 
+    // Multi-Language Translation Trigger in Groups (Method A: `tran bd|ind|eng` | Method B: `/translate bd|ind|eng`, `/bd`, `/ind`, `/eng`)
+    if (await this.handleTranslationCommand(message, text, true)) {
+      return;
+    }
+
     // Check /filters command in groups (strictly requires '/' prefix)
     const isFilters = /^\/(?:filters|filter)(?:@\w+)?$/i.test(text.trim());
     if (isFilters) {
@@ -2753,8 +2788,8 @@ export class TelegramService {
       }
 
       if (rawPayload) {
-        // Bypass start message deletion for instant delivery speed
-        await this.handleDeepLinkDelivery(chatId, rawPayload);
+        // Bypass duplicate force-sub check for zero-latency instant file delivery
+        await this.handleDeepLinkDelivery(chatId, rawPayload, { skipForceSubCheck: true });
         return;
       } else {
         await this.sendStartWelcomeMessage(chatId, fromId, message);
@@ -2991,6 +3026,11 @@ export class TelegramService {
       return;
     }
 
+    // 2a. Multi-Language Translation Trigger in Private Chat (`tran bd|ind|eng`, `/translate bd|ind|eng`, `/bd`, `/ind`, `/eng`)
+    if (await this.handleTranslationCommand(message, text, false)) {
+      return;
+    }
+
     // 2b. Filters command (/filters, /filter) - Strictly requires '/' prefix
     const isFilters = /^\/(?:filters|filter)(?:@\w+)?$/i.test(text.trim());
     if (isFilters) {
@@ -3102,12 +3142,152 @@ export class TelegramService {
   }
 
   // =========================================================================
-  // PRIVATE DELIVERY FLOW
+  // MULTI-LANGUAGE TRANSLATION SYSTEM (BD -> bn, IND -> hi, ENG -> en)
+  // =========================================================================
+  private static parseTranslationTrigger(text: string): {
+    targetCode: 'bn' | 'hi' | 'en';
+    label: string;
+    inlineText: string;
+  } | null {
+    const trimmed = (text || '').trim();
+    if (!trimmed) return null;
+
+    let rawLang = '';
+    let inlineText = '';
+
+    // Method A: `tran bd`, `tran ind`, `tran eng` (also supports optional inline text)
+    const methodAMatch = trimmed.match(/^tran(?:slate)?\s+(bd|bn|bangla|bengali|ind|hi|hindi|eng|en|english)(?:\s+([\s\S]+))?$/i);
+    if (methodAMatch) {
+      rawLang = methodAMatch[1].toLowerCase();
+      inlineText = (methodAMatch[2] || '').trim();
+    } else {
+      // Method B: `/translate bd|ind|eng`, `/bd`, `/ind`, `/eng` (including @botusername suffix)
+      const methodBCmdMatch = trimmed.match(/^\/translate(?:@\w+)?\s+(bd|bn|bangla|bengali|ind|hi|hindi|eng|en|english)(?:\s+([\s\S]+))?$/i);
+      if (methodBCmdMatch) {
+        rawLang = methodBCmdMatch[1].toLowerCase();
+        inlineText = (methodBCmdMatch[2] || '').trim();
+      } else {
+        const methodBShortMatch = trimmed.match(/^\/(bd|ind|eng)(?:@\w+)?(?:\s+([\s\S]+))?$/i);
+        if (methodBShortMatch) {
+          rawLang = methodBShortMatch[1].toLowerCase();
+          inlineText = (methodBShortMatch[2] || '').trim();
+        }
+      }
+    }
+
+    if (!rawLang) return null;
+
+    if (rawLang === 'bd' || rawLang === 'bn' || rawLang === 'bangla' || rawLang === 'bengali') {
+      return { targetCode: 'bn', label: '🇧🇩 Bengali (BD)', inlineText };
+    }
+    if (rawLang === 'ind' || rawLang === 'hi' || rawLang === 'hindi') {
+      return { targetCode: 'hi', label: '🇮🇳 Hindi (IND)', inlineText };
+    }
+    if (rawLang === 'eng' || rawLang === 'en' || rawLang === 'english') {
+      return { targetCode: 'en', label: '🇬🇧 English (ENG)', inlineText };
+    }
+
+    return null;
+  }
+
+  private static async translateText(sourceText: string, targetCode: 'bn' | 'hi' | 'en'): Promise<string | null> {
+    const cleanText = sourceText.trim();
+    if (!cleanText) return null;
+
+    // Primary fast translator: Google Translate GTX endpoint
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(targetCode)}&dt=t&q=${encodeURIComponent(cleanText.slice(0, 4500))}`;
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) {
+        const data: any = await res.json();
+        if (Array.isArray(data) && Array.isArray(data[0])) {
+          const joined = data[0]
+            .map((seg: any) => (Array.isArray(seg) && typeof seg[0] === 'string' ? seg[0] : ''))
+            .join('')
+            .trim();
+          if (joined) return joined;
+        }
+      }
+    } catch (err: any) {
+      console.warn('[Translate] Primary GTX endpoint notice:', err?.message || err);
+    }
+
+    // Fallback translator: MyMemory API
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(cleanText.slice(0, 500))}&langpair=autodetect|${encodeURIComponent(targetCode)}`;
+      const res = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) {
+        const data: any = await res.json();
+        const translated = data?.responseData?.translatedText;
+        if (translated && typeof translated === 'string' && translated.trim()) {
+          return translated.trim();
+        }
+      }
+    } catch (err: any) {
+      console.warn('[Translate] Fallback MyMemory notice:', err?.message || err);
+    }
+
+    return null;
+  }
+
+  private static async handleTranslationCommand(message: any, text: string, isGroup: boolean): Promise<boolean> {
+    const parsed = this.parseTranslationTrigger(text);
+    if (!parsed) return false;
+
+    const chatId = message.chat?.id;
+    if (!chatId) return true;
+
+    const replied = message.reply_to_message;
+    const targetSourceText = (replied?.text || replied?.caption || parsed.inlineText || '').trim();
+
+    if (!targetSourceText) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `ℹ️ <b>Translation Usage:</b>\nReply to any text message with:\n• <code>tran bd</code> / <code>tran ind</code> / <code>tran eng</code>\n• <code>/bd</code> / <code>/ind</code> / <code>/eng</code>\n• <code>/translate bd</code> / <code>/translate ind</code> / <code>/translate eng</code>`,
+        parse_mode: 'HTML',
+        reply_to_message_id: message.message_id,
+        ...(isGroup && message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+      });
+      return true;
+    }
+
+    this.callTelegramApi('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
+
+    const translated = await this.translateText(targetSourceText, parsed.targetCode);
+    if (!translated) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: '⚠️ Translation service is temporarily busy. Please try again in a moment.',
+        parse_mode: 'HTML',
+        reply_to_message_id: replied?.message_id || message.message_id,
+        ...(isGroup && message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+      });
+      return true;
+    }
+
+    await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: `🌐 <b>Translated (${parsed.label}):</b>\n\n${this.escapeHtml(translated)}`,
+      parse_mode: 'HTML',
+      reply_to_message_id: replied?.message_id || message.message_id,
+      ...(isGroup && message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+    });
+    return true;
+  }
+
+  // =========================================================================
+  // PRIVATE DELIVERY FLOW (ZERO-LATENCY INSTANT DISPATCH)
   // =========================================================================
   public static async handleDeepLinkDelivery(
     chatId: string | number,
     rawPayload: string,
-    options: { includeBackButton?: boolean; messageIdToEdit?: number } = {}
+    options: { includeBackButton?: boolean; messageIdToEdit?: number; skipForceSubCheck?: boolean } = {}
   ): Promise<void> {
     if (!rawPayload) return;
 
@@ -3123,11 +3303,13 @@ export class TelegramService {
       return;
     }
 
-    // Mandatory Channel Join (Force Sub) Check
-    const forceCheck = await this.checkUserForceSub(chatId);
-    if (!forceCheck.allJoined) {
-      await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, rawPayload);
-      return;
+    // Mandatory Channel Join (Force Sub) Check (skipped when just verified by /start caller)
+    if (!options?.skipForceSubCheck) {
+      const forceCheck = await this.checkUserForceSub(chatId);
+      if (!forceCheck.allJoined) {
+        await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, rawPayload);
+        return;
+      }
     }
 
     const cleanPayload = rawPayload.trim();
@@ -3136,35 +3318,15 @@ export class TelegramService {
     // Super-fast 0ms in-memory item resolution
     let item: ItemRecord | null = (storage as any).resolveItemFast ? (storage as any).resolveItemFast(cleanPayload) : null;
     if (!item) {
-      item = await storage.getItem(cleanPayload);
-    }
-    if (!item) {
-      item = await storage.getItem(`f_${normalizedId}`);
-    }
-    if (!item) {
-      item = await storage.getItem(`l_${normalizedId}`);
-    }
-    if (!item) {
-      item = await storage.getItem(normalizedId);
-    }
-    if (!item) {
-      item = await storage.findItemByTrigger(cleanPayload);
-    }
-    if (!item && !cleanPayload.startsWith('#')) {
-      item = await storage.findItemByTrigger(`#${cleanPayload}`);
-    }
-    if (!item && !cleanPayload.startsWith('/')) {
-      item = await storage.findItemByTrigger(`/${cleanPayload}`);
-    }
-    if (!item) {
       const allItems = await storage.getItems();
-      item = allItems.find(i => 
-        i.id === cleanPayload || 
-        i.id === normalizedId || 
-        i.id === `f_${normalizedId}` || 
+      const lowerClean = cleanPayload.toLowerCase();
+      item = allItems.find(i =>
+        i.id === cleanPayload ||
+        i.id === normalizedId ||
+        i.id === `f_${normalizedId}` ||
         i.id === `l_${normalizedId}` ||
-        i.rawKeyword === cleanPayload ||
-        i.triggers.includes(cleanPayload)
+        (i.rawKeyword && i.rawKeyword.toLowerCase() === lowerClean) ||
+        (Array.isArray(i.triggers) && i.triggers.some(t => t.trim().toLowerCase() === lowerClean || t.trim().toLowerCase() === `#${lowerClean}` || t.trim().toLowerCase() === `/${lowerClean}`))
       ) || null;
     }
 
@@ -3177,10 +3339,7 @@ export class TelegramService {
       return;
     }
 
-    // SETUP VIDEO SYSTEM (Admin Panel & Bot Delivery):
-    // Strict Conditional Behavior:
-    // • When "Setup Video" toggle is OFF: Deliver file/link directly & normally as before (NO setup video buttons).
-    // • When "Setup Video" toggle is ON: Only then send the two inline menu buttons ([ 🎬 Setup Video ] | [ 📁 File / Link ]).
+    // SETUP VIDEO SYSTEM (Admin Panel & Bot Delivery)
     const isSetupVideoActive = Boolean(item.hasSetupVideo === true && item.setupVideoUrl && String(item.setupVideoUrl).trim().length > 0);
 
     if (!options?.includeBackButton && isSetupVideoActive) {
@@ -3196,11 +3355,19 @@ export class TelegramService {
 
     const isTextOnlyItem = Boolean(item.isTextOnly || (item.type === 'file' && item.fileEnabled === false));
 
-    // Instant delivery: delete previous interactive menu message if editing is requested
+    // Delete previous interactive menu message in background if editing is requested
     if (options?.messageIdToEdit) {
       this.callTelegramApi('deleteMessage', {
         chat_id: chatId,
         message_id: options.messageIdToEdit
+      }).catch(() => {});
+    }
+
+    // Immediately trigger the instant delivery notice ("Delivering your file...") before dispatching file payloads
+    if (item.type === 'file' && !isTextOnlyItem && !options?.messageIdToEdit) {
+      this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: '⚡ Delivering your file...'
       }).catch(() => {});
     }
 
@@ -3215,8 +3382,6 @@ export class TelegramService {
 
     try {
       if (isTextOnlyItem) {
-        // ONLY TEXT DELIVERY:
-        // Deliver pure text response directly without requiring any file upload/attachment
         const messageText = item.replyMessage || item.caption || item.name;
         let res: any = null;
 
@@ -3258,11 +3423,11 @@ export class TelegramService {
 
         if (res && res.ok) {
           console.info('[Telegram] Successfully delivered Only-Text response to chat:', chatId, 'item:', item.id);
-          await storage.incrementItemDelivery(item.id);
+          storage.incrementItemDelivery(item.id).catch(() => {});
 
           const deliveredMessageId = res.result?.message_id;
           if (deliveredMessageId) {
-            await storage.recordChatDeliveryMessage(chatId, deliveredMessageId);
+            storage.recordChatDeliveryMessage(chatId, deliveredMessageId).catch(() => {});
 
             try {
               const settings = await storage.getSettings();
@@ -3278,7 +3443,7 @@ export class TelegramService {
                 });
                 if (noticeRes && noticeRes.ok && noticeRes.result?.message_id) {
                   companionNoticeId = Number(noticeRes.result.message_id);
-                  await storage.recordChatDeliveryMessage(chatId, companionNoticeId);
+                  storage.recordChatDeliveryMessage(chatId, companionNoticeId).catch(() => {});
                 }
               }
 
@@ -3300,62 +3465,60 @@ export class TelegramService {
           console.warn('[Telegram] Only-Text delivery failed:', res?.description);
         }
       } else if (item.type === 'file') {
-        // RULE 6 & 7:
-        // If admin adds ONLY file: send ONLY the file! No extra text!
-        // If admin adds file + custom caption: send ONLY file + exact caption!
         const caption = item.caption ? item.caption : undefined;
         let fileIdOrUrl = item.telegramFileId || item.url;
-
-        // Check if this item has an uploaded file buffer in persistent storage
-        const uploadRef = item.uploadedFileId || item.telegramFileId || item.id;
-        let uploadedFile = uploadRef ? await storage.getUploadedFile(uploadRef) : null;
-        if (!uploadedFile && item.id) {
-          uploadedFile = await storage.getUploadedFile(item.id);
-        }
-        if (!uploadedFile && item.telegramFileId) {
-          uploadedFile = await storage.getUploadedFile(item.telegramFileId);
-        }
-
-        // Check if item has fileBase64 stored directly on record
-        if (!uploadedFile && item.fileBase64) {
-          try {
-            const buf = Buffer.from(item.fileBase64.replace(/^data:[^;]+;base64,/, ''), 'base64');
-            uploadedFile = {
-              id: item.uploadedFileId || item.id,
-              fileName: item.fileName || item.name || 'file',
-              fileType: item.fileType || 'document',
-              mimeType: item.mimeType || 'application/octet-stream',
-              size: buf.length,
-              buffer: buf,
-              createdAt: item.createdAt
-            };
-          } catch {}
-        }
-
-        // If local data URI is present in url, extract buffer
-        if (!uploadedFile && item.url && item.url.startsWith('data:')) {
-          try {
-            const matches = item.url.match(/^data:([^;]+);base64,(.+)$/);
-            if (matches) {
-              const buf = Buffer.from(matches[2], 'base64');
-              uploadedFile = {
-                id: item.id,
-                fileName: item.fileName || item.name,
-                fileType: item.fileType || 'document',
-                mimeType: matches[1],
-                size: buf.length,
-                buffer: buf,
-                createdAt: item.createdAt
-              };
-            }
-          } catch {}
-        }
 
         const isLocalIdentifier = Boolean(fileIdOrUrl && (
           fileIdOrUrl.startsWith('upload_') || 
           fileIdOrUrl.startsWith('local_') || 
           fileIdOrUrl.startsWith('phone_')
         ));
+
+        // Helper to lazily load uploaded buffer ONLY if needed (eliminates latency when telegramFileId is already cached)
+        const loadUploadedFileBuffer = async () => {
+          const uploadRef = item!.uploadedFileId || item!.telegramFileId || item!.id;
+          let uf = uploadRef ? await storage.getUploadedFile(uploadRef) : null;
+          if (!uf && item!.id) {
+            uf = await storage.getUploadedFile(item!.id);
+          }
+          if (!uf && item!.telegramFileId) {
+            uf = await storage.getUploadedFile(item!.telegramFileId);
+          }
+          if (!uf && item!.fileBase64) {
+            try {
+              const buf = Buffer.from(item!.fileBase64.replace(/^data:[^;]+;base64,/, ''), 'base64');
+              uf = {
+                id: item!.uploadedFileId || item!.id,
+                fileName: item!.fileName || item!.name || 'file',
+                fileType: item!.fileType || 'document',
+                mimeType: item!.mimeType || 'application/octet-stream',
+                size: buf.length,
+                buffer: buf,
+                createdAt: item!.createdAt
+              };
+            } catch {}
+          }
+          if (!uf && item!.url && item!.url.startsWith('data:')) {
+            try {
+              const matches = item!.url.match(/^data:([^;]+);base64,(.+)$/);
+              if (matches) {
+                const buf = Buffer.from(matches[2], 'base64');
+                uf = {
+                  id: item!.id,
+                  fileName: item!.fileName || item!.name,
+                  fileType: item!.fileType || 'document',
+                  mimeType: matches[1],
+                  size: buf.length,
+                  buffer: buf,
+                  createdAt: item!.createdAt
+                };
+              }
+            } catch {}
+          }
+          return uf;
+        };
+
+        let uploadedFile = (isLocalIdentifier || !fileIdOrUrl) ? await loadUploadedFileBuffer() : null;
 
         let res: any = null;
 
@@ -3432,19 +3595,24 @@ export class TelegramService {
             });
           }
 
-          // Fallback if Telegram API rejected remote file_id (e.g. invalid/mock/expired) but we have the local uploaded file
-          if ((!res || !res.ok) && uploadedFile) {
-            console.warn('[Telegram] Remote file_id rejected by Telegram, falling back to direct buffer delivery:', res?.description);
-            res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, caption, backKeyboard);
-            if (res && res.ok) {
-              const realFileId = res.result?.document?.file_id || 
-                (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
-                res.result?.video?.file_id ||
-                res.result?.audio?.file_id;
-              if (realFileId) {
-                item.telegramFileId = realFileId;
-                item.uploadedFileId = uploadedFile.id;
-                await storage.saveItem(item);
+          // Fallback if Telegram API rejected remote file_id, lazily load local uploaded buffer if available
+          if (!res || !res.ok) {
+            if (!uploadedFile) {
+              uploadedFile = await loadUploadedFileBuffer();
+            }
+            if (uploadedFile) {
+              console.warn('[Telegram] Remote file_id rejected by Telegram, falling back to direct buffer delivery:', res?.description);
+              res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, caption, backKeyboard);
+              if (res && res.ok) {
+                const realFileId = res.result?.document?.file_id || 
+                  (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
+                  res.result?.video?.file_id ||
+                  res.result?.audio?.file_id;
+                if (realFileId) {
+                  item.telegramFileId = realFileId;
+                  item.uploadedFileId = uploadedFile.id;
+                  storage.saveItem(item).catch(() => {});
+                }
               }
             }
           }
@@ -6505,30 +6673,54 @@ export class TelegramService {
 
 export class ClonedBotRunner {
   private isRunning: boolean = false;
+  private isLoopActive: boolean = false;
   private pollingOffset: number = 0;
+  private lastPollAt: number = Date.now();
   private abortController: AbortController | null = null;
 
   constructor(public readonly bot: ClonedBotRecord) {}
 
+  public isAlive(): boolean {
+    return this.isRunning && this.isLoopActive && (Date.now() - this.lastPollAt < 90000);
+  }
+
   public async start(): Promise<void> {
-    if (this.isRunning) return;
+    if (this.isRunning && this.isLoopActive) return;
     this.isRunning = true;
+    this.lastPollAt = Date.now();
     this.abortController = new AbortController();
 
     console.info(`[ClonedBot ${this.bot.id}] Starting isolated runner for @${this.bot.username}...`);
 
-    // Clean any webhooks
     try {
       await TelegramService.callTelegramApi('deleteWebhook', { drop_pending_updates: true }, this.bot.token);
     } catch {}
 
-    this.runLoop().catch(err => {
-      console.warn(`[ClonedBot ${this.bot.id}] Runner error:`, err?.message || err);
-    });
+    this.launchLoop();
+  }
+
+  private launchLoop(): void {
+    if (!this.isRunning || this.isLoopActive) return;
+    this.isLoopActive = true;
+    this.runLoop()
+      .catch(err => {
+        console.warn(`[ClonedBot ${this.bot.id}] Runner error:`, err?.message || err);
+      })
+      .finally(() => {
+        this.isLoopActive = false;
+        if (this.isRunning) {
+          setTimeout(() => {
+            if (this.isRunning) {
+              this.launchLoop();
+            }
+          }, 2000);
+        }
+      });
   }
 
   public stop(): void {
     this.isRunning = false;
+    this.isLoopActive = false;
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
@@ -6538,10 +6730,24 @@ export class ClonedBotRunner {
 
   private async runLoop(): Promise<void> {
     const botStorage = StorageManager.getStorage(this.bot.id);
-    await botStorage.init();
+    try {
+      await botStorage.init();
+    } catch (initErr: any) {
+      console.warn(`[ClonedBot ${this.bot.id}] Storage init notice:`, initErr?.message || initErr);
+    }
+
+    if (this.pollingOffset === 0) {
+      try {
+        const peek = await TelegramService.callTelegramApi('getUpdates', { offset: -1, limit: 1 }, this.bot.token);
+        if (peek?.ok && Array.isArray(peek.result) && peek.result.length > 0) {
+          this.pollingOffset = peek.result[0].update_id + 1;
+        }
+      } catch {}
+    }
 
     while (this.isRunning) {
       try {
+        this.lastPollAt = Date.now();
         const res = await TelegramService.callTelegramApi('getUpdates', {
           offset: this.pollingOffset,
           timeout: 10,
@@ -6551,6 +6757,7 @@ export class ClonedBotRunner {
             'my_chat_member', 'chat_member', 'chat_join_request'
           ]
         }, this.bot.token);
+        this.lastPollAt = Date.now();
 
         if (!this.isRunning) break;
 
@@ -6567,6 +6774,8 @@ export class ClonedBotRunner {
               console.error(`[ClonedBot ${this.bot.id}] Update error:`, err?.message || err);
             }
           }
+        } else if (res && res.description && String(res.description).includes('409')) {
+          await new Promise(r => setTimeout(r, 5000));
         }
       } catch (err: any) {
         if (!this.isRunning) break;
@@ -6578,6 +6787,7 @@ export class ClonedBotRunner {
 
 export class TelegramBotManager {
   private static runners: Map<string, ClonedBotRunner> = new Map();
+  private static watchdogTimer: NodeJS.Timeout | null = null;
 
   public static async verifyBotToken(token: string): Promise<{ ok: boolean; info?: any; error?: string }> {
     try {
@@ -6593,6 +6803,35 @@ export class TelegramBotManager {
     }
   }
 
+  public static ensureBotRunning(bot: ClonedBotRecord): void {
+    if (!bot || bot.status === 'stopped') return;
+    const existing = this.runners.get(bot.id);
+    if (!existing || !existing.isAlive()) {
+      this.startBotInstance(bot);
+    }
+  }
+
+  private static startWatchdog(): void {
+    if (this.watchdogTimer) return;
+    this.watchdogTimer = setInterval(async () => {
+      try {
+        const mainStorage = StorageManager.getMainStorage();
+        const bots = await mainStorage.getClonedBots().catch(() => []);
+        for (const bot of bots) {
+          if (bot.status !== 'stopped') {
+            const runner = this.runners.get(bot.id);
+            if (!runner || !runner.isAlive()) {
+              console.info(`[Watchdog] Reviving polling runner for cloned bot @${bot.username} (${bot.id})...`);
+              this.startBotInstance(bot);
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn('[Watchdog] Cloned bot watchdog notice:', err?.message || err);
+      }
+    }, 30000);
+  }
+
   public static async initAllBots(): Promise<void> {
     try {
       const mainStorage = StorageManager.getMainStorage();
@@ -6603,6 +6842,7 @@ export class TelegramBotManager {
           this.startBotInstance(bot);
         }
       }
+      this.startWatchdog();
     } catch (err: any) {
       console.error('[TelegramBotManager] Error initializing cloned bots:', err?.message || err);
     }
@@ -6689,18 +6929,18 @@ export class TelegramBotManager {
       botUsername: info.username || ''
     });
 
-    // 4. Create and register the dedicated Sub-Admin account in the database
+    // 4. Create and register the dedicated Sub-Admin account strictly inside isolated bot storage
     const subAdminAccount = {
       id: `adm_${info.id}`,
       telegramId: String(info.id),
       name: `${info.first_name || 'Bot'} Administrator`,
       username: adminUsername,
-      role: 'owner' as const, // Owner of this cloned bot instance
+      role: 'owner' as const, // Owner of this isolated cloned bot instance
       passwordHash: await hashPassword(adminPassword),
       permissions: {
         files_view: true, files_add: true, files_edit: true, files_delete: true,
         links_view: true, links_add: true, links_edit: true, links_delete: true,
-        messages_view: true, messages_edit: true, admins_manage: true,
+        messages_view: true, messages_edit: true, admins_manage: false,
         design_edit: true, settings_edit: true, cleanup_manage: true
       },
       status: 'active' as const,
@@ -6708,21 +6948,11 @@ export class TelegramBotManager {
       createdAt: new Date().toISOString()
     };
 
-    // Save in cloned bot's isolated storage
+    // Save strictly in cloned bot's isolated storage (never pollute mainStorage.admins!)
     await botStorage.saveAdmin(subAdminAccount);
     await botStorage.syncToFirebaseCloud();
 
-    // Also register sub-admin profile in mainStorage for global lookup
-    const mainSubAdmin = {
-      ...subAdminAccount,
-      id: `subadm_${botId}`,
-      botId: botId,
-      botUsername: info.username || '',
-      role: 'subadmin' as const
-    };
-    await mainStorage.saveAdmin(mainSubAdmin);
-
-    // Commit sub-admin record directly into Firebase Realtime Database
+    // Commit sub-admin record directly into Firebase Realtime Database under isolated paths
     try {
       const rtdbToken = await mainStorage.getFirebaseAuthToken();
       const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';

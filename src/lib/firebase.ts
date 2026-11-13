@@ -1,7 +1,15 @@
 import { initializeApp, getApps } from "firebase/app";
 import { getAnalytics, isSupported } from "firebase/analytics";
 import { getDatabase } from "firebase/database";
-import { getAuth } from "firebase/auth";
+import {
+  getAuth,
+  setPersistence,
+  browserLocalPersistence,
+  indexedDBLocalPersistence,
+  browserSessionPersistence,
+  inMemoryPersistence,
+  Auth
+} from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 // 1. Primary Firebase Config (Existing: zexiofficial844)
@@ -35,6 +43,24 @@ function getOrInitializeApp(config: typeof primaryConfig, name: string) {
   return initializeApp(config, name);
 }
 
+// Configure Telegram Mini App / WebView safe persistence
+async function configureAuthPersistence(authInstance: Auth): Promise<void> {
+  if (typeof window === "undefined") return;
+  for (const persistence of [
+    browserLocalPersistence,
+    indexedDBLocalPersistence,
+    browserSessionPersistence,
+    inMemoryPersistence
+  ]) {
+    try {
+      await setPersistence(authInstance, persistence);
+      return;
+    } catch {
+      // Fallback to next supported persistence storage
+    }
+  }
+}
+
 // Initialize Primary App
 export const primaryApp = getOrInitializeApp(primaryConfig, "primaryBot");
 export const primaryDb = getDatabase(primaryApp);
@@ -46,6 +72,13 @@ export const secondaryApp = getOrInitializeApp(secondaryConfig, "secondaryBot");
 export const secondaryDb = getDatabase(secondaryApp);
 export const secondaryAuth = getAuth(secondaryApp);
 export const secondaryFirestore = getFirestore(secondaryApp);
+
+export const authPersistenceReady: Promise<void> = typeof window !== "undefined"
+  ? Promise.all([
+      configureAuthPersistence(primaryAuth),
+      configureAuthPersistence(secondaryAuth)
+    ]).then(() => undefined)
+  : Promise.resolve();
 
 // Initialize Analytics safely (only in supported browser environments)
 export let primaryAnalytics: any = null;

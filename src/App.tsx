@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { 
-  api, AdminUser, ItemRecord, MessageTemplate, DesignConfig, BotSettings 
+  api, getUrlBotId, AdminUser, ItemRecord, MessageTemplate, DesignConfig, BotSettings 
 } from './lib/api';
+import { primaryAuth, secondaryAuth } from './lib/firebase';
+import { signOut } from 'firebase/auth';
 import { SplashScreen, DEFAULT_LOGO_URL } from './components/SplashScreen';
 import { LoginScreen } from './components/LoginScreen';
 import { OfflineScreen } from './components/OfflineScreen';
@@ -17,8 +19,31 @@ import { ToastContainer } from './components/ToastContainer';
 import { BotSwitcherModal } from './components/BotSwitcherModal';
 import { Shield, Sparkles, Send, Bell, Crown, ShieldCheck } from 'lucide-react';
 
+function resolveBotDisplayName(info: any, fallbackUsername?: string): string {
+  if (!info) {
+    return fallbackUsername ? `@${String(fallbackUsername).replace(/^@/, '')}` : 'Bot';
+  }
+  if (info.isMain === false) {
+    return (
+      info.botName ||
+      info.botFirstName ||
+      info.result?.first_name ||
+      info.displayName ||
+      (info.botUsername ? `@${String(info.botUsername).replace(/^@/, '')}` : '') ||
+      'Cloned Bot'
+    );
+  }
+  const username =
+    (info.botUsername ? String(info.botUsername).replace(/^@/, '') : '') ||
+    (info.result?.username ? String(info.result.username).replace(/^@/, '') : '') ||
+    (fallbackUsername ? String(fallbackUsername).replace(/^@/, '') : '');
+  if (username) return `@${username}`;
+  return info.displayName || info.botName || info.result?.first_name || 'Bot';
+}
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState<AdminUser | null>(null);
+  const [sessionBotId, setSessionBotId] = useState<string>('main');
   const [loading, setLoading] = useState(true);
   const [showSplash, setShowSplash] = useState(true);
   const [currentTab, setCurrentTab] = useState('dashboard');
@@ -66,15 +91,9 @@ export default function App() {
   const fetchBotStatus = useCallback(async () => {
     try {
       const info = await api.getBotInfo().catch(() => null);
-      if (info && (info.isConnected || (info.ok && (info.result || info.botUsername)) || info.botUsername)) {
-        const handle =
-          (info.botUsername ? String(info.botUsername).replace(/^@/, '') : '') ||
-          (info.result?.username ? String(info.result.username).replace(/^@/, '') : '') ||
-          (info.displayName ? String(info.displayName).replace(/^@/, '') : '') ||
-          info.result?.first_name ||
-          'Bot';
+      if (info && (info.isConnected || (info.ok && (info.result || info.botUsername || info.botName)) || info.botUsername || info.botName)) {
         setIsBotConnected(true);
-        setBotDisplayName(`@${handle}`);
+        setBotDisplayName(resolveBotDisplayName(info));
       }
     } catch (e) {
       console.warn('Could not fetch bot status on mount:', e);
@@ -90,13 +109,18 @@ export default function App() {
   const initApp = async () => {
     setLoading(true);
     try {
+      const urlBotId = getUrlBotId();
+      if (urlBotId) {
+        api.setActiveBotId(urlBotId);
+      }
+
       // Check for auth_token in URL query param (returned by Telegram OAuth callback)
       if (typeof window !== 'undefined') {
         const urlParams = new URLSearchParams(window.location.search);
         const authToken = urlParams.get('auth_token');
         if (authToken) {
           api.setToken(authToken);
-          const cleanUrl = window.location.pathname;
+          const cleanUrl = window.location.pathname + (urlBotId ? `?bot_id=${encodeURIComponent(urlBotId)}` : '');
           window.history.replaceState({}, document.title, cleanUrl);
         }
       }
@@ -104,11 +128,26 @@ export default function App() {
       // 1. Check current session
       const meData = await api.getMe();
       if (meData?.admin) {
+        const activeSessBot = meData.botId || meData.admin.botId || 'main';
+        // Strict Panel Isolation:
+        // - Cloned bot sessions NEVER access main panel (!urlBotId)
+        // - Explicit ?bot_id= URL must match a cloned bot's session (unless already logged into main owner)
+        if ((activeSessBot !== 'main' && (!urlBotId || urlBotId !== activeSessBot)) ||
+            (urlBotId && urlBotId !== 'main' && activeSessBot !== urlBotId)) {
+          api.clearToken();
+          const publicDesign = await api.getLoginDesign().catch(() => null);
+          if (publicDesign) {
+            setDesign((prev) => ({ ...prev, ...publicDesign }));
+          }
+          return;
+        }
+
+        setSessionBotId(activeSessBot);
         setCurrentUser(meData.admin);
         await refreshAllData();
       } else {
         // Load public login design
-        const publicDesign = await api.getLoginDesign();
+        const publicDesign = await api.getLoginDesign().catch(() => null);
         if (publicDesign) {
           setDesign((prev) => ({ ...prev, ...publicDesign }));
         }
@@ -139,24 +178,17 @@ export default function App() {
         setSettings(loadedSettings);
       }
 
-      // Check bot connection dynamically
-      const activeHandle =
-        (loadedBotInfo?.botUsername ? String(loadedBotInfo.botUsername).replace(/^@/, '') : '') ||
-        (loadedBotInfo?.result?.username ? String(loadedBotInfo.result.username).replace(/^@/, '') : '') ||
-        (loadedBotInfo?.displayName ? String(loadedBotInfo.displayName).replace(/^@/, '') : '') ||
-        (loadedSettings?.botUsername ? String(loadedSettings.botUsername).replace(/^@/, '') : '');
-
+      const resolvedName = resolveBotDisplayName(loadedBotInfo, loadedSettings?.botUsername);
       const isConnected = Boolean(
         loadedBotInfo?.isConnected ||
-        (loadedBotInfo?.ok && (loadedBotInfo?.result || loadedBotInfo?.botUsername)) ||
-        (Boolean(loadedSettings?.botToken || loadedSettings?.hasToken) && activeHandle) ||
-        activeHandle
+        (loadedBotInfo?.ok && (loadedBotInfo?.result || loadedBotInfo?.botUsername || loadedBotInfo?.botName)) ||
+        (Boolean(loadedSettings?.botToken || loadedSettings?.hasToken) && Boolean(loadedSettings?.botUsername))
       );
 
-      if (isConnected && activeHandle) {
+      if (isConnected) {
         setIsBotConnected(true);
-        setBotDisplayName(`@${activeHandle}`);
-      } else if (loadedBotInfo?.isConnected === false && !activeHandle) {
+        setBotDisplayName(resolvedName);
+      } else if (loadedBotInfo?.isConnected === false) {
         setIsBotConnected(false);
         setBotDisplayName('');
       }
@@ -218,13 +250,10 @@ export default function App() {
         api.getBotInfo().catch(() => null)
       ]);
 
-      const hasBotToken = Boolean(loadedSettings?.botToken || loadedSettings?.hasToken);
-      if (hasBotToken && loadedBotInfo?.ok && loadedBotInfo?.result) {
+      const hasBotToken = Boolean(loadedSettings?.botToken || loadedSettings?.hasToken || loadedBotInfo?.hasToken);
+      if (loadedBotInfo?.ok && (loadedBotInfo?.isConnected || (hasBotToken && loadedBotInfo?.result))) {
         setIsBotConnected(true);
-        const name =
-          loadedBotInfo.result.first_name ||
-          (loadedBotInfo.result.username ? `@${loadedBotInfo.result.username}` : (loadedSettings?.botUsername ? `@${loadedSettings.botUsername.replace(/^@/, '')}` : 'Bot'));
-        setBotDisplayName(name);
+        setBotDisplayName(resolveBotDisplayName(loadedBotInfo, loadedSettings?.botUsername));
       } else {
         setIsBotConnected(false);
         setBotDisplayName('');
@@ -318,10 +347,28 @@ export default function App() {
   }, [isOnline]);
 
   const handleLogout = useCallback(async () => {
+    try {
+      if (typeof window !== 'undefined' && window.sessionStorage) {
+        window.sessionStorage.setItem('tg_just_logged_out', '1');
+      }
+    } catch {}
     await api.logout();
+    try {
+      await Promise.all([
+        signOut(primaryAuth).catch(() => {}),
+        signOut(secondaryAuth).catch(() => {})
+      ]);
+    } catch {}
     setCurrentUser(null);
+    setSessionBotId('main');
+    setItems([]);
+    setTemplates({});
+    setSettings(null);
+    setAdminsCount(1);
+    setIsBotSwitcherOpen(false);
     setCurrentTab('dashboard');
-  }, []);
+    fetchBotStatus();
+  }, [fetchBotStatus]);
 
   const handleSplashComplete = useCallback(() => {
     setShowSplash(false);
@@ -367,6 +414,7 @@ export default function App() {
         <LoginScreen
           design={design}
           onSuccess={(admin) => {
+            setSessionBotId(admin.botId || api.getActiveBotId() || 'main');
             setCurrentUser(admin);
             refreshAllData();
           }}
@@ -468,7 +516,7 @@ export default function App() {
                   <>
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)] shrink-0" />
                     <span className="truncate font-medium text-white/80">
-                      Connected to {botDisplayName ? (botDisplayName.startsWith('@') ? botDisplayName : `@${botDisplayName}`) : 'Bot'}
+                      Connected to {botDisplayName || 'Bot'}
                     </span>
                   </>
                 ) : (
@@ -557,7 +605,7 @@ export default function App() {
               onRefreshTemplates={refreshAllData}
               onRefreshSettings={refreshAllData}
               onLogout={handleLogout}
-              onOpenBotSwitcher={() => setIsBotSwitcherOpen(true)}
+              onOpenBotSwitcher={sessionBotId === 'main' ? () => setIsBotSwitcherOpen(true) : undefined}
             />
           </div>
         </main>

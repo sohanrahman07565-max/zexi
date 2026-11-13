@@ -51,48 +51,75 @@ const uploadMiddleware = multer({
   }
 });
 
-// Middleware to authenticate session via HTTP-only cookie or Bearer token
+// Middleware to authenticate session via Bearer token (priority) or HTTP-only cookie
 async function authenticate(req: Request, res: Response, next: NextFunction) {
-  const rawHeader = req.cookies?.tg_admin_session || req.headers.authorization?.replace(/^Bearer\s+/i, '');
+  const bearerToken = req.headers.authorization?.replace(/^Bearer\s+/i, '').trim() || '';
+  const cookieToken = req.cookies?.tg_admin_session ? String(req.cookies.tg_admin_session).trim() : '';
+  const rawHeader = bearerToken || cookieToken;
 
   if (!rawHeader) {
     return res.status(401).json({ error: 'Authentication required' });
   }
 
+  const requestedBotId = (
+    (req.headers['x-bot-id'] as string) ||
+    (req.query.bot_id as string) ||
+    (req.query.botId as string) ||
+    (req.body?.bot_id as string) ||
+    (req.body?.botId as string) ||
+    'main'
+  ).trim() || 'main';
+
   // Verify HMAC signature if token was signed, or fallback to raw token for backward compatibility
   const verifiedToken = verifySessionToken(rawHeader) || rawHeader;
   const mainStorage = StorageManager.getMainStorage();
+  const activeStorage = StorageManager.getStorage(requestedBotId);
 
-  let session = await mainStorage.getSession(verifiedToken);
+  let session = activeStorage !== mainStorage ? await activeStorage.getSession(verifiedToken) : null;
   let admin: AdminUser | null = null;
 
   if (session) {
-    admin = await mainStorage.getAdmin(session.adminId);
+    admin = await activeStorage.getAdmin(session.adminId);
   }
 
-  // If not found in mainStorage, check the active storage context (for cloned bot sub-admins)
-  if (!session || !admin) {
-    const activeStorage = storage;
-    if (activeStorage !== mainStorage) {
-      if (!session) session = await activeStorage.getSession(verifiedToken);
-      if (session) {
-        admin = await activeStorage.getAdmin(session.adminId);
+  if (!session) {
+    session = await mainStorage.getSession(verifiedToken);
+    if (session) {
+      const sessionScope = session.botId || 'main';
+      if (sessionScope !== 'main') {
+        const scopedStorage = StorageManager.getStorage(sessionScope);
+        admin = await scopedStorage.getAdmin(session.adminId);
+      } else {
+        admin = await mainStorage.getAdmin(session.adminId);
       }
     }
   }
 
-  // If session was found in mainStorage but admin is isolated in a cloned bot storage:
-  if (session && !admin) {
-    const clonedBots = await mainStorage.getClonedBots();
+  // Fallback: check isolated cloned bot storages ONLY if token isn't found in active/main
+  if (!session) {
+    const clonedBots = await mainStorage.getClonedBots().catch(() => []);
     for (const b of clonedBots) {
       const bStorage = StorageManager.getStorage(b.id);
-      admin = await bStorage.getAdmin(session.adminId);
-      if (admin) break;
+      const foundSess = await bStorage.getSession(verifiedToken);
+      if (foundSess) {
+        session = foundSess;
+        if (!session.botId) session.botId = b.id;
+        admin = await bStorage.getAdmin(session.adminId);
+        break;
+      }
     }
   }
 
   if (!session) {
     return res.status(401).json({ error: 'Session expired or invalid' });
+  }
+
+  // STRICT ISOLATION: A cloned bot sub-admin session is locked exclusively to its own botId
+  const sessionBotId = session.botId || 'main';
+  if (sessionBotId !== 'main' && requestedBotId !== sessionBotId) {
+    return res.status(403).json({
+      error: 'Access Denied: Your session is restricted to its assigned cloned bot panel.'
+    });
   }
 
   if (!admin || !admin.enabled) {
@@ -101,6 +128,7 @@ async function authenticate(req: Request, res: Response, next: NextFunction) {
 
   (req as any).admin = admin;
   (req as any).session = session;
+  (req as any).sessionBotId = sessionBotId;
   next();
 }
 
@@ -125,90 +153,57 @@ function requirePermission(permKey: keyof AdminUser['permissions']) {
 // AUTHENTICATION
 // ============================================================================
 
-// Helper to look up cloned bot sub-admin credentials from Firebase/storage
+// Helper to look up cloned bot sub-admin credentials strictly scoped to requestedBotId
 async function findClonedBotAuth(cleanId: string, requestedBotId?: string): Promise<{
   clonedBot: ClonedBotRecord;
   adminUser: AdminUser;
   storedPassword?: string;
   storage: SharedStorageService;
 } | null> {
-  const mainStorage = StorageManager.getMainStorage();
-  await mainStorage.loadLatest(true);
-  const clonedBots = await mainStorage.getClonedBots();
-
-  const cleanLower = cleanId.toLowerCase().replace(/^@/, '').trim();
-
-  let matchedBot: ClonedBotRecord | null = null;
-
-  // 1. If explicit botId is provided (e.g. from ?bot_id=, header, or body), check that cloned bot first
-  if (requestedBotId && requestedBotId !== 'main') {
-    const target = clonedBots.find(b => b.id === requestedBotId);
-    if (target) {
-      const isUsernameMatch =
-        (target.adminUsername && target.adminUsername.toLowerCase().trim() === cleanLower) ||
-        (target.username && target.username.toLowerCase().trim() === cleanLower) ||
-        (target.username && `admin_${target.username.toLowerCase().trim()}` === cleanLower) ||
-        target.id.toLowerCase() === cleanLower ||
-        cleanLower === 'admin';
-
-      if (isUsernameMatch) {
-        matchedBot = target;
-      }
-    }
-  }
-
-  // 2. If not matched yet, check all cloned bots by adminUsername, username, or bot ID
-  if (!matchedBot) {
-    matchedBot = clonedBots.find(b => 
-      (b.adminUsername && b.adminUsername.toLowerCase().trim() === cleanLower) ||
-      (b.username && `admin_${b.username.toLowerCase().trim()}` === cleanLower) ||
-      (b.username && b.username.toLowerCase().trim() === cleanLower) ||
-      b.id.toLowerCase() === cleanLower
-    ) || null;
-  }
-
-  // 3. If still not matched, check each cloned bot's isolated storage
-  if (!matchedBot) {
-    for (const bot of clonedBots) {
-      try {
-        const botStorage = StorageManager.getStorage(bot.id);
-        const botAdmins = await botStorage.getAdmins();
-        const found = botAdmins.find(a => 
-          (a.username && a.username.toLowerCase().trim() === cleanLower) ||
-          (a.id && a.id.toLowerCase().trim() === cleanLower) ||
-          (a.name && a.name.toLowerCase().trim() === cleanLower)
-        );
-        if (found) {
-          return {
-            clonedBot: bot,
-            adminUser: found,
-            storedPassword: bot.adminPassword,
-            storage: botStorage
-          };
-        }
-      } catch {}
-    }
+  // STRICT ISOLATION: Cloned bot sub-admin logins are ONLY allowed when a specific cloned bot_id is targeted
+  if (!requestedBotId || requestedBotId === 'main') {
     return null;
   }
 
-  // Load the matched cloned bot's isolated storage
-  const botStorage = StorageManager.getStorage(matchedBot.id);
-  await botStorage.loadLatest(true);
+  const mainStorage = StorageManager.getMainStorage();
+  await mainStorage.loadLatest(false);
+  const clonedBots = await mainStorage.getClonedBots();
+
+  const cleanLower = cleanId.toLowerCase().replace(/^@/, '').trim();
+  const target = clonedBots.find(b => b.id === requestedBotId);
+  if (!target) {
+    return null;
+  }
+
+  // Load the targeted cloned bot's isolated storage
+  const botStorage = StorageManager.getStorage(target.id);
+  await botStorage.loadLatest(false);
   const botAdmins = await botStorage.getAdmins();
-  let adminUser = botAdmins.find(a => 
+
+  const isTargetUsernameMatch =
+    (target.adminUsername && target.adminUsername.toLowerCase().trim() === cleanLower) ||
+    (target.username && target.username.toLowerCase().trim() === cleanLower) ||
+    (target.username && `admin_${target.username.toLowerCase().trim()}` === cleanLower) ||
+    target.id.toLowerCase() === cleanLower;
+
+  let adminUser = botAdmins.find(a =>
     (a.username && a.username.toLowerCase().trim() === cleanLower) ||
     (a.id && a.id.toLowerCase().trim() === cleanLower) ||
-    a.role === 'owner'
+    (a.name && a.name.toLowerCase().trim() === cleanLower)
   );
 
-  if (!adminUser) {
+  if (!adminUser && isTargetUsernameMatch) {
+    adminUser = botAdmins.find(a => a.role === 'owner');
+  }
+
+  if (!adminUser && isTargetUsernameMatch) {
     adminUser = {
-      id: `adm_${matchedBot.id}`,
-      telegramId: matchedBot.id.replace(/^clone_/, ''),
-      name: `${matchedBot.name || 'Bot'} Administrator`,
-      username: matchedBot.adminUsername || cleanLower,
+      id: `adm_${target.id.replace(/^clone_/, '')}`,
+      telegramId: target.id.replace(/^clone_/, ''),
+      name: `${target.name || 'Bot'} Administrator`,
+      username: target.adminUsername || cleanLower,
       role: 'owner',
-      passwordHash: await hashPassword(matchedBot.adminPassword || 'Zexi#Admin123'),
+      passwordHash: await hashPassword(target.adminPassword || 'Zexi#Admin123'),
       permissions: {
         files_view: true, files_add: true, files_edit: true, files_delete: true,
         links_view: true, links_add: true, links_edit: true, links_delete: true,
@@ -221,16 +216,21 @@ async function findClonedBotAuth(cleanId: string, requestedBotId?: string): Prom
     await botStorage.saveAdmin(adminUser);
   }
 
+  if (!adminUser) {
+    return null;
+  }
+
   return {
-    clonedBot: matchedBot,
+    clonedBot: target,
     adminUser,
-    storedPassword: matchedBot.adminPassword,
+    storedPassword: target.adminPassword,
     storage: botStorage
   };
 }
 
 // POST /api/auth/login
 apiRouter.post('/auth/login', async (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   const telegramId = req.body.telegramId || req.body.username || req.body.adminName || req.body.email;
   const { password } = req.body;
   if (!telegramId || !password) {
@@ -241,25 +241,29 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   const cleanPassword = String(password).trim();
   console.info('[Auth] Admin login attempt for identifier:', cleanId);
 
-  const requestedBotId = 
-    (req.headers['x-bot-id'] as string) || 
-    (req.query.bot_id as string) || 
-    (req.query.botId as string) || 
-    (req.body?.bot_id as string) || 
-    (req.body?.botId as string) || 
-    '';
+  const requestedBotId = (
+    (req.headers['x-bot-id'] as string) ||
+    (req.query.bot_id as string) ||
+    (req.query.botId as string) ||
+    (req.body?.bot_id as string) ||
+    (req.body?.botId as string) ||
+    'main'
+  ).trim() || 'main';
 
-  // --- 1. CLONED BOT SUB-ADMIN AUTHENTICATION ---
-  const clonedAuth = await findClonedBotAuth(cleanId, requestedBotId);
-  if (clonedAuth) {
+  // --- 1. CLONED BOT SUB-ADMIN AUTHENTICATION (Strictly Isolated to requestedBotId) ---
+  if (requestedBotId !== 'main') {
+    const clonedAuth = await findClonedBotAuth(cleanId, requestedBotId);
+    if (!clonedAuth) {
+      console.warn(`[Auth] Rejected login on cloned bot panel ${requestedBotId} for unknown identifier: ${cleanId}`);
+      return res.status(401).json({ error: 'Access Denied', field: 'email' });
+    }
+
     console.info(`[Auth] Cloned bot sub-admin login attempt for bot @${clonedAuth.clonedBot.username} (${clonedAuth.clonedBot.id}) with username: ${cleanId}`);
 
     let isPasswordValid = false;
-    // Check against saved adminPassword (exact string match)
     if (clonedAuth.storedPassword && cleanPassword === clonedAuth.storedPassword) {
       isPasswordValid = true;
     }
-    // Check against passwordHash in admin account
     if (!isPasswordValid && clonedAuth.adminUser.passwordHash) {
       isPasswordValid = await verifyPassword(cleanPassword, clonedAuth.adminUser.passwordHash);
     }
@@ -269,16 +273,15 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'Incorrect password', field: 'password' });
     }
 
-    // Password valid! Create session in cloned bot's storage and mainStorage
-    const rawToken = await clonedAuth.storage.createSession(clonedAuth.adminUser.id, clonedAuth.adminUser.role);
-    const mainStorage = StorageManager.getMainStorage();
-    await mainStorage.createSessionWithToken(rawToken, clonedAuth.adminUser.id, clonedAuth.adminUser.role);
+    // Create isolated session strictly scoped to this cloned bot ID
+    const rawToken = await clonedAuth.storage.createSession(clonedAuth.adminUser.id, clonedAuth.adminUser.role, clonedAuth.clonedBot.id);
     const signedToken = signSessionToken(rawToken);
 
     res.cookie('tg_admin_session', signedToken, {
       httpOnly: true,
       secure: true,
       sameSite: 'none',
+      path: '/',
       maxAge: 12 * 60 * 60 * 1000 // 12 hours
     });
 
@@ -295,6 +298,7 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
         telegramId: clonedAuth.adminUser.telegramId,
         name: clonedAuth.adminUser.name,
         role: clonedAuth.adminUser.role,
+        botId: clonedAuth.clonedBot.id,
         permissions: clonedAuth.adminUser.permissions
       }
     });
@@ -351,11 +355,13 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
     matchedAdmin = ownerAdmin || null;
   }
 
-  // 2. If not owner, check if the identifier matches an AUTHORIZED SUB-ADMIN explicitly stored in the database
+  // 2. If not owner, check if the identifier matches an AUTHORIZED SUB-ADMIN explicitly belonging to MAIN bot (never cloned bot sub-admins!)
   if (!matchedAdmin && !isOwnerAttempt) {
     const subAdmin = allAdmins.find(a => 
       a.role !== 'owner' &&
       a.enabled &&
+      !((a as any).botId && (a as any).botId !== 'main') &&
+      !String(a.id || '').startsWith('subadm_clone_') &&
       (
         String(a.id).trim().toLowerCase() === cleanLower ||
         String(a.telegramId).trim().toLowerCase() === cleanLower ||
@@ -432,11 +438,11 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
 
   console.info('[Auth] Admin login SUCCESSFUL for:', cleanId, matchedAdmin.name, matchedAdmin.role);
 
-  // Create session
-  const rawToken = await storage.createSession(matchedAdmin.id, matchedAdmin.role);
+  // Create session scoped to main panel
+  const rawToken = await storage.createSession(matchedAdmin.id, matchedAdmin.role, 'main');
   const mainStorage = StorageManager.getMainStorage();
   if (storage !== mainStorage) {
-    await mainStorage.createSessionWithToken(rawToken, matchedAdmin.id, matchedAdmin.role);
+    await mainStorage.createSessionWithToken(rawToken, matchedAdmin.id, matchedAdmin.role, undefined, 'main');
   }
   const signedToken = signSessionToken(rawToken);
 
@@ -444,6 +450,7 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
     httpOnly: true,
     secure: true,
     sameSite: 'none',
+    path: '/',
     maxAge: 12 * 60 * 60 * 1000 // 12 hours
   });
 
@@ -453,11 +460,13 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   return res.json({
     success: true,
     token: signedToken,
+    botId: 'main',
     admin: {
       id: matchedAdmin.id,
       telegramId: matchedAdmin.telegramId,
       name: matchedAdmin.name,
       role: matchedAdmin.role,
+      botId: 'main',
       permissions: matchedAdmin.permissions
     }
   });
@@ -489,7 +498,31 @@ apiRouter.post('/auth/validate-credentials', async (req: Request, res: Response)
   const cleanLower = cleanId.toLowerCase().replace(/^@/, '');
   const cleanNormalized = cleanLower.replace(/\s+/g, '');
 
-  await storage.loadLatest(true);
+  const requestedBotId = (
+    (req.headers['x-bot-id'] as string) ||
+    (req.query.bot_id as string) ||
+    (req.query.botId as string) ||
+    req.body?.bot_id ||
+    req.body?.botId ||
+    'main'
+  ).trim() || 'main';
+
+  if (requestedBotId !== 'main') {
+    const clonedMatch = await findClonedBotAuth(cleanId, requestedBotId);
+    if (clonedMatch) {
+      let isClonedPassValid = false;
+      if (clonedMatch.adminUser.passwordHash) {
+        isClonedPassValid = await verifyPassword(cleanPassword, clonedMatch.adminUser.passwordHash);
+      }
+      if (!isClonedPassValid && clonedMatch.storedPassword) {
+        isClonedPassValid = (cleanPassword === clonedMatch.storedPassword);
+      }
+      return res.json({ valid: isClonedPassValid });
+    }
+    return res.json({ valid: false });
+  }
+
+  await storage.loadLatest(false);
   const allAdmins = await storage.getAdmins();
   const ownerAdmin = allAdmins.find(a => a.role === 'owner');
 
@@ -521,6 +554,8 @@ apiRouter.post('/auth/validate-credentials', async (req: Request, res: Response)
     const subAdmin = allAdmins.find(a => 
       a.role !== 'owner' &&
       a.enabled &&
+      !((a as any).botId && (a as any).botId !== 'main') &&
+      !String(a.id || '').startsWith('subadm_clone_') &&
       (
         String(a.id).trim().toLowerCase() === cleanLower ||
         String(a.telegramId).trim().toLowerCase() === cleanLower ||
@@ -534,20 +569,7 @@ apiRouter.post('/auth/validate-credentials', async (req: Request, res: Response)
     }
   }
 
-  // If not owner or authorized sub-admin: check if it's a cloned bot sub-admin
   if (!matchedAdmin && !isOwner) {
-    const requestedBotId = (req.headers['x-bot-id'] as string) || (req.query.bot_id as string) || (req.query.botId as string) || req.body?.bot_id;
-    const clonedMatch = await findClonedBotAuth(cleanId, requestedBotId);
-    if (clonedMatch) {
-      let isClonedPassValid = false;
-      if (clonedMatch.adminUser.passwordHash) {
-        isClonedPassValid = await verifyPassword(cleanPassword, clonedMatch.adminUser.passwordHash);
-      }
-      if (!isClonedPassValid && clonedMatch.storedPassword) {
-        isClonedPassValid = (cleanPassword === clonedMatch.storedPassword);
-      }
-      return res.json({ valid: isClonedPassValid });
-    }
     return res.json({ valid: false });
   }
 
@@ -571,6 +593,22 @@ apiRouter.post('/auth/validate-credentials', async (req: Request, res: Response)
 
 // POST /api/auth/firebase-login (Firebase Authentication Session Creator)
 apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  const requestedBotId = (
+    (req.headers['x-bot-id'] as string) ||
+    (req.query.bot_id as string) ||
+    (req.query.botId as string) ||
+    (req.body?.bot_id as string) ||
+    'main'
+  ).trim() || 'main';
+
+  if (requestedBotId !== 'main') {
+    return res.status(403).json({
+      error: 'Access Denied: Please sign in using your cloned bot sub-admin credentials.',
+      field: 'email'
+    });
+  }
+
   const { idToken, email, displayName } = req.body;
   const cleanEmail = String(email || '').trim().toLowerCase();
   
@@ -578,9 +616,10 @@ apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Email is required for authentication' });
   }
 
-  // Reload admins
-  await storage.loadLatest(true);
-  const allAdmins = await storage.getAdmins();
+  // Reload admins strictly from main storage
+  const mainStorage = StorageManager.getMainStorage();
+  await mainStorage.loadLatest(true);
+  const allAdmins = await mainStorage.getAdmins();
   const rootAdminId = String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '8153757163').trim();
   const rootAdminName = (process.env.ADMIN_NAME || 'Sohan').trim();
   const envAdminEmail = (process.env.ADMIN_EMAIL || 'sohanrahman07565@gmail.com').trim().toLowerCase();
@@ -657,34 +696,38 @@ apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Access Denied: This administrator account has been disabled.' });
   }
 
-  // Create session
-  const rawToken = await storage.createSession(admin.id, admin.role);
+  // Create session scoped to main panel
+  const mainStorageForSession = StorageManager.getMainStorage();
+  const rawToken = await mainStorageForSession.createSession(admin.id, admin.role, 'main');
   const signedToken = signSessionToken(rawToken);
 
   res.cookie('tg_admin_session', signedToken, {
     httpOnly: true,
     secure: true,
     sameSite: 'none',
+    path: '/',
     maxAge: 12 * 60 * 60 * 1000 // 12 hours
   });
 
   if (idToken) {
-    storage.setCloudAuthToken(idToken);
+    mainStorageForSession.setCloudAuthToken(idToken);
   }
 
   admin.lastLoginAt = new Date().toISOString();
-  await storage.saveAdmin(admin);
+  await mainStorageForSession.saveAdmin(admin);
 
   console.info('[Firebase Auth] Session successfully created for admin:', admin.name, admin.role);
 
   return res.json({
     success: true,
     token: signedToken,
+    botId: 'main',
     admin: {
       id: admin.id,
       telegramId: admin.telegramId,
       name: admin.name,
       role: admin.role,
+      botId: 'main',
       permissions: admin.permissions
     }
   });
@@ -692,12 +735,32 @@ apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
 
 // POST /api/auth/logout
 apiRouter.post('/auth/logout', async (req: Request, res: Response) => {
-  const rawHeader = req.cookies?.tg_admin_session || req.headers.authorization?.replace(/^Bearer\s+/i, '');
-  if (rawHeader) {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  const bearerHeader = req.headers.authorization?.replace(/^Bearer\s+/i, '').trim() || '';
+  const cookieHeader = req.cookies?.tg_admin_session ? String(req.cookies.tg_admin_session).trim() : '';
+  const tokensToRevoke = Array.from(new Set([bearerHeader, cookieHeader].filter(Boolean)));
+
+  const mainStorage = StorageManager.getMainStorage();
+  for (const rawHeader of tokensToRevoke) {
     const verifiedToken = verifySessionToken(rawHeader) || rawHeader;
-    await storage.deleteSession(verifiedToken);
+    await storage.deleteSession(verifiedToken).catch(() => {});
+    if (storage !== mainStorage) {
+      await mainStorage.deleteSession(verifiedToken).catch(() => {});
+    }
+    const clonedBots = await mainStorage.getClonedBots().catch(() => []);
+    for (const b of clonedBots) {
+      const bStorage = StorageManager.getStorage(b.id);
+      await bStorage.deleteSession(verifiedToken).catch(() => {});
+    }
   }
-  res.clearCookie('tg_admin_session');
+
+  res.clearCookie('tg_admin_session', {
+    httpOnly: true,
+    secure: true,
+    sameSite: 'none',
+    path: '/'
+  });
+  res.clearCookie('tg_admin_session', { path: '/' });
   return res.json({ success: true, message: 'Logged out' });
 });
 
@@ -743,13 +806,17 @@ apiRouter.get('/firebase-rules', authenticate, async (_req: Request, res: Respon
 
 // GET /api/auth/me
 apiRouter.get('/auth/me', authenticate, async (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   const admin = (req as any).admin as AdminUser;
+  const sessionBotId = (req as any).sessionBotId || 'main';
   return res.json({
+    botId: sessionBotId,
     admin: {
       id: admin.id,
       telegramId: admin.telegramId,
       name: admin.name,
       role: admin.role,
+      botId: sessionBotId,
       permissions: admin.permissions
     }
   });
@@ -986,13 +1053,14 @@ apiRouter.get('/auth/callback', async (req: Request, res: Response) => {
   }
 
   const admin = authResult.admin;
-  const rawToken = await storage.createSession(admin.id, admin.role);
+  const rawToken = await storage.createSession(admin.id, admin.role, 'main');
   const signedToken = signSessionToken(rawToken);
 
   res.cookie('tg_admin_session', signedToken, {
     httpOnly: true,
     secure: true,
     sameSite: 'none',
+    path: '/',
     maxAge: 12 * 60 * 60 * 1000
   });
 
@@ -1005,6 +1073,16 @@ apiRouter.get('/auth/callback', async (req: Request, res: Response) => {
 
 // POST /api/auth/telegram-login (Telegram Login Widget / OpenID Connect with Admin Whitelist Verification)
 apiRouter.post('/auth/telegram-login', async (req: Request, res: Response) => {
+  const requestedBotId = (
+    (req.headers['x-bot-id'] as string) ||
+    (req.query.bot_id as string) ||
+    (req.query.botId as string) ||
+    'main'
+  ).trim() || 'main';
+  if (requestedBotId !== 'main') {
+    return res.status(403).json({ error: 'Access Denied: Please log in with your cloned bot sub-admin credentials.' });
+  }
+
   const tgUser = req.body;
   const authResult = await verifyAndAuthorizeTelegramUser(tgUser);
   if (!authResult.ok || !authResult.admin) {
@@ -1012,13 +1090,14 @@ apiRouter.post('/auth/telegram-login', async (req: Request, res: Response) => {
   }
 
   const admin = authResult.admin;
-  const rawToken = await storage.createSession(admin.id, admin.role);
+  const rawToken = await storage.createSession(admin.id, admin.role, 'main');
   const signedToken = signSessionToken(rawToken);
 
   res.cookie('tg_admin_session', signedToken, {
     httpOnly: true,
     secure: true,
     sameSite: 'none',
+    path: '/',
     maxAge: 12 * 60 * 60 * 1000
   });
 
@@ -1030,11 +1109,13 @@ apiRouter.post('/auth/telegram-login', async (req: Request, res: Response) => {
   return res.json({
     success: true,
     token: signedToken,
+    botId: 'main',
     admin: {
       id: admin.id,
       telegramId: admin.telegramId,
       name: admin.name,
       role: admin.role,
+      botId: 'main',
       permissions: admin.permissions
     }
   });
@@ -2068,8 +2149,12 @@ apiRouter.post('/bot/set-webhook', authenticate, requirePermission('settings_edi
 // ============================================================================
 
 // GET /api/bots - List all active bots (main bot + all cloned bots)
-apiRouter.get('/bots', authenticate, async (_req: Request, res: Response) => {
+apiRouter.get('/bots', authenticate, async (req: Request, res: Response) => {
   try {
+    const sessionBotId = (req as any).sessionBotId || 'main';
+    if (sessionBotId !== 'main') {
+      return res.status(403).json({ error: 'Cloned bot sub-admins cannot access bot fleet management.' });
+    }
     const bots = await TelegramBotManager.getAllBots();
     return res.json({ ok: true, bots });
   } catch (err: any) {
@@ -2080,8 +2165,9 @@ apiRouter.get('/bots', authenticate, async (_req: Request, res: Response) => {
 // POST /api/bots/clone - Dynamically clone a Telegram bot with its isolated database
 apiRouter.post('/bots/clone', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
   try {
-    const activeBotId = (req.headers['x-bot-id'] as string) || (req.query.botId as string) || 'main';
-    if (activeBotId !== 'main') {
+    const sessionBotId = (req as any).sessionBotId || 'main';
+    const activeBotId = (req.headers['x-bot-id'] as string) || (req.query.bot_id as string) || (req.query.botId as string) || 'main';
+    if (sessionBotId !== 'main' || activeBotId !== 'main') {
       return res.status(403).json({ error: 'Cloned bot panels are not permitted to clone additional bots.' });
     }
 
@@ -2110,6 +2196,10 @@ apiRouter.post('/bots/clone', authenticate, requirePermission('settings_edit'), 
 // DELETE /api/bots/:id - Delete a cloned bot instance and stop its runner
 apiRouter.delete('/bots/:id', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
   try {
+    const sessionBotId = (req as any).sessionBotId || 'main';
+    if (sessionBotId !== 'main') {
+      return res.status(403).json({ error: 'Cloned bot sub-admins cannot delete bot instances.' });
+    }
     const { id } = req.params;
     if (id === 'main') {
       return res.status(400).json({ error: 'Cannot delete the primary main bot' });
@@ -2123,33 +2213,92 @@ apiRouter.delete('/bots/:id', authenticate, requirePermission('settings_edit'), 
 });
 
 let cachedBotInfoPayload: { data: any; expiresAt: number; token: string } | null = null;
+const cachedClonedBotInfo = new Map<string, { data: any; expiresAt: number }>();
 
-// GET /api/bot/info - Dynamic bot status & profile directly from process.env.BOT_TOKEN
+// GET /api/bot/info - Dynamic bot status & profile strictly isolated per activeBotId
 apiRouter.get('/bot/info', async (req: Request, res: Response) => {
-  res.setHeader('Cache-Control', 'private, no-cache, stale-while-revalidate=5');
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
 
-  // Multi-bot support: if targeting a cloned bot instance, return its live status from the bot manager
-  const activeBotId = (req.headers['x-bot-id'] as string) || (req.query.botId as string) || 'main';
+  // Multi-bot support: if targeting a cloned bot instance, return ONLY its live status (never fall back to main bot!)
+  const activeBotId = (
+    (req.headers['x-bot-id'] as string) ||
+    (req.query.bot_id as string) ||
+    (req.query.botId as string) ||
+    'main'
+  ).trim() || 'main';
+
   if (activeBotId !== 'main') {
+    const cachedCloned = cachedClonedBotInfo.get(activeBotId);
+    if (cachedCloned && Date.now() < cachedCloned.expiresAt) {
+      return res.json(cachedCloned.data);
+    }
+
     try {
-      const allBots = await TelegramBotManager.getAllBots();
-      const currentCloned = allBots.find(b => b.id === activeBotId);
+      const mainStorage = StorageManager.getMainStorage();
+      const clonedList = await mainStorage.getClonedBots().catch(() => []);
+      const currentCloned = clonedList.find(b => b.id === activeBotId);
+
       if (currentCloned) {
-        return res.json({
-          ok: true,
-          isConnected: currentCloned.status === 'active',
-          hasToken: true,
-          botUsername: currentCloned.username,
-          displayName: currentCloned.name || `@${currentCloned.username}`,
-          result: {
-            id: currentCloned.id,
-            first_name: currentCloned.name,
-            username: currentCloned.username
+        let liveName = currentCloned.name || '';
+        let liveUsername = (currentCloned.username || '').replace(/^@/, '');
+        let liveId: string | number = currentCloned.id;
+        let isLive = currentCloned.status !== 'stopped';
+
+        // Ensure cloned bot runner is actively polling
+        TelegramBotManager.ensureBotRunning(currentCloned);
+
+        if (currentCloned.token) {
+          const meRes = await TelegramService.callTelegramApi('getMe', {}, currentCloned.token).catch(() => null);
+          if (meRes?.ok && meRes.result) {
+            liveName = meRes.result.first_name || liveName;
+            liveUsername = (meRes.result.username || liveUsername).replace(/^@/, '');
+            liveId = meRes.result.id || liveId;
+            isLive = true;
           }
-        });
+        }
+
+        const payload = {
+          ok: true,
+          isMain: false,
+          botId: currentCloned.id,
+          isConnected: isLive,
+          hasToken: Boolean(currentCloned.token),
+          botName: liveName || (liveUsername ? `@${liveUsername}` : 'Cloned Bot'),
+          botFirstName: liveName,
+          botUsername: liveUsername,
+          displayName: liveName || (liveUsername ? `@${liveUsername}` : 'Cloned Bot'),
+          result: {
+            id: liveId,
+            first_name: liveName || liveUsername || 'Cloned Bot',
+            username: liveUsername
+          }
+        };
+        cachedClonedBotInfo.set(activeBotId, { data: payload, expiresAt: Date.now() + 15000 });
+        return res.json(payload);
       }
+
+      return res.status(404).json({
+        ok: false,
+        isMain: false,
+        botId: activeBotId,
+        isConnected: false,
+        hasToken: false,
+        botName: '',
+        botUsername: '',
+        displayName: ''
+      });
     } catch (e) {
       console.warn('[Routes] Error resolving cloned bot info:', e);
+      return res.json({
+        ok: false,
+        isMain: false,
+        botId: activeBotId,
+        isConnected: false,
+        hasToken: false,
+        botName: '',
+        botUsername: '',
+        displayName: ''
+      });
     }
   }
 
@@ -2165,6 +2314,8 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
   if (!token) {
     const emptyPayload = {
       ok: false,
+      isMain: true,
+      botId: 'main',
       isConnected: false,
       hasToken: false,
       botUsername: settings?.botUsername || '',
@@ -2206,8 +2357,11 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
 
   const responsePayload = {
     ok: isConnected,
+    isMain: true,
+    botId: 'main',
     hasToken: Boolean(token),
     isConnected,
+    botName: botFirstName || cleanHandle,
     botUsername: botUsername || (rawResult?.username ? String(rawResult.username).replace(/^@/, '') : ''),
     botFirstName,
     displayName,

@@ -1220,29 +1220,31 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
         {/* Menu Items */}
         <div className="glass-panel rounded-2xl divide-y divide-zinc-800/80 border border-zinc-800 overflow-hidden">
-          {/* Switch Bot & Fleet Management */}
-          <button
-            onClick={() => onOpenBotSwitcher ? onOpenBotSwitcher() : null}
-            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer bg-red-500/[0.04]"
-          >
-            <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-red-500/20 to-rose-600/20 text-red-400 flex items-center justify-center border border-red-500/30 shadow-sm shadow-red-500/20">
-                <Bot className="w-4 h-4 text-red-400" />
-              </div>
-              <div>
-                <div className="text-xs font-semibold text-white flex items-center gap-2">
-                  <span>Switch Bot &amp; Fleet Manager</span>
-                  <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-red-500/20 text-red-300 font-semibold border border-red-500/30">
-                    Multi-Bot
-                  </span>
+          {/* Switch Bot & Fleet Management (Main Panel Only) */}
+          {onOpenBotSwitcher && (
+            <button
+              onClick={() => onOpenBotSwitcher()}
+              className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer bg-red-500/[0.04]"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-red-500/20 to-rose-600/20 text-red-400 flex items-center justify-center border border-red-500/30 shadow-sm shadow-red-500/20">
+                  <Bot className="w-4 h-4 text-red-400" />
                 </div>
-                <div className="text-[11px] text-zinc-400 mt-0.5">
-                  Manage active bot or clone a new bot instance
+                <div>
+                  <div className="text-xs font-semibold text-white flex items-center gap-2">
+                    <span>Switch Bot &amp; Fleet Manager</span>
+                    <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-red-500/20 text-red-300 font-semibold border border-red-500/30">
+                      Multi-Bot
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-zinc-400 mt-0.5">
+                    Manage active bot or clone a new bot instance
+                  </div>
                 </div>
               </div>
-            </div>
-            <ChevronRight className="w-4 h-4 text-zinc-500" />
-          </button>
+              <ChevronRight className="w-4 h-4 text-zinc-500" />
+            </button>
+          )}
 
           {/* Templates */}
           <button

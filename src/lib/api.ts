@@ -7,6 +7,7 @@ export interface AdminUser {
   name: string;
   username?: string;
   role: 'owner' | 'subadmin';
+  botId?: string;
   enabled?: boolean;
   lastLoginAt?: string;
   permissions: {
@@ -216,41 +217,81 @@ export interface BotInstance {
 
 const TOKEN_KEY = 'tg_admin_token';
 const BOT_ID_KEY = 'tg_active_bot_id';
+let memoryTokenFallback: string | null = null;
+let memoryBotIdFallback: string | null = null;
 
-export function getActiveBotId(): string {
+export function getUrlBotId(): string | null {
   try {
     if (typeof window !== 'undefined') {
       const urlParams = new URLSearchParams(window.location.search);
-      const urlBotId = urlParams.get('bot_id');
-      if (urlBotId) {
-        if (window.localStorage) {
-          localStorage.setItem(BOT_ID_KEY, urlBotId);
-        }
-        return urlBotId;
-      }
-      if (window.localStorage) {
-        return localStorage.getItem(BOT_ID_KEY) || 'main';
-      }
-    }
-  } catch {}
-  return 'main';
-}
-
-export function setActiveBotId(botId: string): void {
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      localStorage.setItem(BOT_ID_KEY, botId || 'main');
-    }
-  } catch {}
-}
-
-function getStoredToken(): string | null {
-  try {
-    if (typeof window !== 'undefined' && window.localStorage) {
-      return localStorage.getItem(TOKEN_KEY);
+      const urlBotId = (urlParams.get('bot_id') || urlParams.get('botId') || '').trim();
+      return urlBotId || null;
     }
   } catch {}
   return null;
+}
+
+export function getActiveBotId(): string {
+  const urlBotId = getUrlBotId();
+  if (urlBotId) {
+    memoryBotIdFallback = urlBotId;
+    try { window.localStorage?.setItem(BOT_ID_KEY, urlBotId); } catch {}
+    try { window.sessionStorage?.setItem(BOT_ID_KEY, urlBotId); } catch {}
+    return urlBotId;
+  }
+  try {
+    const stored = window.localStorage?.getItem(BOT_ID_KEY) || window.sessionStorage?.getItem(BOT_ID_KEY);
+    if (stored) {
+      memoryBotIdFallback = stored;
+      return stored;
+    }
+  } catch {}
+  return memoryBotIdFallback || 'main';
+}
+
+export function setActiveBotId(botId: string): void {
+  const cleanId = (botId || 'main').trim() || 'main';
+  memoryBotIdFallback = cleanId;
+  try { window.localStorage?.setItem(BOT_ID_KEY, cleanId); } catch {}
+  try { window.sessionStorage?.setItem(BOT_ID_KEY, cleanId); } catch {}
+}
+
+function getStoredToken(): string | null {
+  if (memoryTokenFallback) return memoryTokenFallback;
+  try {
+    if (typeof window !== 'undefined') {
+      const t = window.localStorage?.getItem(TOKEN_KEY) || window.sessionStorage?.getItem(TOKEN_KEY);
+      if (t) {
+        memoryTokenFallback = t;
+        return t;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function storeToken(token: string): void {
+  memoryTokenFallback = token;
+  try { window.localStorage?.setItem(TOKEN_KEY, token); } catch {}
+  try { window.sessionStorage?.setItem(TOKEN_KEY, token); } catch {}
+}
+
+function wipeLocalAuthStorage(): void {
+  memoryTokenFallback = null;
+  const urlBotId = getUrlBotId();
+  memoryBotIdFallback = urlBotId || 'main';
+  try {
+    window.localStorage?.removeItem(TOKEN_KEY);
+    if (!urlBotId) {
+      window.localStorage?.removeItem(BOT_ID_KEY);
+    }
+  } catch {}
+  try {
+    window.sessionStorage?.clear();
+    if (urlBotId) {
+      window.sessionStorage?.setItem(BOT_ID_KEY, urlBotId);
+    }
+  } catch {}
 }
 
 export function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
@@ -263,20 +304,18 @@ export function authFetch(url: string, options: RequestInit = {}): Promise<Respo
   if (!headers.has('x-bot-id')) {
     headers.set('x-bot-id', activeBotId);
   }
+  const isAuthOrStatus = url.includes('/api/auth/') || url.includes('/api/bot/info');
   return fetch(url, {
     ...options,
     headers,
+    cache: isAuthOrStatus ? 'no-store' : options.cache,
     credentials: 'include'
   });
 }
 
 export const api = {
   setToken(token: string): void {
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        localStorage.setItem(TOKEN_KEY, token);
-      }
-    } catch {}
+    storeToken(token);
   },
 
   getToken(): string | null {
@@ -284,14 +323,10 @@ export const api = {
   },
 
   clearToken(): void {
-    try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        localStorage.removeItem(TOKEN_KEY);
-      }
-    } catch {}
+    wipeLocalAuthStorage();
   },
 
-  async getMe(): Promise<{ admin: AdminUser } | null> {
+  async getMe(): Promise<{ admin: AdminUser; botId?: string } | null> {
     try {
       const res = await authFetch('/api/auth/me');
       if (!res.ok) return null;
@@ -315,11 +350,7 @@ export const api = {
       throw err;
     }
     if (data.token) {
-      try {
-        if (typeof window !== 'undefined' && window.localStorage) {
-          localStorage.setItem(TOKEN_KEY, data.token);
-        }
-      } catch {}
+      storeToken(data.token);
     }
     if (data.botId) {
       setActiveBotId(data.botId);
@@ -327,7 +358,7 @@ export const api = {
     return data;
   },
 
-  async firebaseLogin(payload: { idToken?: string; email?: string | null; displayName?: string | null; password?: string }): Promise<{ success: boolean; admin: AdminUser; token?: string; error?: string }> {
+  async firebaseLogin(payload: { idToken?: string; email?: string | null; displayName?: string | null; password?: string }): Promise<{ success: boolean; admin: AdminUser; token?: string; botId?: string; error?: string }> {
     const res = await authFetch('/api/auth/firebase-login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -340,16 +371,15 @@ export const api = {
       throw err;
     }
     if (data.token) {
-      try {
-        if (typeof window !== 'undefined' && window.localStorage) {
-          localStorage.setItem(TOKEN_KEY, data.token);
-        }
-      } catch {}
+      storeToken(data.token);
+    }
+    if (data.botId) {
+      setActiveBotId(data.botId);
     }
     return data;
   },
 
-  async telegramLogin(tgUser: any): Promise<{ success: boolean; admin: AdminUser; token?: string; error?: string }> {
+  async telegramLogin(tgUser: any): Promise<{ success: boolean; admin: AdminUser; token?: string; botId?: string; error?: string }> {
     const res = await authFetch('/api/auth/telegram-login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -358,11 +388,10 @@ export const api = {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Telegram authentication failed');
     if (data.token) {
-      try {
-        if (typeof window !== 'undefined' && window.localStorage) {
-          localStorage.setItem(TOKEN_KEY, data.token);
-        }
-      } catch {}
+      storeToken(data.token);
+    }
+    if (data.botId) {
+      setActiveBotId(data.botId);
     }
     return data;
   },
@@ -383,12 +412,23 @@ export const api = {
   },
 
   async logout(): Promise<void> {
+    const previousToken = getStoredToken();
+    const activeBotId = getActiveBotId();
     try {
-      if (typeof window !== 'undefined' && window.localStorage) {
-        localStorage.removeItem(TOKEN_KEY);
+      const headers = new Headers({ 'x-bot-id': activeBotId });
+      if (previousToken) {
+        headers.set('Authorization', `Bearer ${previousToken}`);
       }
-    } catch {}
-    await authFetch('/api/auth/logout', { method: 'POST' });
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers,
+        cache: 'no-store',
+        credentials: 'include',
+        keepalive: true
+      }).catch(() => {});
+    } finally {
+      wipeLocalAuthStorage();
+    }
   },
 
   async forgotPassword(telegramId: string, code: string, newPassword: string): Promise<{ success: boolean; message: string }> {
