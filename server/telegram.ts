@@ -267,7 +267,7 @@ export class TelegramService {
       let data = await executeRequest(currentPayload);
 
       // Chained error-resilient fallback retries (handles combined parse_mode, reply_to_message_id, thread_id, and inline style rejections)
-      for (let retryPass = 0; retryPass < 3 && data && !data.ok; retryPass++) {
+      for (let retryPass = 0; retryPass < 4 && data && !data.ok; retryPass++) {
         const desc = typeof data.description === 'string' ? data.description.toLowerCase() : '';
         let modified = false;
 
@@ -2362,6 +2362,21 @@ export class TelegramService {
     }
 
 
+    // 4. Check /allfile or /allfiles command in groups early so built-in file list triggers reliably
+    const earlyAllFileCmd = this.parseAllFileCommand(text);
+    if (earlyAllFileCmd.matched) {
+      await this.handleFilesListCommand(
+        fromId,
+        message.chat.id,
+        earlyAllFileCmd.page,
+        message.message_id,
+        true,
+        undefined,
+        message.message_thread_id
+      );
+      return;
+    }
+
     // 5. Fraud Protection & Custom Word Filter Rules
     const fraudRules = await storage.getFraudRules();
     const activeFraudRules = fraudRules.filter(r => r.enabled);
@@ -2566,21 +2581,6 @@ export class TelegramService {
     const isFilters = /^\/(?:filters|filter)(?:@\w+)?$/i.test(text.trim());
     if (isFilters) {
       await this.handleFiltersCommand(message.chat.id, message.message_id, true);
-      return;
-    }
-
-    // Check /allfile or /allfiles command in groups (works with or without page argument)
-    const allFileCmd = this.parseAllFileCommand(text);
-    if (allFileCmd.matched) {
-      await this.handleFilesListCommand(
-        fromId,
-        message.chat.id,
-        allFileCmd.page,
-        message.message_id,
-        true,
-        undefined,
-        message.message_thread_id
-      );
       return;
     }
 
@@ -4552,7 +4552,7 @@ export class TelegramService {
 
     if (totalItems === 0) {
       return {
-        text: '📂 <b>Stored Files &amp; Links</b>\n\n<i>No files, documents, or links have been added yet.</i>',
+        text: '📁 <b>No files found in the database.</b>',
         inlineKeyboard: [
           [
             { text: '🔄 Refresh', callback_data: 'fl_p:1', style: 'primary' },
@@ -4709,55 +4709,69 @@ export class TelegramService {
     editMessageId?: number,
     threadId?: number
   ): Promise<void> {
-    // Ensure database cache is initialized (0.01ms no-op when already warm in memory)
-    await storage.loadLatest(false);
-    const view = this.buildFilesListView(page);
+    try {
+      // Ensure database cache is initialized (0.01ms no-op when already warm in memory)
+      await storage.loadLatest(false);
+      if (storage.getItemsFast().length === 0) {
+        await storage.loadLatest(true).catch(() => {});
+      }
+      const view = this.buildFilesListView(page);
 
-    if (editMessageId) {
-      const editRes = await this.callTelegramApi('editMessageText', {
-        chat_id: chatId,
-        message_id: editMessageId,
-        text: view.text,
-        parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: view.inlineKeyboard }
-      });
+      if (editMessageId) {
+        const editRes = await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: editMessageId,
+          text: view.text,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: view.inlineKeyboard }
+        });
 
-      if (editRes?.ok) {
+        if (editRes?.ok) {
+          return;
+        }
+
+        const desc = String(editRes?.description || '').toLowerCase();
+        // Telegram returns "message is not modified" if Refresh/page is already identical; ignore cleanly
+        if (desc.includes('not modified')) {
+          return;
+        }
+
+        console.warn('[Telegram] /allfile editMessageText notice:', editRes?.description || 'unknown error');
+        // If message can't be edited (e.g., too old or deleted), deliver updated page cleanly via sendMessage
+        const fallbackSendParams: any = {
+          chat_id: chatId,
+          text: view.text,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: view.inlineKeyboard }
+        };
+        if (threadId) fallbackSendParams.message_thread_id = threadId;
+        await this.callTelegramApi('sendMessage', fallbackSendParams);
         return;
       }
 
-      const desc = String(editRes?.description || '').toLowerCase();
-      // Telegram returns "message is not modified" if Refresh/page is already identical; ignore cleanly
-      if (desc.includes('not modified')) {
-        return;
-      }
-
-      console.warn('[Telegram] /allfile editMessageText notice:', editRes?.description || 'unknown error');
-      // If message can't be edited (e.g., too old or deleted), deliver updated page cleanly via sendMessage
-      const fallbackSendParams: any = {
+      const params: any = {
         chat_id: chatId,
         text: view.text,
         parse_mode: 'HTML',
         reply_markup: { inline_keyboard: view.inlineKeyboard }
       };
-      if (threadId) fallbackSendParams.message_thread_id = threadId;
-      await this.callTelegramApi('sendMessage', fallbackSendParams);
-      return;
-    }
+      if (replyToMessageId) params.reply_to_message_id = replyToMessageId;
+      if (threadId) params.message_thread_id = threadId;
 
-    const params: any = {
-      chat_id: chatId,
-      text: view.text,
-      parse_mode: 'HTML',
-      reply_markup: { inline_keyboard: view.inlineKeyboard }
-    };
-    if (replyToMessageId) params.reply_to_message_id = replyToMessageId;
-    if (threadId) params.message_thread_id = threadId;
-
-    const res = await this.callTelegramApi('sendMessage', params);
-    if (!res?.ok && params.reply_to_message_id) {
-      delete params.reply_to_message_id;
-      await this.callTelegramApi('sendMessage', params);
+      const res = await this.callTelegramApi('sendMessage', params);
+      if (!res?.ok && params.reply_to_message_id) {
+        delete params.reply_to_message_id;
+        await this.callTelegramApi('sendMessage', params);
+      }
+    } catch (err: any) {
+      console.error('[Telegram] /allfile command error:', err?.message || err);
+      const errParams: any = {
+        chat_id: chatId,
+        text: '❌ Unable to load the file list right now. Please try again in a moment.'
+      };
+      if (replyToMessageId && !editMessageId) errParams.reply_to_message_id = replyToMessageId;
+      if (threadId) errParams.message_thread_id = threadId;
+      await this.callTelegramApi('sendMessage', errParams).catch(() => {});
     }
   }
 
