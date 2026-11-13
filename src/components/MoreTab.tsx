@@ -132,9 +132,122 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [templateMediaUrl, setTemplateMediaUrl] = useState('');
   const [templateSaving, setTemplateSaving] = useState(false);
 
-  // Auto-focus and scroll to top refs for seamless editing
+  // Auto-focus, scroll to top, and cursor-position tracking refs for seamless editing
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const templateSelectionRef = useRef<{ start: number; end: number } | null>(null);
+  const maintenanceTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const maintenanceSelectionRef = useRef<{ start: number; end: number } | null>(null);
+  const broadcastTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const broadcastSelectionRef = useRef<{ start: number; end: number } | null>(null);
   const modalScrollRef = useRef<HTMLDivElement | null>(null);
+
+  const syncTextareaSelection = (
+    el: HTMLTextAreaElement | null,
+    selectionRef: React.MutableRefObject<{ start: number; end: number } | null>
+  ) => {
+    if (!el) return;
+    if (typeof el.selectionStart === 'number' && typeof el.selectionEnd === 'number') {
+      selectionRef.current = { start: el.selectionStart, end: el.selectionEnd };
+    }
+  };
+
+  const insertAtCursor = (
+    el: HTMLTextAreaElement | null,
+    currentValue: string,
+    snippet: string,
+    onUpdate: (nextValue: string) => void,
+    selectionRef?: React.MutableRefObject<{ start: number; end: number } | null>
+  ) => {
+    if (!el) {
+      onUpdate(`${currentValue}${snippet}`);
+      return;
+    }
+
+    const isFocused = document.activeElement === el;
+    const hasLiveSelection =
+      typeof el.selectionStart === 'number' && typeof el.selectionEnd === 'number';
+
+    let start = hasLiveSelection ? el.selectionStart : currentValue.length;
+    let end = hasLiveSelection ? el.selectionEnd : currentValue.length;
+
+    if (!isFocused && selectionRef?.current) {
+      start = selectionRef.current.start;
+      end = selectionRef.current.end;
+    }
+
+    start = Math.max(0, Math.min(start, currentValue.length));
+    end = Math.max(start, Math.min(end, currentValue.length));
+
+    const nextValue = currentValue.slice(0, start) + snippet + currentValue.slice(end);
+    const nextCursor = start + snippet.length;
+
+    if (selectionRef) {
+      selectionRef.current = { start: nextCursor, end: nextCursor };
+    }
+
+    onUpdate(nextValue);
+
+    requestAnimationFrame(() => {
+      if (el) {
+        el.focus();
+        el.setSelectionRange(nextCursor, nextCursor);
+      }
+    });
+  };
+
+  const wrapSelectionWithTag = (
+    el: HTMLTextAreaElement | null,
+    currentValue: string,
+    openTag: string,
+    closeTag: string,
+    fallbackInner: string,
+    onUpdate: (nextValue: string) => void,
+    selectionRef?: React.MutableRefObject<{ start: number; end: number } | null>
+  ) => {
+    if (!el) {
+      onUpdate(`${currentValue}${openTag}${fallbackInner}${closeTag}`);
+      return;
+    }
+
+    const isFocused = document.activeElement === el;
+    const hasLiveSelection =
+      typeof el.selectionStart === 'number' && typeof el.selectionEnd === 'number';
+
+    let start = hasLiveSelection ? el.selectionStart : currentValue.length;
+    let end = hasLiveSelection ? el.selectionEnd : currentValue.length;
+
+    if (!isFocused && selectionRef?.current) {
+      start = selectionRef.current.start;
+      end = selectionRef.current.end;
+    }
+
+    start = Math.max(0, Math.min(start, currentValue.length));
+    end = Math.max(start, Math.min(end, currentValue.length));
+
+    const selected = currentValue.slice(start, end);
+    const inner = selected || fallbackInner;
+    const snippet = `${openTag}${inner}${closeTag}`;
+    const nextValue = currentValue.slice(0, start) + snippet + currentValue.slice(end);
+    const nextCursorStart = start + openTag.length;
+    const nextCursorEnd = selected ? start + snippet.length : nextCursorStart + inner.length;
+
+    if (selectionRef) {
+      selectionRef.current = { start: nextCursorEnd, end: nextCursorEnd };
+    }
+
+    onUpdate(nextValue);
+
+    requestAnimationFrame(() => {
+      if (el) {
+        el.focus();
+        if (selected) {
+          el.setSelectionRange(nextCursorEnd, nextCursorEnd);
+        } else {
+          el.setSelectionRange(nextCursorStart, nextCursorEnd);
+        }
+      }
+    });
+  };
 
   useEffect(() => {
     if (editingTemplate) {
@@ -145,9 +258,14 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         }
         if (textareaRef.current) {
           textareaRef.current.focus();
+          const len = textareaRef.current.value.length;
+          textareaRef.current.setSelectionRange(len, len);
+          templateSelectionRef.current = { start: len, end: len };
         }
       }, 50);
       return () => clearTimeout(timer);
+    } else {
+      templateSelectionRef.current = null;
     }
   }, [editingTemplate]);
 
@@ -557,7 +675,14 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               ref={textareaRef}
               rows={5}
               value={templateContent}
-              onChange={(e) => setTemplateContent(e.target.value)}
+              onChange={(e) => {
+                setTemplateContent(e.target.value);
+                syncTextareaSelection(e.currentTarget, templateSelectionRef);
+              }}
+              onSelect={(e) => syncTextareaSelection(e.currentTarget, templateSelectionRef)}
+              onKeyUp={(e) => syncTextareaSelection(e.currentTarget, templateSelectionRef)}
+              onClick={(e) => syncTextareaSelection(e.currentTarget, templateSelectionRef)}
+              onBlur={(e) => syncTextareaSelection(e.currentTarget, templateSelectionRef)}
               className="w-full bg-[#101018] border border-zinc-700/80 rounded-2xl p-3.5 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
               placeholder="Type your bot message..."
             />
@@ -643,7 +768,16 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               {editingTemplate.key === 'START_MESSAGE' && (
                 <button
                   type="button"
-                  onClick={() => setTemplateContent((prev) => `${prev} @username`)}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() =>
+                    insertAtCursor(
+                      textareaRef.current,
+                      templateContent,
+                      '@username',
+                      setTemplateContent,
+                      templateSelectionRef
+                    )
+                  }
                   className="bg-indigo-950/70 border border-indigo-500/50 px-2 py-1 rounded-lg text-indigo-300 text-[10px] font-mono hover:bg-indigo-900/60 cursor-pointer font-bold transition-all active:scale-95"
                 >
                   +@username
@@ -653,7 +787,16 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 <button
                   key={v}
                   type="button"
-                  onClick={() => setTemplateContent((prev) => `${prev} {${v}}`)}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() =>
+                    insertAtCursor(
+                      textareaRef.current,
+                      templateContent,
+                      `{${v}}`,
+                      setTemplateContent,
+                      templateSelectionRef
+                    )
+                  }
                   className="bg-zinc-800/90 border border-zinc-700/80 px-2 py-1 rounded-lg text-red-400 text-[10px] font-mono hover:bg-zinc-700 cursor-pointer transition-all active:scale-95"
                 >
                   +{`{${v}}`}
@@ -2699,9 +2842,17 @@ service cloud.firestore {
                   <span className="text-[10px] text-amber-400 font-mono">Dynamic Tags</span>
                 </div>
                 <textarea
+                  ref={maintenanceTextareaRef}
                   rows={2}
                   value={botSettings.maintenanceNotice || ''}
-                  onChange={(e) => setBotSettings({ ...botSettings, maintenanceNotice: e.target.value })}
+                  onChange={(e) => {
+                    setBotSettings({ ...botSettings, maintenanceNotice: e.target.value });
+                    syncTextareaSelection(e.currentTarget, maintenanceSelectionRef);
+                  }}
+                  onSelect={(e) => syncTextareaSelection(e.currentTarget, maintenanceSelectionRef)}
+                  onKeyUp={(e) => syncTextareaSelection(e.currentTarget, maintenanceSelectionRef)}
+                  onClick={(e) => syncTextareaSelection(e.currentTarget, maintenanceSelectionRef)}
+                  onBlur={(e) => syncTextareaSelection(e.currentTarget, maintenanceSelectionRef)}
                   placeholder="e.g. ⚠️ Hello @username! {bot_name} is under maintenance. User ID: {user_id}"
                   className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-2.5 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-amber-500"
                 />
@@ -2715,13 +2866,19 @@ service cloud.firestore {
                     <button
                       key={tag}
                       type="button"
+                      onMouseDown={(e) => e.preventDefault()}
                       onClick={() => {
                         const current = botSettings.maintenanceNotice || '';
-                        const spacer = current.length > 0 && !current.endsWith(' ') ? ' ' : '';
-                        setBotSettings({
-                          ...botSettings,
-                          maintenanceNotice: `${current}${spacer}${tag}`
-                        });
+                        insertAtCursor(
+                          maintenanceTextareaRef.current,
+                          current,
+                          tag,
+                          (nextVal) =>
+                            setBotSettings((prev: any) =>
+                              prev ? { ...prev, maintenanceNotice: nextVal } : prev
+                            ),
+                          maintenanceSelectionRef
+                        );
                       }}
                       className="px-2 py-0.5 rounded-md bg-zinc-800/90 hover:bg-zinc-700 border border-zinc-700/80 text-[10px] font-mono text-zinc-300 hover:text-white transition-colors cursor-pointer"
                       title={`Click to insert ${tag}`}
@@ -3533,9 +3690,17 @@ service cloud.firestore {
             </div>
 
             <textarea
+              ref={broadcastTextareaRef}
               rows={4}
               value={broadcastMessage}
-              onChange={(e) => setBroadcastMessage(e.target.value)}
+              onChange={(e) => {
+                setBroadcastMessage(e.target.value);
+                syncTextareaSelection(e.currentTarget, broadcastSelectionRef);
+              }}
+              onSelect={(e) => syncTextareaSelection(e.currentTarget, broadcastSelectionRef)}
+              onKeyUp={(e) => syncTextareaSelection(e.currentTarget, broadcastSelectionRef)}
+              onClick={(e) => syncTextareaSelection(e.currentTarget, broadcastSelectionRef)}
+              onBlur={(e) => syncTextareaSelection(e.currentTarget, broadcastSelectionRef)}
               placeholder={
                 broadcastMediaType === 'text'
                   ? 'Write your announcement message here... (HTML tags <b>, <i>, <code> supported)'
@@ -3551,7 +3716,16 @@ service cloud.firestore {
                   <button
                     key={v}
                     type="button"
-                    onClick={() => setBroadcastMessage((prev) => `${prev} {${v}}`)}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() =>
+                      insertAtCursor(
+                        broadcastTextareaRef.current,
+                        broadcastMessage,
+                        `{${v}}`,
+                        setBroadcastMessage,
+                        broadcastSelectionRef
+                      )
+                    }
                     className="bg-zinc-800 border border-zinc-700/80 px-1.5 py-0.5 rounded text-red-400 text-[10px] font-mono hover:bg-zinc-700 cursor-pointer"
                   >
                     +{`{${v}}`}
@@ -3562,22 +3736,55 @@ service cloud.firestore {
               <div className="flex items-center gap-1 text-[10px] text-zinc-400">
                 <button
                   type="button"
-                  onClick={() => setBroadcastMessage((prev) => `${prev}<b>bold text</b>`)}
-                  className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-bold"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() =>
+                    wrapSelectionWithTag(
+                      broadcastTextareaRef.current,
+                      broadcastMessage,
+                      '<b>',
+                      '</b>',
+                      'bold text',
+                      setBroadcastMessage,
+                      broadcastSelectionRef
+                    )
+                  }
+                  className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-bold cursor-pointer"
                 >
                   B
                 </button>
                 <button
                   type="button"
-                  onClick={() => setBroadcastMessage((prev) => `${prev}<i>italic text</i>`)}
-                  className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 italic"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() =>
+                    wrapSelectionWithTag(
+                      broadcastTextareaRef.current,
+                      broadcastMessage,
+                      '<i>',
+                      '</i>',
+                      'italic text',
+                      setBroadcastMessage,
+                      broadcastSelectionRef
+                    )
+                  }
+                  className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 italic cursor-pointer"
                 >
                   I
                 </button>
                 <button
                   type="button"
-                  onClick={() => setBroadcastMessage((prev) => `${prev}<code>code</code>`)}
-                  className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-mono"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() =>
+                    wrapSelectionWithTag(
+                      broadcastTextareaRef.current,
+                      broadcastMessage,
+                      '<code>',
+                      '</code>',
+                      'code',
+                      setBroadcastMessage,
+                      broadcastSelectionRef
+                    )
+                  }
+                  className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-mono cursor-pointer"
                 >
                   &lt;/&gt;
                 </button>

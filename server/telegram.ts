@@ -3190,44 +3190,209 @@ export class TelegramService {
     return null;
   }
 
+  private static translationCache = new Map<string, { text: string; expiresAt: number }>();
+
+  private static splitTextChunks(text: string, maxLen: number): string[] {
+    if (text.length <= maxLen) return [text];
+    const chunks: string[] = [];
+    let remaining = text;
+    while (remaining.length > maxLen) {
+      let cut = remaining.lastIndexOf('\n', maxLen);
+      if (cut < Math.floor(maxLen * 0.4)) {
+        cut = remaining.lastIndexOf(' ', maxLen);
+      }
+      if (cut < Math.floor(maxLen * 0.4)) {
+        cut = maxLen;
+      }
+      chunks.push(remaining.slice(0, cut));
+      remaining = remaining.slice(cut).replace(/^\s+/, '');
+    }
+    if (remaining.length > 0) chunks.push(remaining);
+    return chunks;
+  }
+
+  private static async translateWithGoogleClient(
+    chunk: string,
+    targetCode: 'bn' | 'hi' | 'en',
+    client: 'at' | 'it' | 'gtx'
+  ): Promise<{ ok: boolean; text?: string; retryable?: boolean; status?: number }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const userAgent =
+        client === 'gtx'
+          ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+          : 'GoogleTranslate/6.29.59279 (Linux; U; Android 11; Pixel 5)';
+      const url = `https://translate.googleapis.com/translate_a/single?client=${client}&dt=t`;
+      const body = new URLSearchParams({ sl: 'auto', tl: targetCode, q: chunk }).toString();
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'User-Agent': userAgent,
+          'Accept': 'application/json, text/plain, */*',
+          'Content-Type': 'application/x-www-form-urlencoded;charset=utf-8'
+        },
+        body,
+        signal: controller.signal
+      });
+      if (!res.ok) {
+        return { ok: false, retryable: res.status === 429 || res.status >= 500, status: res.status };
+      }
+      const data: any = await res.json();
+      if (Array.isArray(data) && Array.isArray(data[0])) {
+        const joined = data[0]
+          .map((seg: any) => (Array.isArray(seg) && typeof seg[0] === 'string' ? seg[0] : ''))
+          .join('')
+          .trim();
+        if (joined) return { ok: true, text: joined };
+      }
+      return { ok: false, retryable: false, status: res.status };
+    } catch (err: any) {
+      return { ok: false, retryable: true };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private static async translateWithMyMemoryChunk(
+    chunk: string,
+    targetCode: 'bn' | 'hi' | 'en'
+  ): Promise<string | null> {
+    const maxRetries = 2;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      try {
+        const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(chunk)}&langpair=autodetect|${encodeURIComponent(targetCode)}`;
+        const res = await fetch(url, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/json'
+          },
+          signal: controller.signal
+        });
+        if (res.status === 429 || res.status >= 500) {
+          if (attempt < maxRetries) {
+            await new Promise((r) => setTimeout(r, 300 * Math.pow(2, attempt)));
+            continue;
+          }
+          return null;
+        }
+        if (!res.ok) return null;
+
+        const data: any = await res.json();
+        const responseStatus = Number(data?.responseStatus);
+        const details = String(data?.responseDetails || '').toUpperCase();
+        const translated = typeof data?.responseData?.translatedText === 'string'
+          ? data.responseData.translatedText.trim()
+          : '';
+
+        // Same language selected (e.g. translating English text to ENG) -> source text is already in target language
+        if (details.includes('SELECT TWO DISTINCT LANGUAGES')) {
+          return chunk;
+        }
+
+        const isErrorBanner =
+          !translated ||
+          translated.toUpperCase().includes('MYMEMORY WARNING') ||
+          translated.toUpperCase().includes('QUERY LENGTH LIMIT') ||
+          translated.toUpperCase().includes('INVALID LANGUAGE PAIR') ||
+          translated.toUpperCase().includes('PLEASE SELECT TWO DISTINCT LANGUAGES');
+
+        if (responseStatus === 200 && !isErrorBanner) {
+          return translated;
+        }
+        return null;
+      } catch {
+        if (attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, 300 * Math.pow(2, attempt)));
+          continue;
+        }
+        return null;
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+    return null;
+  }
+
   private static async translateText(sourceText: string, targetCode: 'bn' | 'hi' | 'en'): Promise<string | null> {
     const cleanText = sourceText.trim();
     if (!cleanText) return null;
 
-    // Primary fast translator: Google Translate GTX endpoint
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
-      const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(targetCode)}&dt=t&q=${encodeURIComponent(cleanText.slice(0, 4500))}`;
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (res.ok) {
-        const data: any = await res.json();
-        if (Array.isArray(data) && Array.isArray(data[0])) {
-          const joined = data[0]
-            .map((seg: any) => (Array.isArray(seg) && typeof seg[0] === 'string' ? seg[0] : ''))
-            .join('')
-            .trim();
-          if (joined) return joined;
-        }
-      }
-    } catch (err: any) {
-      console.warn('[Translate] Primary GTX endpoint notice:', err?.message || err);
+    const cacheKey = `${targetCode}:${cleanText}`;
+    const cached = this.translationCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.text;
     }
 
-    // Fallback translator: MyMemory API
+    const rememberResult = (val: string) => {
+      if (this.translationCache.size >= 300) {
+        const oldestKey = this.translationCache.keys().next().value;
+        if (oldestKey) this.translationCache.delete(oldestKey);
+      }
+      this.translationCache.set(cacheKey, { text: val, expiresAt: Date.now() + 10 * 60 * 1000 });
+      return val;
+    };
+
+    // Tier 1: Google Translate POST with client rotation (at -> it -> gtx) + exponential backoff
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
-      const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(cleanText.slice(0, 500))}&langpair=autodetect|${encodeURIComponent(targetCode)}`;
-      const res = await fetch(url, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (res.ok) {
-        const data: any = await res.json();
-        const translated = data?.responseData?.translatedText;
-        if (translated && typeof translated === 'string' && translated.trim()) {
-          return translated.trim();
+      const googleChunks = this.splitTextChunks(cleanText, 4000);
+      const translatedChunks: string[] = [];
+      let allGoogleSucceeded = true;
+
+      for (const chunk of googleChunks) {
+        const clients: Array<'at' | 'it' | 'gtx'> = ['at', 'it', 'gtx'];
+        let chunkResult: string | null = null;
+
+        for (let i = 0; i < clients.length; i++) {
+          const client = clients[i];
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const res = await this.translateWithGoogleClient(chunk, targetCode, client);
+            if (res.ok && res.text) {
+              chunkResult = res.text;
+              break;
+            }
+            if (!res.retryable) break;
+            if (attempt === 0) {
+              const backoffMs = 200 * Math.pow(2, i) + Math.floor(Math.random() * 120);
+              await new Promise((r) => setTimeout(r, backoffMs));
+            }
+          }
+          if (chunkResult) break;
         }
+
+        if (!chunkResult) {
+          allGoogleSucceeded = false;
+          break;
+        }
+        translatedChunks.push(chunkResult);
+      }
+
+      if (allGoogleSucceeded && translatedChunks.length > 0) {
+        return rememberResult(translatedChunks.join('\n'));
+      }
+    } catch (err: any) {
+      console.warn('[Translate] Google pipeline notice:', err?.message || err);
+    }
+
+    // Tier 2: Chunked MyMemory API fallback (up to 450 chars per chunk)
+    try {
+      const mmChunks = this.splitTextChunks(cleanText, 450);
+      const translatedChunks: string[] = [];
+      let allMmSucceeded = true;
+
+      for (const chunk of mmChunks) {
+        const translatedChunk = await this.translateWithMyMemoryChunk(chunk, targetCode);
+        if (!translatedChunk) {
+          allMmSucceeded = false;
+          break;
+        }
+        translatedChunks.push(translatedChunk);
+      }
+
+      if (allMmSucceeded && translatedChunks.length > 0) {
+        return rememberResult(translatedChunks.join('\n'));
       }
     } catch (err: any) {
       console.warn('[Translate] Fallback MyMemory notice:', err?.message || err);
