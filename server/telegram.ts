@@ -118,11 +118,6 @@ function extractUpdateKeys(update: any, botId: string = 'main'): string[] {
     keys.push(`${botId}_cb_${update.callback_query.id}`);
   }
 
-  if (update.callback_query?.from?.id && update.callback_query?.data) {
-    const cbMsgId = update.callback_query.message?.message_id || '';
-    keys.push(`${botId}_cb_act_${update.callback_query.from.id}_${update.callback_query.data}_${cbMsgId}`);
-  }
-
   return keys;
 }
 
@@ -152,7 +147,7 @@ function claimExclusiveTelegramUpdate(update: any, botId: string = 'main'): { al
   for (const k of keys) {
     const lastSeen = processedUpdateKeys.get(k);
     if (lastSeen) {
-      const ttl = k.includes('_deb_') ? 1500 : 90000;
+      const ttl = k.includes('_cb_act_') ? 300 : k.includes('_deb_') ? 1500 : 90000;
       if (now - lastSeen < ttl) {
         return { allowed: false, keys };
       }
@@ -288,6 +283,34 @@ export class TelegramService {
           body: JSON.stringify(fallbackPayload)
         });
         return await retryRes.json();
+      }
+
+      // If failed because inline_keyboard includes custom semantic `style` fields unsupported by an endpoint, retry without `style`
+      if (!data.ok && Array.isArray(payload?.reply_markup?.inline_keyboard)) {
+        const hasStyle = payload.reply_markup.inline_keyboard.some((row: any[]) =>
+          Array.isArray(row) && row.some((btn: any) => btn && typeof btn === 'object' && 'style' in btn)
+        );
+        if (hasStyle) {
+          const strippedKeyboard = payload.reply_markup.inline_keyboard.map((row: any[]) =>
+            Array.isArray(row)
+              ? row.map((btn: any) => {
+                  if (!btn || typeof btn !== 'object') return btn;
+                  const { style, ...rest } = btn;
+                  return rest;
+                })
+              : row
+          );
+          const fallbackPayload = {
+            ...payload,
+            reply_markup: { ...payload.reply_markup, inline_keyboard: strippedKeyboard }
+          };
+          const retryRes = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(fallbackPayload)
+          });
+          return await retryRes.json();
+        }
       }
 
       return data;
@@ -2305,8 +2328,8 @@ export class TelegramService {
       const keyboard = {
         inline_keyboard: [
           [
-            { text: '🚫 Ban User', callback_data: `admin_ban_user:${targetUserId}:${report.id}` },
-            { text: 'Dismiss', callback_data: `admin_dismiss_report:${report.id}` }
+            { text: '🚫 Ban User', callback_data: `admin_ban_user:${targetUserId}:${report.id}`, style: 'danger' },
+            { text: 'Dismiss', callback_data: `admin_dismiss_report:${report.id}`, style: 'primary' }
           ]
         ]
       };
@@ -2545,10 +2568,10 @@ export class TelegramService {
       return;
     }
 
-    // Check /files or /filelist command in groups (Admin / Authorized Users)
-    const filesCmdMatch = text.trim().match(/^\/(?:files|filelist)(?:@\w+)?(?:\s+(\d+))?$/i);
-    if (filesCmdMatch) {
-      const page = filesCmdMatch[1] ? Math.max(1, parseInt(filesCmdMatch[1], 10) || 1) : 1;
+    // Check /allfile or /allfiles command in groups
+    const allFileCmdMatch = text.trim().match(/^\/allfiles?(?:@\w+)?(?:\s+(\d+))?$/i);
+    if (allFileCmdMatch) {
+      const page = allFileCmdMatch[1] ? Math.max(1, parseInt(allFileCmdMatch[1], 10) || 1) : 1;
       await this.handleFilesListCommand(
         fromId,
         message.chat.id,
@@ -3103,10 +3126,10 @@ export class TelegramService {
       return;
     }
 
-    // 2c. File listing command (/files, /filelist) - Admin / Authorized Users
-    const filesCmdMatch = text.trim().match(/^\/(?:files|filelist)(?:@\w+)?(?:\s+(\d+))?$/i);
-    if (filesCmdMatch) {
-      const page = filesCmdMatch[1] ? Math.max(1, parseInt(filesCmdMatch[1], 10) || 1) : 1;
+    // 2c. File listing command (/allfile, /allfiles)
+    const allFileCmdMatch = text.trim().match(/^\/allfiles?(?:@\w+)?(?:\s+(\d+))?$/i);
+    if (allFileCmdMatch) {
+      const page = allFileCmdMatch[1] ? Math.max(1, parseInt(allFileCmdMatch[1], 10) || 1) : 1;
       await this.handleFilesListCommand(fromId, chatId, page, message.message_id, false);
       return;
     }
@@ -4486,24 +4509,17 @@ export class TelegramService {
   }
 
   // =========================================================================
-  // INTERACTIVE FILE LISTING & LINK COPYING COMMAND (/files, /filelist)
+  // INTERACTIVE FILE LISTING & LINK COPYING COMMAND (/allfile, /allfiles)
   // =========================================================================
-  private static async buildFilesListView(requestedPage: number = 1): Promise<{
+  private static buildFilesListView(requestedPage: number = 1): {
     text: string;
     inlineKeyboard: any[][];
     totalItems: number;
     page: number;
     totalPages: number;
-  }> {
-    await storage.loadLatest(false);
-    const allItems = await storage.getItems();
-    const activeItems = allItems
-      .filter((item) => item && item.status !== 'disabled')
-      .sort((a, b) => {
-        const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-        const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-        return tb - ta;
-      });
+  } {
+    // Instant O(1) pre-sorted & pre-indexed retrieval from memory (zero DB/cloud lag)
+    const activeItems = storage.getItemsFast();
 
     const pageSize = 10;
     const totalItems = activeItems.length;
@@ -4515,7 +4531,12 @@ export class TelegramService {
     if (totalItems === 0) {
       return {
         text: '📂 <b>Stored Files &amp; Links</b>\n\n<i>No files, documents, or links have been added yet.</i>',
-        inlineKeyboard: [[{ text: '🔄 Refresh', callback_data: 'fl_p:1' }, { text: '✖️ Close', callback_data: 'fl_close' }]],
+        inlineKeyboard: [
+          [
+            { text: '🔄 Refresh', callback_data: 'fl_p:1', style: 'primary' },
+            { text: '✖️ Close', callback_data: 'fl_close', style: 'danger' }
+          ]
+        ],
         totalItems: 0,
         page: 1,
         totalPages: 1
@@ -4533,10 +4554,10 @@ export class TelegramService {
     ].filter(Boolean);
 
     const text =
-      `📂 <b>Stored Files &amp; Links (${totalItems})</b>\n` +
+      `📂 <b>All Stored Files &amp; Links (${totalItems})</b>\n` +
       `<i>${summaryParts.join(' • ')}</i>\n` +
       `📄 Page <b>${page}</b> of <b>${totalPages}</b>\n\n` +
-      `👇 <i>Tap any item below to view its details and copy its direct link:</i>`;
+      `👇 <i>Tap any item below to view details &amp; copy its link:</i>`;
 
     const rows: any[][] = pageItems.map((item, idx) => {
       const num = startIdx + idx + 1;
@@ -4555,26 +4576,25 @@ export class TelegramService {
           : '📄';
       const rawTitle = (item.fileName || item.name || item.rawKeyword || 'Untitled').replace(/\s+/g, ' ').trim();
       const shortTitle = rawTitle.length > 42 ? `${rawTitle.slice(0, 39)}...` : rawTitle;
-      // Keep callback_data strictly within Telegram's 64-byte limit
       const cbData = `fl_v:${item.id}:${page}`.slice(0, 64);
-      return [{ text: `${num}. ${icon} ${shortTitle}`, callback_data: cbData }];
+      return [{ text: `${num}. ${icon} ${shortTitle}`, callback_data: cbData, style: 'primary' }];
     });
 
     if (totalPages > 1) {
       const navRow: any[] = [];
       if (page > 1) {
-        navRow.push({ text: '⬅️ Prev', callback_data: `fl_p:${page - 1}` });
+        navRow.push({ text: '⬅️ Prev', callback_data: `fl_p:${page - 1}`, style: 'primary' });
       }
-      navRow.push({ text: `${page} / ${totalPages}`, callback_data: 'fl_noop' });
+      navRow.push({ text: `📄 ${page} / ${totalPages}`, callback_data: 'fl_noop', style: 'primary' });
       if (page < totalPages) {
-        navRow.push({ text: 'Next ➡️', callback_data: `fl_p:${page + 1}` });
+        navRow.push({ text: 'Next ➡️', callback_data: `fl_p:${page + 1}`, style: 'primary' });
       }
       rows.push(navRow);
     }
 
     rows.push([
-      { text: '🔄 Refresh', callback_data: `fl_p:${page}` },
-      { text: '✖️ Close', callback_data: 'fl_close' }
+      { text: '🔄 Refresh', callback_data: `fl_p:${page}`, style: 'primary' },
+      { text: '✖️ Close', callback_data: 'fl_close', style: 'danger' }
     ]);
 
     return { text, inlineKeyboard: rows, totalItems, page, totalPages };
@@ -4618,34 +4638,34 @@ export class TelegramService {
       `• <b>Triggers:</b> ${triggerList}\n` +
       `• <b>Deliveries:</b> ${item.deliveryCount || 0}\n\n` +
       `🔗 <b>Direct Start Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
-      `👇 <i>Tap <b>🔗 Copy Link</b> below to copy and share:</i>`;
+      `👇 <i>Tap <b>✅ 🔗 Copy Link</b> below to copy and share:</i>`;
 
     const copyBtnPrimary: any = cleanBotUsername
-      ? { text: '🔗 Copy Link', copy_text: { text: deepLink } }
-      : { text: '🔗 Copy Link', callback_data: `fl_copy:${item.id}` };
+      ? { text: '🔗 Copy Link', copy_text: { text: deepLink }, style: 'success' }
+      : { text: '🔗 Copy Link', callback_data: `fl_copy:${item.id}`, style: 'success' };
 
     const actionRowFallback: any[] = [
-      { text: '🔗 Copy Link', callback_data: `fl_copy:${item.id}` },
-      ...(cleanBotUsername ? [{ text: '↗️ Open Link', url: deepLink }] : [])
+      { text: '🔗 Copy Link', callback_data: `fl_copy:${item.id}`, style: 'success' },
+      ...(cleanBotUsername ? [{ text: '↗️ Open Link', url: deepLink, style: 'success' }] : [])
     ];
 
     const primaryKeyboard: any[][] = [
       [copyBtnPrimary],
       [
-        { text: '📋 Send Copyable Link', callback_data: `fl_copy:${item.id}` },
-        ...(cleanBotUsername ? [{ text: '↗️ Open Link', url: deepLink }] : [])
+        { text: '📋 Send Copyable Link', callback_data: `fl_copy:${item.id}`, style: 'success' },
+        ...(cleanBotUsername ? [{ text: '↗️ Open Link', url: deepLink, style: 'success' }] : [])
       ],
       [
-        { text: '⬅️ Back to File List', callback_data: `fl_p:${returnPage}` },
-        { text: '✖️ Close', callback_data: 'fl_close' }
+        { text: '⬅️ Back to File List', callback_data: `fl_p:${returnPage}`, style: 'primary' },
+        { text: '✖️ Close', callback_data: 'fl_close', style: 'danger' }
       ]
     ];
 
     const fallbackKeyboard: any[][] = [
       actionRowFallback,
       [
-        { text: '⬅️ Back to File List', callback_data: `fl_p:${returnPage}` },
-        { text: '✖️ Close', callback_data: 'fl_close' }
+        { text: '⬅️ Back to File List', callback_data: `fl_p:${returnPage}`, style: 'primary' },
+        { text: '✖️ Close', callback_data: 'fl_close', style: 'danger' }
       ]
     ];
 
@@ -4653,43 +4673,28 @@ export class TelegramService {
   }
 
   private static async handleFilesListCommand(
-    fromId: string,
+    _fromId: string,
     chatId: number | string,
     page: number = 1,
     replyToMessageId?: number,
-    isGroup: boolean = false,
+    _isGroup: boolean = false,
     editMessageId?: number,
     threadId?: number
   ): Promise<void> {
-    const isSysAdmin = await this.isAuthorizedAdmin(fromId);
-    const isGrpAdmin = isGroup && chatId ? await this.isGroupAdminOrCreator(chatId, fromId) : false;
-    if (!isSysAdmin && !isGrpAdmin) {
-      if (isGroup) {
-        await this.sendAutoDeletingNotice(
-          chatId,
-          '❌ Only administrators or authorized users can access the file list.',
-          5000,
-          replyToMessageId
-        );
-      } else {
-        await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text: '❌ Access denied. Only administrators or authorized users can access the file list.'
-        });
-      }
-      return;
-    }
-
-    const view = await this.buildFilesListView(page);
+    const view = this.buildFilesListView(page);
 
     if (editMessageId) {
-      await this.callTelegramApi('editMessageText', {
+      const editRes = await this.callTelegramApi('editMessageText', {
         chat_id: chatId,
         message_id: editMessageId,
         text: view.text,
         parse_mode: 'HTML',
         reply_markup: { inline_keyboard: view.inlineKeyboard }
       });
+      // Telegram returns "message is not modified" if Refresh was tapped with unchanged items; ignore cleanly
+      if (!editRes?.ok && editRes?.description && !String(editRes.description).toLowerCase().includes('not modified')) {
+        console.warn('[Telegram] /allfile editMessageText notice:', editRes.description);
+      }
       return;
     }
 
@@ -6066,31 +6071,23 @@ export class TelegramService {
       return;
     }
 
-    // INTERACTIVE FILE LISTING & LINK COPYING CALLBACKS (/files, /filelist)
+    // INTERACTIVE FILE LISTING & LINK COPYING CALLBACKS (/allfile, /allfiles)
     if (data && (data.startsWith('fl_p:') || data.startsWith('fl_v:') || data.startsWith('fl_copy:') || data === 'fl_close' || data === 'fl_noop')) {
-      if (data === 'fl_noop') {
-        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id });
-        return;
-      }
-
+      const msgId = cb.message?.message_id;
       const isGroupChat = cb.message?.chat?.type === 'group' || cb.message?.chat?.type === 'supergroup';
-      const isSysAdmin = await this.isAuthorizedAdmin(fromId);
-      const isGrpAdmin = isGroupChat && chatId ? await this.isGroupAdminOrCreator(chatId, fromId) : false;
-      if (!isSysAdmin && !isGrpAdmin) {
-        await this.callTelegramApi('answerCallbackQuery', {
-          callback_query_id: cb.id,
-          text: '❌ Unauthorized: Only admins or authorized users can use this menu.',
-          show_alert: true
-        });
+
+      if (data === 'fl_noop') {
+        this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
         return;
       }
 
       if (data === 'fl_close') {
-        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id });
-        if (chatId && cb.message?.message_id) {
+        // Respond immediately to dismiss button loading indicator and delete list message
+        this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Closed' }).catch(() => {});
+        if (chatId && msgId) {
           await this.callTelegramApi('deleteMessage', {
             chat_id: chatId,
-            message_id: cb.message.message_id
+            message_id: msgId
           }).catch(() => {});
         }
         return;
@@ -6098,15 +6095,16 @@ export class TelegramService {
 
       if (data.startsWith('fl_p:')) {
         const targetPage = Math.max(1, parseInt(data.slice('fl_p:'.length), 10) || 1);
-        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id });
-        if (chatId && cb.message?.message_id) {
+        // Immediately answer callback query (non-blocking) so Prev / Next / Back / Refresh never hangs
+        this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+        if (chatId && msgId) {
           await this.handleFilesListCommand(
             fromId,
             chatId,
             targetPage,
             undefined,
             isGroupChat,
-            cb.message.message_id
+            msgId
           );
         }
         return;
@@ -6118,11 +6116,7 @@ export class TelegramService {
         const itemId = lastColonIdx > 0 ? rawRest.slice(0, lastColonIdx) : rawRest;
         const returnPage = lastColonIdx > 0 ? Math.max(1, parseInt(rawRest.slice(lastColonIdx + 1), 10) || 1) : 1;
 
-        await storage.loadLatest(false);
-        const item =
-          (await storage.getItem(itemId)) ||
-          (await storage.getItems()).find((i) => i.id === itemId);
-
+        const item = storage.getItemFast(itemId);
         if (!item) {
           await this.callTelegramApi('answerCallbackQuery', {
             callback_query_id: cb.id,
@@ -6132,12 +6126,12 @@ export class TelegramService {
           return;
         }
 
-        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id });
+        this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
         const detail = await this.buildFileDetailView(item, returnPage);
-        if (chatId && cb.message?.message_id) {
+        if (chatId && msgId) {
           const editRes = await this.callTelegramApi('editMessageText', {
             chat_id: chatId,
-            message_id: cb.message.message_id,
+            message_id: msgId,
             text: detail.text,
             parse_mode: 'HTML',
             reply_markup: { inline_keyboard: detail.primaryKeyboard }
@@ -6145,7 +6139,7 @@ export class TelegramService {
           if (!editRes?.ok) {
             await this.callTelegramApi('editMessageText', {
               chat_id: chatId,
-              message_id: cb.message.message_id,
+              message_id: msgId,
               text: detail.text,
               parse_mode: 'HTML',
               reply_markup: { inline_keyboard: detail.fallbackKeyboard }
@@ -6157,10 +6151,7 @@ export class TelegramService {
 
       if (data.startsWith('fl_copy:')) {
         const itemId = data.slice('fl_copy:'.length).trim();
-        await storage.loadLatest(false);
-        const item =
-          (await storage.getItem(itemId)) ||
-          (await storage.getItems()).find((i) => i.id === itemId);
+        const item = storage.getItemFast(itemId);
 
         if (!item) {
           await this.callTelegramApi('answerCallbackQuery', {
@@ -6172,11 +6163,11 @@ export class TelegramService {
         }
 
         const detail = await this.buildFileDetailView(item, 1);
-        await this.callTelegramApi('answerCallbackQuery', {
+        this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
-          text: `🔗 Link ready to copy!`,
+          text: '🔗 Link ready to copy!',
           show_alert: false
-        });
+        }).catch(() => {});
 
         if (chatId) {
           const title = (item.fileName || item.name || 'File').trim();

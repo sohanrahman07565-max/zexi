@@ -542,6 +542,8 @@ export class SharedStorageService {
   private lastLoadedAt: number = 0;
   private triggerCache = new Map<string, ItemRecord>();
   private itemCache = new Map<string, ItemRecord>();
+  private sortedActiveItemsNewestCache: ItemRecord[] | null = null;
+  private sortedItemsChronoCache: ItemRecord[] | null = null;
   private cloudSyncTimer: NodeJS.Timeout | null = null;
 
   constructor(public readonly botId: string = 'main') {
@@ -613,6 +615,8 @@ export class SharedStorageService {
   private rebuildCache(): void {
     this.triggerCache.clear();
     this.itemCache.clear();
+    this.sortedActiveItemsNewestCache = null;
+    this.sortedItemsChronoCache = null;
     for (const item of this.db.items) {
       if (item.status === 'active') {
         this.itemCache.set(item.id, item);
@@ -651,6 +655,22 @@ export class SharedStorageService {
         }
       }
     }
+
+    // Pre-build chronological and newest-first active item indexes for instant /allfile rendering
+    this.sortedItemsChronoCache = [...this.db.items].sort((a, b) => {
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      if (timeA !== timeB) return timeA - timeB;
+      return (a.id || '').localeCompare(b.id || '');
+    });
+
+    this.sortedActiveItemsNewestCache = this.db.items
+      .filter((item) => item && item.status !== 'disabled')
+      .sort((a, b) => {
+        const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return timeB - timeA;
+      });
   }
 
   private isCloudSyncing = false;
@@ -1366,21 +1386,26 @@ export class SharedStorageService {
 
   // --- Items ---
   public async getItems(): Promise<ItemRecord[]> {
-    // True real-time synchronization: always load latest items from persistent cloud storage
-    await this.loadLatest(true);
+    await this.loadLatest(false);
     this.checkAndCleanExpiredItemsSync();
-    // Strictly sequential chronological order (FIFO): first added stays at top/first position
-    const items = [...this.db.items].sort((a, b) => {
-      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      if (timeA !== timeB) return timeA - timeB;
-      return (a.id || '').localeCompare(b.id || '');
-    });
-    return items;
+    if (!this.sortedItemsChronoCache) {
+      this.rebuildCache();
+    }
+    return this.sortedItemsChronoCache || [];
   }
 
-  public async getItem(id: string): Promise<ItemRecord | null> {
-    await this.loadLatest(true);
+  // Zero-latency synchronous indexed item list (newest first) for /allfile & interactive pagination
+  public getItemsFast(): ItemRecord[] {
+    this.checkAndCleanExpiredItemsSync();
+    if (!this.sortedActiveItemsNewestCache) {
+      this.rebuildCache();
+    }
+    return this.sortedActiveItemsNewestCache || [];
+  }
+
+  // Zero-latency O(1) synchronous single-item lookup
+  public getItemFast(id: string): ItemRecord | null {
+    if (!id) return null;
     const cached = this.itemCache.get(id);
     if (cached && cached.status === 'active') {
       if (cached.retentionType === 'temporary' && cached.expiresAt && Date.now() >= new Date(cached.expiresAt).getTime()) {
@@ -1389,8 +1414,7 @@ export class SharedStorageService {
       }
       return cached;
     }
-
-    const item = this.itemCache.get(id) || this.db.items.find(i => i.id === id);
+    const item = this.db.items.find(i => i.id === id);
     if (item && item.retentionType === 'temporary' && item.expiresAt) {
       if (Date.now() >= new Date(item.expiresAt).getTime()) {
         this.checkAndCleanExpiredItemsSync();
@@ -1398,6 +1422,11 @@ export class SharedStorageService {
       }
     }
     return item || null;
+  }
+
+  public async getItem(id: string): Promise<ItemRecord | null> {
+    await this.loadLatest(false);
+    return this.getItemFast(id);
   }
 
   public async findItemByTrigger(trigger: string): Promise<ItemRecord | null> {
