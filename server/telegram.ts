@@ -246,76 +246,77 @@ export class TelegramService {
       ? (Number(payload?.timeout) || 10) + 15
       : 15;
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutSeconds * 1000);
+    const executeRequest = async (reqPayload: Record<string, any>): Promise<any> => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutSeconds * 1000);
+      try {
+        const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(reqPayload),
+          signal: controller.signal
+        });
+        return await res.json();
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    };
 
     try {
-      const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
-      const data = await res.json();
+      let currentPayload: Record<string, any> = { ...payload };
+      let data = await executeRequest(currentPayload);
 
-      // If failed because of parse entities error (e.g. unclosed tags), retry without HTML parse_mode
-      if (!data.ok && data.description && typeof data.description === 'string' && data.description.toLowerCase().includes('parse entities')) {
-        console.warn(`[Telegram] ${method} failed with entity parsing (${data.description}). Retrying without parse_mode...`);
-        const fallbackPayload = { ...payload };
-        delete fallbackPayload.parse_mode;
-        const retryRes = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(fallbackPayload)
-        });
-        return await retryRes.json();
-      }
+      // Chained error-resilient fallback retries (handles combined parse_mode, reply_to_message_id, thread_id, and inline style rejections)
+      for (let retryPass = 0; retryPass < 3 && data && !data.ok; retryPass++) {
+        const desc = typeof data.description === 'string' ? data.description.toLowerCase() : '';
+        let modified = false;
 
-      // If failed because the message to be replied was deleted, immediately retry without reply_to_message_id
-      if (!data.ok && payload.reply_to_message_id && typeof data.description === 'string' && (data.description.toLowerCase().includes('replied') || data.description.toLowerCase().includes('reply'))) {
-        console.warn(`[Telegram] ${method} failed with reply_to_message_id (${data.description}). Retrying without reply_to_message_id...`);
-        const fallbackPayload = { ...payload };
-        delete fallbackPayload.reply_to_message_id;
-        const retryRes = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(fallbackPayload)
-        });
-        return await retryRes.json();
-      }
-
-      // If failed because inline_keyboard includes custom semantic `style` fields unsupported by an endpoint, retry without `style`
-      if (!data.ok && Array.isArray(payload?.reply_markup?.inline_keyboard)) {
-        const hasStyle = payload.reply_markup.inline_keyboard.some((row: any[]) =>
-          Array.isArray(row) && row.some((btn: any) => btn && typeof btn === 'object' && 'style' in btn)
-        );
-        if (hasStyle) {
-          const strippedKeyboard = payload.reply_markup.inline_keyboard.map((row: any[]) =>
-            Array.isArray(row)
-              ? row.map((btn: any) => {
-                  if (!btn || typeof btn !== 'object') return btn;
-                  const { style, ...rest } = btn;
-                  return rest;
-                })
-              : row
+        if (currentPayload.parse_mode && (desc.includes('parse entities') || desc.includes("can't parse"))) {
+          console.warn(`[Telegram] ${method} failed with entity parsing (${data.description}). Retrying without parse_mode...`);
+          const nextPayload = { ...currentPayload };
+          delete nextPayload.parse_mode;
+          currentPayload = nextPayload;
+          modified = true;
+        } else if (currentPayload.reply_to_message_id && (desc.includes('replied') || desc.includes('reply'))) {
+          console.warn(`[Telegram] ${method} failed with reply_to_message_id (${data.description}). Retrying without reply_to_message_id...`);
+          const nextPayload = { ...currentPayload };
+          delete nextPayload.reply_to_message_id;
+          currentPayload = nextPayload;
+          modified = true;
+        } else if (currentPayload.message_thread_id && desc.includes('thread')) {
+          console.warn(`[Telegram] ${method} failed with message_thread_id (${data.description}). Retrying without message_thread_id...`);
+          const nextPayload = { ...currentPayload };
+          delete nextPayload.message_thread_id;
+          currentPayload = nextPayload;
+          modified = true;
+        } else if (Array.isArray(currentPayload?.reply_markup?.inline_keyboard)) {
+          const hasStyle = currentPayload.reply_markup.inline_keyboard.some((row: any[]) =>
+            Array.isArray(row) && row.some((btn: any) => btn && typeof btn === 'object' && 'style' in btn)
           );
-          const fallbackPayload = {
-            ...payload,
-            reply_markup: { ...payload.reply_markup, inline_keyboard: strippedKeyboard }
-          };
-          const retryRes = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(fallbackPayload)
-          });
-          return await retryRes.json();
+          if (hasStyle) {
+            const strippedKeyboard = currentPayload.reply_markup.inline_keyboard.map((row: any[]) =>
+              Array.isArray(row)
+                ? row.map((btn: any) => {
+                    if (!btn || typeof btn !== 'object') return btn;
+                    const { style, ...rest } = btn;
+                    return rest;
+                  })
+                : row
+            );
+            currentPayload = {
+              ...currentPayload,
+              reply_markup: { ...currentPayload.reply_markup, inline_keyboard: strippedKeyboard }
+            };
+            modified = true;
+          }
         }
+
+        if (!modified) break;
+        data = await executeRequest(currentPayload);
       }
 
       return data;
     } catch (err: any) {
-      clearTimeout(timeoutId);
       if (method === 'getUpdates' && (err.name === 'AbortError' || err.message?.includes('aborted'))) {
         // Normal long-poll cycle completion; return empty updates cleanly without logging error
         return { ok: true, result: [] };
@@ -561,14 +562,14 @@ export class TelegramService {
   public static async handleUpdate(update: any, tokenOverride?: string, botId: string = 'main'): Promise<void> {
     if (!update) return;
 
+    if (tokenOverride && !botTokenContext.getStore()) {
+      return botTokenContext.run(tokenOverride, () => this.handleUpdate(update, undefined, botId));
+    }
+
     // Strict multi-instance atomic deduplication: prevents duplicate execution and double replies (0ms instant)
     const { allowed, keys } = claimExclusiveTelegramUpdate(update, botId);
     if (!allowed) {
       return;
-    }
-
-    if (tokenOverride && !botTokenContext.getStore()) {
-      return botTokenContext.run(tokenOverride, () => this.handleUpdate(update, undefined, botId));
     }
 
     try {
@@ -2568,14 +2569,13 @@ export class TelegramService {
       return;
     }
 
-    // Check /allfile or /allfiles command in groups
-    const allFileCmdMatch = text.trim().match(/^\/allfiles?(?:@\w+)?(?:\s+(\d+))?$/i);
-    if (allFileCmdMatch) {
-      const page = allFileCmdMatch[1] ? Math.max(1, parseInt(allFileCmdMatch[1], 10) || 1) : 1;
+    // Check /allfile or /allfiles command in groups (works with or without page argument)
+    const allFileCmd = this.parseAllFileCommand(text);
+    if (allFileCmd.matched) {
       await this.handleFilesListCommand(
         fromId,
         message.chat.id,
-        page,
+        allFileCmd.page,
         message.message_id,
         true,
         undefined,
@@ -2851,9 +2851,9 @@ export class TelegramService {
       return;
     }
 
-    // Check if user is in an active /editthismessage session
+    // Check if user is in an active /editthismessage session (allow built-in slash commands to bypass cleanly)
     const editSession = activeEditSessions.get(fromId);
-    if (editSession && text) {
+    if (editSession && text && !/^\/(?:cancel|start|filters?|allfiles?)(?:@\w+)?(?:\s|$)/i.test(text.trim())) {
       await storage.updateTemplate(editSession.templateKey, text);
       activeEditSessions.delete(fromId);
       await this.callTelegramApi('sendMessage', {
@@ -3126,11 +3126,18 @@ export class TelegramService {
       return;
     }
 
-    // 2c. File listing command (/allfile, /allfiles)
-    const allFileCmdMatch = text.trim().match(/^\/allfiles?(?:@\w+)?(?:\s+(\d+))?$/i);
-    if (allFileCmdMatch) {
-      const page = allFileCmdMatch[1] ? Math.max(1, parseInt(allFileCmdMatch[1], 10) || 1) : 1;
-      await this.handleFilesListCommand(fromId, chatId, page, message.message_id, false);
+    // 2c. File listing command (/allfile, /allfiles — defaults to Page 1 with zero arguments required)
+    const allFileCmd = this.parseAllFileCommand(text);
+    if (allFileCmd.matched) {
+      await this.handleFilesListCommand(
+        fromId,
+        chatId,
+        allFileCmd.page,
+        message.message_id,
+        false,
+        undefined,
+        message.message_thread_id
+      );
       return;
     }
 
@@ -4511,6 +4518,20 @@ export class TelegramService {
   // =========================================================================
   // INTERACTIVE FILE LISTING & LINK COPYING COMMAND (/allfile, /allfiles)
   // =========================================================================
+  private static parseAllFileCommand(rawText: string): { matched: boolean; page: number } {
+    const cleaned = String(rawText || '')
+      .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, ' ')
+      .trim();
+    const match = cleaned.match(/^\/allfiles?(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i);
+    if (!match) {
+      return { matched: false, page: 1 };
+    }
+    const argText = (match[1] || '').trim();
+    const numMatch = argText.match(/\d+/);
+    const page = numMatch ? Math.max(1, parseInt(numMatch[0], 10) || 1) : 1;
+    return { matched: true, page };
+  }
+
   private static buildFilesListView(requestedPage: number = 1): {
     text: string;
     inlineKeyboard: any[][];
@@ -4524,7 +4545,8 @@ export class TelegramService {
     const pageSize = 10;
     const totalItems = activeItems.length;
     const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
-    const page = Math.min(Math.max(1, requestedPage), totalPages);
+    const safeReqPage = Number.isFinite(requestedPage) ? Math.floor(requestedPage) : 1;
+    const page = Math.min(Math.max(1, safeReqPage), totalPages);
     const startIdx = (page - 1) * pageSize;
     const pageItems = activeItems.slice(startIdx, startIdx + pageSize);
 
@@ -4574,9 +4596,15 @@ export class TelegramService {
           : item.fileType === 'audio'
           ? '🎵'
           : '📄';
-      const rawTitle = (item.fileName || item.name || item.rawKeyword || 'Untitled').replace(/\s+/g, ' ').trim();
+      const rawTitle = (item.fileName || item.name || item.rawKeyword || 'Untitled')
+        .replace(/[\r\n\t]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim() || 'Untitled';
       const shortTitle = rawTitle.length > 42 ? `${rawTitle.slice(0, 39)}...` : rawTitle;
-      const cbData = `fl_v:${item.id}:${page}`.slice(0, 64);
+      const fullCb = `fl_v:${item.id}:${page}`;
+      const cbData = Buffer.byteLength(fullCb, 'utf8') <= 64
+        ? fullCb
+        : `fl_v:${item.id}`.slice(0, 64);
       return [{ text: `${num}. ${icon} ${shortTitle}`, callback_data: cbData, style: 'primary' }];
     });
 
@@ -4638,7 +4666,7 @@ export class TelegramService {
       `• <b>Triggers:</b> ${triggerList}\n` +
       `• <b>Deliveries:</b> ${item.deliveryCount || 0}\n\n` +
       `🔗 <b>Direct Start Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
-      `👇 <i>Tap <b>✅ 🔗 Copy Link</b> below to copy and share:</i>`;
+      `👇 <i>Tap <b>🔗 Copy Link</b> below to copy and share:</i>`;
 
     const copyBtnPrimary: any = cleanBotUsername
       ? { text: '🔗 Copy Link', copy_text: { text: deepLink }, style: 'success' }
@@ -4681,6 +4709,8 @@ export class TelegramService {
     editMessageId?: number,
     threadId?: number
   ): Promise<void> {
+    // Ensure database cache is initialized (0.01ms no-op when already warm in memory)
+    await storage.loadLatest(false);
     const view = this.buildFilesListView(page);
 
     if (editMessageId) {
@@ -4691,10 +4721,27 @@ export class TelegramService {
         parse_mode: 'HTML',
         reply_markup: { inline_keyboard: view.inlineKeyboard }
       });
-      // Telegram returns "message is not modified" if Refresh was tapped with unchanged items; ignore cleanly
-      if (!editRes?.ok && editRes?.description && !String(editRes.description).toLowerCase().includes('not modified')) {
-        console.warn('[Telegram] /allfile editMessageText notice:', editRes.description);
+
+      if (editRes?.ok) {
+        return;
       }
+
+      const desc = String(editRes?.description || '').toLowerCase();
+      // Telegram returns "message is not modified" if Refresh/page is already identical; ignore cleanly
+      if (desc.includes('not modified')) {
+        return;
+      }
+
+      console.warn('[Telegram] /allfile editMessageText notice:', editRes?.description || 'unknown error');
+      // If message can't be edited (e.g., too old or deleted), deliver updated page cleanly via sendMessage
+      const fallbackSendParams: any = {
+        chat_id: chatId,
+        text: view.text,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: view.inlineKeyboard }
+      };
+      if (threadId) fallbackSendParams.message_thread_id = threadId;
+      await this.callTelegramApi('sendMessage', fallbackSendParams);
       return;
     }
 
@@ -6074,6 +6121,7 @@ export class TelegramService {
     // INTERACTIVE FILE LISTING & LINK COPYING CALLBACKS (/allfile, /allfiles)
     if (data && (data.startsWith('fl_p:') || data.startsWith('fl_v:') || data.startsWith('fl_copy:') || data === 'fl_close' || data === 'fl_noop')) {
       const msgId = cb.message?.message_id;
+      const threadId = cb.message?.message_thread_id;
       const isGroupChat = cb.message?.chat?.type === 'group' || cb.message?.chat?.type === 'supergroup';
 
       if (data === 'fl_noop') {
@@ -6094,17 +6142,20 @@ export class TelegramService {
       }
 
       if (data.startsWith('fl_p:')) {
-        const targetPage = Math.max(1, parseInt(data.slice('fl_p:'.length), 10) || 1);
+        const rawPageStr = data.slice('fl_p:'.length).trim();
+        const parsedPage = parseInt(rawPageStr, 10);
+        const targetPage = Number.isFinite(parsedPage) && parsedPage >= 1 ? parsedPage : 1;
         // Immediately answer callback query (non-blocking) so Prev / Next / Back / Refresh never hangs
         this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
-        if (chatId && msgId) {
+        if (chatId) {
           await this.handleFilesListCommand(
             fromId,
             chatId,
             targetPage,
             undefined,
             isGroupChat,
-            msgId
+            msgId,
+            threadId
           );
         }
         return;
@@ -6116,7 +6167,11 @@ export class TelegramService {
         const itemId = lastColonIdx > 0 ? rawRest.slice(0, lastColonIdx) : rawRest;
         const returnPage = lastColonIdx > 0 ? Math.max(1, parseInt(rawRest.slice(lastColonIdx + 1), 10) || 1) : 1;
 
-        const item = storage.getItemFast(itemId);
+        let item = storage.getItemFast(itemId);
+        if (!item) {
+          await storage.loadLatest(false);
+          item = storage.getItemFast(itemId);
+        }
         if (!item) {
           await this.callTelegramApi('answerCallbackQuery', {
             callback_query_id: cb.id,
@@ -6151,7 +6206,11 @@ export class TelegramService {
 
       if (data.startsWith('fl_copy:')) {
         const itemId = data.slice('fl_copy:'.length).trim();
-        const item = storage.getItemFast(itemId);
+        let item = storage.getItemFast(itemId);
+        if (!item) {
+          await storage.loadLatest(false);
+          item = storage.getItemFast(itemId);
+        }
 
         if (!item) {
           await this.callTelegramApi('answerCallbackQuery', {
@@ -6175,7 +6234,7 @@ export class TelegramService {
             chat_id: chatId,
             text: `🔗 <b>${this.escapeHtml(title)}</b>\n\nTap below to copy link:\n<code>${this.escapeHtml(detail.deepLink)}</code>`,
             parse_mode: 'HTML',
-            ...(cb.message?.message_thread_id ? { message_thread_id: cb.message.message_thread_id } : {})
+            ...(threadId ? { message_thread_id: threadId } : {})
           });
         }
         return;

@@ -2988,6 +2988,8 @@ export class SharedStorageService {
       };
     }
 
+    this.rebuildCache();
+    this.invalidateCache();
     await this.persist();
     return { restoredCounts: counts };
   }
