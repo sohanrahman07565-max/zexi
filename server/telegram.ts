@@ -1833,6 +1833,21 @@ export class TelegramService {
 
     if (!text && !message.document && !message.photo && !message.video && !message.audio) return;
 
+    // 0. Check /allfile or /allfiles command immediately so built-in file list never gets blocked by active wizards or word filters
+    const earlyAllFileCmd = this.parseAllFileCommand(text);
+    if (earlyAllFileCmd.matched) {
+      await this.handleFilesListCommand(
+        fromId,
+        message.chat.id,
+        earlyAllFileCmd.page,
+        message.message_id,
+        true,
+        undefined,
+        message.message_thread_id
+      );
+      return;
+    }
+
     // 1. Check if user is inside an active /add session in group
     let addSession = activeAddSessions.get(fromId);
     if (!addSession) {
@@ -2362,22 +2377,7 @@ export class TelegramService {
     }
 
 
-    // 4. Check /allfile or /allfiles command in groups early so built-in file list triggers reliably
-    const earlyAllFileCmd = this.parseAllFileCommand(text);
-    if (earlyAllFileCmd.matched) {
-      await this.handleFilesListCommand(
-        fromId,
-        message.chat.id,
-        earlyAllFileCmd.page,
-        message.message_id,
-        true,
-        undefined,
-        message.message_thread_id
-      );
-      return;
-    }
-
-    // 5. Fraud Protection & Custom Word Filter Rules
+    // 4. Fraud Protection & Custom Word Filter Rules
     const fraudRules = await storage.getFraudRules();
     const activeFraudRules = fraudRules.filter(r => r.enabled);
     if (activeFraudRules.length > 0) {
@@ -4518,7 +4518,7 @@ export class TelegramService {
   // =========================================================================
   // INTERACTIVE FILE LISTING & LINK COPYING COMMAND (/allfile, /allfiles)
   // =========================================================================
-  private static parseAllFileCommand(rawText: string): { matched: boolean; page: number } {
+  public static parseAllFileCommand(rawText: string): { matched: boolean; page: number } {
     const cleaned = String(rawText || '')
       .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, ' ')
       .trim();
@@ -4532,7 +4532,7 @@ export class TelegramService {
     return { matched: true, page };
   }
 
-  private static buildFilesListView(requestedPage: number = 1): {
+  public static buildFilesListView(requestedPage: number = 1): {
     text: string;
     inlineKeyboard: any[][];
     totalItems: number;

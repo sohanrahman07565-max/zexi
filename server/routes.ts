@@ -2664,6 +2664,30 @@ apiRouter.post('/simulate', authenticate, async (req: Request, res: Response) =>
     });
   }
 
+  // Check /allfile or /allfiles command simulation (defaults to Page 1 with no arguments)
+  const allFileCmd = TelegramService.parseAllFileCommand(cleanInput);
+  if (allFileCmd.matched) {
+    await storage.loadLatest(false);
+    if (storage.getItemsFast().length === 0) {
+      await storage.loadLatest(true).catch(() => {});
+    }
+    const view = TelegramService.buildFilesListView(allFileCmd.page);
+    return res.json({
+      matched: true,
+      input: cleanInput,
+      chatType,
+      isAllFile: true,
+      page: view.page,
+      totalPages: view.totalPages,
+      totalItems: view.totalItems,
+      botResponse: {
+        isReplyToMessage: true,
+        text: view.text.replace(/<[^>]+>/g, ''),
+        buttons: view.inlineKeyboard.flat()
+      }
+    });
+  }
+
   const matchedItem = await storage.findItemByTrigger(cleanInput);
   const templates = await storage.getTemplates();
   const botUsername = await TelegramService.getBotUsername();
