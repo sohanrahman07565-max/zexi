@@ -86,7 +86,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [showAddFraudRule, setShowAddFraudRule] = useState<boolean>(false);
   const [newFraudKeyword, setNewFraudKeyword] = useState<string>('');
   const [newFraudMatchType, setNewFraudMatchType] = useState<'contains' | 'exact' | 'regex'>('contains');
-  const [newFraudAction, setNewFraudAction] = useState<'delete_and_warn' | 'delete' | 'warn' | 'mute' | 'ban'>('delete_and_warn');
+  const [newFraudAction, setNewFraudAction] = useState<'delete_and_warn' | 'delete' | 'warn' | 'mute' | 'ban' | 'reply_only'>('delete_and_warn');
   const [newFraudDuration, setNewFraudDuration] = useState<string>('30m');
   const [newFraudDurationUnit, setNewFraudDurationUnit] = useState<'minutes' | 'hours' | 'days' | 'permanent'>('minutes');
   const [newFraudDurationValue, setNewFraudDurationValue] = useState<number>(30);
@@ -555,7 +555,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         vFd.append('fileName', newFraudVideoFile.name);
         vFd.append('fileType', 'video');
         const vRes = await api.uploadFile(vFd);
-        finalMediaUrl = vRes.uploadedFileId || vRes.fileId;
+        finalMediaUrl = vRes.fileId || vRes.uploadedFileId || '';
         finalMediaType = 'video';
       }
 
@@ -4193,6 +4193,7 @@ service cloud.firestore {
                   className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white focus:outline-none focus:border-amber-500"
                 >
                   <option value="delete_and_warn">Delete &amp; Warn User</option>
+                  <option value="reply_only">Reply Only</option>
                   <option value="delete">Delete Message Only</option>
                   <option value="warn">Warn User Only</option>
                   <option value="mute">Mute User in Chat</option>
@@ -4305,12 +4306,19 @@ service cloud.firestore {
 
             <div>
               <label className="text-[11px] font-semibold text-zinc-300 block mb-1">
-                Custom Warning Message <span className="text-zinc-500 font-normal">(supports &#123;user_name&#125;, &#123;user_id&#125;, &#123;keyword&#125;, &#123;warning_count&#125;, &#123;max_warnings&#125;, &#123;action&#125;)</span>
+                {newFraudAction === 'reply_only' ? 'Reply / Caption Message' : 'Custom Warning Message'}{' '}
+                <span className="text-zinc-500 font-normal">
+                  (supports &#123;user_name&#125;, &#123;user_id&#125;, &#123;keyword&#125;, &#123;warning_count&#125;, &#123;max_warnings&#125;, &#123;action&#125;)
+                </span>
               </label>
               <textarea
                 value={newFraudWarningText}
                 onChange={(e) => setNewFraudWarningText(e.target.value)}
-                placeholder="⚠️ Warning ({warning_count}/{max_warnings}): Prohibited keyword detected. User: {user_name} | Action: {action}"
+                placeholder={
+                  newFraudAction === 'reply_only'
+                    ? 'Write your reply or video caption... (sent directly as a quote reply without deleting or warning)'
+                    : '⚠️ Warning ({warning_count}/{max_warnings}): Prohibited keyword detected. User: {user_name} | Action: {action}'
+                }
                 rows={2}
                 className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-amber-500"
               />
@@ -4480,6 +4488,8 @@ service cloud.firestore {
                           ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
                           : rule.action === 'mute'
                           ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
+                          : rule.action === 'reply_only'
+                          ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
                           : rule.action === 'delete_and_warn'
                           ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
                           : 'bg-zinc-800 text-zinc-300'
@@ -4487,12 +4497,17 @@ service cloud.firestore {
                     >
                       {rule.action.replace(/_/g, ' ')}
                     </span>
+                    {rule.mediaUrl && rule.mediaType && rule.mediaType !== 'text' && rule.mediaType !== 'none' && (
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                        {rule.mediaType === 'video' ? '🎥 Video Reply' : rule.mediaType === 'photo' ? '📸 Photo Reply' : `📎 ${rule.mediaType}`}
+                      </span>
+                    )}
                     {rule.duration && (rule.action === 'mute' || rule.action === 'ban') && (
                       <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-zinc-800 text-amber-300 border border-amber-500/20">
                         ⏱️ {rule.duration}
                       </span>
                     )}
-                    {rule.maxWarnings && rule.maxWarnings > 1 && (
+                    {rule.action !== 'reply_only' && rule.maxWarnings && rule.maxWarnings > 1 && (
                       <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-zinc-800 text-zinc-400 border border-zinc-700">
                         Max: {rule.maxWarnings} warnings
                       </span>

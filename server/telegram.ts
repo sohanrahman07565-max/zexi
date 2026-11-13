@@ -2366,20 +2366,27 @@ export class TelegramService {
             const action = rule.action || 'delete_and_warn';
             const maxWarnings = rule.maxWarnings && rule.maxWarnings > 0 ? rule.maxWarnings : 3;
             const duration = rule.duration || 'permanent';
+            const isReplyOnly = action === 'reply_only';
 
-            // Delete offending message if configured
-            if (action === 'delete' || action === 'delete_and_warn' || action === 'mute' || action === 'ban') {
-              if (message.message_id) {
-                await this.deleteUserMessage(message.chat.id, message.message_id);
-              }
+            // Delete offending message only when configured (NEVER delete on reply_only or warn)
+            const shouldDeleteMessage =
+              action === 'delete' || action === 'delete_and_warn' || action === 'mute' || action === 'ban';
+            if (shouldDeleteMessage && message.message_id) {
+              await this.deleteUserMessage(message.chat.id, message.message_id);
             }
 
-            // Increment and evaluate warning count
-            const currentWarnings = await storage.incrementUserFraudWarning(message.chat.id, fromId, rule.id);
-            const isFinalThreshold = currentWarnings >= maxWarnings;
+            // Increment and evaluate warning count ONLY for warning/penalty rules (skip on reply_only & delete)
+            let currentWarnings = 0;
+            let isFinalThreshold = false;
+            if (!isReplyOnly && action !== 'delete') {
+              currentWarnings = await storage.incrementUserFraudWarning(message.chat.id, fromId, rule.id);
+              isFinalThreshold = currentWarnings >= maxWarnings;
+            }
 
             let actionDescription = 'Warning issued';
-            if (action === 'delete') {
+            if (isReplyOnly) {
+              actionDescription = 'Reply sent';
+            } else if (action === 'delete') {
               actionDescription = 'Message deleted';
             } else if (action === 'mute') {
               actionDescription = isFinalThreshold ? `Muted (${duration})` : `Warning (${currentWarnings}/${maxWarnings})`;
@@ -2388,7 +2395,7 @@ export class TelegramService {
             }
 
             // If threshold reached and action is mute or ban, execute penalty
-            if (isFinalThreshold && (action === 'mute' || action === 'ban')) {
+            if (!isReplyOnly && isFinalThreshold && (action === 'mute' || action === 'ban')) {
               let durationSec = 0;
               const durLower = (duration || '').trim().toLowerCase();
               if (durLower && durLower !== 'permanent') {
@@ -2447,35 +2454,77 @@ export class TelegramService {
               await storage.resetUserFraudWarning(message.chat.id, fromId, rule.id);
             }
 
-            // Send notification/warning message
+            // Send notification / warning / Rose-style media+caption reply
             if (action !== 'delete') {
+              const hasMedia = Boolean(
+                rule.mediaUrl &&
+                rule.mediaType &&
+                rule.mediaType !== 'text' &&
+                rule.mediaType !== 'none'
+              );
+              const customMsgRaw = (rule.customMessage || rule.warningText || '').trim();
               const templates = await storage.getTemplates();
-              const defaultTpl = templates.FRAUD_KEYWORD_DEFAULT_REPLY?.content || 
-                '⚠️ <b>Warning ({warning_count}/{max_warnings}):</b> Prohibited content detected.\nUser: {user_name} (ID: <code>{user_id}</code>)\nAction taken: {action}';
-              
-              const rawMessage = rule.customMessage || rule.warningText || defaultTpl;
+              const defaultTpl = isReplyOnly
+                ? (hasMedia ? '' : '💬 Hello {user_name}, please check this regarding <code>{keyword}</code>.')
+                : (templates.FRAUD_KEYWORD_DEFAULT_REPLY?.content ||
+                  '⚠️ <b>Warning ({warning_count}/{max_warnings}):</b> Prohibited content detected.\nUser: {user_name} (ID: <code>{user_id}</code>)\nAction taken: {action}');
+
+              const rawMessage = customMsgRaw || defaultTpl;
               const formattedReply = rawMessage
-                .replace(/\{user_name\}/g, message.from?.first_name || 'User')
+                .replace(/\{user_name\}/g, this.escapeHtml(message.from?.first_name || 'User'))
                 .replace(/\{user_id\}/g, fromId)
-                .replace(/\{keyword\}/g, rule.keyword)
+                .replace(/\{keyword\}/g, this.escapeHtml(rule.keyword))
                 .replace(/\{warning_count\}/g, String(currentWarnings))
                 .replace(/\{max_warnings\}/g, String(maxWarnings))
                 .replace(/\{action\}/g, actionDescription)
                 .replace(/\{duration\}/g, duration);
 
-              if (rule.mediaUrl && rule.mediaType && rule.mediaType !== 'text' && rule.mediaType !== 'none') {
-                await TelegramService.sendBroadcastMessage({
+              // Quote-reply directly to the user's message whenever it wasn't deleted (e.g. reply_only or warn)
+              const quoteReplyId = !shouldDeleteMessage && message.message_id ? Number(message.message_id) : undefined;
+              const threadId = message.message_thread_id ? Number(message.message_thread_id) : undefined;
+
+              if (hasMedia && rule.mediaUrl) {
+                const mediaRes = await TelegramService.sendBroadcastMessage({
                   chatId: message.chat.id,
-                  message: formattedReply,
+                  message: formattedReply || undefined,
                   mediaType: rule.mediaType as any,
-                  mediaUrl: rule.mediaUrl
+                  mediaUrl: rule.mediaUrl,
+                  replyToMessageId: quoteReplyId,
+                  threadId
                 });
-              } else {
-                await this.callTelegramApi('sendMessage', {
+
+                // Cache newly assigned Telegram file_id back to rule for instant future replies
+                if (mediaRes.ok && mediaRes.fileId && rule.mediaUrl !== mediaRes.fileId) {
+                  storage.saveFraudRule({ ...rule, mediaUrl: mediaRes.fileId }).catch(() => {});
+                }
+
+                // Fallback to text reply if media dispatch failed and we have reply text
+                if (!mediaRes.ok && formattedReply) {
+                  console.warn('[Telegram] Fraud rule media reply failed, falling back to text:', mediaRes.description);
+                  await this.callTelegramApi('sendMessage', {
+                    chat_id: message.chat.id,
+                    text: formattedReply,
+                    parse_mode: 'HTML',
+                    ...(quoteReplyId ? { reply_to_message_id: quoteReplyId } : {}),
+                    ...(threadId ? { message_thread_id: threadId } : {})
+                  });
+                }
+              } else if (formattedReply) {
+                const sendRes = await this.callTelegramApi('sendMessage', {
                   chat_id: message.chat.id,
                   text: formattedReply,
-                  parse_mode: 'HTML'
+                  parse_mode: 'HTML',
+                  ...(quoteReplyId ? { reply_to_message_id: quoteReplyId } : {}),
+                  ...(threadId ? { message_thread_id: threadId } : {})
                 });
+                if (!sendRes?.ok && quoteReplyId) {
+                  await this.callTelegramApi('sendMessage', {
+                    chat_id: message.chat.id,
+                    text: formattedReply,
+                    parse_mode: 'HTML',
+                    ...(threadId ? { message_thread_id: threadId } : {})
+                  });
+                }
               }
             }
             return;
@@ -2493,6 +2542,22 @@ export class TelegramService {
     const isFilters = /^\/(?:filters|filter)(?:@\w+)?$/i.test(text.trim());
     if (isFilters) {
       await this.handleFiltersCommand(message.chat.id, message.message_id, true);
+      return;
+    }
+
+    // Check /files or /filelist command in groups (Admin / Authorized Users)
+    const filesCmdMatch = text.trim().match(/^\/(?:files|filelist)(?:@\w+)?(?:\s+(\d+))?$/i);
+    if (filesCmdMatch) {
+      const page = filesCmdMatch[1] ? Math.max(1, parseInt(filesCmdMatch[1], 10) || 1) : 1;
+      await this.handleFilesListCommand(
+        fromId,
+        message.chat.id,
+        page,
+        message.message_id,
+        true,
+        undefined,
+        message.message_thread_id
+      );
       return;
     }
 
@@ -3038,6 +3103,14 @@ export class TelegramService {
       return;
     }
 
+    // 2c. File listing command (/files, /filelist) - Admin / Authorized Users
+    const filesCmdMatch = text.trim().match(/^\/(?:files|filelist)(?:@\w+)?(?:\s+(\d+))?$/i);
+    if (filesCmdMatch) {
+      const page = filesCmdMatch[1] ? Math.max(1, parseInt(filesCmdMatch[1], 10) || 1) : 1;
+      await this.handleFilesListCommand(fromId, chatId, page, message.message_id, false);
+      return;
+    }
+
     // 3. Command: /setstartmsg or /startmsg
     if (text.startsWith('/setstartmsg') || text.startsWith('/startmsg')) {
       await this.handleSetStartMessageCommand(fromId, chatId, text, message);
@@ -3528,13 +3601,14 @@ export class TelegramService {
       }).catch(() => {});
     }
 
-    // Immediately trigger the instant delivery notice ("Delivering your file...") before dispatching file payloads
-    if (item.type === 'file' && !isTextOnlyItem && !options?.messageIdToEdit) {
-      this.callTelegramApi('sendMessage', {
-        chat_id: chatId,
-        text: '⚡ Delivering your file...'
-      }).catch(() => {});
-    }
+    // Immediately send "⏳ Delivering your file..." notice and capture its promise for cleanup in finally
+    const deliveringMsgPromise =
+      item.type === 'file' && !isTextOnlyItem && !options?.messageIdToEdit
+        ? this.callTelegramApi('sendMessage', {
+            chat_id: chatId,
+            text: '⏳ Delivering your file...'
+          }).catch(() => null)
+        : null;
 
     // Trigger instant chat action in background (zero blocking)
     const chatAction = item.type === 'file' && !isTextOnlyItem
@@ -3947,6 +4021,19 @@ export class TelegramService {
       }
     } catch (err: any) {
       console.error('[Telegram] Error in delivery execution:', err?.message || err);
+    } finally {
+      if (deliveringMsgPromise) {
+        try {
+          const statusRes = await deliveringMsgPromise;
+          const statusMsgId = statusRes?.ok ? Number(statusRes.result?.message_id) : undefined;
+          if (statusMsgId) {
+            await this.callTelegramApi('deleteMessage', {
+              chat_id: chatId,
+              message_id: statusMsgId
+            }).catch(() => {});
+          }
+        } catch {}
+      }
     }
   }
 
@@ -4121,37 +4208,76 @@ export class TelegramService {
     chatId: string | number;
     message?: string;
     mediaType: 'text' | 'photo' | 'video' | 'audio' | 'voice';
-    mediaUrl?: string; // URL or Telegram file_id
+    mediaUrl?: string; // URL, Telegram file_id, or local upload_*/local_* identifier
     fileBuffer?: Buffer;
     fileName?: string;
     mimeType?: string;
     pinMessage?: boolean;
+    replyToMessageId?: number;
+    threadId?: number;
   }): Promise<{ ok: boolean; messageId?: number; fileId?: string; description?: string }> {
     const token = await this.getBotToken();
     if (!token) return { ok: false, description: 'No bot token configured' };
 
     const chatId = String(params.chatId);
-    const caption = params.message?.trim() || undefined;
+    const captionRaw = params.message?.trim() || undefined;
+    const caption = captionRaw && captionRaw.length > 1024 ? `${captionRaw.slice(0, 1020)}...` : captionRaw;
     const mediaType = params.mediaType || 'text';
+    const replyToMessageId = params.replyToMessageId ? Number(params.replyToMessageId) : undefined;
+    const threadId = params.threadId ? Number(params.threadId) : undefined;
 
     // 1. Text-Only Message
     if (mediaType === 'text') {
-      const res = await this.callTelegramApi('sendMessage', {
+      let res = await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
         text: params.message || '',
-        parse_mode: 'HTML'
+        parse_mode: 'HTML',
+        ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
+        ...(threadId ? { message_thread_id: threadId } : {})
       });
+      if ((!res || !res.ok) && replyToMessageId) {
+        res = await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: params.message || '',
+          parse_mode: 'HTML',
+          ...(threadId ? { message_thread_id: threadId } : {})
+        });
+      }
       if (res && res.ok && params.pinMessage && res.result?.message_id) {
         await this.callTelegramApi('pinChatMessage', {
           chat_id: chatId,
           message_id: res.result.message_id
         }).catch(() => {});
       }
-      return { ok: Boolean(res && res.ok), messageId: res.result?.message_id, description: res.description };
+      return { ok: Boolean(res && res.ok), messageId: res?.result?.message_id, description: res?.description };
+    }
+
+    // Resolve locally uploaded media buffer if mediaUrl points to a local upload identifier (upload_*, local_*, phone_*)
+    let fileBuffer = params.fileBuffer;
+    let fileName = params.fileName;
+    let mimeType = params.mimeType;
+    const isLocalMediaId = Boolean(
+      params.mediaUrl &&
+      (params.mediaUrl.startsWith('upload_') ||
+        params.mediaUrl.startsWith('local_') ||
+        params.mediaUrl.startsWith('phone_'))
+    );
+
+    if (!fileBuffer && isLocalMediaId && params.mediaUrl) {
+      try {
+        const uploaded = await storage.getUploadedFile(params.mediaUrl);
+        if (uploaded && uploaded.buffer) {
+          fileBuffer = uploaded.buffer;
+          fileName = fileName || uploaded.fileName;
+          mimeType = mimeType || uploaded.mimeType;
+        }
+      } catch (lookupErr) {
+        console.warn('[Telegram] Failed to load local media buffer for rule/broadcast:', lookupErr);
+      }
     }
 
     // 2. Media via existing Telegram file_id or external URL
-    if (params.mediaUrl) {
+    if (params.mediaUrl && !isLocalMediaId && !fileBuffer) {
       let method = 'sendPhoto';
       let field = 'photo';
       if (mediaType === 'video') {
@@ -4165,11 +4291,32 @@ export class TelegramService {
         field = 'voice';
       }
 
-      const res = await this.callTelegramApi(method, {
+      const basePayload: Record<string, any> = {
         chat_id: chatId,
         [field]: params.mediaUrl,
-        ...(caption ? { caption, parse_mode: 'HTML' } : {})
-      });
+        ...(caption ? { caption, parse_mode: 'HTML' } : {}),
+        ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
+        ...(threadId ? { message_thread_id: threadId } : {})
+      };
+
+      let res = await this.callTelegramApi(method, basePayload);
+      // Retry without reply_to_message_id if Telegram rejected the quoted message
+      if ((!res || !res.ok) && replyToMessageId) {
+        const retryPayload = { ...basePayload };
+        delete retryPayload.reply_to_message_id;
+        res = await this.callTelegramApi(method, retryPayload);
+      }
+      // Retry without parse_mode if HTML tags failed to parse
+      if ((!res || !res.ok) && caption) {
+        const plainPayload: Record<string, any> = {
+          chat_id: chatId,
+          [field]: params.mediaUrl,
+          caption: caption.replace(/<[^>]+>/g, ''),
+          ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
+          ...(threadId ? { message_thread_id: threadId } : {})
+        };
+        res = await this.callTelegramApi(method, plainPayload);
+      }
 
       if (res && res.ok && params.pinMessage && res.result?.message_id) {
         await this.callTelegramApi('pinChatMessage', {
@@ -4178,14 +4325,40 @@ export class TelegramService {
         }).catch(() => {});
       }
 
-      const fileId = res.result?.photo ? res.result.photo[res.result.photo.length - 1]?.file_id :
-        res.result?.video?.file_id || res.result?.audio?.file_id || res.result?.voice?.file_id;
+      if (res && res.ok) {
+        const fileId = res.result?.photo ? res.result.photo[res.result.photo.length - 1]?.file_id :
+          res.result?.video?.file_id || res.result?.audio?.file_id || res.result?.voice?.file_id;
+        return { ok: true, messageId: res.result?.message_id, fileId, description: res.description };
+      }
 
-      return { ok: Boolean(res && res.ok), messageId: res.result?.message_id, fileId, description: res.description };
+      // Check if local uploaded buffer exists under this key as last-resort fallback
+      try {
+        const uploaded = await storage.getUploadedFile(params.mediaUrl);
+        if (uploaded && uploaded.buffer) {
+          fileBuffer = uploaded.buffer;
+          fileName = fileName || uploaded.fileName;
+          mimeType = mimeType || uploaded.mimeType;
+        }
+      } catch {}
+
+      if (!fileBuffer) {
+        return { ok: false, messageId: res?.result?.message_id, description: res?.description };
+      }
     }
 
     // 3. Media via uploaded Buffer (multipart FormData)
-    if (params.fileBuffer) {
+    if (fileBuffer) {
+      let normalizedBuf: Buffer;
+      if (Buffer.isBuffer(fileBuffer)) {
+        normalizedBuf = fileBuffer;
+      } else if ((fileBuffer as any)?.data) {
+        normalizedBuf = Buffer.from((fileBuffer as any).data);
+      } else if (typeof fileBuffer === 'string') {
+        normalizedBuf = Buffer.from(fileBuffer, 'base64');
+      } else {
+        normalizedBuf = Buffer.from(fileBuffer);
+      }
+
       let method = 'sendPhoto';
       let fieldName = 'photo';
       if (mediaType === 'video') {
@@ -4199,24 +4372,40 @@ export class TelegramService {
         fieldName = 'voice';
       }
 
-      const formData = new FormData();
-      formData.append('chat_id', chatId);
-      if (caption) {
-        formData.append('caption', caption);
-        formData.append('parse_mode', 'HTML');
-      }
+      const sendMultipart = async (useReply: boolean, useHtml: boolean) => {
+        const formData = new FormData();
+        formData.append('chat_id', chatId);
+        if (caption) {
+          formData.append('caption', useHtml ? caption : caption.replace(/<[^>]+>/g, ''));
+          if (useHtml) formData.append('parse_mode', 'HTML');
+        }
+        if (useReply && replyToMessageId) {
+          formData.append('reply_to_message_id', String(replyToMessageId));
+        }
+        if (threadId) {
+          formData.append('message_thread_id', String(threadId));
+        }
 
-      const blob = new Blob([new Uint8Array(params.fileBuffer)] as any, {
-        type: params.mimeType || (mediaType === 'photo' ? 'image/jpeg' : mediaType === 'video' ? 'video/mp4' : mediaType === 'voice' ? 'audio/ogg' : 'audio/mpeg')
-      });
-      formData.append(fieldName, blob, params.fileName || (mediaType === 'photo' ? 'photo.jpg' : mediaType === 'video' ? 'video.mp4' : mediaType === 'voice' ? 'voice.ogg' : 'audio.mp3'));
+        const blob = new Blob([new Uint8Array(normalizedBuf)] as any, {
+          type: mimeType || (mediaType === 'photo' ? 'image/jpeg' : mediaType === 'video' ? 'video/mp4' : mediaType === 'voice' ? 'audio/ogg' : 'audio/mpeg')
+        });
+        formData.append(fieldName, blob, fileName || (mediaType === 'photo' ? 'photo.jpg' : mediaType === 'video' ? 'video.mp4' : mediaType === 'voice' ? 'voice.ogg' : 'audio.mp3'));
 
-      try {
         const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
           method: 'POST',
           body: formData
         });
-        const data = await res.json();
+        return await res.json();
+      };
+
+      try {
+        let data = await sendMultipart(true, true);
+        if (!data.ok && replyToMessageId) {
+          data = await sendMultipart(false, true);
+        }
+        if (!data.ok && caption) {
+          data = await sendMultipart(Boolean(replyToMessageId), false);
+        }
         if (data.ok && params.pinMessage && data.result?.message_id) {
           await this.callTelegramApi('pinChatMessage', {
             chat_id: chatId,
@@ -4293,6 +4482,230 @@ export class TelegramService {
     const res = await this.callTelegramApi('sendMessage', params);
     if (res.ok && res.result?.message_id && isGroup) {
       await this.trackAndLimitMessage(Number(chatId), res.result.message_id);
+    }
+  }
+
+  // =========================================================================
+  // INTERACTIVE FILE LISTING & LINK COPYING COMMAND (/files, /filelist)
+  // =========================================================================
+  private static async buildFilesListView(requestedPage: number = 1): Promise<{
+    text: string;
+    inlineKeyboard: any[][];
+    totalItems: number;
+    page: number;
+    totalPages: number;
+  }> {
+    await storage.loadLatest(false);
+    const allItems = await storage.getItems();
+    const activeItems = allItems
+      .filter((item) => item && item.status !== 'disabled')
+      .sort((a, b) => {
+        const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return tb - ta;
+      });
+
+    const pageSize = 10;
+    const totalItems = activeItems.length;
+    const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+    const page = Math.min(Math.max(1, requestedPage), totalPages);
+    const startIdx = (page - 1) * pageSize;
+    const pageItems = activeItems.slice(startIdx, startIdx + pageSize);
+
+    if (totalItems === 0) {
+      return {
+        text: '📂 <b>Stored Files &amp; Links</b>\n\n<i>No files, documents, or links have been added yet.</i>',
+        inlineKeyboard: [[{ text: '🔄 Refresh', callback_data: 'fl_p:1' }, { text: '✖️ Close', callback_data: 'fl_close' }]],
+        totalItems: 0,
+        page: 1,
+        totalPages: 1
+      };
+    }
+
+    const fileCount = activeItems.filter((i) => i.type === 'file' && !i.isTextOnly && i.fileEnabled !== false).length;
+    const linkCount = activeItems.filter((i) => i.type === 'link').length;
+    const textCount = totalItems - fileCount - linkCount;
+
+    const summaryParts = [
+      fileCount > 0 ? `📁 ${fileCount} Files` : null,
+      linkCount > 0 ? `🔗 ${linkCount} Links` : null,
+      textCount > 0 ? `💬 ${textCount} Text` : null
+    ].filter(Boolean);
+
+    const text =
+      `📂 <b>Stored Files &amp; Links (${totalItems})</b>\n` +
+      `<i>${summaryParts.join(' • ')}</i>\n` +
+      `📄 Page <b>${page}</b> of <b>${totalPages}</b>\n\n` +
+      `👇 <i>Tap any item below to view its details and copy its direct link:</i>`;
+
+    const rows: any[][] = pageItems.map((item, idx) => {
+      const num = startIdx + idx + 1;
+      const isTextOnly = Boolean(item.isTextOnly || (item.type === 'file' && item.fileEnabled === false));
+      const icon =
+        item.type === 'link'
+          ? '🔗'
+          : isTextOnly
+          ? '💬'
+          : item.fileType === 'video'
+          ? '🎥'
+          : item.fileType === 'photo'
+          ? '🖼️'
+          : item.fileType === 'audio'
+          ? '🎵'
+          : '📄';
+      const rawTitle = (item.fileName || item.name || item.rawKeyword || 'Untitled').replace(/\s+/g, ' ').trim();
+      const shortTitle = rawTitle.length > 42 ? `${rawTitle.slice(0, 39)}...` : rawTitle;
+      // Keep callback_data strictly within Telegram's 64-byte limit
+      const cbData = `fl_v:${item.id}:${page}`.slice(0, 64);
+      return [{ text: `${num}. ${icon} ${shortTitle}`, callback_data: cbData }];
+    });
+
+    if (totalPages > 1) {
+      const navRow: any[] = [];
+      if (page > 1) {
+        navRow.push({ text: '⬅️ Prev', callback_data: `fl_p:${page - 1}` });
+      }
+      navRow.push({ text: `${page} / ${totalPages}`, callback_data: 'fl_noop' });
+      if (page < totalPages) {
+        navRow.push({ text: 'Next ➡️', callback_data: `fl_p:${page + 1}` });
+      }
+      rows.push(navRow);
+    }
+
+    rows.push([
+      { text: '🔄 Refresh', callback_data: `fl_p:${page}` },
+      { text: '✖️ Close', callback_data: 'fl_close' }
+    ]);
+
+    return { text, inlineKeyboard: rows, totalItems, page, totalPages };
+  }
+
+  private static async buildFileDetailView(item: ItemRecord, returnPage: number = 1): Promise<{
+    text: string;
+    deepLink: string;
+    primaryKeyboard: any[][];
+    fallbackKeyboard: any[][];
+  }> {
+    const botUsername = await this.getBotUsername();
+    const cleanBotUsername = botUsername.replace(/^@/, '').trim();
+    const payload = getItemPayload(item);
+    const deepLink = cleanBotUsername
+      ? `https://t.me/${cleanBotUsername}?start=${payload}`
+      : `?start=${payload}`;
+
+    const isTextOnly = Boolean(item.isTextOnly || (item.type === 'file' && item.fileEnabled === false));
+    const typeLabel =
+      item.type === 'link'
+        ? '🔗 Link'
+        : isTextOnly
+        ? '💬 Text Message'
+        : item.fileType === 'video'
+        ? '🎥 Video'
+        : item.fileType === 'photo'
+        ? '🖼️ Photo'
+        : item.fileType === 'audio'
+        ? '🎵 Audio'
+        : '📄 Document / File';
+
+    const title = (item.fileName || item.name || 'Untitled').trim();
+    const triggerList = Array.isArray(item.triggers) && item.triggers.length > 0
+      ? item.triggers.slice(0, 5).map((t) => `<code>${this.escapeHtml(t)}</code>`).join(', ')
+      : '<i>None</i>';
+
+    const text =
+      `📦 <b>${this.escapeHtml(title)}</b>\n\n` +
+      `• <b>Type:</b> ${typeLabel}\n` +
+      `• <b>Triggers:</b> ${triggerList}\n` +
+      `• <b>Deliveries:</b> ${item.deliveryCount || 0}\n\n` +
+      `🔗 <b>Direct Start Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
+      `👇 <i>Tap <b>🔗 Copy Link</b> below to copy and share:</i>`;
+
+    const copyBtnPrimary: any = cleanBotUsername
+      ? { text: '🔗 Copy Link', copy_text: { text: deepLink } }
+      : { text: '🔗 Copy Link', callback_data: `fl_copy:${item.id}` };
+
+    const actionRowFallback: any[] = [
+      { text: '🔗 Copy Link', callback_data: `fl_copy:${item.id}` },
+      ...(cleanBotUsername ? [{ text: '↗️ Open Link', url: deepLink }] : [])
+    ];
+
+    const primaryKeyboard: any[][] = [
+      [copyBtnPrimary],
+      [
+        { text: '📋 Send Copyable Link', callback_data: `fl_copy:${item.id}` },
+        ...(cleanBotUsername ? [{ text: '↗️ Open Link', url: deepLink }] : [])
+      ],
+      [
+        { text: '⬅️ Back to File List', callback_data: `fl_p:${returnPage}` },
+        { text: '✖️ Close', callback_data: 'fl_close' }
+      ]
+    ];
+
+    const fallbackKeyboard: any[][] = [
+      actionRowFallback,
+      [
+        { text: '⬅️ Back to File List', callback_data: `fl_p:${returnPage}` },
+        { text: '✖️ Close', callback_data: 'fl_close' }
+      ]
+    ];
+
+    return { text, deepLink, primaryKeyboard, fallbackKeyboard };
+  }
+
+  private static async handleFilesListCommand(
+    fromId: string,
+    chatId: number | string,
+    page: number = 1,
+    replyToMessageId?: number,
+    isGroup: boolean = false,
+    editMessageId?: number,
+    threadId?: number
+  ): Promise<void> {
+    const isSysAdmin = await this.isAuthorizedAdmin(fromId);
+    const isGrpAdmin = isGroup && chatId ? await this.isGroupAdminOrCreator(chatId, fromId) : false;
+    if (!isSysAdmin && !isGrpAdmin) {
+      if (isGroup) {
+        await this.sendAutoDeletingNotice(
+          chatId,
+          '❌ Only administrators or authorized users can access the file list.',
+          5000,
+          replyToMessageId
+        );
+      } else {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '❌ Access denied. Only administrators or authorized users can access the file list.'
+        });
+      }
+      return;
+    }
+
+    const view = await this.buildFilesListView(page);
+
+    if (editMessageId) {
+      await this.callTelegramApi('editMessageText', {
+        chat_id: chatId,
+        message_id: editMessageId,
+        text: view.text,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: view.inlineKeyboard }
+      });
+      return;
+    }
+
+    const params: any = {
+      chat_id: chatId,
+      text: view.text,
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: view.inlineKeyboard }
+    };
+    if (replyToMessageId) params.reply_to_message_id = replyToMessageId;
+    if (threadId) params.message_thread_id = threadId;
+
+    const res = await this.callTelegramApi('sendMessage', params);
+    if (!res?.ok && params.reply_to_message_id) {
+      delete params.reply_to_message_id;
+      await this.callTelegramApi('sendMessage', params);
     }
   }
 
@@ -5651,6 +6064,131 @@ export class TelegramService {
         } catch {}
       }
       return;
+    }
+
+    // INTERACTIVE FILE LISTING & LINK COPYING CALLBACKS (/files, /filelist)
+    if (data && (data.startsWith('fl_p:') || data.startsWith('fl_v:') || data.startsWith('fl_copy:') || data === 'fl_close' || data === 'fl_noop')) {
+      if (data === 'fl_noop') {
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id });
+        return;
+      }
+
+      const isGroupChat = cb.message?.chat?.type === 'group' || cb.message?.chat?.type === 'supergroup';
+      const isSysAdmin = await this.isAuthorizedAdmin(fromId);
+      const isGrpAdmin = isGroupChat && chatId ? await this.isGroupAdminOrCreator(chatId, fromId) : false;
+      if (!isSysAdmin && !isGrpAdmin) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: '❌ Unauthorized: Only admins or authorized users can use this menu.',
+          show_alert: true
+        });
+        return;
+      }
+
+      if (data === 'fl_close') {
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id });
+        if (chatId && cb.message?.message_id) {
+          await this.callTelegramApi('deleteMessage', {
+            chat_id: chatId,
+            message_id: cb.message.message_id
+          }).catch(() => {});
+        }
+        return;
+      }
+
+      if (data.startsWith('fl_p:')) {
+        const targetPage = Math.max(1, parseInt(data.slice('fl_p:'.length), 10) || 1);
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id });
+        if (chatId && cb.message?.message_id) {
+          await this.handleFilesListCommand(
+            fromId,
+            chatId,
+            targetPage,
+            undefined,
+            isGroupChat,
+            cb.message.message_id
+          );
+        }
+        return;
+      }
+
+      if (data.startsWith('fl_v:')) {
+        const rawRest = data.slice('fl_v:'.length);
+        const lastColonIdx = rawRest.lastIndexOf(':');
+        const itemId = lastColonIdx > 0 ? rawRest.slice(0, lastColonIdx) : rawRest;
+        const returnPage = lastColonIdx > 0 ? Math.max(1, parseInt(rawRest.slice(lastColonIdx + 1), 10) || 1) : 1;
+
+        await storage.loadLatest(false);
+        const item =
+          (await storage.getItem(itemId)) ||
+          (await storage.getItems()).find((i) => i.id === itemId);
+
+        if (!item) {
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: '❌ File or link no longer exists.',
+            show_alert: true
+          });
+          return;
+        }
+
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id });
+        const detail = await this.buildFileDetailView(item, returnPage);
+        if (chatId && cb.message?.message_id) {
+          const editRes = await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: detail.text,
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: detail.primaryKeyboard }
+          });
+          if (!editRes?.ok) {
+            await this.callTelegramApi('editMessageText', {
+              chat_id: chatId,
+              message_id: cb.message.message_id,
+              text: detail.text,
+              parse_mode: 'HTML',
+              reply_markup: { inline_keyboard: detail.fallbackKeyboard }
+            });
+          }
+        }
+        return;
+      }
+
+      if (data.startsWith('fl_copy:')) {
+        const itemId = data.slice('fl_copy:'.length).trim();
+        await storage.loadLatest(false);
+        const item =
+          (await storage.getItem(itemId)) ||
+          (await storage.getItems()).find((i) => i.id === itemId);
+
+        if (!item) {
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: '❌ File or link no longer exists.',
+            show_alert: true
+          });
+          return;
+        }
+
+        const detail = await this.buildFileDetailView(item, 1);
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: `🔗 Link ready to copy!`,
+          show_alert: false
+        });
+
+        if (chatId) {
+          const title = (item.fileName || item.name || 'File').trim();
+          await this.callTelegramApi('sendMessage', {
+            chat_id: chatId,
+            text: `🔗 <b>${this.escapeHtml(title)}</b>\n\nTap below to copy link:\n<code>${this.escapeHtml(detail.deepLink)}</code>`,
+            parse_mode: 'HTML',
+            ...(cb.message?.message_thread_id ? { message_thread_id: cb.message.message_thread_id } : {})
+          });
+        }
+        return;
+      }
     }
 
     await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id });

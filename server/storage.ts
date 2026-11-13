@@ -246,7 +246,7 @@ export interface FraudKeywordRule {
   id: string;
   keyword: string;
   matchType: 'contains' | 'exact' | 'regex';
-  action: 'warn' | 'delete' | 'delete_and_warn' | 'mute' | 'ban';
+  action: 'warn' | 'delete' | 'delete_and_warn' | 'mute' | 'ban' | 'reply_only';
   duration?: string; // Supports custom minutes/hours/days e.g. "30m", "2h", "1d" or "permanent"
   maxWarnings?: number; // e.g. 1 to 10 (default: 3)
   customMessage?: string;

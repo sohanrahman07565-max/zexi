@@ -190,7 +190,7 @@ export interface FraudKeywordRule {
   id: string;
   keyword: string;
   matchType: 'contains' | 'exact' | 'regex';
-  action: 'delete' | 'warn' | 'delete_and_warn' | 'mute' | 'ban';
+  action: 'delete' | 'warn' | 'delete_and_warn' | 'mute' | 'ban' | 'reply_only';
   duration?: string; // Custom minutes/hours e.g. "30m", "2h", "1d" or "permanent"
   maxWarnings?: number;
   customMessage?: string;
