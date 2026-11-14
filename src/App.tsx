@@ -457,22 +457,15 @@ export default function App() {
   // If unauthenticated -> Render Main Login Screen
   if (!currentUser) {
     return (
-      <div className="relative min-h-screen w-full bg-[#05060d] text-white overflow-x-hidden overflow-y-auto selection:bg-indigo-500 selection:text-white">
-        <div className="aurora" aria-hidden="true">
-          <div className="orb o1" />
-          <div className="orb o2" />
-          <div className="orb o3" />
-        </div>
-        <div className="relative z-10">
-          <LoginScreen
-            design={design}
-            onSuccess={(admin) => {
-              setSessionBotId(admin.botId || api.getActiveBotId() || 'main');
-              setCurrentUser(admin);
-              refreshAllData();
-            }}
-          />
-        </div>
+      <div className="relative min-h-screen w-full bg-[#07060f] text-white overflow-x-hidden overflow-y-auto selection:bg-pink-500 selection:text-white">
+        <LoginScreen
+          design={design}
+          onSuccess={(admin) => {
+            setSessionBotId(admin.botId || api.getActiveBotId() || 'main');
+            setCurrentUser(admin);
+            refreshAllData();
+          }}
+        />
         <ToastContainer />
       </div>
     );
