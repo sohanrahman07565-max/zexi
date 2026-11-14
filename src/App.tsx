@@ -13,8 +13,6 @@ import { FiltersTab } from './components/FiltersTab';
 import { DesignTab } from './components/DesignTab';
 import { MoreTab } from './components/MoreTab';
 import { BottomNav } from './components/BottomNav';
-import { BackgroundEffects } from './components/BackgroundEffects';
-import { DynamicWeatherBackground } from './components/DynamicWeatherBackground';
 import { ToastContainer } from './components/ToastContainer';
 import { BotSwitcherModal } from './components/BotSwitcherModal';
 import { DynamicIslandHeader } from './components/DynamicIslandHeader';
@@ -60,8 +58,8 @@ export default function App() {
   const [templates, setTemplates] = useState<Record<string, MessageTemplate>>({});
   const [settings, setSettings] = useState<BotSettings | null>(null);
   const [design, setDesign] = useState<DesignConfig>({
-    primaryColor: '#ef4444',
-    accentColor: '#dc2626',
+    primaryColor: '#7c9cff',
+    accentColor: '#c084fc',
     backgroundStyle: 'cyber-grid',
     animationSpeed: 1.0,
     animationOpacity: 0.6,
@@ -207,8 +205,73 @@ export default function App() {
     }
   }, []);
 
+  // Sync Liquid Glass dynamic --a CSS variable from active theme config
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const raw = design?.primaryColor;
+    const resolvedAccent = !raw || raw.toLowerCase() === '#ef4444' ? '#7c9cff' : raw;
+    document.documentElement.style.setProperty('--a', resolvedAccent);
+  }, [design?.primaryColor]);
+
+  // Global Liquid Glass pointer ripple, haptics, and cursor/touch specular illumination
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    let activeGlassEl: HTMLElement | null = null;
+
+    const handlePointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+
+      const interactive = target.closest('button, .tap, .lg-sw, .lg-col, .lg-nb, [role="button"]');
+      if (interactive) {
+        try {
+          const rp = document.createElement('span');
+          rp.className = 'lg-rp';
+          rp.style.left = `${e.clientX}px`;
+          rp.style.top = `${e.clientY}px`;
+          document.body.appendChild(rp);
+          window.setTimeout(() => rp.remove(), 750);
+          if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+            navigator.vibrate(6);
+          }
+        } catch {}
+      }
+
+      const glassEl = target.closest('.glass, .glass-panel, .glass-water-card') as HTMLElement | null;
+      if (glassEl) {
+        const rect = glassEl.getBoundingClientRect();
+        glassEl.style.setProperty('--mx', `${e.clientX - rect.left}px`);
+        glassEl.style.setProperty('--my', `${e.clientY - rect.top}px`);
+        glassEl.classList.add('lit');
+        activeGlassEl = glassEl;
+      }
+    };
+
+    const clearLit = () => {
+      if (activeGlassEl) {
+        activeGlassEl.classList.remove('lit');
+        activeGlassEl = null;
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown, { passive: true });
+    window.addEventListener('pointerup', clearLit, { passive: true });
+    window.addEventListener('pointercancel', clearLit, { passive: true });
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      window.removeEventListener('pointerup', clearLit);
+      window.removeEventListener('pointercancel', clearLit);
+    };
+  }, []);
+
   const handleNavigate = useCallback((tab: string) => {
     setCurrentTab(tab);
+    if (typeof window !== 'undefined') {
+      try {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } catch {}
+    }
   }, []);
 
   // Smooth horizontal touch swipe gestures across main screen area
@@ -402,74 +465,39 @@ export default function App() {
   // If unauthenticated -> Render Main Login Screen
   if (!currentUser) {
     return (
-      <div className="relative min-h-screen w-full bg-[#060608] text-white overflow-x-hidden overflow-y-auto selection:bg-red-500 selection:text-white">
-        <BackgroundEffects
-          styleName={design.backgroundStyle}
-          speed={design.animationSpeed}
-          opacity={design.animationOpacity}
-          density={design.animationDensity}
-          enabled={design.animationEnabled}
-          primaryColor={design.primaryColor}
-          accentColor={design.accentColor}
-        />
-        <LoginScreen
-          design={design}
-          onSuccess={(admin) => {
-            setSessionBotId(admin.botId || api.getActiveBotId() || 'main');
-            setCurrentUser(admin);
-            refreshAllData();
-          }}
-        />
+      <div className="relative min-h-screen w-full bg-[#05060d] text-white overflow-x-hidden overflow-y-auto selection:bg-indigo-500 selection:text-white">
+        <div className="aurora" aria-hidden="true">
+          <div className="orb o1" />
+          <div className="orb o2" />
+          <div className="orb o3" />
+        </div>
+        <div className="relative z-10">
+          <LoginScreen
+            design={design}
+            onSuccess={(admin) => {
+              setSessionBotId(admin.botId || api.getActiveBotId() || 'main');
+              setCurrentUser(admin);
+              refreshAllData();
+            }}
+          />
+        </div>
         <ToastContainer />
       </div>
     );
   }
 
-  // Authenticated Android Mobile View
+  // Authenticated Liquid Glass Mobile-First Admin Panel
   return (
-    <div className="relative min-h-screen w-full bg-[#060608] text-white selection:bg-red-500 selection:text-white flex justify-center overflow-x-hidden overflow-y-auto">
-      {/* Dynamic Real-Time Weather Background (Interior Admin Panel) */}
-      <DynamicWeatherBackground />
-
-      {/* Hardware-Accelerated Floating Ambient Accent Layer */}
-      <div 
-        className="fixed inset-0 pointer-events-none z-0 overflow-hidden"
-        style={{
-          background: `radial-gradient(circle at 50% 12%, rgba(239,68,68,0.08) 0%, rgba(220,38,38,0.03) 45%, transparent 75%)`,
-          contain: 'strict',
-          transform: 'translate3d(0, 0, 0)'
-        }}
-      >
-        {/* Upper Floating Glowing Orb */}
-        <div 
-          className="absolute -top-24 left-1/4 w-[420px] h-[420px] rounded-full blur-[100px] pointer-events-none opacity-40 animate-ambient-1"
-          style={{ background: 'rgba(239, 68, 68, 0.12)', willChange: 'transform, opacity' }}
-        />
-        {/* Lower Floating Glowing Orb */}
-        <div 
-          className="absolute bottom-12 -right-24 w-[380px] h-[380px] rounded-full blur-[90px] pointer-events-none opacity-40 animate-ambient-2"
-          style={{ background: 'rgba(225, 29, 72, 0.10)', willChange: 'transform, opacity' }}
-        />
-        {/* Central Floating Ambient Glow */}
-        <div 
-          className="absolute top-1/2 left-1/3 -translate-x-1/2 -translate-y-1/2 w-[340px] h-[340px] rounded-full blur-[80px] pointer-events-none opacity-30 animate-ambient-3"
-          style={{ background: 'rgba(220, 38, 38, 0.08)', willChange: 'transform, opacity' }}
-        />
+    <div className="relative min-h-screen w-full bg-[#05060d] text-white selection:bg-indigo-500 selection:text-white flex justify-center overflow-x-hidden overflow-y-auto">
+      {/* Deep Space Aurora Background Layer */}
+      <div className="aurora" aria-hidden="true">
+        <div className="orb o1" />
+        <div className="orb o2" />
+        <div className="orb o3" />
       </div>
 
-      {/* Background canvas effects */}
-      <BackgroundEffects
-        styleName={design.backgroundStyle}
-        speed={design.animationSpeed}
-        opacity={design.animationOpacity}
-        density={design.animationDensity}
-        enabled={design.animationEnabled}
-        primaryColor={design.primaryColor || '#ef4444'}
-        accentColor={design.accentColor || '#dc2626'}
-      />
-
-      {/* Mobile Screen Container */}
-      <div className="relative z-10 w-full max-w-md min-h-screen flex flex-col px-4 pt-1 pb-28 sm:pb-32">
+      {/* Liquid Glass Screen Container */}
+      <div className="relative z-10 w-full max-w-[480px] min-h-screen flex flex-col px-3.5 pt-1 pb-28 sm:pb-32">
         {/* Interactive Dynamic Island Top Bar */}
         <DynamicIslandHeader
           currentTab={currentTab}

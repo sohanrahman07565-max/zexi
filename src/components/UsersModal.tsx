@@ -245,20 +245,20 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
         )}
 
         {/* Search Bar */}
-        <div className="shrink-0 p-3 sm:p-4 border-b border-zinc-800/80 bg-[#0a0a10]">
+        <div className="shrink-0 p-3 sm:p-4 border-b border-white/10 bg-white/[0.02]">
           <div className="relative">
-            <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+            <Search className="w-4 h-4 text-white/50 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder={userTab === 'banned' ? "Search banned users by Name, @username, or User ID..." : "Search active users by Name, @username, or User ID..."}
-              className="w-full pl-9 pr-8 py-2.5 rounded-xl bg-[#13131c] border border-zinc-800 text-white placeholder-zinc-500 text-xs focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 focus:shadow-[0_0_15px_rgba(239,68,68,0.25)] transition-all"
+              className="w-full pl-9 pr-8 py-2.5 rounded-xl bg-black/30 border border-white/15 text-white placeholder-white/40 text-xs focus:outline-none focus:border-white/40 transition-all"
             />
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-white/60 hover:text-white cursor-pointer"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
@@ -421,10 +421,14 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
         </div>
 
         {/* Modal Footer (Pinned at bottom) */}
-        <div className="shrink-0 p-3 sm:p-4 border-t border-zinc-800/80 bg-[#0a0a10] flex items-center justify-end text-xs">
+        <div className="shrink-0 p-3 sm:p-4 border-t border-white/10 bg-white/[0.02] flex items-center justify-end text-xs">
           <button
             onClick={onClose}
-            className="px-4 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold transition-colors cursor-pointer shadow-md shadow-cyan-600/30 active:scale-95"
+            className="tap px-4 py-2 rounded-xl text-white text-xs font-bold cursor-pointer border border-white/25"
+            style={{
+              background: 'linear-gradient(135deg, var(--a), var(--a2))',
+              boxShadow: '0 8px 20px -4px color-mix(in srgb, var(--a) 55%, transparent)',
+            }}
           >
             Close
           </button>

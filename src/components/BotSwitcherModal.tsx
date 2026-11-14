@@ -138,24 +138,30 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
         {/* Header */}
         <div className="flex items-center justify-between pb-3.5 border-b border-white/10 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-red-500/25 to-rose-600/20 text-red-400 border border-red-500/30 flex items-center justify-center shrink-0 shadow-lg shadow-red-500/20">
-              <Bot className="w-5 h-5 text-red-400" />
+            <div
+              className="lg-tile w-10 h-10 rounded-2xl text-white shrink-0"
+              style={{
+                background: 'linear-gradient(135deg, var(--a), var(--a2))',
+                '--c': 'rgba(124,156,255,0.45)',
+              } as React.CSSProperties}
+            >
+              <Bot className="w-5 h-5 text-white" />
             </div>
             <div className="min-w-0">
               <h2 className="text-base font-bold text-white flex items-center gap-1.5 leading-tight">
                 <span>Switch Telegram Bot</span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 font-mono font-semibold border border-red-500/30">
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 text-white/90 font-mono font-semibold border border-white/20">
                   {bots.length} Active
                 </span>
               </h2>
-              <p className="text-[11px] text-zinc-400 truncate">
+              <p className="text-[11px] text-white/60 truncate">
                 Isolated database for each bot instance
               </p>
             </div>
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-white/70 hover:text-white flex items-center justify-center transition-all cursor-pointer"
+            className="tap w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-white/70 hover:text-white flex items-center justify-center cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -164,13 +170,13 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
         {/* Scrollable Bot List Content */}
         <div className="flex-1 overflow-y-auto py-3 space-y-3.5 pr-1">
           {/* Active Bot Summary Banner */}
-          <div className="p-3 rounded-2xl bg-gradient-to-r from-red-950/40 via-red-900/20 to-zinc-900/50 border border-red-500/30 flex items-center justify-between gap-3">
+          <div className="glass p-3 rounded-2xl flex items-center justify-between gap-3">
             <div className="min-w-0">
-              <div className="text-[10px] uppercase font-bold tracking-wider text-red-400">
+              <div className="text-[10px] uppercase font-bold tracking-wider" style={{ color: 'var(--a3)' }}>
                 Active Dashboard Target
               </div>
               <div className="text-sm font-bold text-white truncate flex items-center gap-1.5 mt-0.5">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)] shrink-0" />
+                <span className="lg-dot shrink-0" />
                 <span className="truncate">
                   {bots.find(b => b.id === activeBotId)?.name || currentBotUsername || 'Primary Bot'}
                 </span>

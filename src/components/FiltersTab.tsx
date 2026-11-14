@@ -279,19 +279,25 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
           - Top-Left: Active Filter Count display
           - Top-Right: "Add Filter" Button
           ========================================================================= */}
-      <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-3">
+      <div className="glass-panel lg-rise rounded-[24px] p-4 space-y-3">
         {/* Title on Top */}
-        <div className="border-b border-zinc-800/80 pb-2">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 border border-amber-500/30 flex items-center justify-center shrink-0">
-              <Filter className="w-4 h-4" />
+        <div className="border-b border-white/10 pb-2.5">
+          <div className="flex items-center gap-2.5">
+            <div
+              className="lg-tile w-9 h-9 rounded-xl shrink-0"
+              style={{
+                background: 'color-mix(in srgb, #f472b6 22%, rgba(255,255,255,.06))',
+                '--c': 'rgba(244,114,182,0.45)',
+              } as React.CSSProperties}
+            >
+              <Filter className="w-4 h-4 text-pink-300" />
             </div>
             <div>
-              <h2 className="text-base font-bold text-white tracking-tight">
+              <h2 className="text-base font-extrabold text-white tracking-tight">
                 Filter Keywords &amp; Commands
               </h2>
-              <p className="text-[11px] text-zinc-400">
-                Manage group triggers and public <code className="text-amber-400 font-mono">/filters</code> list
+              <p className="text-[11px] text-white/60">
+                Manage group triggers and public <code className="lg-kw">/filters</code> list
               </p>
             </div>
           </div>
@@ -299,21 +305,23 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
 
         {/* Top-Left: Active Filter Count | Top-Right: Add Filter Button */}
         <div className="flex items-center justify-between gap-3 pt-1">
-          {/* Top-Left: Active Filter Count display */}
           <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold text-zinc-300">Active Filters:</span>
-            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-300">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="text-xs font-bold font-mono">{activeFilters.length}</span>
-              <span className="text-[10px] text-amber-400/80 font-medium">in /filters</span>
+            <span className="text-xs font-semibold text-white/75">Active Filters:</span>
+            <div className="lg-badge">
+              <span className="lg-dot" />
+              <span className="text-xs font-extrabold font-mono text-white">{activeFilters.length}</span>
+              <span className="text-[10px] text-white/65 font-semibold">in /filters</span>
             </div>
           </div>
 
-          {/* Top-Right: "Add Filter" Button */}
           {canEdit && (
             <button
               onClick={openAddModal}
-              className="py-2 px-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md shadow-blue-600/30 cursor-pointer active:scale-95 transition-all"
+              className="tap py-2 px-3.5 rounded-xl text-white font-bold text-xs flex items-center gap-1.5 border border-white/25 cursor-pointer whitespace-nowrap shrink-0"
+              style={{
+                background: 'linear-gradient(135deg, var(--a), var(--a2))',
+                boxShadow: '0 8px 20px -4px color-mix(in srgb, var(--a) 55%, transparent)',
+              }}
             >
               <Plus className="w-4 h-4 stroke-[2.5]" />
               <span>Add Filter</span>
@@ -324,37 +332,37 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
         {/* Search and Filter View Bar */}
         <div className="space-y-2 pt-1">
           <div className="relative">
-            <Search className="w-4 h-4 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+            <Search className="w-4 h-4 text-white/50 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="Search keyword or trigger name..."
-              className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl py-2 pl-9 pr-3 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
+              className="w-full bg-white/[0.06] border border-white/15 rounded-2xl py-2.5 pl-9 pr-3 text-xs text-white placeholder-white/45 focus:outline-none focus:border-white/40 transition-colors"
             />
           </div>
 
-          <div className="flex p-1 bg-zinc-900/90 border border-zinc-800/80 rounded-xl text-xs">
+          <div className="flex p-1 bg-white/[0.05] border border-white/15 rounded-2xl text-xs gap-1">
             <button
               onClick={() => setFilterMode('all')}
-              className={`flex-1 py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-                filterMode === 'all' ? 'bg-zinc-800 text-white shadow-xs' : 'text-zinc-400 hover:text-zinc-200'
+              className={`tap flex-1 py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
+                filterMode === 'all' ? 'bg-white/15 text-white border border-white/25 shadow-xs' : 'text-white/60 hover:text-white'
               }`}
             >
               All ({items.length})
             </button>
             <button
               onClick={() => setFilterMode('in_filters')}
-              className={`flex-1 py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-                filterMode === 'in_filters' ? 'bg-amber-500/20 text-amber-300 shadow-xs' : 'text-zinc-400 hover:text-zinc-200'
+              className={`tap flex-1 py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
+                filterMode === 'in_filters' ? 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/35' : 'text-white/60 hover:text-white'
               }`}
             >
               Visible ({activeFilters.length})
             </button>
             <button
               onClick={() => setFilterMode('hidden')}
-              className={`flex-1 py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-                filterMode === 'hidden' ? 'bg-zinc-800 text-zinc-300 shadow-xs' : 'text-zinc-400 hover:text-zinc-200'
+              className={`tap flex-1 py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
+                filterMode === 'hidden' ? 'bg-white/12 text-white/90 border border-white/20' : 'text-white/60 hover:text-white'
               }`}
             >
               Hidden ({items.length - activeFilters.length})
@@ -519,15 +527,15 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
                   </div>
                 </div>
 
-                {/* DIRECT INLINE QUICK ACTION BUTTONS (Requirement 1): [ Edit ] [ Delete ] [ Copy Link ] */}
-                <div className="pt-2 border-t border-zinc-800/80 grid grid-cols-3 gap-2">
+                {/* DIRECT INLINE QUICK ACTION BUTTONS: [ Edit ] [ Delete ] [ Copy Link ] */}
+                <div className="pt-2.5 border-t border-white/10 grid grid-cols-3 gap-2">
                   {/* Action 1: [ Edit ] */}
                   <button
                     type="button"
                     onClick={() => openEditModal(item)}
-                    className="py-2 px-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white border border-zinc-800 hover:border-amber-500/40 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer active:scale-95"
+                    className="tap py-2 px-2 rounded-xl bg-white/[0.07] hover:bg-white/[0.14] text-white border border-white/15 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
                   >
-                    <Edit2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <Edit2 className="w-3.5 h-3.5 text-sky-300 shrink-0" />
                     <span>Edit</span>
                   </button>
 
@@ -536,9 +544,9 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
                     type="button"
                     onClick={() => setDeleteConfirmItem(item)}
                     disabled={!canDelete}
-                    className="py-2 px-2 rounded-xl bg-zinc-900 hover:bg-rose-500/20 text-zinc-200 hover:text-rose-300 border border-zinc-800 hover:border-rose-500/40 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="tap py-2 px-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-200 border border-rose-400/25 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                   >
-                    <Trash2 className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                    <Trash2 className="w-3.5 h-3.5 text-rose-300 shrink-0" />
                     <span>Delete</span>
                   </button>
 
@@ -546,20 +554,20 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
                   <button
                     type="button"
                     onClick={() => copyShareableLink(item.id, shareableDeepLink)}
-                    className={`py-2 px-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer active:scale-95 ${
+                    className={`tap py-2 px-2 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer border ${
                       isLinkCopied
-                        ? 'bg-emerald-500 text-zinc-950 font-bold border border-emerald-400'
-                        : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white border border-zinc-800 hover:border-red-500/40'
+                        ? 'bg-emerald-500/25 text-emerald-200 font-bold border-emerald-400/45'
+                        : 'bg-white/[0.07] hover:bg-white/[0.14] text-cyan-200 border-white/15'
                     }`}
                   >
                     {isLinkCopied ? (
                       <>
-                        <Check className="w-3.5 h-3.5 text-zinc-950 stroke-[3]" />
+                        <Check className="w-3.5 h-3.5 text-emerald-300 stroke-[3]" />
                         <span>Copied!</span>
                       </>
                     ) : (
                       <>
-                        <Copy className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                        <Copy className="w-3.5 h-3.5 text-cyan-300 shrink-0" />
                         <span>Copy Link</span>
                       </>
                     )}

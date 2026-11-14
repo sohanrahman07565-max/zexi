@@ -591,13 +591,13 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
       {/* Search and Unified Add Button */}
       <div className="flex items-center gap-2">
         <div className="relative flex-1">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/50" />
           <input
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search files, links, triggers..."
-            className="w-full bg-zinc-900/90 border border-zinc-800 rounded-xl py-2 pl-9 pr-3 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
+            className="w-full bg-white/[0.06] backdrop-blur-xl border border-white/15 rounded-2xl py-2.5 pl-9 pr-3 text-xs text-white placeholder:text-white/45 focus:outline-none focus:border-white/40 transition-colors"
           />
         </div>
 
@@ -605,7 +605,11 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
         {(canAddFile || canAddLink) && (
           <button
             onClick={() => openAddModal('file')}
-            className="py-2 px-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-600/30 text-xs font-semibold flex items-center gap-1.5 cursor-pointer active:scale-95 transition-all shrink-0"
+            className="tap py-2.5 px-3.5 rounded-2xl text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer border border-white/25 shrink-0 whitespace-nowrap"
+            style={{
+              background: 'linear-gradient(135deg, var(--a), var(--a2))',
+              boxShadow: '0 8px 20px -4px color-mix(in srgb, var(--a) 55%, transparent)',
+            }}
           >
             <Plus className="w-3.5 h-3.5" />
             <span>Add Content</span>
@@ -614,51 +618,51 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
       </div>
 
       {/* Segmented Filter */}
-      <div className="flex p-1 bg-zinc-900/90 border border-zinc-800/80 rounded-xl text-xs flex-wrap gap-1">
+      <div className="glass flex p-1 rounded-2xl text-xs flex-wrap gap-1">
         <button
           onClick={() => setFilter('all')}
-          className={`flex-1 min-w-[50px] py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-            filter === 'all' ? 'bg-zinc-800 text-white shadow-xs' : 'text-zinc-400 hover:text-zinc-200'
+          className={`tap flex-1 min-w-[50px] py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
+            filter === 'all' ? 'bg-white/15 text-white border border-white/25 shadow-xs' : 'text-white/60 hover:text-white'
           }`}
         >
           All ({items.length})
         </button>
         <button
           onClick={() => setFilter('file')}
-          className={`flex-1 min-w-[50px] py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-            filter === 'file' ? 'bg-red-500/20 text-sky-300 shadow-xs' : 'text-zinc-400 hover:text-zinc-200'
+          className={`tap flex-1 min-w-[50px] py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
+            filter === 'file' ? 'bg-sky-500/20 text-sky-200 border border-sky-400/35' : 'text-white/60 hover:text-white'
           }`}
         >
           Files ({items.filter((i) => i.type === 'file' && !i.isTextOnly).length})
         </button>
         <button
           onClick={() => setFilter('text')}
-          className={`flex-1 min-w-[50px] py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-            filter === 'text' ? 'bg-purple-500/20 text-purple-300 shadow-xs' : 'text-zinc-400 hover:text-zinc-200'
+          className={`tap flex-1 min-w-[50px] py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
+            filter === 'text' ? 'bg-purple-500/20 text-purple-200 border border-purple-400/35' : 'text-white/60 hover:text-white'
           }`}
         >
           💬 Text ({items.filter((i) => i.isTextOnly).length})
         </button>
         <button
           onClick={() => setFilter('temporary')}
-          className={`flex-1 min-w-[70px] py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-            filter === 'temporary' ? 'bg-amber-500/20 text-amber-300 shadow-xs font-semibold' : 'text-zinc-400 hover:text-zinc-200'
+          className={`tap flex-1 min-w-[70px] py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
+            filter === 'temporary' ? 'bg-amber-500/20 text-amber-200 border border-amber-400/35' : 'text-white/60 hover:text-white'
           }`}
         >
           ⏳ Temp ({items.filter((i) => i.type === 'file' && i.retentionType === 'temporary').length})
         </button>
         <button
           onClick={() => setFilter('permanent')}
-          className={`flex-1 min-w-[70px] py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-            filter === 'permanent' ? 'bg-emerald-500/20 text-emerald-300 shadow-xs font-semibold' : 'text-zinc-400 hover:text-zinc-200'
+          className={`tap flex-1 min-w-[70px] py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
+            filter === 'permanent' ? 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/35' : 'text-white/60 hover:text-white'
           }`}
         >
           ♾️ Perm ({items.filter((i) => i.type === 'file' && i.retentionType !== 'temporary').length})
         </button>
         <button
           onClick={() => setFilter('link')}
-          className={`flex-1 min-w-[50px] py-1.5 text-center font-medium rounded-lg transition-colors cursor-pointer ${
-            filter === 'link' ? 'bg-indigo-500/20 text-indigo-300 shadow-xs' : 'text-zinc-400 hover:text-zinc-200'
+          className={`tap flex-1 min-w-[50px] py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
+            filter === 'link' ? 'bg-indigo-500/20 text-indigo-200 border border-indigo-400/35' : 'text-white/60 hover:text-white'
           }`}
         >
           Links ({items.filter((i) => i.type === 'link').length})
@@ -690,27 +694,33 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-start gap-3 min-w-0">
                     <div
-                      className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 mt-0.5 ${
-                        item.isTextOnly
-                          ? 'bg-purple-500/10 text-purple-400'
+                      className="lg-tile w-10 h-10 rounded-xl mt-0.5"
+                      style={{
+                        background: item.isTextOnly
+                          ? 'color-mix(in srgb, #c084fc 22%, rgba(255,255,255,.06))'
                           : item.type === 'file'
-                          ? 'bg-red-500/10 text-red-400'
-                          : 'bg-indigo-500/10 text-indigo-400'
-                      }`}
+                          ? 'color-mix(in srgb, #60a5fa 22%, rgba(255,255,255,.06))'
+                          : 'color-mix(in srgb, #818cf8 22%, rgba(255,255,255,.06))',
+                        '--c': item.isTextOnly
+                          ? 'rgba(192,132,252,0.4)'
+                          : item.type === 'file'
+                          ? 'rgba(96,165,250,0.4)'
+                          : 'rgba(129,140,248,0.4)',
+                      } as React.CSSProperties}
                     >
                       {item.isTextOnly ? (
-                        <MessageSquare className="w-5 h-5" />
+                        <MessageSquare className="w-5 h-5 text-purple-300" />
                       ) : item.type === 'file' ? (
-                        <FileText className="w-5 h-5" />
+                        <FileText className="w-5 h-5 text-sky-300" />
                       ) : (
-                        <Link2 className="w-5 h-5" />
+                        <Link2 className="w-5 h-5 text-indigo-300" />
                       )}
                     </div>
                     <div className="min-w-0">
-                      <div className="text-sm font-semibold text-white truncate">{item.name}</div>
+                      <div className="text-sm font-bold text-white truncate">{item.name}</div>
                       
                       {/* Typographic metadata */}
-                      <div className="flex items-center gap-1.5 text-xs text-zinc-400 mt-1 flex-wrap">
+                      <div className="flex items-center gap-1.5 text-xs text-white/65 mt-1 flex-wrap">
                         <button
                           type="button"
                           onClick={(e) => {
@@ -718,13 +728,13 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                             copySingleTag(primaryTrigger);
                           }}
                           title={`Click to copy ${primaryTrigger}`}
-                          className="font-mono text-red-400 hover:text-sky-300 font-semibold flex items-center gap-1 cursor-pointer transition-colors group"
+                          className="lg-kw flex items-center gap-1 cursor-pointer group hover:brightness-110"
                         >
                           <span>{primaryTrigger}</span>
                           {copiedTag === primaryTrigger ? (
-                            <Check className="w-3 h-3 text-emerald-400" />
+                            <Check className="w-3 h-3 text-emerald-300" />
                           ) : (
-                            <Copy className="w-3 h-3 text-zinc-500 group-hover:text-red-400 opacity-60 group-hover:opacity-100" />
+                            <Copy className="w-3 h-3 opacity-70 group-hover:opacity-100" />
                           )}
                         </button>
                         <span>·</span>
@@ -821,15 +831,14 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                 )}
 
                 {/* INLINE QUICK ACTIONS ON STORED FILES/LINKS LIST */}
-                {/* User Spec: Place quick-action options directly underneath each saved file/link card in the list view: [ Edit ] [ Delete ] [ Generated Link ] */}
-                <div className="pt-2.5 border-t border-zinc-800/80 grid grid-cols-3 gap-1.5 sm:gap-2">
+                <div className="pt-2.5 border-t border-white/10 grid grid-cols-3 gap-1.5 sm:gap-2">
                   {/* Quick Option 1: Edit */}
                   <button
                     type="button"
                     onClick={() => openEditModal(item)}
-                    className="py-2 px-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-200 hover:text-white border border-zinc-800 hover:border-red-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-xs"
+                    className="tap py-2 px-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-white/90 hover:text-white border border-white/10 hover:border-white/25 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
                   >
-                    <Edit2 className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                    <Edit2 className="w-3.5 h-3.5 text-[#7c9cff] shrink-0" />
                     <span>Edit</span>
                   </button>
 
@@ -837,7 +846,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                   <button
                     type="button"
                     onClick={() => setDeleteConfirmId(item.id)}
-                    className="py-2 px-2 rounded-xl bg-zinc-900 hover:bg-rose-950/40 text-zinc-300 hover:text-rose-400 border border-zinc-800 hover:border-rose-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-xs"
+                    className="tap py-2 px-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-200 hover:text-rose-100 border border-rose-400/20 hover:border-rose-400/35 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
                   >
                     <Trash2 className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                     <span>Delete</span>
@@ -848,10 +857,10 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                     type="button"
                     onClick={() => copyDeepLink(item.id, deepLink)}
                     title={deepLink}
-                    className={`py-2 px-2 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-xs truncate ${
+                    className={`tap py-2 px-2 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer truncate ${
                       isCopied
-                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 shadow-xs'
-                        : 'bg-indigo-950/40 hover:bg-indigo-900/60 text-indigo-300 border-indigo-500/30'
+                        ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40'
+                        : 'bg-[#7c9cff]/15 hover:bg-[#7c9cff]/25 text-[#c7d4ff] border-[#7c9cff]/30'
                     }`}
                   >
                     {isCopied ? (
@@ -861,7 +870,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                       </>
                     ) : (
                       <>
-                        <Share2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                        <Share2 className="w-3.5 h-3.5 text-[#7c9cff] shrink-0" />
                         <span className="truncate">Generated Link</span>
                       </>
                     )}
@@ -877,24 +886,24 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
       {deleteConfirmId && createPortal(
         <div 
           onClick={() => setDeleteConfirmId(null)}
-          className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-150"
+          className="fixed inset-0 z-[200] flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-150"
         >
           <div 
             onClick={(e) => e.stopPropagation()}
-            className="glass-panel w-full max-w-sm rounded-3xl p-5 sm:p-6 border border-zinc-700/80 shadow-[0_0_50px_rgba(0,0,0,0.9),0_0_30px_rgba(239,68,68,0.25)] animate-in zoom-in-95 duration-150"
+            className="glass-panel w-full max-w-sm rounded-[24px] p-5 sm:p-6 animate-in zoom-in-95 duration-150"
           >
-            <div className="w-11 h-11 rounded-2xl bg-red-500/20 border border-red-500/30 text-red-400 flex items-center justify-center mb-3">
+            <div className="lg-tile w-11 h-11 rounded-2xl bg-rose-500/20 text-rose-300 flex items-center justify-center mb-3">
               <Trash2 className="w-5 h-5" />
             </div>
             <h4 className="font-bold text-white text-base mb-1.5">Delete this item?</h4>
-            <p className="text-xs text-zinc-300 mb-5 leading-relaxed">
+            <p className="text-xs text-white/65 mb-5 leading-relaxed">
               This action cannot be undone. It will permanently remove the item, trigger mappings, and metadata.
             </p>
             <div className="flex gap-2.5">
               <button
                 type="button"
                 onClick={() => setDeleteConfirmId(null)}
-                className="flex-1 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white text-xs font-semibold cursor-pointer border border-zinc-700 transition-colors"
+                className="tap flex-1 py-2.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] text-white text-xs font-semibold cursor-pointer border border-white/15 transition-colors"
               >
                 Cancel
               </button>
@@ -902,7 +911,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                 type="button"
                 onClick={() => handleDelete(deleteConfirmId)}
                 disabled={loading}
-                className="flex-1 py-2.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold cursor-pointer shadow-lg shadow-red-600/30 disabled:opacity-50 transition-colors flex items-center justify-center gap-1.5"
+                className="tap flex-1 py-2.5 rounded-xl bg-rose-500/85 hover:bg-rose-500 text-white text-xs font-semibold cursor-pointer shadow-lg shadow-rose-500/25 disabled:opacity-50 transition-colors flex items-center justify-center gap-1.5"
               >
                 {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                 <span>{loading ? 'Deleting...' : 'Delete'}</span>
@@ -917,34 +926,34 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
       {modalMode !== 'none' && createPortal(
         <div 
           onClick={() => setModalMode('none')}
-          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md overscroll-contain animate-in fade-in duration-200"
+          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-md overscroll-contain animate-in fade-in duration-200"
         >
           <div 
             onClick={(e) => e.stopPropagation()}
-            className="glass-panel w-full sm:max-w-md max-h-[85vh] h-auto flex flex-col rounded-3xl border border-zinc-700/80 shadow-[0_0_50px_rgba(0,0,0,0.9),0_0_25px_rgba(6,182,212,0.18)] overflow-hidden animate-in zoom-in-95 duration-200 my-auto"
+            className="glass-panel w-full sm:max-w-md max-h-[85vh] h-auto flex flex-col rounded-[24px] overflow-hidden animate-in zoom-in-95 duration-200 my-auto"
           >
             {/* Modal Header - Pinned at Top */}
-            <div className="shrink-0 p-4 sm:p-5 border-b border-zinc-800 bg-[#0e0e16]/95 flex items-center justify-between">
+            <div className="shrink-0 p-4 sm:p-5 border-b border-white/10 bg-white/[0.03] flex items-center justify-between">
               <div>
                 <h3 className="font-bold text-white text-base">
                   {modalMode === 'edit' ? 'Edit Stored Item' : 'Add New File / Link'}
                 </h3>
-                <div className="flex items-center gap-2 mt-0.5 text-[11px] text-zinc-400">
-                  <span className="font-mono text-cyan-400 font-semibold">ID: {autoGeneratedId}</span>
-                  <span className="text-zinc-600">•</span>
+                <div className="flex items-center gap-2 mt-0.5 text-[11px] text-white/55">
+                  <span className="font-mono text-[#34d3ee] font-semibold">ID: {autoGeneratedId}</span>
+                  <span className="text-white/30">•</span>
                   <span>Auto-Generated</span>
                 </div>
               </div>
               <button
                 onClick={() => setModalMode('none')}
-                className="p-1.5 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white cursor-pointer transition-colors"
+                className="tap p-1.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.16] text-white/70 hover:text-white border border-white/10 cursor-pointer transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             {/* Step Navigation Bar */}
-            <div className="shrink-0 px-4 sm:px-5 py-2.5 bg-zinc-900/90 border-b border-zinc-800/80 flex items-center justify-between gap-2">
+            <div className="shrink-0 px-4 sm:px-5 py-2.5 bg-white/[0.04] border-b border-white/10 flex items-center justify-between gap-2">
               <button
                 type="button"
                 onClick={() => setFormStep(1)}

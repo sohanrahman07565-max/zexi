@@ -1273,19 +1273,19 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   if (subView === 'menu') {
     return (
       <div className="space-y-4 pb-28">
-        {/* Admin Profile Header Card (Smooth Capsule Rounded Style with 7-Tap Webhook Setup Gesture) */}
+        {/* Admin Profile Header Card (Liquid Glass Capsule with 7-Tap Webhook Setup Gesture) */}
         <div 
           onClick={handleHeaderSecretTap}
           title="Admin Profile"
-          className={`glass-panel rounded-full py-3.5 px-5 border shadow-lg flex items-center justify-between gap-3 cursor-pointer select-none active:scale-[0.985] transition-all duration-200 ${
+          className={`glass-panel lg-rise tap rounded-full py-3.5 px-5 flex items-center justify-between gap-3 cursor-pointer select-none ${
             gestureFeedback
-              ? 'border-emerald-500/80 bg-emerald-950/40 shadow-[0_0_30px_rgba(16,185,129,0.4)]'
-              : 'border-zinc-800/90 bg-gradient-to-r from-zinc-900/95 via-[#101018]/90 to-zinc-900/95 hover:border-zinc-700/80'
+              ? '!border-emerald-400/60 shadow-[0_0_30px_rgba(52,211,153,0.35)]'
+              : ''
           }`}
         >
           <div className="flex items-center gap-3.5 min-w-0">
             {/* Official Telegram Logo Avatar */}
-            <div className="w-11 h-11 shrink-0 rounded-full overflow-hidden flex items-center justify-center shadow-md shadow-sky-500/20 bg-[#229ED9]">
+            <div className="w-11 h-11 shrink-0 rounded-full overflow-hidden flex items-center justify-center shadow-[0_6px_16px_rgba(34,158,217,0.35)] bg-[#229ED9]">
               <svg viewBox="0 0 48 48" className="w-full h-full" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <circle cx="24" cy="24" r="24" fill="url(#tg_more_card_grad)" />
                 <path fillRule="evenodd" clipRule="evenodd" d="M10.2 23.3C18.6 19.6 24.2 17.1 27.1 15.9C35.2 12.5 36.9 11.9 38 11.9C38.2 11.9 38.8 12 39.2 12.3C39.5 12.6 39.6 13 39.6 13.3C39.6 13.6 39.6 14.2 39.5 14.9L34.3 39.5C33.9 41.3 32.8 41.8 31.3 40.9L23.4 35.1L19.6 38.8C19.2 39.2 18.8 39.6 18 39.6L18.6 31.1L34.1 17.1C34.8 16.5 33.9 16.1 33 16.7L13.8 28.8L5.6 26.2C3.8 25.6 3.8 24.4 6 23.5L10.2 23.3Z" fill="white" />
@@ -1301,17 +1301,17 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               <div className="text-sm font-bold text-white truncate">
                 {currentUser.name}
               </div>
-              <div className="text-xs text-zinc-400 font-mono mt-0.5 truncate">
+              <div className="text-xs text-white/55 font-mono mt-0.5 truncate tabular-nums">
                 ID: {currentUser.telegramId}
               </div>
             </div>
           </div>
 
-          {/* Strictly Plain Text Role Badge (No emojis or symbols attached) */}
           <div className="shrink-0 text-right pr-1">
-            <span className={`text-xs font-bold tracking-wide ${
-              currentUser.role?.toLowerCase() === 'owner' ? 'text-amber-400' : 'text-zinc-300'
+            <span className={`lg-badge text-[11px] font-bold tracking-wide ${
+              currentUser.role?.toLowerCase() === 'owner' ? 'text-amber-300' : 'text-white/85'
             }`}>
+              <span className="lg-dot" />
               {currentUser.role?.toLowerCase() === 'owner' ? 'Owner' : 'Admin'}
             </span>
           </div>
@@ -1320,17 +1320,17 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         {/* Smooth Animated Admin Details Popup */}
         {showAdminDetailsPopup && (
           <div 
-            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
+            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-200"
             onClick={() => setShowAdminDetailsPopup(false)}
           >
             <div 
-              className="w-full max-w-sm rounded-3xl bg-[#0c0c14]/98 border border-white/20 p-5 shadow-[0_20px_50px_rgba(0,0,0,0.9),0_0_30px_rgba(239,68,68,0.2)] text-white relative animate-in zoom-in-95 duration-200"
+              className="glass-panel w-full max-w-sm rounded-[24px] p-5 text-white relative animate-in zoom-in-95 duration-200"
               onClick={(e) => e.stopPropagation()}
             >
               {/* Header Title */}
-              <div className="flex items-center justify-between pb-3.5 border-b border-zinc-800">
+              <div className="flex items-center justify-between pb-3.5 border-b border-white/10">
                 <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-xl bg-red-500/15 border border-red-500/30 flex items-center justify-center text-red-400">
+                  <div className="lg-tile w-8 h-8 rounded-xl bg-[#7c9cff]/20 flex items-center justify-center text-[#7c9cff]">
                     <ShieldCheck className="w-4 h-4" />
                   </div>
                   <h3 className="text-sm font-bold text-white tracking-tight">Admin Details</h3>
@@ -1338,7 +1338,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowAdminDetailsPopup(false)}
-                  className="w-7 h-7 rounded-lg bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                  className="tap w-7 h-7 rounded-lg bg-white/[0.08] hover:bg-white/[0.16] border border-white/10 text-white/70 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -1346,28 +1346,28 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
               {/* Full Telegram Details */}
               <div className="space-y-3 pt-4">
-                <div className="p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800 space-y-1">
-                  <span className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider block">Admin ID</span>
+                <div className="p-3 rounded-2xl bg-white/[0.05] border border-white/10 space-y-1">
+                  <span className="text-[10px] uppercase font-bold text-white/50 tracking-wider block">Admin ID</span>
                   <span className="text-sm font-mono font-bold text-white block select-all">{currentUser.telegramId || currentUser.id || 'N/A'}</span>
                 </div>
 
-                <div className="p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800 space-y-1">
-                  <span className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider block">Username</span>
-                  <span className="text-sm font-mono font-bold text-red-400 block select-all">
+                <div className="p-3 rounded-2xl bg-white/[0.05] border border-white/10 space-y-1">
+                  <span className="text-[10px] uppercase font-bold text-white/50 tracking-wider block">Username</span>
+                  <span className="text-sm font-mono font-bold text-[#7c9cff] block select-all">
                     {currentUser.username ? (currentUser.username.startsWith('@') ? currentUser.username : `@${currentUser.username}`) : `@${(currentUser.name || 'admin').toLowerCase().replace(/\s+/g, '_')}`}
                   </span>
                 </div>
 
-                <div className="p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800 space-y-1">
-                  <span className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider block">Role</span>
-                  <span className="text-xs font-bold text-amber-400 block uppercase tracking-wide">
+                <div className="p-3 rounded-2xl bg-white/[0.05] border border-white/10 space-y-1">
+                  <span className="text-[10px] uppercase font-bold text-white/50 tracking-wider block">Role</span>
+                  <span className="text-xs font-bold text-amber-300 block uppercase tracking-wide">
                     {currentUser.role === 'owner' ? 'Owner / Super Administrator' : 'Administrator'}
                   </span>
                 </div>
 
-                <div className="p-3 rounded-2xl bg-zinc-900/90 border border-zinc-800 space-y-1">
-                  <span className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider block">Credentials</span>
-                  <span className="text-xs font-mono text-zinc-300 block break-all">
+                <div className="p-3 rounded-2xl bg-white/[0.05] border border-white/10 space-y-1">
+                  <span className="text-[10px] uppercase font-bold text-white/50 tracking-wider block">Credentials</span>
+                  <span className="text-xs font-mono text-white/75 block break-all">
                     Authorized Session Token ({currentUser.role || 'admin'})
                   </span>
                 </div>
@@ -1377,7 +1377,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowAdminDetailsPopup(false)}
-                  className="w-full py-2.5 px-4 rounded-xl bg-white/10 hover:bg-white/15 border border-white/20 text-white font-bold text-xs transition-colors cursor-pointer"
+                  className="tap w-full py-2.5 px-4 rounded-xl bg-white/[0.1] hover:bg-white/[0.18] border border-white/15 text-white font-bold text-xs transition-colors cursor-pointer"
                 >
                   Close
                 </button>
@@ -1387,79 +1387,85 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         )}
 
         {/* Menu Items */}
-        <div className="glass-panel rounded-2xl divide-y divide-zinc-800/80 border border-zinc-800 overflow-hidden">
+        <div className="glass-panel lg-rise rounded-[24px] divide-y divide-white/10 overflow-hidden">
           {/* Switch Bot & Fleet Management (Main Panel Only) */}
           {onOpenBotSwitcher && (
             <button
               onClick={() => onOpenBotSwitcher()}
-              className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer bg-red-500/[0.04]"
+              className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer bg-white/[0.02]"
             >
               <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-red-500/20 to-rose-600/20 text-red-400 flex items-center justify-center border border-red-500/30 shadow-sm shadow-red-500/20">
-                  <Bot className="w-4 h-4 text-red-400" />
+                <div
+                  className="lg-tile"
+                  style={{
+                    background: 'color-mix(in srgb, var(--a) 24%, rgba(255,255,255,.06))',
+                    '--c': 'rgba(124,156,255,0.45)',
+                  } as React.CSSProperties}
+                >
+                  <Bot className="w-4 h-4 text-sky-300" />
                 </div>
                 <div>
-                  <div className="text-xs font-semibold text-white flex items-center gap-2">
+                  <div className="text-xs font-bold text-white flex items-center gap-2">
                     <span>Switch Bot &amp; Fleet Manager</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-red-500/20 text-red-300 font-semibold border border-red-500/30">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-white/10 text-sky-200 font-semibold border border-white/20">
                       Multi-Bot
                     </span>
                   </div>
-                  <div className="text-[11px] text-zinc-400 mt-0.5">
+                  <div className="text-[11px] text-white/60 mt-0.5">
                     Manage active bot or clone a new bot instance
                   </div>
                 </div>
               </div>
-              <ChevronRight className="w-4 h-4 text-zinc-500" />
+              <ChevronRight className="w-4 h-4 text-white/50" />
             </button>
           )}
 
           {/* Templates */}
           <button
             onClick={() => setSubView('templates')}
-            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
+            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-red-500/10 text-red-400 flex items-center justify-center">
-                <MessageSquare className="w-4 h-4" />
+              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #60a5fa 20%, rgba(255,255,255,.06))' }}>
+                <MessageSquare className="w-4 h-4 text-sky-300" />
               </div>
               <div>
-                <div className="text-xs font-semibold text-white">Message Templates</div>
+                <div className="text-xs font-bold text-white">Message Templates</div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-zinc-500" />
+            <ChevronRight className="w-4 h-4 text-white/50" />
           </button>
 
           {/* Admins */}
           <button
             onClick={() => setSubView('admins')}
-            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
+            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-indigo-500/10 text-indigo-400 flex items-center justify-center">
-                <Users className="w-4 h-4" />
+              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #818cf8 20%, rgba(255,255,255,.06))' }}>
+                <Users className="w-4 h-4 text-indigo-300" />
               </div>
               <div>
-                <div className="text-xs font-semibold text-white">Sub-Admins &amp; Permissions</div>
+                <div className="text-xs font-bold text-white">Sub-Admins &amp; Permissions</div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-zinc-500" />
+            <ChevronRight className="w-4 h-4 text-white/50" />
           </button>
 
           {/* Bot Settings */}
           <button
             onClick={() => setSubView('settings')}
-            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
+            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center">
-                <Settings className="w-4 h-4" />
+              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #fbbf24 20%, rgba(255,255,255,.06))' }}>
+                <Settings className="w-4 h-4 text-amber-300" />
               </div>
               <div>
-                <div className="text-xs font-semibold text-white">Bot Settings</div>
+                <div className="text-xs font-bold text-white">Bot Settings</div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-zinc-500" />
+            <ChevronRight className="w-4 h-4 text-white/50" />
           </button>
 
           {/* File Auto-Delete & Cleanup */}
@@ -1468,112 +1474,110 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               loadCleanupStatus();
               setSubView('cleanup');
             }}
-            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
+            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-rose-500/10 text-rose-400 flex items-center justify-center border border-rose-500/20">
-                <Clock className="w-4 h-4" />
+              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #f472b6 20%, rgba(255,255,255,.06))' }}>
+                <Clock className="w-4 h-4 text-pink-300" />
               </div>
               <div>
-                <div className="text-xs font-semibold text-white flex items-center gap-1.5">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5">
                   <span>File Auto-Delete &amp; Cleanup</span>
-                  <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-rose-500/20 text-rose-300 font-mono font-semibold">
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-pink-500/20 text-pink-200 font-mono font-semibold border border-pink-400/25">
                     {botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10}m Timeout
                   </span>
                 </div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-zinc-500" />
+            <ChevronRight className="w-4 h-4 text-white/50" />
           </button>
 
           {/* Broadcast Notification System */}
           <button
             onClick={() => setSubView('broadcast')}
-            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
+            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-red-500/20 to-rose-600/20 text-red-400 flex items-center justify-center border border-red-500/30">
-                <Megaphone className="w-4 h-4" />
+              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #c084fc 22%, rgba(255,255,255,.06))' }}>
+                <Megaphone className="w-4 h-4 text-purple-300" />
               </div>
               <div>
-                <div className="text-xs font-semibold text-white flex items-center gap-1.5">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5">
                   <span>Broadcast System</span>
-                  <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-red-500/20 text-red-300 font-mono font-semibold">
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-purple-500/20 text-purple-200 font-mono font-semibold border border-purple-400/25">
                     {broadcastUsersCount > 0 ? `${broadcastUsersCount} Users` : 'Rich Media'}
                   </span>
                 </div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-zinc-500" />
+            <ChevronRight className="w-4 h-4 text-white/50" />
           </button>
 
           {/* User Reports & Moderation */}
           <button
             onClick={() => setSubView('reports')}
-            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
+            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-rose-500/10 text-rose-400 flex items-center justify-center border border-rose-500/20">
-                <Flag className="w-4 h-4" />
+              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #fb7185 20%, rgba(255,255,255,.06))' }}>
+                <Flag className="w-4 h-4 text-rose-300" />
               </div>
               <div>
-                <div className="text-xs font-semibold text-white flex items-center gap-1.5">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5">
                   <span>User Reports</span>
                   {reportsList.filter(r => r.status === 'pending').length > 0 ? (
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-rose-500/30 text-rose-300 font-mono font-semibold animate-pulse">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-rose-500/30 text-rose-200 font-mono font-semibold animate-pulse">
                       {reportsList.filter(r => r.status === 'pending').length} Pending
                     </span>
                   ) : (
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-zinc-800 text-zinc-400 font-mono">
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-white/10 text-white/70 font-mono">
                       {reportsList.length} Total
                     </span>
                   )}
                 </div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-zinc-500" />
+            <ChevronRight className="w-4 h-4 text-white/50" />
           </button>
 
           {/* Fraud Protection & Word Filter */}
           <button
             onClick={() => setSubView('fraud')}
-            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
+            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center border border-amber-500/20">
-                <ShieldAlert className="w-4 h-4" />
+              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #fbbf24 20%, rgba(255,255,255,.06))' }}>
+                <ShieldAlert className="w-4 h-4 text-amber-300" />
               </div>
               <div>
-                <div className="text-xs font-semibold text-white flex items-center gap-1.5">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5">
                   <span>Fraud &amp; Word Filter</span>
-                  <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-amber-500/20 text-amber-300 font-mono font-semibold">
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-amber-500/20 text-amber-200 font-mono font-semibold border border-amber-400/25">
                     {fraudRulesList.filter(r => r.enabled).length} Active Rules
                   </span>
                 </div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-zinc-500" />
+            <ChevronRight className="w-4 h-4 text-white/50" />
           </button>
-
-
 
           {/* Chat Ignore / Whitelist */}
           <button
             onClick={() => setSubView('whitelist')}
-            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
+            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3 min-w-0">
-              <div className="w-9 h-9 rounded-xl bg-cyan-500/10 text-cyan-400 flex items-center justify-center border border-cyan-500/20 shrink-0">
-                <VolumeX className="w-4 h-4" />
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #34d3ee 20%, rgba(255,255,255,.06))' }}>
+                <VolumeX className="w-4 h-4 text-cyan-300" />
               </div>
               <div className="min-w-0">
-                <div className="text-xs font-semibold text-white flex items-center gap-1.5 flex-wrap">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
                   <span>Chat Ignore / Whitelist</span>
                   <span
-                    className={`text-[10px] px-1.5 py-0.2 rounded-md font-mono font-semibold tabular-nums ${
+                    className={`text-[10px] px-1.5 py-0.5 rounded-md font-mono font-semibold tabular-nums ${
                       chatWhitelistEnabled
-                        ? 'bg-emerald-500/20 text-emerald-300'
-                        : 'bg-zinc-800 text-zinc-400'
+                        ? 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/25'
+                        : 'bg-white/10 text-white/70'
                     }`}
                   >
                     {chatWhitelistEnabled ? `Strict · ${allowedChats.length}` : `${allowedChats.length} Saved`}
@@ -1581,56 +1585,56 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 </div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-zinc-500 shrink-0" />
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
           </button>
 
           {/* Emoji Store */}
           <button
             onClick={() => setSubView('emoji')}
-            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
+            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-pink-500/10 text-pink-400 flex items-center justify-center">
-                <Smile className="w-4 h-4" />
+              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #f472b6 20%, rgba(255,255,255,.06))' }}>
+                <Smile className="w-4 h-4 text-pink-300" />
               </div>
               <div>
-                <div className="text-xs font-semibold text-white flex items-center gap-1.5">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5">
                   <span>Emoji Store</span>
-                  <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-pink-500/20 text-pink-300 font-mono font-semibold">
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-pink-500/20 text-pink-200 font-mono font-semibold">
                     Hot
                   </span>
                 </div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-zinc-500" />
+            <ChevronRight className="w-4 h-4 text-white/50" />
           </button>
 
           {/* Firebase Security Rules */}
           <button
             onClick={() => setSubView('firebase')}
-            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
+            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center border border-amber-500/20">
-                <Database className="w-4 h-4" />
+              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #34d399 20%, rgba(255,255,255,.06))' }}>
+                <Database className="w-4 h-4 text-emerald-300" />
               </div>
               <div>
-                <div className="text-xs font-semibold text-white flex items-center gap-1.5">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5">
                   <span>Firebase Security Rules</span>
-                  <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-emerald-500/20 text-emerald-300 font-mono font-semibold">
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-200 font-mono font-semibold">
                     Secured
                   </span>
                 </div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-zinc-500" />
+            <ChevronRight className="w-4 h-4 text-white/50" />
           </button>
         </div>
 
         {/* Logout */}
         <button
           onClick={onLogout}
-          className="w-full p-3.5 rounded-2xl glass-panel border border-rose-500/20 text-rose-400 hover:bg-rose-500/10 text-xs font-semibold flex items-center justify-center gap-2 transition-colors cursor-pointer"
+          className="glass tap lg-rise w-full p-3.5 rounded-[20px] border-rose-400/25 text-rose-300 hover:bg-rose-500/15 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
         >
           <LogOut className="w-4 h-4" />
           <span>Sign Out of Admin Portal</span>

@@ -28,14 +28,14 @@ export const ToastContainer: React.FC = () => {
           <div
             key={item.id}
             role="alert"
-            className={`pointer-events-auto w-full rounded-2xl p-3.5 sm:p-4 backdrop-blur-2xl border shadow-2xl flex items-start gap-3 transition-all duration-300 ease-out animate-in slide-in-from-top-4 fade-in duration-300 ${
+            className={`glass pointer-events-auto w-full rounded-[22px] p-3.5 sm:p-4 flex items-start gap-3 transition-all duration-300 ease-out animate-in slide-in-from-top-4 fade-in duration-300 ${
               isSuccess
-                ? 'bg-[#06140f]/95 border-emerald-500/40 text-emerald-200 shadow-[0_12px_40px_rgba(0,0,0,0.85),0_0_24px_rgba(16,185,129,0.28)]'
+                ? 'text-emerald-200 border-emerald-400/35'
                 : isError
-                ? 'bg-[#18080f]/95 border-rose-500/50 text-rose-200 shadow-[0_12px_40px_rgba(0,0,0,0.85),0_0_24px_rgba(244,63,94,0.32)]'
+                ? 'text-rose-200 border-rose-400/40'
                 : isWarning
-                ? 'bg-[#181206]/95 border-amber-500/45 text-amber-200 shadow-[0_12px_40px_rgba(0,0,0,0.85),0_0_24px_rgba(245,158,11,0.25)]'
-                : 'bg-[#0a0f1d]/95 border-blue-500/45 text-blue-200 shadow-[0_12px_40px_rgba(0,0,0,0.85),0_0_24px_rgba(59,130,246,0.25)]'
+                ? 'text-amber-200 border-amber-400/40'
+                : 'text-sky-200 border-sky-400/40'
             }`}
           >
             {/* Status Icon with ambient glow */}
