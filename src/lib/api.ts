@@ -120,6 +120,15 @@ export interface ForceSubChannel {
   detectedAt?: string;
 }
 
+export interface AllowedChatEntry {
+  chatId: string;
+  title?: string;
+  type?: 'group' | 'supergroup' | 'channel';
+  username?: string;
+  addedAt: string;
+  addedBy?: string;
+}
+
 export interface BotSettings {
   botToken: string;
   botUsername: string;
@@ -139,6 +148,8 @@ export interface BotSettings {
   requiredChannels?: ForceSubChannel[];
   autoApproveJoinRequests?: boolean;
   antiForwardEnabled?: boolean;
+  chatWhitelistEnabled?: boolean;
+  allowedChats?: AllowedChatEntry[];
 }
 
 export interface JoinRequestRecord {
@@ -666,6 +677,50 @@ export const api = {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to approve join request');
+    return data;
+  },
+
+  // Chat Whitelist / Ignore Management
+  async getChatWhitelist(): Promise<{ success: boolean; chatWhitelistEnabled: boolean; allowedChats: AllowedChatEntry[] }> {
+    const res = await authFetch('/api/chat-whitelist');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to fetch chat whitelist');
+    return data;
+  },
+
+  async toggleChatWhitelist(enabled: boolean): Promise<{ success: boolean; chatWhitelistEnabled: boolean; allowedChats: AllowedChatEntry[] }> {
+    const res = await authFetch('/api/chat-whitelist/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to update chat whitelist mode');
+    return data;
+  },
+
+  async addAllowedChat(payload: {
+    chatId: string;
+    title?: string;
+    type?: 'group' | 'supergroup' | 'channel';
+    username?: string;
+  }): Promise<{ success: boolean; chatWhitelistEnabled: boolean; allowedChats: AllowedChatEntry[] }> {
+    const res = await authFetch('/api/chat-whitelist/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to add chat to whitelist');
+    return data;
+  },
+
+  async removeAllowedChat(chatId: string): Promise<{ success: boolean; chatWhitelistEnabled: boolean; allowedChats: AllowedChatEntry[] }> {
+    const res = await authFetch(`/api/chat-whitelist/${encodeURIComponent(chatId)}`, {
+      method: 'DELETE'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to remove chat from whitelist');
     return data;
   },
 

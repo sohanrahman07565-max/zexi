@@ -271,6 +271,18 @@ export class TelegramService {
         const desc = typeof data.description === 'string' ? data.description.toLowerCase() : '';
         let modified = false;
 
+        // CRITICAL: Never strip `style` or retry when message content/markup is unchanged ("message is not modified")
+        // or when the target message/chat/callback no longer exists.
+        if (
+          desc.includes('not modified') ||
+          desc.includes('message to edit not found') ||
+          desc.includes('message_id_invalid') ||
+          desc.includes('query is too old') ||
+          desc.includes('chat not found')
+        ) {
+          break;
+        }
+
         if (currentPayload.parse_mode && (desc.includes('parse entities') || desc.includes("can't parse"))) {
           console.warn(`[Telegram] ${method} failed with entity parsing (${data.description}). Retrying without parse_mode...`);
           const nextPayload = { ...currentPayload };
@@ -289,7 +301,10 @@ export class TelegramService {
           delete nextPayload.message_thread_id;
           currentPayload = nextPayload;
           modified = true;
-        } else if (Array.isArray(currentPayload?.reply_markup?.inline_keyboard)) {
+        } else if (
+          Array.isArray(currentPayload?.reply_markup?.inline_keyboard) &&
+          (desc.includes('style') || desc.includes('reply_markup') || desc.includes('button') || desc.includes('keyboard'))
+        ) {
           const hasStyle = currentPayload.reply_markup.inline_keyboard.some((row: any[]) =>
             Array.isArray(row) && row.some((btn: any) => btn && typeof btn === 'object' && 'style' in btn)
           );
@@ -578,6 +593,27 @@ export class TelegramService {
         const fromId = String(update.edited_message.from?.id || '');
         const isInInteractiveSession = activeAddSessions.has(fromId) || activeEditSessions.has(fromId);
         if (!isInInteractiveSession) {
+          return;
+        }
+      }
+
+      // 0. GLOBAL CHAT WHITELIST / IGNORE MIDDLEWARE GUARD
+      // Inspect target chat BEFORE tracking, my_chat_member auto-detection, chat_join_request,
+      // callback queries, force-sub prompts, or any command handling.
+      const targetChat =
+        update.message?.chat ||
+        update.edited_message?.chat ||
+        update.channel_post?.chat ||
+        update.edited_channel_post?.chat ||
+        update.callback_query?.message?.chat ||
+        update.my_chat_member?.chat ||
+        update.chat_member?.chat ||
+        update.chat_join_request?.chat;
+
+      if (targetChat && targetChat.id !== undefined && targetChat.type !== 'private') {
+        const isAllowed = await storage.isChatWhitelisted(targetChat.id, targetChat.type);
+        if (!isAllowed) {
+          // Strict silent ignore: zero replies, zero auto-detection, zero force-sub prompts, even for admins
           return;
         }
       }
@@ -1876,6 +1912,9 @@ export class TelegramService {
     const isAdminListCommand = /^\/(?:admins?|users?)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isConnectCommand = /^\/(?:connect|addchannel)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isDisconnectCommand = /^\/(?:disconnect|removechannel)(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isAllowChatCommand = /^\/allowchat(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isIgnoreChatCommand = /^\/ignorechat(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isAllowedChatsCommand = /^\/(?:allowedchats|whitelistedchats)(?:@\w+)?(?:\s+|$)/i.test(text);
 
     const isAdminCommand =
       isAddCommand ||
@@ -1888,7 +1927,10 @@ export class TelegramService {
       isCleanupCommand ||
       isAdminListCommand ||
       isConnectCommand ||
-      isDisconnectCommand;
+      isDisconnectCommand ||
+      isAllowChatCommand ||
+      isIgnoreChatCommand ||
+      isAllowedChatsCommand;
 
     if (isAdminCommand) {
       const isAdmin = await this.isAuthorizedAdmin(fromId);
@@ -2077,6 +2119,36 @@ export class TelegramService {
             await this.handleDisconnectCommand(fromId, fromId, text, message.chat.id);
           },
           'Channel disconnection processed. Details sent to your private messages.'
+        );
+        return;
+      }
+
+      if (isAllowChatCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleAllowChatCommand(fromId, fromId, text, message.chat);
+          },
+          'Chat whitelist updated. Confirmation sent to your private messages.'
+        );
+        return;
+      }
+
+      if (isIgnoreChatCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleIgnoreChatCommand(fromId, fromId, text, message.chat);
+          },
+          'Chat removed from whitelist. Confirmation sent to your private messages.'
+        );
+        return;
+      }
+
+      if (isAllowedChatsCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleAllowedChatsCommand(fromId, fromId);
+          },
+          'Whitelisted chat list sent to your private messages.'
         );
         return;
       }
@@ -3111,6 +3183,20 @@ export class TelegramService {
     // Admin /disconnect or /removechannel command
     if (/^\/(?:disconnect|removechannel)(?:@\w+)?(?:\s+.*)?$/i.test(text.trim())) {
       await this.handleDisconnectCommand(fromId, chatId, text);
+      return;
+    }
+
+    // Admin /allowchat, /ignorechat, /allowedchats commands in Private DM
+    if (/^\/allowchat(?:@\w+)?(?:\s+.*)?$/i.test(text.trim())) {
+      await this.handleAllowChatCommand(fromId, chatId, text);
+      return;
+    }
+    if (/^\/ignorechat(?:@\w+)?(?:\s+.*)?$/i.test(text.trim())) {
+      await this.handleIgnoreChatCommand(fromId, chatId, text);
+      return;
+    }
+    if (/^\/(?:allowedchats|whitelistedchats)(?:@\w+)?(?:\s+.*)?$/i.test(text.trim())) {
+      await this.handleAllowedChatsCommand(fromId, chatId);
       return;
     }
 
@@ -4518,9 +4604,19 @@ export class TelegramService {
   // =========================================================================
   // INTERACTIVE FILE LISTING & LINK COPYING COMMAND (/allfile, /allfiles)
   // =========================================================================
+  private static truncateUtf8Bytes(input: string, maxBytes: number): string {
+    if (Buffer.byteLength(input, 'utf8') <= maxBytes) return input;
+    let out = '';
+    for (const ch of input) {
+      if (Buffer.byteLength(out + ch, 'utf8') > maxBytes) break;
+      out += ch;
+    }
+    return out;
+  }
+
   public static parseAllFileCommand(rawText: string): { matched: boolean; page: number } {
     const cleaned = String(rawText || '')
-      .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, ' ')
+      .replace(/[\u200B-\u200F\u202A-\u202E\uFEFF\u00A0]/g, ' ')
       .trim();
     const match = cleaned.match(/^\/allfiles?(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i);
     if (!match) {
@@ -4604,7 +4700,7 @@ export class TelegramService {
       const fullCb = `fl_v:${item.id}:${page}`;
       const cbData = Buffer.byteLength(fullCb, 'utf8') <= 64
         ? fullCb
-        : `fl_v:${item.id}`.slice(0, 64);
+        : this.truncateUtf8Bytes(`fl_v:${item.id}`, 64);
       return [{ text: `${num}. ${icon} ${shortTitle}`, callback_data: cbData, style: 'primary' }];
     });
 
@@ -4731,7 +4827,7 @@ export class TelegramService {
         }
 
         const desc = String(editRes?.description || '').toLowerCase();
-        // Telegram returns "message is not modified" if Refresh/page is already identical; ignore cleanly
+        // Telegram returns "message is not modified" if Refresh/page is already identical; preserve existing styled markup cleanly
         if (desc.includes('not modified')) {
           return;
         }
@@ -4758,10 +4854,27 @@ export class TelegramService {
       if (replyToMessageId) params.reply_to_message_id = replyToMessageId;
       if (threadId) params.message_thread_id = threadId;
 
-      const res = await this.callTelegramApi('sendMessage', params);
+      let res = await this.callTelegramApi('sendMessage', params);
       if (!res?.ok && params.reply_to_message_id) {
         delete params.reply_to_message_id;
-        await this.callTelegramApi('sendMessage', params);
+        res = await this.callTelegramApi('sendMessage', params);
+      }
+      if (!res?.ok) {
+        console.warn('[Telegram] /allfile sendMessage fallback triggered:', res?.description || 'unknown error');
+        const strippedKeyboard = view.inlineKeyboard.map((row: any[]) =>
+          row.map((btn: any) => {
+            const { style, ...rest } = btn;
+            return rest;
+          })
+        );
+        const safeParams: any = {
+          chat_id: chatId,
+          text: view.text,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: strippedKeyboard }
+        };
+        if (threadId) safeParams.message_thread_id = threadId;
+        await this.callTelegramApi('sendMessage', safeParams);
       }
     } catch (err: any) {
       console.error('[Telegram] /allfile command error:', err?.message || err);
@@ -4773,6 +4886,161 @@ export class TelegramService {
       if (threadId) errParams.message_thread_id = threadId;
       await this.callTelegramApi('sendMessage', errParams).catch(() => {});
     }
+  }
+
+  // =========================================================================
+  // CHAT WHITELIST / IGNORE COMMANDS (/allowchat, /ignorechat, /allowedchats)
+  // =========================================================================
+  private static async handleAllowChatCommand(
+    fromId: string,
+    replyChatId: number | string,
+    text: string,
+    contextChat?: any
+  ): Promise<void> {
+    const isAdmin = await this.isAuthorizedAdmin(fromId);
+    if (!isAdmin) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: replyChatId,
+        text: '❌ Access denied. Only authorized administrators can manage the chat whitelist.'
+      });
+      return;
+    }
+
+    const rawArgs = text.replace(/^\/allowchat(?:@\w+)?/i, '').trim();
+    let targetChatId = '';
+    let customLabel = '';
+
+    if (rawArgs) {
+      const tokens = rawArgs.split(/\s+/);
+      targetChatId = tokens[0].trim();
+      customLabel = tokens.slice(1).join(' ').trim();
+    } else if (contextChat && contextChat.id && contextChat.type !== 'private') {
+      targetChatId = String(contextChat.id).trim();
+      customLabel = contextChat.title || contextChat.username || '';
+    }
+
+    if (!targetChatId || !/^-?\d+$/.test(targetChatId)) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: replyChatId,
+        text:
+          `ℹ️ <b>Allow / Whitelist Chat Usage:</b>\n\n` +
+          `Send: <code>/allowchat &lt;chat_id&gt; [optional name]</code>\n` +
+          `Example: <code>/allowchat -1001234567890 VIP Group</code>\n\n` +
+          `<i>Note: Adding a chat ID automatically enables strict Whitelist mode so all unlisted groups/channels are silently ignored.</i>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    let resolvedTitle = customLabel;
+    let resolvedType: 'group' | 'supergroup' | 'channel' = 'supergroup';
+    let resolvedUsername: string | undefined;
+
+    try {
+      const chatRes = await this.callTelegramApi('getChat', { chat_id: Number(targetChatId) });
+      if (chatRes?.ok && chatRes.result) {
+        resolvedTitle = resolvedTitle || chatRes.result.title || chatRes.result.username || '';
+        if (chatRes.result.type === 'group' || chatRes.result.type === 'channel' || chatRes.result.type === 'supergroup') {
+          resolvedType = chatRes.result.type;
+        }
+        if (chatRes.result.username) {
+          resolvedUsername = `@${String(chatRes.result.username).replace(/^@/, '')}`;
+        }
+      }
+    } catch {}
+
+    const updatedSettings = await storage.addAllowedChat(
+      targetChatId,
+      resolvedTitle || `Chat ${targetChatId}`,
+      resolvedType,
+      fromId,
+      true
+    );
+    const list = Array.isArray(updatedSettings.allowedChats) ? updatedSettings.allowedChats : [];
+
+    await this.callTelegramApi('sendMessage', {
+      chat_id: replyChatId,
+      text:
+        `✅ <b>Chat Added to Whitelist</b>\n\n` +
+        `• <b>Title:</b> ${this.escapeHtml(resolvedTitle || `Chat ${targetChatId}`)}\n` +
+        `• <b>Chat ID:</b> <code>${this.escapeHtml(targetChatId)}</code>\n` +
+        `• <b>Strict Whitelist Guard:</b> 🟢 Active\n` +
+        `• <b>Total Allowed Chats:</b> ${list.length}`,
+      parse_mode: 'HTML'
+    });
+  }
+
+  private static async handleIgnoreChatCommand(
+    fromId: string,
+    replyChatId: number | string,
+    text: string,
+    contextChat?: any
+  ): Promise<void> {
+    const isAdmin = await this.isAuthorizedAdmin(fromId);
+    if (!isAdmin) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: replyChatId,
+        text: '❌ Access denied. Only authorized administrators can manage the chat whitelist.'
+      });
+      return;
+    }
+
+    const rawArg = text.replace(/^\/ignorechat(?:@\w+)?/i, '').trim().split(/\s+/)[0] || '';
+    const targetChatId = rawArg || (contextChat && contextChat.type !== 'private' ? String(contextChat.id) : '');
+
+    if (!targetChatId || !/^-?\d+$/.test(targetChatId)) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: replyChatId,
+        text:
+          `ℹ️ <b>Ignore / Remove Chat Usage:</b>\n\n` +
+          `Send: <code>/ignorechat &lt;chat_id&gt;</code>\n` +
+          `Example: <code>/ignorechat -1001234567890</code>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    const removal = await storage.removeAllowedChat(targetChatId);
+    const remainingList = Array.isArray(removal.settings?.allowedChats) ? removal.settings.allowedChats : [];
+    await this.callTelegramApi('sendMessage', {
+      chat_id: replyChatId,
+      text:
+        `🔇 <b>Chat Removed from Whitelist</b>\n\n` +
+        `• <b>Chat ID:</b> <code>${this.escapeHtml(targetChatId)}</code>\n` +
+        `• <b>Remaining Allowed Chats:</b> ${remainingList.length}\n\n` +
+        `<i>When Strict Whitelist Guard is active, the bot will now completely ignore all activity in this chat.</i>`,
+      parse_mode: 'HTML'
+    });
+  }
+
+  private static async handleAllowedChatsCommand(fromId: string, replyChatId: number | string): Promise<void> {
+    const isAdmin = await this.isAuthorizedAdmin(fromId);
+    if (!isAdmin) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: replyChatId,
+        text: '❌ Access denied.'
+      });
+      return;
+    }
+
+    const settings = await storage.getSettings();
+    const list = await storage.getAllowedChats();
+    const statusLabel = settings.chatWhitelistEnabled ? '🟢 ENABLED (Strict Ignore Active)' : '⚪ DISABLED (Allow All Chats)';
+
+    const lines = list.length > 0
+      ? list.map((c, idx) => `${idx + 1}. <b>${this.escapeHtml(c.title || 'Chat')}</b> — <code>${this.escapeHtml(c.id)}</code>`).join('\n')
+      : '<i>No whitelisted chat IDs configured yet.</i>';
+
+    await this.callTelegramApi('sendMessage', {
+      chat_id: replyChatId,
+      text:
+        `🛡️ <b>Chat Whitelist Status</b>\n` +
+        `• <b>Guard:</b> ${statusLabel}\n` +
+        `• <b>Whitelisted Chats (${list.length}):</b>\n\n` +
+        `${lines}\n\n` +
+        `<i>Commands:</i>\n<code>/allowchat &lt;chat_id&gt; [name]</code>\n<code>/ignorechat &lt;chat_id&gt;</code>`,
+      parse_mode: 'HTML'
+    });
   }
 
   // =========================================================================
@@ -6206,13 +6474,16 @@ export class TelegramService {
             reply_markup: { inline_keyboard: detail.primaryKeyboard }
           });
           if (!editRes?.ok) {
-            await this.callTelegramApi('editMessageText', {
-              chat_id: chatId,
-              message_id: msgId,
-              text: detail.text,
-              parse_mode: 'HTML',
-              reply_markup: { inline_keyboard: detail.fallbackKeyboard }
-            });
+            const editDesc = String(editRes?.description || '').toLowerCase();
+            if (!editDesc.includes('not modified')) {
+              await this.callTelegramApi('editMessageText', {
+                chat_id: chatId,
+                message_id: msgId,
+                text: detail.text,
+                parse_mode: 'HTML',
+                reply_markup: { inline_keyboard: detail.fallbackKeyboard }
+              });
+            }
           }
         }
         return;
@@ -7460,7 +7731,7 @@ export class ClonedBotRunner {
     console.info(`[ClonedBot ${this.bot.id}] Starting isolated runner for @${this.bot.username}...`);
 
     try {
-      await TelegramService.callTelegramApi('deleteWebhook', { drop_pending_updates: true }, this.bot.token);
+      await TelegramService.callTelegramApi('deleteWebhook', { drop_pending_updates: false }, this.bot.token);
     } catch {}
 
     this.launchLoop();
@@ -7499,6 +7770,14 @@ export class ClonedBotRunner {
     const botStorage = StorageManager.getStorage(this.bot.id);
     try {
       await botStorage.init();
+      await botStorage.loadLatest(true).catch(() => {});
+      const st = await botStorage.getSettings();
+      if (!st.botToken || st.botToken !== this.bot.token || (!st.botUsername && this.bot.username)) {
+        await botStorage.updateSettings({
+          botToken: this.bot.token,
+          botUsername: st.botUsername || this.bot.username || ''
+        });
+      }
     } catch (initErr: any) {
       console.warn(`[ClonedBot ${this.bot.id}] Storage init notice:`, initErr?.message || initErr);
     }
@@ -7583,7 +7862,12 @@ export class TelegramBotManager {
     this.watchdogTimer = setInterval(async () => {
       try {
         const mainStorage = StorageManager.getMainStorage();
-        const bots = await mainStorage.getClonedBots().catch(() => []);
+        await mainStorage.loadLatest(false).catch(() => {});
+        let bots = await mainStorage.getClonedBots().catch(() => []);
+        if (bots.length === 0) {
+          await mainStorage.loadLatest(true).catch(() => {});
+          bots = await mainStorage.getClonedBots().catch(() => []);
+        }
         for (const bot of bots) {
           if (bot.status !== 'stopped') {
             const runner = this.runners.get(bot.id);
@@ -7602,6 +7886,8 @@ export class TelegramBotManager {
   public static async initAllBots(): Promise<void> {
     try {
       const mainStorage = StorageManager.getMainStorage();
+      await mainStorage.init().catch(() => {});
+      await mainStorage.loadLatest(true).catch(() => {});
       const bots = await mainStorage.getClonedBots();
       console.info(`[TelegramBotManager] Initializing ${bots.length} cloned bots...`);
       for (const bot of bots) {

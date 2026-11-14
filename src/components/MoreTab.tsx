@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { 
-  AdminUser, MessageTemplate, BotSettings, UserReportRecord, FraudKeywordRule, JoinRequestRecord, api 
+  AdminUser, MessageTemplate, BotSettings, UserReportRecord, FraudKeywordRule, JoinRequestRecord, AllowedChatEntry, api 
 } from '../lib/api';
 import { toast } from '../lib/toast';
 import { 
@@ -9,7 +9,7 @@ import {
   ChevronRight, Edit2, Check, RefreshCw, Plus, Minus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi, WifiOff,
   Megaphone, Image as ImageIcon, Video as VideoIcon, Music, Mic, Pin, Paperclip, Loader2, Radio,
   Flag, AlertTriangle, Ban, CheckCircle, ShieldAlert, Eye, ExternalLink, ShieldCheck,
-  Server, Database, Copy, Download, Upload, Activity, HardDrive, Key, CheckSquare, Square, Bot
+  Server, Database, Copy, Download, Upload, Activity, HardDrive, Key, CheckSquare, Square, Bot, VolumeX
 } from 'lucide-react';
 import { EmojiStore } from './EmojiStore';
 
@@ -49,8 +49,16 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   onLogout,
   onOpenBotSwitcher
 }) => {
-  const [subView, setSubView] = useState<'menu' | 'templates' | 'admins' | 'cleanup' | 'settings' | 'webhook' | 'broadcast' | 'apk' | 'emoji' | 'reports' | 'fraud' | 'backup' | 'firebase'>('menu');
+  const [subView, setSubView] = useState<'menu' | 'templates' | 'admins' | 'cleanup' | 'settings' | 'webhook' | 'broadcast' | 'apk' | 'emoji' | 'reports' | 'fraud' | 'backup' | 'firebase' | 'whitelist'>('menu');
   const [copiedRulesType, setCopiedRulesType] = useState<'rtdb' | 'firestore' | null>(null);
+
+  // Chat Whitelist / Ignore state
+  const [chatWhitelistEnabled, setChatWhitelistEnabled] = useState<boolean>(Boolean(settings?.chatWhitelistEnabled));
+  const [allowedChats, setAllowedChats] = useState<AllowedChatEntry[]>(Array.isArray(settings?.allowedChats) ? settings!.allowedChats : []);
+  const [whitelistLoading, setWhitelistLoading] = useState<boolean>(false);
+  const [whitelistSaving, setWhitelistSaving] = useState<boolean>(false);
+  const [newWhitelistChatId, setNewWhitelistChatId] = useState<string>('');
+  const [newWhitelistTitle, setNewWhitelistTitle] = useState<string>('');
 
   // Webhook standalone state
   const [webhookAppUrl, setWebhookAppUrl] = useState<string>(
@@ -377,8 +385,23 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         autoApproveJoinRequests: settings.autoApproveJoinRequests ?? true,
         requiredChannels: Array.isArray(settings.requiredChannels) ? settings.requiredChannels : []
       }));
+      setChatWhitelistEnabled(Boolean(settings.chatWhitelistEnabled));
+      setAllowedChats(Array.isArray(settings.allowedChats) ? settings.allowedChats : []);
     }
   }, [settings]);
+
+  const loadChatWhitelist = async () => {
+    setWhitelistLoading(true);
+    try {
+      const res = await api.getChatWhitelist();
+      setChatWhitelistEnabled(Boolean(res.chatWhitelistEnabled));
+      setAllowedChats(Array.isArray(res.allowedChats) ? res.allowedChats : []);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to load chat whitelist');
+    } finally {
+      setWhitelistLoading(false);
+    }
+  };
 
   // Load admins when viewing admins tab
   useEffect(() => {
@@ -388,6 +411,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       loadCleanupStatus();
     } else if (subView === 'settings') {
       loadJoinRequests();
+    } else if (subView === 'whitelist') {
+      loadChatWhitelist();
     }
     // Refresh user count for broadcast
     api.getUsers().then(users => {
@@ -1531,6 +1556,33 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </button>
 
 
+
+          {/* Chat Ignore / Whitelist */}
+          <button
+            onClick={() => setSubView('whitelist')}
+            className="w-full p-4 flex items-center justify-between hover:bg-zinc-800/40 text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-xl bg-cyan-500/10 text-cyan-400 flex items-center justify-center border border-cyan-500/20 shrink-0">
+                <VolumeX className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>Chat Ignore / Whitelist</span>
+                  <span
+                    className={`text-[10px] px-1.5 py-0.2 rounded-md font-mono font-semibold tabular-nums ${
+                      chatWhitelistEnabled
+                        ? 'bg-emerald-500/20 text-emerald-300'
+                        : 'bg-zinc-800 text-zinc-400'
+                    }`}
+                  >
+                    {chatWhitelistEnabled ? `Strict · ${allowedChats.length}` : `${allowedChats.length} Saved`}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-zinc-500 shrink-0" />
+          </button>
 
           {/* Emoji Store */}
           <button
@@ -4544,6 +4596,320 @@ service cloud.firestore {
             ))}
           </div>
         )}
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------
+  // SUB-VIEW: CHAT IGNORE / WHITELIST
+  // -------------------------------------------------------------
+  if (subView === 'whitelist') {
+    const handleToggleStrictWhitelist = async () => {
+      setWhitelistSaving(true);
+      try {
+        const res = await api.toggleChatWhitelist(!chatWhitelistEnabled);
+        setChatWhitelistEnabled(Boolean(res.chatWhitelistEnabled));
+        setAllowedChats(res.allowedChats || []);
+        onRefreshSettings();
+        toast.success(
+          res.chatWhitelistEnabled
+            ? 'Strict Chat Whitelist enabled: non-whitelisted groups/channels are now silently ignored.'
+            : 'Strict Chat Whitelist disabled: bot responds in all active groups.'
+        );
+      } catch (err: any) {
+        toast.error(err?.message || 'Failed to update whitelist setting');
+      } finally {
+        setWhitelistSaving(false);
+      }
+    };
+
+    const handleAddWhitelistChat = async (e: React.FormEvent) => {
+      e.preventDefault();
+      const trimmedId = newWhitelistChatId.trim();
+      if (!/^-?\d+$/.test(trimmedId)) {
+        toast.error('Please enter a valid numeric Chat ID (e.g. -1001234567890)');
+        return;
+      }
+      setWhitelistSaving(true);
+      try {
+        const res = await api.addAllowedChat({
+          chatId: trimmedId,
+          title: newWhitelistTitle.trim() || undefined
+        });
+        setChatWhitelistEnabled(Boolean(res.chatWhitelistEnabled));
+        setAllowedChats(res.allowedChats || []);
+        setNewWhitelistChatId('');
+        setNewWhitelistTitle('');
+        onRefreshSettings();
+        toast.success('Chat added to authorized whitelist');
+      } catch (err: any) {
+        toast.error(err?.message || 'Failed to add chat ID');
+      } finally {
+        setWhitelistSaving(false);
+      }
+    };
+
+    const handleQuickAllowChannel = async (ch: { chatId: string; name?: string; type?: 'channel' | 'supergroup' | 'group'; username?: string }) => {
+      setWhitelistSaving(true);
+      try {
+        const res = await api.addAllowedChat({
+          chatId: ch.chatId,
+          title: ch.name,
+          type: ch.type,
+          username: ch.username
+        });
+        setChatWhitelistEnabled(Boolean(res.chatWhitelistEnabled));
+        setAllowedChats(res.allowedChats || []);
+        onRefreshSettings();
+        toast.success(`Whitelisted ${ch.name || ch.chatId}`);
+      } catch (err: any) {
+        toast.error(err?.message || 'Failed to allow chat');
+      } finally {
+        setWhitelistSaving(false);
+      }
+    };
+
+    const handleRemoveWhitelistChat = async (chatId: string) => {
+      setWhitelistSaving(true);
+      try {
+        const res = await api.removeAllowedChat(chatId);
+        setChatWhitelistEnabled(Boolean(res.chatWhitelistEnabled));
+        setAllowedChats(res.allowedChats || []);
+        onRefreshSettings();
+        toast.success('Chat removed from whitelist');
+      } catch (err: any) {
+        toast.error(err?.message || 'Failed to remove chat');
+      } finally {
+        setWhitelistSaving(false);
+      }
+    };
+
+    const connectedCandidates = (botSettings.requiredChannels || []).filter(
+      (ch: any) => ch?.chatId && !allowedChats.some((a) => a.chatId === String(ch.chatId).trim())
+    );
+
+    return (
+      <div className="space-y-4 animate-tab-fade-in">
+        {/* Header */}
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <button
+              onClick={() => setSubView('menu')}
+              className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white cursor-pointer shrink-0"
+            >
+              <ChevronRight className="w-4 h-4 rotate-180" />
+            </button>
+            <div className="min-w-0">
+              <h2 className="text-base font-bold text-white flex items-center gap-1.5 truncate">
+                <VolumeX className="w-4 h-4 text-cyan-400 shrink-0" />
+                <span>Chat Ignore / Whitelist</span>
+              </h2>
+              <p className="text-[11px] text-zinc-400 truncate">
+                Silently ignore all non-whitelisted groups, supergroups &amp; channels
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={loadChatWhitelist}
+            disabled={whitelistLoading}
+            className="px-2.5 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${whitelistLoading ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
+          </button>
+        </div>
+
+        {/* Master Guard Card */}
+        <div className="p-4 rounded-2xl glass-panel border border-zinc-800 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-white flex items-center gap-2">
+                <span>Strict Chat Whitelist Guard</span>
+                <span
+                  className={`text-[10px] px-2 py-0.5 rounded-md font-semibold ${
+                    chatWhitelistEnabled
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                      : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                  }`}
+                >
+                  {chatWhitelistEnabled ? 'ACTIVE' : 'OFF'}
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-400 mt-1 leading-relaxed">
+                When active, the bot drops every group/channel update outside the whitelist with zero replies, zero prompts, and zero auto-detection—even for admin commands. Private DMs still work.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleToggleStrictWhitelist}
+              disabled={whitelistSaving}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
+                chatWhitelistEnabled
+                  ? 'bg-emerald-500 hover:bg-emerald-400 text-zinc-950'
+                  : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700'
+              }`}
+            >
+              {chatWhitelistEnabled ? 'Enabled' : 'Enable Guard'}
+            </button>
+          </div>
+        </div>
+
+        {/* Add Authorized Chat Form */}
+        <form onSubmit={handleAddWhitelistChat} className="p-4 rounded-2xl glass-panel border border-cyan-500/25 space-y-3">
+          <div className="text-xs font-bold text-white flex items-center gap-1.5">
+            <Plus className="w-3.5 h-3.5 text-cyan-400" />
+            <span>Authorize New Chat ID</span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <div>
+              <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                Telegram Chat ID
+              </label>
+              <input
+                type="text"
+                value={newWhitelistChatId}
+                onChange={(e) => setNewWhitelistChatId(e.target.value)}
+                placeholder="-1001234567890"
+                className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-cyan-500"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                Group / Channel Label (Optional)
+              </label>
+              <input
+                type="text"
+                value={newWhitelistTitle}
+                onChange={(e) => setNewWhitelistTitle(e.target.value)}
+                placeholder="e.g. Official Support Group"
+                className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white focus:outline-none focus:border-cyan-500"
+              />
+            </div>
+          </div>
+          <div className="flex items-center justify-between gap-2 pt-1">
+            <span className="text-[10px] text-zinc-400">
+              Adding a chat automatically enables Strict Guard.
+            </span>
+            <button
+              type="submit"
+              disabled={whitelistSaving}
+              className="px-4 py-2 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-zinc-950 text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+            >
+              {whitelistSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              <Plus className="w-3.5 h-3.5" />
+              <span>Allow Chat</span>
+            </button>
+          </div>
+        </form>
+
+        {/* Quick Allow from Connected Channels */}
+        {connectedCandidates.length > 0 && (
+          <div className="p-4 rounded-2xl glass-panel border border-zinc-800 space-y-2.5">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400">
+              Quick Add Connected Chats
+            </div>
+            <div className="space-y-2">
+              {connectedCandidates.map((ch: any) => (
+                <div
+                  key={ch.chatId}
+                  className="p-2.5 rounded-xl bg-zinc-950/80 border border-zinc-800 flex items-center justify-between gap-2"
+                >
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-white truncate">{ch.name}</div>
+                    <div className="text-[10px] font-mono text-zinc-400 truncate">{ch.chatId}</div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={whitelistSaving}
+                    onClick={() => handleQuickAllowChannel(ch)}
+                    className="px-2.5 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/30 text-[11px] font-semibold whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    + Allow
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Allowed Chats List */}
+        <div className="space-y-2.5">
+          <div className="flex items-center justify-between px-1">
+            <span className="text-xs font-bold text-white tabular-nums">
+              Authorized Chats ({allowedChats.length})
+            </span>
+          </div>
+
+          {whitelistLoading ? (
+            <div className="p-6 text-center text-xs text-zinc-400 flex items-center justify-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin text-cyan-400" />
+              <span>Loading authorized chats...</span>
+            </div>
+          ) : allowedChats.length === 0 ? (
+            <div className="p-6 rounded-2xl glass-panel border border-zinc-800 text-center space-y-2">
+              <Shield className="w-7 h-7 text-cyan-400 mx-auto" />
+              <div className="text-xs font-semibold text-white">No whitelisted chats configured</div>
+              <p className="text-[11px] text-zinc-400">
+                Add a Telegram group/channel ID above or send <code className="text-cyan-300">/allowchat -100...</code> in bot DM.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {allowedChats.map((entry) => (
+                <div
+                  key={entry.chatId}
+                  className="p-3.5 rounded-2xl glass-panel border border-zinc-800 flex items-center justify-between gap-2.5"
+                >
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-xs font-bold text-white truncate">
+                        {entry.title || `Chat ${entry.chatId}`}
+                      </span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-zinc-800 text-zinc-300 uppercase font-mono shrink-0">
+                        {entry.type || 'group'}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono">
+                      <span>{entry.chatId}</span>
+                      {entry.username && <span className="text-cyan-400 truncate">{entry.username}</span>}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard?.writeText(entry.chatId);
+                        toast.success('Chat ID copied');
+                      }}
+                      className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white cursor-pointer"
+                      title="Copy Chat ID"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={whitelistSaving}
+                      onClick={() => handleRemoveWhitelistChat(entry.chatId)}
+                      className="p-2 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 hover:bg-rose-500/20 cursor-pointer disabled:opacity-50"
+                      title="Remove from Whitelist"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Bot Command Reference */}
+        <div className="p-3.5 rounded-2xl glass-panel border border-zinc-800 space-y-1.5 text-[11px] text-zinc-400">
+          <div className="text-xs font-bold text-white">Telegram Bot Commands</div>
+          <div><code className="text-cyan-300">/allowchat &lt;chat_id&gt; [name]</code> — Whitelist chat &amp; activate guard</div>
+          <div><code className="text-cyan-300">/ignorechat &lt;chat_id&gt;</code> — Remove chat so bot ignores it</div>
+          <div><code className="text-cyan-300">/allowedchats</code> — View current whitelist status in DM</div>
+        </div>
       </div>
     );
   }

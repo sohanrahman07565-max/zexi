@@ -1975,6 +1975,11 @@ apiRouter.get('/settings', authenticate, async (_req: Request, res: Response) =>
     botUsername,
     forceSubEnabled: settings.forceSubEnabled ?? false,
     requiredChannels: Array.isArray(settings.requiredChannels) ? settings.requiredChannels : [],
+    chatWhitelistEnabled: settings.chatWhitelistEnabled ?? false,
+    allowedChats: (Array.isArray(settings.allowedChats) ? settings.allowedChats : []).map((entry: any) => ({
+      ...entry,
+      chatId: entry.chatId || entry.id || ''
+    })),
     botTokenMasked: maskedToken,
     hasToken: Boolean(token),
     isConnected: Boolean(token && botUsername)
@@ -2012,6 +2017,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
   if (forceSubEnabled !== undefined) updates.forceSubEnabled = Boolean(forceSubEnabled);
   if (req.body.autoApproveJoinRequests !== undefined) updates.autoApproveJoinRequests = Boolean(req.body.autoApproveJoinRequests);
   if (req.body.antiForwardEnabled !== undefined) updates.antiForwardEnabled = Boolean(req.body.antiForwardEnabled);
+  if (req.body.chatWhitelistEnabled !== undefined) updates.chatWhitelistEnabled = Boolean(req.body.chatWhitelistEnabled);
   if (requiredChannels !== undefined) {
     if (Array.isArray(requiredChannels)) {
       updates.requiredChannels = requiredChannels
@@ -2052,9 +2058,108 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
       antiForwardEnabled: newSettings.antiForwardEnabled ?? false,
       forceSubEnabled: newSettings.forceSubEnabled ?? false,
       autoApproveJoinRequests: newSettings.autoApproveJoinRequests ?? true,
-      requiredChannels: Array.isArray(newSettings.requiredChannels) ? newSettings.requiredChannels : []
+      requiredChannels: Array.isArray(newSettings.requiredChannels) ? newSettings.requiredChannels : [],
+      chatWhitelistEnabled: newSettings.chatWhitelistEnabled ?? false,
+      allowedChats: (Array.isArray(newSettings.allowedChats) ? newSettings.allowedChats : []).map((entry: any) => ({
+        ...entry,
+        chatId: entry.chatId || entry.id || ''
+      }))
     } 
   });
+});
+
+// =========================================================================
+// CHAT WHITELIST / IGNORE MANAGEMENT ROUTES
+// =========================================================================
+const formatAllowedChatsResponse = (entries: any[] = []) =>
+  (Array.isArray(entries) ? entries : []).map((entry) => ({
+    ...entry,
+    chatId: entry.chatId || entry.id || ''
+  }));
+
+apiRouter.get('/chat-whitelist', authenticate, requirePermission('settings_edit'), async (_req: Request, res: Response) => {
+  try {
+    await storage.loadLatest(false);
+    const settings = await storage.getSettings();
+    const allowedChats = await storage.getAllowedChats();
+    return res.json({
+      success: true,
+      chatWhitelistEnabled: Boolean(settings.chatWhitelistEnabled),
+      allowedChats: formatAllowedChatsResponse(allowedChats)
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to load chat whitelist' });
+  }
+});
+
+apiRouter.post('/chat-whitelist/toggle', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const enabled = Boolean(req.body?.enabled);
+    const updated = await storage.updateSettings({ chatWhitelistEnabled: enabled });
+    return res.json({
+      success: true,
+      chatWhitelistEnabled: Boolean(updated.chatWhitelistEnabled),
+      allowedChats: formatAllowedChatsResponse(updated.allowedChats)
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to update chat whitelist toggle' });
+  }
+});
+
+apiRouter.post('/chat-whitelist/add', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const rawChatId = String(req.body?.chatId || '').trim();
+    if (!rawChatId || !/^-?\d+$/.test(rawChatId)) {
+      return res.status(400).json({ error: 'Valid numeric Telegram chat ID is required (e.g., -1001234567890)' });
+    }
+
+    let resolvedTitle = String(req.body?.title || '').trim();
+    let resolvedType: 'group' | 'supergroup' | 'channel' = req.body?.type || 'supergroup';
+
+    try {
+      const chatRes = await TelegramService.callTelegramApi('getChat', { chat_id: Number(rawChatId) });
+      if (chatRes?.ok && chatRes.result) {
+        resolvedTitle = resolvedTitle || chatRes.result.title || chatRes.result.username || '';
+        if (chatRes.result.type === 'group' || chatRes.result.type === 'channel' || chatRes.result.type === 'supergroup') {
+          resolvedType = chatRes.result.type;
+        }
+      }
+    } catch {}
+
+    const currentAdmin = (req as any).admin as AdminUser;
+    const updatedSettings = await storage.addAllowedChat(
+      rawChatId,
+      resolvedTitle || `Chat ${rawChatId}`,
+      resolvedType,
+      currentAdmin?.id || currentAdmin?.telegramId || 'admin',
+      true
+    );
+
+    return res.json({
+      success: true,
+      chatWhitelistEnabled: Boolean(updatedSettings.chatWhitelistEnabled),
+      allowedChats: formatAllowedChatsResponse(updatedSettings.allowedChats)
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to add chat to whitelist' });
+  }
+});
+
+apiRouter.delete('/chat-whitelist/:chatId', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const rawChatId = decodeURIComponent(String(req.params.chatId || '')).trim();
+    if (!rawChatId) {
+      return res.status(400).json({ error: 'chatId is required' });
+    }
+    const removal = await storage.removeAllowedChat(rawChatId);
+    return res.json({
+      success: true,
+      chatWhitelistEnabled: Boolean(removal.settings?.chatWhitelistEnabled),
+      allowedChats: formatAllowedChatsResponse(removal.settings?.allowedChats)
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to remove chat from whitelist' });
+  }
 });
 
 // POST /api/settings/sync-channels - Auto-detect and sync channels/groups where bot is admin

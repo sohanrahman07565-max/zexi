@@ -150,6 +150,14 @@ export interface ForceSubChannel {
   detectedAt?: string;
 }
 
+export interface AllowedChatEntry {
+  id: string;
+  title?: string;
+  type?: 'group' | 'supergroup' | 'channel' | 'private';
+  addedAt: string;
+  addedBy?: string;
+}
+
 export interface BotSettings {
   botToken: string;
   botUsername: string;
@@ -166,6 +174,8 @@ export interface BotSettings {
   requiredChannels?: ForceSubChannel[];
   autoApproveJoinRequests?: boolean;
   antiForwardEnabled?: boolean;
+  chatWhitelistEnabled?: boolean;
+  allowedChats?: AllowedChatEntry[];
 }
 
 export interface JoinRequestRecord {
@@ -515,7 +525,9 @@ export const DEFAULT_SETTINGS: BotSettings = {
   forceSubEnabled: false,
   autoApproveJoinRequests: true,
   antiForwardEnabled: false,
-  requiredChannels: []
+  requiredChannels: [],
+  chatWhitelistEnabled: false,
+  allowedChats: []
 };
 
 // Persistent storage paths for standalone Render Web Service and local environment (Dual Firebase projects)
@@ -675,14 +687,28 @@ export class SharedStorageService {
 
   private isCloudSyncing = false;
   private hasPendingCloudSync = false;
+  private cloudSyncPromise: Promise<boolean> | null = null;
+  private activeLoadPromise: Promise<AppDatabase> | null = null;
   private cachedAuthToken: string | null = null;
   private tokenExpiresAt: number = 0;
+  private static sharedCloudToken: string | null = null;
+  private static sharedRefreshToken: string | null = null;
+  private static sharedTokenExpiresAt: number = 0;
+  private static authRateLimitedUntil: number = 0;
+  private static tokenFetchPromise: Promise<string | null> | null = null;
 
   // Explicitly set authenticated admin Firebase ID token (from client login)
-  public setCloudAuthToken(token: string): void {
+  public setCloudAuthToken(token: string, refreshToken?: string): void {
     if (token && typeof token === 'string') {
-      this.cachedAuthToken = token.trim();
-      this.tokenExpiresAt = Date.now() + 55 * 60 * 1000; // 55 minutes validity
+      const clean = token.trim();
+      const exp = Date.now() + 55 * 60 * 1000;
+      this.cachedAuthToken = clean;
+      this.tokenExpiresAt = exp;
+      SharedStorageService.sharedCloudToken = clean;
+      SharedStorageService.sharedTokenExpiresAt = exp;
+      if (refreshToken && typeof refreshToken === 'string') {
+        SharedStorageService.sharedRefreshToken = refreshToken.trim();
+      }
     }
   }
 
@@ -699,38 +725,120 @@ export class SharedStorageService {
     if (this.cachedAuthToken && now < this.tokenExpiresAt - 60000) {
       return this.cachedAuthToken;
     }
-
-    try {
-      const apiKey = process.env.FIREBASE_API_KEY || "AIzaSyAvuHW-o4Rl-Ry8Fx5I3xp_Op1ujBT24Ls";
-      const email = process.env.FIREBASE_SYNC_EMAIL || "server-sync@bot.local";
-      const password = process.env.FIREBASE_SYNC_PASSWORD || "SyncSecret123456!";
-
-      const authRes = await fetch(
-        `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${apiKey}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            email,
-            password,
-            returnSecureToken: true
-          })
-        }
-      );
-
-      if (authRes.ok) {
-        const authData = await authRes.json();
-        if (authData.idToken) {
-          this.cachedAuthToken = authData.idToken;
-          this.tokenExpiresAt = now + (Number(authData.expiresIn) || 3600) * 1000;
-          return this.cachedAuthToken;
-        }
-      }
-    } catch (e: any) {
-      // Non-critical token retrieval error
+    if (SharedStorageService.sharedCloudToken && now < SharedStorageService.sharedTokenExpiresAt - 60000) {
+      this.cachedAuthToken = SharedStorageService.sharedCloudToken;
+      this.tokenExpiresAt = SharedStorageService.sharedTokenExpiresAt;
+      return this.cachedAuthToken;
     }
 
-    return null;
+    if (SharedStorageService.tokenFetchPromise) {
+      const shared = await SharedStorageService.tokenFetchPromise;
+      if (shared) {
+        this.cachedAuthToken = shared;
+        this.tokenExpiresAt = SharedStorageService.sharedTokenExpiresAt;
+      }
+      return shared;
+    }
+
+    const apiKey = process.env.FIREBASE_API_KEY || "AIzaSyAvuHW-o4Rl-Ry8Fx5I3xp_Op1ujBT24Ls";
+    const email = process.env.FIREBASE_SYNC_EMAIL || "bot-cloud-sync-v2@zexibot.local";
+    const password = process.env.FIREBASE_SYNC_PASSWORD || "ZexiCloudSync#2025!";
+
+    const cacheToken = (idToken: string, expiresInSec?: any, refreshToken?: string) => {
+      const exp = Date.now() + (Number(expiresInSec) || 3600) * 1000;
+      this.cachedAuthToken = idToken;
+      this.tokenExpiresAt = exp;
+      SharedStorageService.sharedCloudToken = idToken;
+      SharedStorageService.sharedTokenExpiresAt = exp;
+      if (refreshToken) {
+        SharedStorageService.sharedRefreshToken = refreshToken;
+      }
+      return idToken;
+    };
+
+    SharedStorageService.tokenFetchPromise = (async (): Promise<string | null> => {
+      try {
+        // 0. If we have a refresh token, exchange it via Secure Token API (avoids password rate limits)
+        if (SharedStorageService.sharedRefreshToken) {
+          try {
+            const refreshRes = await fetch(
+              `https://securetoken.googleapis.com/v1/token?key=${apiKey}`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: `grant_type=refresh_token&refresh_token=${encodeURIComponent(SharedStorageService.sharedRefreshToken)}`
+              }
+            );
+            if (refreshRes.ok) {
+              const refreshData = await refreshRes.json();
+              if (refreshData.id_token) {
+                return cacheToken(refreshData.id_token, refreshData.expires_in, refreshData.refresh_token);
+              }
+            }
+          } catch {}
+        }
+
+        // 1. Try primary sync account signInWithPassword (unless temporarily backed off)
+        if (Date.now() > SharedStorageService.authRateLimitedUntil) {
+          const authRes = await fetch(
+            `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${apiKey}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ email, password, returnSecureToken: true })
+            }
+          );
+
+          if (authRes.ok) {
+            const authData = await authRes.json();
+            if (authData.idToken) return cacheToken(authData.idToken, authData.expiresIn, authData.refreshToken);
+          } else {
+            const errBody = await authRes.json().catch(() => null);
+            const errMsg = String(errBody?.error?.message || '');
+            if (errMsg.includes('TOO_MANY_ATTEMPTS_TRY_LATER')) {
+              SharedStorageService.authRateLimitedUntil = Date.now() + 5 * 60 * 1000;
+            } else {
+              // 2. Auto-provision primary sync user if not yet created
+              const signUpRes = await fetch(
+                `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${apiKey}`,
+                {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ email, password, returnSecureToken: true })
+                }
+              );
+              if (signUpRes.ok) {
+                const signUpData = await signUpRes.json();
+                if (signUpData.idToken) return cacheToken(signUpData.idToken, signUpData.expiresIn, signUpData.refreshToken);
+              }
+            }
+          }
+        }
+
+        // 3. Fallback: Ephemeral email/password sync session (works even when anonymous auth is disabled)
+        const ephemeralEmail = `sync-${crypto.randomBytes(6).toString('hex')}@zexibot.local`;
+        const ephemeralPassword = crypto.randomBytes(16).toString('hex') + 'A1!';
+        const fallbackSignUp = await fetch(
+          `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${apiKey}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: ephemeralEmail, password: ephemeralPassword, returnSecureToken: true })
+          }
+        );
+        if (fallbackSignUp.ok) {
+          const fallbackData = await fallbackSignUp.json();
+          if (fallbackData.idToken) return cacheToken(fallbackData.idToken, fallbackData.expiresIn, fallbackData.refreshToken);
+        }
+      } catch {
+        // Non-critical token retrieval error
+      }
+      return null;
+    })().finally(() => {
+      SharedStorageService.tokenFetchPromise = null;
+    });
+
+    return SharedStorageService.tokenFetchPromise;
   }
 
   private getRtdbUrl(path: string, token?: string | null): string {
@@ -746,71 +854,86 @@ export class SharedStorageService {
     return url;
   }
 
-  // 100% Cloud Persistence: Immediate commit to Firebase Realtime Database
+  // 100% Cloud Persistence: Serialized & awaitable commit to Firebase Realtime Database
   public async syncToFirebaseCloud(): Promise<boolean> {
-    if (this.isCloudSyncing) {
+    if (this.isCloudSyncing && this.cloudSyncPromise) {
       this.hasPendingCloudSync = true;
+      await this.cloudSyncPromise.catch(() => false);
+      if (this.hasPendingCloudSync && !this.isCloudSyncing) {
+        return this.syncToFirebaseCloud();
+      }
       return true;
     }
 
     this.isCloudSyncing = true;
     this.hasPendingCloudSync = false;
 
-    try {
-      const token = await this.getFirebaseAuthToken();
-      const payload = JSON.stringify({
-        items: this.db.items,
-        templates: this.db.templates,
-        admins: this.db.admins,
-        sessions: (this.db.sessions || []).filter(s => s.expiresAt > Date.now()),
-        clonedBots: this.db.clonedBots || [],
-        settings: this.db.settings,
-        design: this.db.design,
-        botUsers: this.db.botUsers,
-        reports: this.db.reports,
-        fraudRules: this.db.fraudRules,
-        linkWarnings: this.db.linkWarnings,
-        fraudWarnings: this.db.fraudWarnings,
-        detectedChannels: this.db.detectedChannels,
-        joinRequests: this.db.joinRequests,
-        uploadedFilesIndex: this.db.uploadedFilesIndex,
-        updatedAt: new Date().toISOString()
-      });
+    const runSync = async (): Promise<boolean> => {
+      let ok = false;
+      try {
+        const token = await this.getFirebaseAuthToken();
+        const payload = JSON.stringify({
+          items: this.db.items,
+          templates: this.db.templates,
+          admins: this.db.admins,
+          sessions: (this.db.sessions || []).filter(s => s.expiresAt > Date.now()),
+          clonedBots: this.db.clonedBots || [],
+          settings: this.db.settings,
+          design: this.db.design,
+          botUsers: this.db.botUsers,
+          reports: this.db.reports,
+          fraudRules: this.db.fraudRules,
+          linkWarnings: this.db.linkWarnings,
+          fraudWarnings: this.db.fraudWarnings,
+          detectedChannels: this.db.detectedChannels,
+          joinRequests: this.db.joinRequests,
+          trackedMessages: this.db.trackedMessages,
+          scheduledDeletions: this.db.scheduledDeletions,
+          chatDeliveryMessages: this.db.chatDeliveryMessages,
+          backupServer: this.db.backupServer,
+          addSessions: this.db.addSessions,
+          webcodes: this.db.webcodes,
+          uploadedFilesIndex: this.db.uploadedFilesIndex,
+          updatedAt: new Date().toISOString()
+        });
 
-      // Attempt 1: Authenticated request (if token/secret available)
-      let res = await fetch(this.getRtdbUrl('/app_state', token), {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: payload
-      });
-
-      // Attempt 2: If 401/403 and token was used, retry without token (in case rules are public)
-      if (!res.ok && token) {
-        res = await fetch(this.getRtdbUrl('/app_state'), {
+        let res = await fetch(this.getRtdbUrl('/app_state', token), {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: payload
         });
+
+        if (!res.ok && token) {
+          res = await fetch(this.getRtdbUrl('/app_state'), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: payload
+          });
+        }
+
+        if (res.ok) {
+          ok = true;
+          console.log(`☁️ [Firebase Cloud] Storage (${this.botId}) committed to Firebase Realtime Database.`);
+        } else {
+          const errorText = await res.text().catch(() => '');
+          console.warn(`☁️ [Firebase Cloud] Cloud sync (${this.botId}) returned HTTP ${res.status}:`, errorText);
+        }
+      } catch (err: any) {
+        console.warn(`☁️ [Firebase Cloud] Storage sync (${this.botId}) notice:`, err?.message || err);
+      } finally {
+        this.isCloudSyncing = false;
+        this.cloudSyncPromise = null;
       }
 
-      if (res.ok) {
-        console.log('☁️ [Firebase Cloud] Storage successfully committed to Firebase Realtime Database (100% cloud permanence).');
-      } else {
-        const errorText = await res.text().catch(() => '');
-        console.warn(`☁️ [Firebase Cloud] Cloud sync returned HTTP ${res.status}:`, errorText);
-      }
-    } catch (err: any) {
-      console.warn('☁️ [Firebase Cloud] Storage sync notice:', err?.message || err);
-    } finally {
-      this.isCloudSyncing = false;
       if (this.hasPendingCloudSync) {
         this.hasPendingCloudSync = false;
-        // Asynchronously process the pending write
-        this.syncToFirebaseCloud().catch(() => {});
+        return this.syncToFirebaseCloud();
       }
-    }
+      return ok;
+    };
 
-    return true;
+    this.cloudSyncPromise = runSync();
+    return this.cloudSyncPromise;
   }
 
   // Restore latest database state from Firebase Realtime Database cloud
@@ -823,16 +946,50 @@ export class SharedStorageService {
         res = await fetch(this.getRtdbUrl('/app_state'));
       }
 
+      let cloudData: any = null;
       if (res.ok) {
-        const cloudData = await res.json();
-        if (
-          cloudData &&
-          typeof cloudData === 'object' &&
-          (cloudData.items || cloudData.settings || cloudData.admins || cloudData.botUsers)
-        ) {
-          console.log('☁️ [Firebase Storage] Restored state from Firebase Realtime Database cloud (zero data loss).');
-          return cloudData;
+        const parsed = await res.json();
+        if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
+          cloudData = parsed;
         }
+      }
+
+      // For main bot, also merge /cloned_bots_meta so cloned bots are never lost across updates
+      if (this.botId === 'main') {
+        try {
+          const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
+          const baseUrl = (process.env.FIREBASE_DATABASE_URL || (isSecondary ? SECONDARY_FIREBASE_RTDB_URL : FIREBASE_RTDB_URL)).replace(/\/+$/, '');
+          let metaRes = await fetch(token ? `${baseUrl}/cloned_bots_meta.json?auth=${encodeURIComponent(token)}` : `${baseUrl}/cloned_bots_meta.json`);
+          if (!metaRes.ok && token) {
+            metaRes = await fetch(`${baseUrl}/cloned_bots_meta.json`);
+          }
+          if (metaRes.ok) {
+            const metaObj = await metaRes.json();
+            if (metaObj && typeof metaObj === 'object') {
+              const metaBots = Object.values(metaObj).filter((b: any) => b && b.id && b.token) as ClonedBotRecord[];
+              if (metaBots.length > 0) {
+                if (!cloudData) cloudData = {};
+                const merged = new Map<string, ClonedBotRecord>();
+                for (const b of (Array.isArray(cloudData.clonedBots) ? cloudData.clonedBots : [])) {
+                  if (b && b.id) merged.set(b.id, b);
+                }
+                for (const b of metaBots) {
+                  if (!merged.has(b.id)) {
+                    merged.set(b.id, b);
+                  } else {
+                    merged.set(b.id, { ...b, ...merged.get(b.id)! });
+                  }
+                }
+                cloudData.clonedBots = Array.from(merged.values());
+              }
+            }
+          }
+        } catch {}
+      }
+
+      if (cloudData) {
+        console.log(`☁️ [Firebase Storage] Restored state (${this.botId}) from Firebase Realtime Database cloud.`);
+        return cloudData;
       }
     } catch (err: any) {
       console.warn('☁️ [Firebase Storage] Notice reading from cloud:', err?.message || err);
@@ -1040,7 +1197,9 @@ export class SharedStorageService {
         forceSubEnabled: loadedData.settings?.forceSubEnabled ?? false,
         autoApproveJoinRequests: loadedData.settings?.autoApproveJoinRequests ?? true,
         antiForwardEnabled: loadedData.settings?.antiForwardEnabled ?? false,
-        requiredChannels: Array.isArray(loadedData.settings?.requiredChannels) ? loadedData.settings.requiredChannels : []
+        requiredChannels: Array.isArray(loadedData.settings?.requiredChannels) ? loadedData.settings.requiredChannels : [],
+        chatWhitelistEnabled: loadedData.settings?.chatWhitelistEnabled ?? false,
+        allowedChats: Array.isArray(loadedData.settings?.allowedChats) ? loadedData.settings.allowedChats : []
       },
       backupServer: {
         ...DEFAULT_BACKUP_SERVER_CONFIG,
@@ -1049,18 +1208,29 @@ export class SharedStorageService {
     };
   }
 
-  // Blazing-fast In-Memory load with non-blocking background revalidation
+  // Blazing-fast In-Memory load with deduplicated cloud bootstrap
   public async loadLatest(force = false): Promise<AppDatabase> {
     const now = Date.now();
 
     // Fast Path: If already in memory and not cold boot, return immediately (0.01ms)
     if (this.lastLoadedAt > 0 && (!force || now - this.lastLoadedAt < 5000)) {
-      // Trigger background revalidation if stale (> 30s)
       if (now - this.lastDiskCheck > 30000) {
         this.revalidateInBackground().catch(() => {});
       }
       return this.db;
     }
+
+    if (this.activeLoadPromise) {
+      return this.activeLoadPromise;
+    }
+
+    this.activeLoadPromise = this.performLoadLatest().finally(() => {
+      this.activeLoadPromise = null;
+    });
+    return this.activeLoadPromise;
+  }
+
+  private async performLoadLatest(): Promise<AppDatabase> {
 
     let loadedData: Partial<AppDatabase> | null = null;
 
@@ -1149,16 +1319,22 @@ export class SharedStorageService {
     await this.loadLatest(true);
   }
 
-  // Fast asynchronous persistence: updates in-memory immediately & commits to cloud synchronously/reliably
-  public async persist(): Promise<boolean> {
+  // Fast asynchronous persistence: updates in-memory immediately & commits to cloud reliably
+  public async persist(waitForCloud: boolean = false): Promise<boolean> {
     this.lastLoadedAt = Date.now();
     this.rebuildCache();
     this.invalidateCache();
 
-    // 100% Cloud Permanence: Immediately commit to Firebase Realtime Database
-    this.syncToFirebaseCloud().catch((err) => {
-      console.warn('☁️ [Firebase Cloud] Background sync error:', err?.message || err);
-    });
+    // 100% Cloud Permanence: Commit to Firebase Realtime Database
+    if (waitForCloud) {
+      await this.syncToFirebaseCloud().catch((err) => {
+        console.warn('☁️ [Firebase Cloud] Sync error:', err?.message || err);
+      });
+    } else {
+      this.syncToFirebaseCloud().catch((err) => {
+        console.warn('☁️ [Firebase Cloud] Background sync error:', err?.message || err);
+      });
+    }
 
     // Trigger debounced real-time replication to silent backup mirror if enabled
     if (
@@ -1530,7 +1706,7 @@ export class SharedStorageService {
     }
     this.rebuildCache();
     this.invalidateCache();
-    return await this.persist();
+    return await this.persist(true);
   }
 
   public async deleteItem(id: string): Promise<boolean> {
@@ -1544,7 +1720,7 @@ export class SharedStorageService {
       }
       this.rebuildCache();
       this.invalidateCache();
-      return await this.persist();
+      return await this.persist(true);
     }
     return false;
   }
@@ -2041,6 +2217,12 @@ export class SharedStorageService {
     if (!Array.isArray(this.db.settings.requiredChannels)) {
       this.db.settings.requiredChannels = [];
     }
+    if (this.db.settings.chatWhitelistEnabled === undefined) {
+      this.db.settings.chatWhitelistEnabled = false;
+    }
+    if (!Array.isArray(this.db.settings.allowedChats)) {
+      this.db.settings.allowedChats = [];
+    }
     return this.db.settings;
   }
 
@@ -2053,10 +2235,90 @@ export class SharedStorageService {
       antiForwardEnabled: settings.antiForwardEnabled !== undefined ? Boolean(settings.antiForwardEnabled) : (this.db.settings.antiForwardEnabled ?? false),
       requiredChannels: settings.requiredChannels !== undefined && Array.isArray(settings.requiredChannels) 
         ? settings.requiredChannels 
-        : (Array.isArray(this.db.settings.requiredChannels) ? this.db.settings.requiredChannels : [])
+        : (Array.isArray(this.db.settings.requiredChannels) ? this.db.settings.requiredChannels : []),
+      chatWhitelistEnabled: settings.chatWhitelistEnabled !== undefined ? Boolean(settings.chatWhitelistEnabled) : (this.db.settings.chatWhitelistEnabled ?? false),
+      allowedChats: settings.allowedChats !== undefined && Array.isArray(settings.allowedChats)
+        ? settings.allowedChats
+        : (Array.isArray(this.db.settings.allowedChats) ? this.db.settings.allowedChats : [])
     };
-    await this.persist();
+    await this.persist(true);
     return this.db.settings;
+  }
+
+  // --- Chat Whitelist / Ignore Guard ---
+  private normalizeChatIdForWhitelist(chatId: string | number): string {
+    return String(chatId || '').trim();
+  }
+
+  public async getAllowedChats(): Promise<AllowedChatEntry[]> {
+    const s = await this.getSettings();
+    return Array.isArray(s.allowedChats) ? s.allowedChats : [];
+  }
+
+  public async isChatWhitelisted(chatId: string | number, chatType?: string): Promise<boolean> {
+    if (chatType === 'private') {
+      return true;
+    }
+    const s = await this.getSettings();
+    if (!s.chatWhitelistEnabled) {
+      return true;
+    }
+    const cleanId = this.normalizeChatIdForWhitelist(chatId);
+    if (!cleanId) return false;
+    const list = Array.isArray(s.allowedChats) ? s.allowedChats : [];
+    return list.some((entry) => {
+      const entryId = String(entry?.id || '').trim();
+      return entryId === cleanId;
+    });
+  }
+
+  public async addAllowedChat(
+    chatId: string | number,
+    title?: string,
+    type: AllowedChatEntry['type'] = 'supergroup',
+    addedBy?: string,
+    autoEnableWhitelist: boolean = true
+  ): Promise<BotSettings> {
+    await this.loadLatest(true);
+    const cleanId = this.normalizeChatIdForWhitelist(chatId);
+    if (!cleanId) return this.db.settings;
+    const current = Array.isArray(this.db.settings.allowedChats) ? [...this.db.settings.allowedChats] : [];
+    const idx = current.findIndex((c) => String(c.id).trim() === cleanId);
+    const entry: AllowedChatEntry = {
+      id: cleanId,
+      title: title?.trim() || (idx >= 0 ? current[idx].title : undefined),
+      type: type || (idx >= 0 ? current[idx].type : 'supergroup'),
+      addedAt: idx >= 0 ? current[idx].addedAt : new Date().toISOString(),
+      addedBy: addedBy || (idx >= 0 ? current[idx].addedBy : undefined)
+    };
+    if (idx >= 0) {
+      current[idx] = entry;
+    } else {
+      current.push(entry);
+    }
+    this.db.settings = {
+      ...this.db.settings,
+      allowedChats: current,
+      ...(autoEnableWhitelist ? { chatWhitelistEnabled: true } : {})
+    };
+    await this.persist(true);
+    return this.db.settings;
+  }
+
+  public async removeAllowedChat(chatId: string | number): Promise<{ removed: boolean; settings: BotSettings }> {
+    await this.loadLatest(true);
+    const cleanId = this.normalizeChatIdForWhitelist(chatId);
+    const current = Array.isArray(this.db.settings.allowedChats) ? this.db.settings.allowedChats : [];
+    const filtered = current.filter((c) => String(c.id).trim() !== cleanId);
+    const removed = filtered.length !== current.length;
+    if (removed) {
+      this.db.settings = {
+        ...this.db.settings,
+        allowedChats: filtered
+      };
+      await this.persist(true);
+    }
+    return { removed, settings: this.db.settings };
   }
 
   // --- Force Sub & Auto-Detected Channels ---
@@ -2479,7 +2741,36 @@ export class SharedStorageService {
       }
     }
 
-    // 3. Keep index in database (metadata only, no raw base64!)
+    // 3. Persist small/medium files (<= 4MB) directly in Firebase RTDB so web-uploaded media survives redeploy
+    if (size > 0 && size <= 4 * 1024 * 1024) {
+      try {
+        const token = await this.getFirebaseAuthToken();
+        const url = this.getRtdbUrl(`/uploaded_files/${cleanId}`, token);
+        const body = JSON.stringify({
+          id: cleanId,
+          fileName: data.fileName,
+          fileType: fType,
+          mimeType: mime,
+          size,
+          base64: data.buffer.toString('base64'),
+          createdAt
+        });
+        let cloudRes = await fetch(url, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body
+        });
+        if (!cloudRes.ok && token) {
+          cloudRes = await fetch(this.getRtdbUrl(`/uploaded_files/${cleanId}`), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body
+          });
+        }
+      } catch {}
+    }
+
+    // 4. Keep index in database (metadata only inside app_state)
     await this.loadLatest(true);
     if (!this.db.uploadedFilesIndex) {
       this.db.uploadedFilesIndex = {};
@@ -2492,7 +2783,7 @@ export class SharedStorageService {
       size,
       createdAt
     };
-    await this.persist();
+    await this.persist(true);
     return record;
   }
 
@@ -2572,6 +2863,32 @@ export class SharedStorageService {
         return rec;
       }
     }
+
+    // 4. Hydrate from Firebase RTDB /uploaded_files/${cleanId} after redeploy
+    try {
+      const token = await this.getFirebaseAuthToken();
+      let res = await fetch(this.getRtdbUrl(`/uploaded_files/${cleanId}`, token));
+      if (!res.ok && token) {
+        res = await fetch(this.getRtdbUrl(`/uploaded_files/${cleanId}`));
+      }
+      if (res.ok) {
+        const cloudFile = await res.json();
+        if (cloudFile && cloudFile.base64) {
+          const buffer = Buffer.from(cloudFile.base64, 'base64');
+          const rec: UploadedFileRecord = {
+            id: cleanId,
+            fileName: cloudFile.fileName || 'file',
+            fileType: cloudFile.fileType || 'document',
+            mimeType: cloudFile.mimeType || 'application/octet-stream',
+            size: buffer.length,
+            buffer,
+            createdAt: cloudFile.createdAt || new Date().toISOString()
+          };
+          SharedStorageService.uploadedFilesMemory.set(cleanId, rec);
+          return rec;
+        }
+      }
+    } catch {}
 
     return null;
   }
@@ -3189,6 +3506,7 @@ export class SharedStorageService {
 
   public async saveClonedBot(cloned: ClonedBotRecord): Promise<void> {
     if (!cloned || !cloned.id) return;
+    await this.loadLatest(false);
     if (!Array.isArray(this.db.clonedBots)) {
       this.db.clonedBots = [];
     }
@@ -3198,39 +3516,47 @@ export class SharedStorageService {
     } else {
       this.db.clonedBots.push(cloned);
     }
-    await this.persist();
 
-    // Persist to Firebase RTDB under /cloned_bots_meta/${cloned.id}.json
+    // Commit immediately to Firebase /cloned_bots_meta/${cloned.id} and /app_state
     try {
       const token = await this.getFirebaseAuthToken();
       const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
       const baseUrl = (process.env.FIREBASE_DATABASE_URL || (isSecondary ? SECONDARY_FIREBASE_RTDB_URL : FIREBASE_RTDB_URL)).replace(/\/+$/, '');
       const metaUrl = token ? `${baseUrl}/cloned_bots_meta/${cloned.id}.json?auth=${encodeURIComponent(token)}` : `${baseUrl}/cloned_bots_meta/${cloned.id}.json`;
-      fetch(metaUrl, {
+      let metaRes = await fetch(metaUrl, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(cloned)
-      }).catch(() => {});
+      });
+      if (!metaRes.ok && token) {
+        await fetch(`${baseUrl}/cloned_bots_meta/${cloned.id}.json`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(cloned)
+        }).catch(() => {});
+      }
     } catch {}
+
+    await this.persist(true);
   }
 
   public async deleteClonedBot(id: string): Promise<boolean> {
     if (!id) return false;
+    await this.loadLatest(false);
     if (!Array.isArray(this.db.clonedBots)) {
       return false;
     }
     const prevLen = this.db.clonedBots.length;
     this.db.clonedBots = this.db.clonedBots.filter(b => b.id !== id);
     if (this.db.clonedBots.length !== prevLen) {
-      await this.persist();
-
       try {
         const token = await this.getFirebaseAuthToken();
         const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
         const baseUrl = (process.env.FIREBASE_DATABASE_URL || (isSecondary ? SECONDARY_FIREBASE_RTDB_URL : FIREBASE_RTDB_URL)).replace(/\/+$/, '');
         const metaUrl = token ? `${baseUrl}/cloned_bots_meta/${id}.json?auth=${encodeURIComponent(token)}` : `${baseUrl}/cloned_bots_meta/${id}.json`;
-        fetch(metaUrl, { method: 'DELETE' }).catch(() => {});
+        await fetch(metaUrl, { method: 'DELETE' }).catch(() => {});
       } catch {}
+      await this.persist(true);
       return true;
     }
     return false;
