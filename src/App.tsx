@@ -16,7 +16,6 @@ import { BottomNav } from './components/BottomNav';
 import { ToastContainer } from './components/ToastContainer';
 import { BotSwitcherModal } from './components/BotSwitcherModal';
 import { DynamicIslandHeader } from './components/DynamicIslandHeader';
-import { Shield, Sparkles, Send, Bell, Crown, ShieldCheck } from 'lucide-react';
 
 function resolveBotDisplayName(info: any, fallbackUsername?: string): string {
   if (!info) {
@@ -43,7 +42,6 @@ function resolveBotDisplayName(info: any, fallbackUsername?: string): string {
 export default function App() {
   const [currentUser, setCurrentUser] = useState<AdminUser | null>(null);
   const [sessionBotId, setSessionBotId] = useState<string>('main');
-  const [loading, setLoading] = useState(true);
   const [showSplash, setShowSplash] = useState(true);
   const [currentTab, setCurrentTab] = useState('dashboard');
   const [isBotSwitcherOpen, setIsBotSwitcherOpen] = useState(false);
@@ -106,7 +104,6 @@ export default function App() {
   }, [fetchBotStatus]);
 
   const initApp = async () => {
-    setLoading(true);
     try {
       const urlBotId = getUrlBotId();
       if (urlBotId) {
@@ -153,8 +150,6 @@ export default function App() {
       }
     } catch (err) {
       console.error('Failed to initialize session:', err);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -222,7 +217,7 @@ export default function App() {
       const target = e.target as HTMLElement | null;
       if (!target) return;
 
-      const interactive = target.closest('button, .tap, .lg-sw, .lg-col, .lg-nb, [role="button"]');
+      const interactive = target.closest('button, .tap, .lg-col, .lg-nb, [role="button"]');
       if (interactive) {
         try {
           const rp = document.createElement('span');
@@ -528,7 +523,6 @@ export default function App() {
               offlineUsers={offlineUsers}
               settings={settings}
               onNavigate={handleNavigate}
-              onOpenAddModal={() => setCurrentTab('files')}
               onRefresh={refreshAllData}
             />
           </div>

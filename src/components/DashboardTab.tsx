@@ -13,7 +13,6 @@ interface DashboardTabProps {
   offlineUsers?: number;
   settings: BotSettings | null;
   onNavigate: (tab: string) => void;
-  onOpenAddModal?: (type: 'file' | 'link') => void;
   onRefresh?: () => void;
 }
 

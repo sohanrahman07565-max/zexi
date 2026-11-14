@@ -3,7 +3,7 @@ import { BotInstance, api } from '../lib/api';
 import { toast } from '../lib/toast';
 import { 
   Bot, Check, Plus, Trash2, ExternalLink, RefreshCw, Loader2, 
-  X, Shield, Radio, Sparkles, AlertCircle, Copy, CheckCircle2, ChevronRight
+  X, Shield, Sparkles, AlertCircle, Copy
 } from 'lucide-react';
 
 interface BotSwitcherModalProps {

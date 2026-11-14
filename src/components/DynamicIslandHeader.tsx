@@ -21,7 +21,6 @@ const TAB_LABELS: Record<string, string> = {
   dashboard: 'Dashboard',
   files: 'Files & Links',
   filters: 'Bot Filters',
-  simulator: 'Group Simulator',
   design: 'App Design',
   more: 'More Options',
 };

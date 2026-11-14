@@ -3,10 +3,10 @@ import { createPortal } from 'react-dom';
 import { ItemRecord, TriggerType, OpenMode, AdminUser, DesignConfig, api } from '../lib/api';
 import { toast } from '../lib/toast';
 import { 
-  FileText, Link2, Plus, Search, Edit2, Trash2, ExternalLink, 
-  Sparkles, Check, X, ShieldAlert, ArrowRight, ArrowLeft, Play, FileUp, Globe, Smartphone,
-  Copy, Hash, ChevronDown, ChevronUp, Share2, Upload, AlertTriangle, Paperclip, Loader2,
-  Clock, Calendar, RefreshCw, Image, Video, Music, CheckCircle2, MessageSquare
+  FileText, Link2, Plus, Search, Edit2, Trash2, 
+  Sparkles, Check, X, ArrowRight, ArrowLeft, Globe, Smartphone,
+  Copy, Share2, Upload, AlertTriangle, Paperclip, Loader2,
+  Clock, Calendar, Video, Music, MessageSquare
 } from 'lucide-react';
 
 interface FilesTabProps {
@@ -15,7 +15,6 @@ interface FilesTabProps {
   botUsername?: string;
   design?: DesignConfig;
   onRefresh: () => void;
-  onSimulate?: (trigger: string) => void;
 }
 
 interface MultiFileEntry {
@@ -34,8 +33,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
   currentUser,
   botUsername,
   design,
-  onRefresh,
-  onSimulate
+  onRefresh
 }) => {
   const [filter, setFilter] = useState<'all' | 'file' | 'link' | 'temporary' | 'permanent' | 'text'>('all');
   const [search, setSearch] = useState('');
@@ -59,11 +57,9 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
   const [openMode, setOpenMode] = useState<OpenMode>('browser');
   const [retentionType, setRetentionType] = useState<'permanent' | 'temporary'>('permanent');
   const [retentionDays, setRetentionDays] = useState<number>(7);
-  const [fileEnabled, setFileEnabled] = useState<boolean>(true);
 
   // Multi-File upload list
   const [selectedFiles, setSelectedFiles] = useState<MultiFileEntry[]>([]);
-  const [uploading, setUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
 
   // Multi-step Flow State: Step 1 (Primary Details) -> Step 2 (Setup Video & Confirmation)
@@ -85,8 +81,6 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
 
   const canAddFile = currentUser.role === 'owner' || currentUser.permissions.files_add;
   const canAddLink = currentUser.role === 'owner' || currentUser.permissions.links_add;
-  const canEdit = currentUser.role === 'owner' || currentUser.permissions.files_edit || currentUser.permissions.links_edit;
-  const canDelete = currentUser.role === 'owner' || currentUser.permissions.files_delete || currentUser.permissions.links_delete;
 
   const generateRandomId = (type: 'file' | 'link' | 'text') => {
     const prefix = type === 'link' ? 'l_' : type === 'text' ? 't_' : 'f_';
@@ -129,7 +123,6 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
     setOpenMode('browser');
     setRetentionType('permanent');
     setRetentionDays(7);
-    setFileEnabled(initialType === 'file');
     setSelectedFiles([]);
     setUploadStatus(null);
     setHasSetupVideo(false);
@@ -158,7 +151,6 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
     setOpenMode(item.openMode || 'browser');
     setRetentionType(item.retentionType || 'permanent');
     setRetentionDays(item.retentionDays || 7);
-    setFileEnabled(item.isTextOnly ? false : (item.fileEnabled !== false));
     
     // Setup Video initialization
     setHasSetupVideo(Boolean(item.hasSetupVideo));
@@ -1824,7 +1816,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                       </button>
                       <button
                         type="submit"
-                        disabled={loading || uploading}
+                        disabled={loading}
                         className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-semibold shadow-md shadow-emerald-600/30 cursor-pointer disabled:opacity-50 transition-all flex items-center justify-center gap-1.5"
                       >
                         {loading ? (

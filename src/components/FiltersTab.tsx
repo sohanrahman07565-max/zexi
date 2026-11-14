@@ -2,8 +2,8 @@ import React, { useState, useMemo } from 'react';
 import { ItemRecord, TriggerType, AdminUser, DesignConfig, api } from '../lib/api';
 import { toast } from '../lib/toast';
 import { 
-  Filter, Plus, Search, Edit2, Trash2, Copy, Check, Share2, 
-  FileText, Link2, ExternalLink, Hash, Slash, Terminal,
+  Filter, Plus, Search, Edit2, Trash2, Copy, Check, 
+  FileText, Link2, Hash, Slash, Terminal,
   X, Eye, EyeOff, AlertTriangle, CheckCircle2
 } from 'lucide-react';
 
@@ -13,7 +13,6 @@ interface FiltersTabProps {
   botUsername?: string;
   design?: DesignConfig;
   onRefresh: () => void;
-  onSimulate?: (trigger: string) => void;
 }
 
 const FiltersTabComponent: React.FC<FiltersTabProps> = ({

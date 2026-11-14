@@ -143,7 +143,6 @@ const EMOJI_CATEGORIES: EmojiCategory[] = [
 export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
   const [activeCategory, setActiveCategory] = useState<string>('all');
   const [search, setSearch] = useState<string>('');
-  const [copiedEmoji, setCopiedEmoji] = useState<string | null>(null);
   const [collectedEmojis, setCollectedEmojis] = useState<string>('');
   const [toastEmoji, setToastEmoji] = useState<string | null>(null);
 
@@ -171,13 +170,8 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
 
   const handleCopy = (emoji: string) => {
     navigator.clipboard.writeText(emoji);
-    setCopiedEmoji(emoji);
     setToastEmoji(emoji);
     setCollectedEmojis((prev) => prev + emoji);
-
-    setTimeout(() => {
-      setCopiedEmoji(null);
-    }, 1200);
 
     setTimeout(() => {
       setToastEmoji((current) => (current === emoji ? null : current));

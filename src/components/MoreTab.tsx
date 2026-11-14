@@ -5,11 +5,11 @@ import {
 } from '../lib/api';
 import { toast } from '../lib/toast';
 import { 
-  MessageSquare, Users, Trash2, Settings, Smartphone, LogOut, 
-  ChevronRight, Edit2, Check, RefreshCw, Plus, Minus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi, WifiOff,
+  MessageSquare, Users, Trash2, Settings, LogOut, 
+  ChevronRight, Edit2, Check, RefreshCw, Plus, Minus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi,
   Megaphone, Image as ImageIcon, Video as VideoIcon, Music, Mic, Pin, Paperclip, Loader2, Radio,
-  Flag, AlertTriangle, Ban, CheckCircle, ShieldAlert, Eye, ExternalLink, ShieldCheck,
-  Copy, Download, Upload, Activity, HardDrive, Key, CheckSquare, Square, Bot, VolumeX
+  Flag, Ban, CheckCircle, ShieldAlert, ExternalLink, ShieldCheck,
+  Copy, Upload, Bot, VolumeX
 } from 'lucide-react';
 import { EmojiStore } from './EmojiStore';
 
@@ -49,7 +49,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   onLogout,
   onOpenBotSwitcher
 }) => {
-  const [subView, setSubView] = useState<'menu' | 'templates' | 'admins' | 'cleanup' | 'settings' | 'webhook' | 'broadcast' | 'apk' | 'emoji' | 'reports' | 'fraud' | 'backup' | 'whitelist'>('menu');
+  const [subView, setSubView] = useState<'menu' | 'templates' | 'admins' | 'cleanup' | 'settings' | 'webhook' | 'broadcast' | 'emoji' | 'reports' | 'fraud' | 'whitelist'>('menu');
 
   // Chat Whitelist / Ignore state
   const [chatWhitelistEnabled, setChatWhitelistEnabled] = useState<boolean>(Boolean(settings?.chatWhitelistEnabled));
@@ -359,7 +359,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   // Force Sub Add Channel form state
   const [newChannelName, setNewChannelName] = useState('');
   const [newChannelChatId, setNewChannelChatId] = useState('');
-  const [channelSyncing, setChannelSyncing] = useState(false);
   const [showManualAddChannel, setShowManualAddChannel] = useState(false);
   const [joinRequests, setJoinRequests] = useState<JoinRequestRecord[]>([]);
   const [loadingJoinRequests, setLoadingJoinRequests] = useState(false);
@@ -1041,23 +1040,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         return { ...prev, requiredChannels: reverted };
       });
       toast.error(err.message || 'Failed to toggle channel status');
-    }
-  };
-
-  const handleSyncChannels = async () => {
-    setChannelSyncing(true);
-    try {
-      const res = await api.syncChannels();
-      setBotSettings((prev: any) => ({
-        ...prev,
-        requiredChannels: res.channels
-      }));
-      onRefreshSettings();
-      toast.success(res.message || 'Channels and groups synced successfully!');
-    } catch (err: any) {
-      toast.error(err.message || 'Failed to auto-detect channels');
-    } finally {
-      setChannelSyncing(false);
     }
   };
 

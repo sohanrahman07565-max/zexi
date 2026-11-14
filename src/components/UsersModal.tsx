@@ -10,8 +10,7 @@ import {
   CheckCircle2,
   RefreshCw,
   AlertCircle,
-  Clock,
-  Sparkles
+  Clock
 } from 'lucide-react';
 
 interface UsersModalProps {
