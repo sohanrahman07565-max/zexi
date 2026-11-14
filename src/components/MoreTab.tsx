@@ -9,7 +9,7 @@ import {
   ChevronRight, Edit2, Check, RefreshCw, Plus, Minus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi, WifiOff,
   Megaphone, Image as ImageIcon, Video as VideoIcon, Music, Mic, Pin, Paperclip, Loader2, Radio,
   Flag, AlertTriangle, Ban, CheckCircle, ShieldAlert, Eye, ExternalLink, ShieldCheck,
-  Server, Database, Copy, Download, Upload, Activity, HardDrive, Key, CheckSquare, Square, Bot, VolumeX
+  Copy, Download, Upload, Activity, HardDrive, Key, CheckSquare, Square, Bot, VolumeX
 } from 'lucide-react';
 import { EmojiStore } from './EmojiStore';
 
@@ -49,8 +49,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   onLogout,
   onOpenBotSwitcher
 }) => {
-  const [subView, setSubView] = useState<'menu' | 'templates' | 'admins' | 'cleanup' | 'settings' | 'webhook' | 'broadcast' | 'apk' | 'emoji' | 'reports' | 'fraud' | 'backup' | 'firebase' | 'whitelist'>('menu');
-  const [copiedRulesType, setCopiedRulesType] = useState<'rtdb' | 'firestore' | null>(null);
+  const [subView, setSubView] = useState<'menu' | 'templates' | 'admins' | 'cleanup' | 'settings' | 'webhook' | 'broadcast' | 'apk' | 'emoji' | 'reports' | 'fraud' | 'backup' | 'whitelist'>('menu');
 
   // Chat Whitelist / Ignore state
   const [chatWhitelistEnabled, setChatWhitelistEnabled] = useState<boolean>(Boolean(settings?.chatWhitelistEnabled));
@@ -516,7 +515,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     setFraudRulesLoading(true);
     try {
       const data = await api.getFraudRules();
-      setFraudRulesList(Array.isArray(data) ? data : []);
+      const sorted = (Array.isArray(data) ? [...data] : []).sort((a, b) => {
+        const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        if (timeB !== timeA) return timeB - timeA;
+        return String(b.id || '').localeCompare(String(a.id || ''));
+      });
+      setFraudRulesList(sorted);
     } catch (err: any) {
       console.warn('Failed to load fraud rules:', err);
     } finally {
@@ -1608,27 +1613,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             </div>
             <ChevronRight className="w-4 h-4 text-white/50" />
           </button>
-
-          {/* Firebase Security Rules */}
-          <button
-            onClick={() => setSubView('firebase')}
-            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
-          >
-            <div className="flex items-center gap-3">
-              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #34d399 20%, rgba(255,255,255,.06))' }}>
-                <Database className="w-4 h-4 text-emerald-300" />
-              </div>
-              <div>
-                <div className="text-xs font-bold text-white flex items-center gap-1.5">
-                  <span>Firebase Security Rules</span>
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-200 font-mono font-semibold">
-                    Secured
-                  </span>
-                </div>
-              </div>
-            </div>
-            <ChevronRight className="w-4 h-4 text-white/50" />
-          </button>
         </div>
 
         {/* Logout */}
@@ -1648,208 +1632,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   // -------------------------------------------------------------
   if (subView === 'emoji') {
     return <EmojiStore onBack={() => setSubView('menu')} />;
-  }
-
-  // -------------------------------------------------------------
-  // SUB-VIEW: FIREBASE SECURITY RULES
-  // -------------------------------------------------------------
-  if (subView === 'firebase') {
-    const rtdbRulesCode = `{
-  "rules": {
-    ".read": "auth != null",
-    ".write": "auth != null",
-    "app_state": {
-      ".read": "auth != null",
-      ".write": "auth != null"
-    },
-    "admins": {
-      ".read": "auth != null",
-      ".write": "auth != null && (auth.token.email == 'sohanrahman07565@gmail.com' || auth.token.email == 'zexiofficial8884@gmail.com' || auth.token.admin == true)"
-    },
-    "bot_config": {
-      ".read": "auth != null",
-      ".write": "auth != null"
-    },
-    "users": {
-      ".read": "auth != null",
-      ".write": "auth != null"
-    }
-  }
-}`;
-
-    const firestoreRulesCode = `rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if false;
-    }
-
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
-    function isOwner(adminId) {
-      return isSignedIn() && (
-        request.auth.uid == adminId || 
-        request.auth.token.email == 'sohanrahman07565@gmail.com' ||
-        request.auth.token.email == 'zexiofficial8884@gmail.com'
-      );
-    }
-
-    match /admins/{adminId} {
-      allow read: if isSignedIn();
-      allow write: if isOwner(adminId);
-    }
-  }
-}`;
-
-    const handleCopyRules = (type: 'rtdb' | 'firestore', code: string) => {
-      try {
-        navigator.clipboard.writeText(code);
-        setCopiedRulesType(type);
-        toast.success(`${type === 'rtdb' ? 'Realtime Database' : 'Firestore'} rules copied to clipboard!`);
-        setTimeout(() => setCopiedRulesType(null), 2500);
-      } catch {
-        toast.error('Failed to copy to clipboard');
-      }
-    };
-
-    return (
-      <div className="space-y-4 pb-28">
-        <div className="flex items-center justify-between">
-          <button
-            onClick={() => setSubView('menu')}
-            className="text-xs text-red-400 hover:text-sky-300 font-medium cursor-pointer"
-          >
-            ← Back to More
-          </button>
-          <span className="text-xs text-zinc-400">Firebase Security Rules</span>
-        </div>
-
-        {/* Security Status Card */}
-        <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-3.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-                <ShieldCheck className="w-4 h-4" />
-              </div>
-              <div>
-                <div className="text-xs font-bold text-white">Database Protection Active</div>
-                <div className="text-[10px] text-zinc-400">Zero-Trust Realtime Database &amp; Firestore Security</div>
-              </div>
-            </div>
-            <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold font-mono">
-              PUBLIC BLOCKED
-            </span>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
-            <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80 space-y-1">
-              <span className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider block">Access Policy</span>
-              <span className="text-xs font-semibold text-white block">Strictly Authenticated</span>
-              <p className="text-[10px] text-emerald-400 font-mono mt-0.5">.read: auth != null</p>
-            </div>
-            <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80 space-y-1">
-              <span className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider block">Write Policy</span>
-              <span className="text-xs font-semibold text-white block">Admin &amp; Bot Sync Only</span>
-              <p className="text-[10px] text-emerald-400 font-mono mt-0.5">.write: auth != null</p>
-            </div>
-          </div>
-
-          {/* Authorized Admin Emails */}
-          <div className="p-3 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-1.5">
-            <span className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider block">Authorized Admin Identifiers</span>
-            <div className="flex flex-wrap gap-1.5">
-              <span className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono">
-                sohanrahman07565@gmail.com
-              </span>
-              <span className="text-[10px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 font-mono">
-                zexiofficial8884@gmail.com
-              </span>
-            </div>
-          </div>
-
-          {/* Dual Database Targets */}
-          <div className="p-3 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-1.5">
-            <span className="text-[10px] uppercase font-bold text-zinc-400 tracking-wider block">Configured Firebase Projects</span>
-            <div className="space-y-1 text-xs">
-              <div className="flex items-center justify-between text-zinc-300">
-                <span className="font-mono text-[11px]">Primary: zexiofficial844</span>
-                <span className="text-[10px] text-emerald-400 font-semibold">Active</span>
-              </div>
-              <div className="flex items-center justify-between text-zinc-300">
-                <span className="font-mono text-[11px]">Secondary: zexi-official</span>
-                <span className="text-[10px] text-emerald-400 font-semibold">Active</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Realtime Database Rules Block */}
-        <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Database className="w-4 h-4 text-amber-400" />
-              <div className="text-xs font-bold text-white">Realtime Database Security Rules (database.rules.json)</div>
-            </div>
-            <button
-              onClick={() => handleCopyRules('rtdb', rtdbRulesCode)}
-              className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-white flex items-center gap-1.5 transition-colors cursor-pointer"
-            >
-              {copiedRulesType === 'rtdb' ? (
-                <>
-                  <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-emerald-400">Copied!</span>
-                </>
-              ) : (
-                <>
-                  <Copy className="w-3.5 h-3.5" />
-                  <span>Copy Rules</span>
-                </>
-              )}
-            </button>
-          </div>
-
-          <pre className="p-3 rounded-xl bg-zinc-950 border border-zinc-800/90 text-[11px] font-mono text-zinc-300 overflow-x-auto max-h-56">
-            <code>{rtdbRulesCode}</code>
-          </pre>
-
-          <p className="text-[10px] text-zinc-400 leading-relaxed">
-            💡 <strong>How to apply in Firebase:</strong> In the Firebase Console, navigate to <strong>Realtime Database</strong> → <strong>Rules</strong> tab, paste this JSON, and click <strong>Publish</strong>. This permanently closes all public reads/writes.
-          </p>
-        </div>
-
-        {/* Cloud Firestore Rules Block */}
-        <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Server className="w-4 h-4 text-sky-400" />
-              <div className="text-xs font-bold text-white">Cloud Firestore Rules (firestore.rules)</div>
-            </div>
-            <button
-              onClick={() => handleCopyRules('firestore', firestoreRulesCode)}
-              className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-white flex items-center gap-1.5 transition-colors cursor-pointer"
-            >
-              {copiedRulesType === 'firestore' ? (
-                <>
-                  <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-emerald-400">Copied!</span>
-                </>
-              ) : (
-                <>
-                  <Copy className="w-3.5 h-3.5" />
-                  <span>Copy Rules</span>
-                </>
-              )}
-            </button>
-          </div>
-
-          <pre className="p-3 rounded-xl bg-zinc-950 border border-zinc-800/90 text-[11px] font-mono text-zinc-300 overflow-x-auto max-h-56">
-            <code>{firestoreRulesCode}</code>
-          </pre>
-        </div>
-      </div>
-    );
   }
 
   // -------------------------------------------------------------

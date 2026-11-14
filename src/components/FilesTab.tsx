@@ -570,7 +570,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
   };
 
   const filteredItems = useMemo(() => {
-    return items.filter((item) => {
+    const filtered = items.filter((item) => {
       if (filter === 'file' && (item.type !== 'file' || item.isTextOnly)) return false;
       if (filter === 'text' && !item.isTextOnly) return false;
       if (filter === 'link' && item.type !== 'link') return false;
@@ -583,6 +583,13 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
         item.rawKeyword.toLowerCase().includes(q) ||
         item.triggers.some((t) => t.toLowerCase().includes(q))
       );
+    });
+
+    return [...filtered].sort((a, b) => {
+      const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      if (timeB !== timeA) return timeB - timeA;
+      return String(b.id || '').localeCompare(String(a.id || ''));
     });
   }, [items, filter, search]);
 

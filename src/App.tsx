@@ -231,9 +231,6 @@ export default function App() {
           rp.style.top = `${e.clientY}px`;
           document.body.appendChild(rp);
           window.setTimeout(() => rp.remove(), 750);
-          if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
-            navigator.vibrate(6);
-          }
         } catch {}
       }
 

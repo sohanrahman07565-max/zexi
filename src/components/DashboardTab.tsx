@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { ItemRecord, BotSettings, api } from '../lib/api';
-import { FileText, Link2, Hash, Users, Sparkles, ArrowUpRight, Plus, ChevronRight } from 'lucide-react';
+import { FileText, Link2, Hash, Users, Sparkles, ArrowUpRight } from 'lucide-react';
 import { UsersModal } from './UsersModal';
 import { useCountUp } from '../hooks/useCountUp';
 
@@ -13,7 +13,7 @@ interface DashboardTabProps {
   offlineUsers?: number;
   settings: BotSettings | null;
   onNavigate: (tab: string) => void;
-  onOpenAddModal: (type: 'file' | 'link') => void;
+  onOpenAddModal?: (type: 'file' | 'link') => void;
   onRefresh?: () => void;
 }
 
@@ -23,7 +23,6 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
   onlineUsers = 0,
   offlineUsers = 0,
   onNavigate,
-  onOpenAddModal,
   onRefresh,
 }) => {
   const [showUsersModal, setShowUsersModal] = useState<boolean>(false);
@@ -124,14 +123,19 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
             <div className="text-[11px] font-bold uppercase tracking-wider text-white/60 mt-1.5">
               Total Users
             </div>
-            <div className="text-[12px] font-semibold text-white/85 mt-2 tabular-nums">
-              <span className="text-emerald-400 font-bold">{animatedOnline.toLocaleString()}</span>{' '}
-              online ·{' '}
-              <span className="text-white/60">{animatedOffline.toLocaleString()}</span> offline
+            <div className="flex flex-wrap items-center gap-2 mt-2.5 tabular-nums">
+              <span className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-emerald-500/15 border border-emerald-400/35 text-[12.5px] font-bold text-emerald-300 shadow-[0_0_16px_rgba(52,211,153,0.16)]">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-[0_0_10px_#34d399] animate-pulse shrink-0" />
+                <span>{animatedOnline.toLocaleString()} Online</span>
+              </span>
+              <span className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-rose-500/15 border border-rose-400/35 text-[12.5px] font-bold text-rose-300 shadow-[0_0_16px_rgba(244,63,94,0.16)]">
+                <span className="w-2.5 h-2.5 rounded-full bg-rose-500 shadow-[0_0_10px_#f43f5e] shrink-0" />
+                <span>{animatedOffline.toLocaleString()} Offline</span>
+              </span>
             </div>
           </div>
 
-          <div className="lg-ring">
+          <div className="lg-ring shrink-0">
             <svg viewBox="0 0 100 100" aria-hidden="true">
               <defs>
                 <linearGradient id="lg-ring-grad" x1="0" y1="0" x2="1" y2="1">
@@ -157,20 +161,6 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
                 Online
               </span>
             </div>
-          </div>
-        </div>
-
-        {/* Continuous Marquee Ticker */}
-        <div className="lg-tick select-none">
-          <div className="lg-mq">
-            <span>⚡ System Online 24/7</span>
-            <span>• Realtime Monitoring</span>
-            <span>• Auto Invite Renewal</span>
-            <span>• Encrypted Tunnel</span>
-            <span>⚡ System Online 24/7</span>
-            <span>• Realtime Monitoring</span>
-            <span>• Auto Invite Renewal</span>
-            <span>• Encrypted Tunnel</span>
           </div>
         </div>
       </div>
@@ -278,169 +268,6 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
             Deliveries
           </div>
         </div>
-      </div>
-
-      {/* Quick Actions */}
-      <div className="space-y-2.5 pt-1">
-        <div className="text-[11px] font-extrabold uppercase tracking-[0.12em] text-white/55 px-1">
-          Quick Actions
-        </div>
-
-        <div className="grid grid-cols-2 gap-2.5">
-          <button
-            type="button"
-            onClick={() => onOpenAddModal('file')}
-            className="glass tap lg-rise rounded-[20px] p-3.5 flex items-center gap-3 text-left cursor-pointer"
-            style={{ '--i': 5 } as React.CSSProperties}
-          >
-            <div
-              className="lg-tile"
-              style={{
-                background: 'color-mix(in srgb, #60a5fa 22%, rgba(255,255,255,.06))',
-                '--c': 'rgba(96,165,250,0.45)',
-              } as React.CSSProperties}
-            >
-              <Plus className="w-4 h-4 text-sky-300" />
-            </div>
-            <div className="min-w-0">
-              <div className="text-[13px] font-extrabold text-white truncate">Add File</div>
-              <div className="text-[11px] text-white/60 truncate">Configure trigger</div>
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => onOpenAddModal('link')}
-            className="glass tap lg-rise rounded-[20px] p-3.5 flex items-center gap-3 text-left cursor-pointer"
-            style={{ '--i': 6 } as React.CSSProperties}
-          >
-            <div
-              className="lg-tile"
-              style={{
-                background: 'color-mix(in srgb, #c084fc 22%, rgba(255,255,255,.06))',
-                '--c': 'rgba(192,132,252,0.45)',
-              } as React.CSSProperties}
-            >
-              <Link2 className="w-4 h-4 text-purple-300" />
-            </div>
-            <div className="min-w-0">
-              <div className="text-[13px] font-extrabold text-white truncate">Add Link</div>
-              <div className="text-[11px] text-white/60 truncate">Browser or App</div>
-            </div>
-          </button>
-        </div>
-
-        <button
-          type="button"
-          onClick={() => onNavigate('filters')}
-          className="glass tap lg-rise w-full rounded-[20px] p-3.5 flex items-center gap-3 text-left cursor-pointer"
-          style={{ '--i': 7 } as React.CSSProperties}
-        >
-          <div
-            className="lg-tile"
-            style={{
-              background: 'color-mix(in srgb, #f472b6 22%, rgba(255,255,255,.06))',
-              '--c': 'rgba(244,114,182,0.45)',
-            } as React.CSSProperties}
-          >
-            <Hash className="w-4 h-4 text-pink-300" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="text-[13px] font-extrabold text-white truncate">
-              Manage All Filters
-            </div>
-            <div className="text-[11px] text-white/60 truncate">
-              Strict keyword matching &amp; /filters rules
-            </div>
-          </div>
-          <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
-        </button>
-      </div>
-
-      {/* Active Items List */}
-      <div className="space-y-2.5 pt-1">
-        <div className="flex items-center justify-between px-1">
-          <span className="text-[11px] font-extrabold uppercase tracking-[0.12em] text-white/55">
-            Active Items ({items.length})
-          </span>
-          <button
-            type="button"
-            onClick={() => onNavigate('files')}
-            className="text-xs font-bold text-white/80 hover:text-white transition-colors cursor-pointer"
-          >
-            View All
-          </button>
-        </div>
-
-        {items.length === 0 ? (
-          <div className="glass lg-rise rounded-[22px] p-6 text-center text-white/70 text-xs">
-            <p className="font-bold text-white text-sm">No items configured yet.</p>
-            <p className="text-[11px] text-white/60 mt-1">
-              Tap "Add File" or "Add Link" above, or send{' '}
-              <code className="lg-kw">/add</code> in Telegram.
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-2.5">
-            {items.slice(0, 5).map((item, idx) => (
-              <div
-                key={item.id}
-                onClick={() => onNavigate('files')}
-                className="glass tap lg-rise rounded-[20px] p-3.5 flex items-center justify-between gap-2.5 cursor-pointer"
-                style={{ '--i': Math.min(idx + 8, 14) } as React.CSSProperties}
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div
-                    className="lg-tile"
-                    style={{
-                      background:
-                        item.type === 'file'
-                          ? 'color-mix(in srgb, #60a5fa 22%, rgba(255,255,255,.06))'
-                          : 'color-mix(in srgb, #c084fc 22%, rgba(255,255,255,.06))',
-                      '--c':
-                        item.type === 'file'
-                          ? 'rgba(96,165,250,0.42)'
-                          : 'rgba(192,132,252,0.42)',
-                    } as React.CSSProperties}
-                  >
-                    {item.type === 'file' ? (
-                      <FileText className="w-4 h-4 text-sky-300" />
-                    ) : (
-                      <Link2 className="w-4 h-4 text-purple-300" />
-                    )}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-[13.5px] font-bold text-white truncate">
-                      {item.name}
-                    </div>
-                    <div className="flex items-center gap-1.5 text-[11px] text-white/60 mt-1 flex-wrap">
-                      <span className="lg-kw">
-                        {item.triggers?.[0] || `#${item.rawKeyword}`}
-                      </span>
-                      <span>·</span>
-                      <span className="truncate">
-                        {item.type === 'file'
-                          ? item.fileName || 'Document'
-                          : item.openMode === 'webapp'
-                          ? 'Mini App'
-                          : 'Browser Link'}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="text-right shrink-0 pl-2">
-                  <span className="text-[14px] font-extrabold text-white tabular-nums block">
-                    {item.deliveryCount || 0}
-                  </span>
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-white/50">
-                    sent
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
     </div>
   );

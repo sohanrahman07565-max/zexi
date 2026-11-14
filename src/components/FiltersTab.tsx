@@ -52,14 +52,14 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
     return items.filter((item) => item.status === 'active' && item.inFiltersList === true);
   }, [items]);
 
-  // Filtered list strictly ordered sequentially (FIFO / chronological):
-  // The first filter added stays at the very top/first position, second right below it, and so on.
+  // Filtered list ordered newest-first (chronological descending):
+  // Newly added triggers/filters appear automatically at the very top of the list.
   const displayedItems = useMemo(() => {
     const sorted = [...items].sort((a, b) => {
       const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
       const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-      if (timeA !== timeB) return timeA - timeB;
-      return (a.id || '').localeCompare(b.id || '');
+      if (timeB !== timeA) return timeB - timeA;
+      return String(b.id || '').localeCompare(String(a.id || ''));
     });
 
     return sorted.filter((item) => {
