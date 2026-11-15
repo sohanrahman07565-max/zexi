@@ -3097,18 +3097,18 @@ export class TelegramService {
       ? `@${bot.ownerUsername} (<code>${bot.ownerId}</code>)`
       : (bot.ownerUsername ? `@${bot.ownerUsername}` : `<code>${bot.ownerId || fromId}</code>`);
 
+    const cleanBotId = String(bot.id).replace(/^clone_/i, '').replace(/[:_-]/g, '');
     const successText =
       `✅ <b>Telegram Bot Successfully Cloned!</b>\n\n` +
       `🤖 <b>Bot Name:</b> ${bot.name}\n` +
       `🔗 <b>Bot Username:</b> @${bot.username}\n` +
-      `🆔 <b>Bot ID:</b> <code>${bot.id}</code>\n` +
       `👑 <b>Official Owner:</b> ${ownerDisplay}\n` +
-      `📡 <b>Status:</b> 🟢 Active &amp; Polling (Full Admin Access Granted)\n\n` +
-      `🔐 <b>Dedicated Sub-Admin Panel Login:</b>\n` +
+      `📡 <b>Status:</b> 🟢 Active &amp; Polling\n\n` +
+      `🔐 <b>Sub-Admin Panel Credentials</b>\n` +
       `🌐 <b>Panel URL:</b> ${bot.panelUrl}\n` +
-      `🆔 <b>Bot ID:</b> <code>${bot.id}</code>\n` +
-      `🔑 <b>Admin Password:</b> <code>${bot.adminPassword}</code>\n\n` +
-      `<i>The assigned Owner now has full administrative privileges inside @${bot.username} and can log in to the web panel using the Bot ID above.</i>`;
+      `🆔 <b>Bot ID:</b> <code>${cleanBotId}</code>\n` +
+      `🔑 <b>Password:</b> <code>${bot.adminPassword}</code>\n\n` +
+      `<i>The assigned Owner can log in to the web panel using the Bot ID and Password above.</i>`;
 
     if (isGroup) {
       if (message?.message_id) {
@@ -5018,7 +5018,7 @@ export class TelegramService {
       '━━━━━━━━━━━━━━━━━━━━',
       `🆔 <b>Player UID:</b> <code>${this.escapeHtml(playerUid)}</code>`,
       '⚡ <b>FREE FIRE PROFILE SYSTEM</b>',
-      '<tg-spoiler>✨ Powered by Zexi Team</tg-spoiler>'
+      '✨ Powered by Zexi Team'
     ].join('\n');
   }
 
@@ -5111,7 +5111,7 @@ export class TelegramService {
       `<blockquote>${this.escapeHtml(cleanBio)}</blockquote>`,
       '━━━━━━━━━━━━━━━━━━━━',
       '⚡ <b>FREE FIRE PROFILE SYSTEM</b>',
-      '<tg-spoiler>✨ Powered by Zexi Team</tg-spoiler>'
+      '✨ Powered by Zexi Team'
     ].join('\n');
   }
 
@@ -8817,7 +8817,7 @@ export class TelegramBotManager {
     }
 
     const info = verification.info;
-    const botId = `clone_${info.id}`;
+    const botId = String(info.id).replace(/[^a-zA-Z0-9]/g, '');
 
     // 1. Check if token matches main bot's active token
     const mainBotToken = await TelegramService.getBotToken();
@@ -8828,7 +8828,11 @@ export class TelegramBotManager {
     // 2. Check if token or bot ID is already in cloned bots registry
     const mainStorage = StorageManager.getMainStorage();
     const existing = await mainStorage.getClonedBots();
-    const foundExisting = existing.find((b: ClonedBotRecord) => b.token === cleanToken || b.id === botId);
+    const foundExisting = existing.find((b: ClonedBotRecord) =>
+      b.token === cleanToken ||
+      b.id === botId ||
+      b.id === `clone_${info.id}`
+    );
     if (foundExisting) {
       return { ok: false, error: 'Already this bot is already running.' };
     }
@@ -8849,7 +8853,7 @@ export class TelegramBotManager {
 
     const cleanToken = validation.cleanToken;
     const info = validation.info;
-    const botId = `clone_${info.id}`;
+    const botId = String(info.id).replace(/[^a-zA-Z0-9]/g, '');
 
     // 1. Resolve official Owner User ID and/or Username
     const mainStorage = StorageManager.getMainStorage();
@@ -8872,7 +8876,7 @@ export class TelegramBotManager {
 
     const resolvedOwnerTelegramId = ownerId || ownerUsername || createdBy || String(info.id);
 
-    // 2. Generate secure password and use Bot ID (e.g. clone_9112185641) as login identifier
+    // 2. Generate secure password and use clean Bot ID (e.g. 9112185641) as login identifier
     const randPart = Math.random().toString(36).substring(2, 6).toUpperCase();
     const numPart = Math.floor(100 + Math.random() * 900);
     const adminPassword = `Zexi#${randPart}${numPart}`;
@@ -8891,7 +8895,7 @@ export class TelegramBotManager {
       ownerUsername: ownerUsername || undefined,
       filesCount: 0,
       usersCount: 0,
-      adminUsername: botId, // Login identifier is now the Bot ID (e.g. clone_9112185641)
+      adminUsername: botId, // Login identifier is the clean Bot ID (e.g. 9112185641)
       adminPassword,
       panelUrl
     };
@@ -8909,7 +8913,7 @@ export class TelegramBotManager {
 
     // 4. Register official Owner strictly inside isolated bot storage with full administrative permissions
     const subAdminAccount = {
-      id: /^\d+$/.test(resolvedOwnerTelegramId) ? resolvedOwnerTelegramId : `owner_${info.id}`,
+      id: /^\d+$/.test(resolvedOwnerTelegramId) ? resolvedOwnerTelegramId : `owner${botId}`,
       telegramId: resolvedOwnerTelegramId,
       name: ownerUsername ? `@${ownerUsername}` : `${info.first_name || 'Bot'} Owner`,
       username: ownerUsername || botId,
@@ -9022,6 +9026,7 @@ export class TelegramBotManager {
       const cStorage = StorageManager.getStorage(c.id);
       const cItems = await cStorage.getItems().catch(() => []);
       const cUsers = await cStorage.getBotUsers().catch(() => []);
+      const cleanBotId = String(c.id).replace(/^clone_/i, '').replace(/[:_-]/g, '');
       list.push({
         id: c.id,
         name: c.name || `@${c.username}`,
@@ -9033,11 +9038,11 @@ export class TelegramBotManager {
         createdAt: c.createdAt,
         ownerId: c.ownerId,
         ownerUsername: c.ownerUsername,
-        adminUsername: c.id,
+        adminUsername: cleanBotId,
         adminPassword: c.adminPassword,
         panelUrl: (c.panelUrl && c.panelUrl.startsWith('http'))
           ? c.panelUrl
-          : `${this.getActiveBaseUrl()}${c.panelUrl || `/panel?bot_id=${c.id}`}`
+          : `${this.getActiveBaseUrl()}${c.panelUrl || `/panel?bot_id=${cleanBotId}`}`
       });
     }
 

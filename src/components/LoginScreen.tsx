@@ -891,7 +891,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
                 ref={userInputRef}
                 id="u"
                 type="text"
-                placeholder={targetBotId && targetBotId !== 'main' ? 'Enter Bot ID (e.g. clone_9112185641)' : 'Enter Bot ID, Username or Email'}
+                placeholder={targetBotId && targetBotId !== 'main' ? 'Enter Bot ID (e.g. 9112185641)' : 'Enter Bot ID, Username or Email'}
                 autoComplete="username"
                 value={identifier}
                 onChange={(e) => {

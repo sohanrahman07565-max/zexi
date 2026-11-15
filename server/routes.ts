@@ -12,14 +12,26 @@ export const apiRouter = Router();
 
 // Multi-Bot Request Routing Middleware:
 // Sets active bot storage context for the current HTTP request via x-bot-id header, ?bot_id=, or req.body.bot_id
-apiRouter.use((req: Request, _res: Response, next: NextFunction) => {
-  const botId = 
+apiRouter.use(async (req: Request, _res: Response, next: NextFunction) => {
+  let botId = 
     (req.headers['x-bot-id'] as string) || 
     (req.query.bot_id as string) || 
     (req.query.botId as string) || 
     (req.body?.bot_id as string) || 
     (req.body?.botId as string) || 
     'main';
+  if (botId && botId !== 'main') {
+    const cleanLookup = botId.replace(/^clone_/i, '').replace(/[:_-]/g, '');
+    const mainStorage = StorageManager.getMainStorage();
+    const cloned = await mainStorage.getClonedBots().catch(() => []);
+    const matched = cloned.find(b =>
+      b.id === botId ||
+      b.id.replace(/^clone_/i, '').replace(/[:_-]/g, '') === cleanLookup
+    );
+    if (matched) {
+      botId = matched.id;
+    }
+  }
   const botStorage = StorageManager.getStorage(botId);
   storageContext.run(botStorage, () => {
     next();
@@ -116,7 +128,9 @@ async function authenticate(req: Request, res: Response, next: NextFunction) {
 
   // STRICT ISOLATION: A cloned bot sub-admin session is locked exclusively to its own botId
   const sessionBotId = session.botId || 'main';
-  if (sessionBotId !== 'main' && requestedBotId !== sessionBotId) {
+  const normalizedSessionBotId = sessionBotId.replace(/^clone_/i, '').replace(/[:_-]/g, '');
+  const normalizedRequestedBotId = requestedBotId.replace(/^clone_/i, '').replace(/[:_-]/g, '');
+  if (sessionBotId !== 'main' && normalizedRequestedBotId !== normalizedSessionBotId) {
     return res.status(403).json({
       error: 'Access Denied: Your session is restricted to its assigned cloned bot panel.'
     });
@@ -170,7 +184,11 @@ async function findClonedBotAuth(cleanId: string, requestedBotId?: string): Prom
   const clonedBots = await mainStorage.getClonedBots();
 
   const cleanLower = cleanId.toLowerCase().replace(/^@/, '').trim();
-  const target = clonedBots.find(b => b.id === requestedBotId);
+  const cleanRequested = requestedBotId.replace(/^clone_/i, '').replace(/[:_-]/g, '').toLowerCase();
+  const target = clonedBots.find(b =>
+    b.id === requestedBotId ||
+    b.id.replace(/^clone_/i, '').replace(/[:_-]/g, '').toLowerCase() === cleanRequested
+  );
   if (!target) {
     return null;
   }
@@ -255,13 +273,14 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
     'main'
   ).trim() || 'main';
 
-  // If logging in from main/root URL using a Cloned Bot ID (e.g. clone_9112185641), route strictly to that cloned bot
+  // If logging in from main/root URL using a Cloned Bot ID (e.g. 9112185641), route strictly to that cloned bot
   if (requestedBotId === 'main') {
     const mainStore = StorageManager.getMainStorage();
     await mainStore.loadLatest(false);
     const allCloned = await mainStore.getClonedBots();
     const matchedByBotId = allCloned.find(b =>
       b.id.toLowerCase() === cleanLowerInput ||
+      b.id.replace(/^clone_/i, '').replace(/[:_-]/g, '').toLowerCase() === cleanLowerInput ||
       (b.adminUsername && b.adminUsername.toLowerCase() === cleanLowerInput)
     );
     if (matchedByBotId) {
@@ -2373,7 +2392,11 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
     try {
       const mainStorage = StorageManager.getMainStorage();
       const clonedList = await mainStorage.getClonedBots().catch(() => []);
-      const currentCloned = clonedList.find(b => b.id === activeBotId);
+      const cleanActiveLookup = activeBotId.replace(/^clone_/i, '').replace(/[:_-]/g, '');
+      const currentCloned = clonedList.find(b =>
+        b.id === activeBotId ||
+        b.id.replace(/^clone_/i, '').replace(/[:_-]/g, '') === cleanActiveLookup
+      );
 
       if (currentCloned) {
         let liveName = currentCloned.name || '';

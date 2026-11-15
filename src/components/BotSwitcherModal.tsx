@@ -186,7 +186,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
               </div>
             </div>
             <span className="text-[10px] px-2.5 py-1 rounded-full bg-white/10 text-white/90 border border-white/15 font-mono shrink-0">
-              ID: {activeBotId}
+              ID: {activeBotId === 'main' ? 'main' : activeBotId.replace(/^clone_/i, '').replace(/[:_-]/g, '')}
             </span>
           </div>
 
@@ -299,67 +299,53 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                     </div>
 
                     {/* Dedicated Sub-Admin Panel Credentials for Cloned Bots */}
-                    {!bot.isMain && (bot.id || bot.adminPassword) && (
-                      <div className="mt-2.5 p-2.5 rounded-xl bg-white/[0.04] border border-white/15 space-y-1.5 text-[11px]">
-                        <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-white/70">
-                          <span>Sub-Admin Panel Credentials</span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const base = typeof window !== 'undefined' ? window.location.origin : '';
-                              const rawUrl = bot.panelUrl || `/panel?bot_id=${bot.id}`;
-                              const url = rawUrl.startsWith('http') ? rawUrl : `${base}${rawUrl}`;
-                              navigator.clipboard.writeText(`Panel URL: ${url}\nBot ID: ${bot.id}\nPassword: ${bot.adminPassword || 'secret'}`);
-                              toast.success('Sub-Admin credentials copied!');
-                            }}
-                            className="text-red-400 hover:text-red-300 flex items-center gap-1 cursor-pointer transition-colors"
-                          >
-                            <Copy className="w-3 h-3" />
-                            <span>Copy</span>
-                          </button>
-                        </div>
-                        <div className="space-y-0.5 font-mono text-[10px] text-white/90">
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-white/50">URL:</span>
-                            {(() => {
-                              const base = typeof window !== 'undefined' ? window.location.origin : '';
-                              const rawUrl = bot.panelUrl || `/panel?bot_id=${bot.id}`;
-                              const fullUrl = rawUrl.startsWith('http') ? rawUrl : `${base}${rawUrl}`;
-                              return (
-                                <a 
-                                  href={fullUrl} 
-                                  target="_blank" 
-                                  rel="noreferrer"
-                                  className="text-sky-300 hover:underline truncate select-all max-w-[210px]"
-                                >
-                                  {fullUrl}
-                                </a>
-                              );
-                            })()}
+                    {!bot.isMain && (bot.id || bot.adminPassword) && (() => {
+                      const cleanBotId = String(bot.adminUsername || bot.id || '').replace(/^clone_/i, '').replace(/[:_-]/g, '');
+                      const base = typeof window !== 'undefined' ? window.location.origin : '';
+                      const rawUrl = bot.panelUrl || `/panel?bot_id=${cleanBotId}`;
+                      const fullUrl = rawUrl.startsWith('http') ? rawUrl : `${base}${rawUrl}`;
+                      return (
+                        <div className="mt-2.5 p-2.5 rounded-xl bg-white/[0.04] border border-white/15 space-y-1.5 text-[11px]">
+                          <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-white/70">
+                            <span>Sub-Admin Panel Credentials</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(`Panel URL: ${fullUrl}\nBot ID: ${cleanBotId}\nPassword: ${bot.adminPassword || 'secret'}`);
+                                toast.success('Sub-Admin credentials copied!');
+                              }}
+                              className="text-red-400 hover:text-red-300 flex items-center gap-1 cursor-pointer transition-colors"
+                            >
+                              <Copy className="w-3 h-3" />
+                              <span>Copy</span>
+                            </button>
                           </div>
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-white/50">Bot ID:</span>
-                            <span className="text-red-300 font-bold select-all">{bot.id}</span>
+                          <div className="space-y-0.5 font-mono text-[10px] text-white/90">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-white/50">URL:</span>
+                              <a 
+                                href={fullUrl} 
+                                target="_blank" 
+                                rel="noreferrer"
+                                className="text-sky-300 hover:underline truncate select-all max-w-[210px]"
+                              >
+                                {fullUrl}
+                              </a>
+                            </div>
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-white/50">Bot ID:</span>
+                              <span className="text-red-300 font-bold select-all">{cleanBotId}</span>
+                            </div>
+                            {bot.adminPassword && (
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-white/50">Pass:</span>
+                                <span className="text-amber-300 font-bold select-all">{bot.adminPassword}</span>
+                              </div>
+                            )}
                           </div>
-                          {(bot.ownerUsername || bot.ownerId) && (
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-white/50">Owner:</span>
-                              <span className="text-emerald-300 font-semibold select-all truncate max-w-[210px]">
-                                {bot.ownerUsername
-                                  ? `@${bot.ownerUsername}${bot.ownerId && bot.ownerId !== bot.ownerUsername ? ` (${bot.ownerId})` : ''}`
-                                  : bot.ownerId}
-                              </span>
-                            </div>
-                          )}
-                          {bot.adminPassword && (
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-white/50">Pass:</span>
-                              <span className="text-amber-300 font-bold select-all">{bot.adminPassword}</span>
-                            </div>
-                          )}
                         </div>
-                      </div>
-                    )}
+                      );
+                    })()}
 
                     {/* Inline Delete Confirmation */}
                     {deleteConfirmId === bot.id && (
