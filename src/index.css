@@ -421,17 +421,6 @@
   will-change: transform;
 }
 
-.lg-pill::before {
-  content: "";
-  position: absolute;
-  top: 3px;
-  left: 16%;
-  right: 16%;
-  height: 3px;
-  border-radius: 99px;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.85), transparent);
-}
-
 .lg-pill.drag {
   transition: none;
 }

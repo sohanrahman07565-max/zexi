@@ -4804,6 +4804,7 @@ export class TelegramService {
   // FREE FIRE UID CHECKER (/u <uid>, /uid <uid>) & GUILD INFO CHECKER
   // =========================================================================
   private static freeFirePlayerCache: Map<string, { data: any; fetchedAt: number }> = new Map();
+  private static freeFireGuildCache: Map<string, { guild: ReturnType<typeof TelegramService.extractGuildInfo>; sourceUid: string; playerData: any }> = new Map();
 
   public static parseFreeFireUidCommand(rawText: string): { matched: boolean; uid: string | null } {
     const cleaned = String(rawText || '')
@@ -4920,7 +4921,7 @@ export class TelegramService {
     capacity?: string | number;
     leaderName?: string;
     leaderUid?: string;
-    summaryAlert: string;
+    leaderFallback?: any;
     summaryHtml: string;
   } {
     const p = apiData?.player && typeof apiData.player === 'object' ? apiData.player : apiData;
@@ -4953,7 +4954,6 @@ export class TelegramService {
     if (!exists) {
       return {
         hasGuild: false,
-        summaryAlert: 'ℹ️ No guild found in this account.',
         summaryHtml: 'ℹ️ <i>No guild found in this account.</i>'
       };
     }
@@ -4962,23 +4962,38 @@ export class TelegramService {
       ? `${memberCount}${this.isPresentValue(capacity) ? `/${capacity}` : ''}`
       : 'N/A';
 
-    const alertLines: string[] = ['🛡 Guild Info Found!'];
-    if (this.isPresentValue(name)) alertLines.push(`Name: ${String(name)}`);
-    if (this.isPresentValue(id)) alertLines.push(`Guild ID: ${String(id)}`);
-    if (this.isPresentValue(level)) alertLines.push(`Level: ${String(level)}`);
-    alertLines.push(`Members: ${membersStr}`);
-
-    const htmlLines: string[] = ['<b>🛡 GUILD INFORMATION</b>'];
-    if (this.isPresentValue(name)) htmlLines.push(`• <b>Guild Name:</b> ${this.escapeHtml(String(name))}`);
-    if (this.isPresentValue(id)) htmlLines.push(`• <b>Guild ID:</b> <code>${this.escapeHtml(String(id))}</code>`);
-    if (this.isPresentValue(level)) htmlLines.push(`• <b>Guild Level:</b> Lv. ${this.escapeHtml(String(level))}`);
-    htmlLines.push(`• <b>Members:</b> ${this.escapeHtml(membersStr)}`);
+    const htmlLines: string[] = [
+      '🛡 <b>GUILD INFORMATION</b>',
+      '━━━━━━━━━━━━━━━━━━━━',
+      ...(this.isPresentValue(name) ? [`🏷 <b>Guild Name:</b> ${this.escapeHtml(String(name))}`] : []),
+      ...(this.isPresentValue(id) ? [`🆔 <b>Guild ID:</b> <code>${this.escapeHtml(String(id))}</code>`] : []),
+      ...(this.isPresentValue(level) ? [`⭐ <b>Guild Level:</b> Lv. ${this.escapeHtml(String(level))}`] : []),
+      `👥 <b>Members:</b> ${this.escapeHtml(membersStr)}`
+    ];
     if (this.isPresentValue(leaderName) || this.isPresentValue(leaderUid)) {
       const leaderLabel = this.isPresentValue(leaderName)
         ? `${this.escapeHtml(String(leaderName))}${this.isPresentValue(leaderUid) ? ` (<code>${this.escapeHtml(String(leaderUid))}</code>)` : ''}`
         : `<code>${this.escapeHtml(String(leaderUid))}</code>`;
-      htmlLines.push(`• <b>Leader:</b> ${leaderLabel}`);
+      htmlLines.push(`👑 <b>Leader:</b> ${leaderLabel}`);
     }
+
+    const leaderFallback = (this.isPresentValue(leaderUid) || this.isPresentValue(leaderName))
+      ? {
+          uid: leaderUid ? String(leaderUid) : 'Unknown',
+          name: leaderName ? String(leaderName) : 'Guild Leader',
+          level: guildObj.leader_level ?? raw?.guild_leader_level ?? 'N/A',
+          likes: guildObj.leader_likes ?? raw?.guild_leader_likes ?? '0',
+          region: guildObj.leader_region ?? raw?.guild_leader_region,
+          br_rank: guildObj.leader_br_rank ?? raw?.guild_leader_br_rank,
+          br_rank_point: guildObj.leader_br_points ?? raw?.guild_leader_br_points,
+          cs_rank: guildObj.leader_cs_rank ?? raw?.guild_leader_cs_rank,
+          cs_rank_point: guildObj.leader_cs_points ?? raw?.guild_leader_cs_points,
+          exp: guildObj.leader_exp ?? raw?.guild_leader_exp ?? 0,
+          created_at: guildObj.leader_created_at ?? raw?.guild_leader_created_at,
+          last_login: guildObj.leader_last_login ?? raw?.guild_leader_last_login,
+          release_version: raw?.guild_leader_release_version
+        }
+      : undefined;
 
     return {
       hasGuild: true,
@@ -4989,87 +5004,115 @@ export class TelegramService {
       capacity: this.isPresentValue(capacity) ? capacity : undefined,
       leaderName: this.isPresentValue(leaderName) ? String(leaderName) : undefined,
       leaderUid: this.isPresentValue(leaderUid) ? String(leaderUid) : undefined,
-      summaryAlert: alertLines.join('\n').slice(0, 200),
+      leaderFallback,
       summaryHtml: htmlLines.join('\n')
     };
   }
 
-  public static formatFreeFirePlayerMessage(apiData: any, fallbackUid: string): string {
+  public static formatGuildInfoMessage(
+    guild: ReturnType<typeof TelegramService.extractGuildInfo>,
+    playerUid: string
+  ): string {
+    return [
+      guild.summaryHtml,
+      '━━━━━━━━━━━━━━━━━━━━',
+      `🆔 <b>Player UID:</b> <code>${this.escapeHtml(playerUid)}</code>`,
+      '⚡ <b>FREE FIRE PROFILE SYSTEM</b>',
+      '<tg-spoiler>✨ Powered by Zexi Team</tg-spoiler>'
+    ].join('\n');
+  }
+
+  public static formatFreeFirePlayerMessage(
+    apiData: any,
+    fallbackUid: string,
+    headerTitle: string = '🔥 <b>FREE FIRE PLAYER PROFILE</b>'
+  ): string {
     const p = apiData?.player && typeof apiData.player === 'object' && !apiData.player.error ? apiData.player : apiData;
 
     const uid = String(p?.uid || apiData?.uid || fallbackUid).trim();
     const name = this.isPresentValue(p?.name) ? String(p.name) : (this.isPresentValue(apiData?.name) ? String(apiData.name) : 'Unknown');
-    const level = p?.level ?? apiData?.level ?? 'N/A';
-    const exp = this.isPresentValue(p?.exp) && Number(p.exp) > 0 ? p.exp : null;
-    const likes = p?.likes ?? apiData?.likes ?? '0';
+    const level = this.isPresentValue(p?.level ?? apiData?.level) ? (p?.level ?? apiData?.level) : 0;
+    const rawExp = p?.exp ?? apiData?.exp;
+    const exp = this.isPresentValue(rawExp) ? String(rawExp) : '0';
+    const likes = this.isPresentValue(p?.likes ?? apiData?.likes) ? (p?.likes ?? apiData?.likes) : '0';
 
     const regionFlag = this.isPresentValue(p?.region_flag || apiData?.region_flag) ? String(p?.region_flag || apiData?.region_flag).trim() : '';
     const regionName = this.isPresentValue(p?.region_name || apiData?.region_name) ? String(p?.region_name || apiData?.region_name).trim() : '';
     const regionCode = this.isPresentValue(p?.region || apiData?.region) ? String(p?.region || apiData?.region).trim() : '';
-    const regionText = regionName && regionCode && regionName.toLowerCase() !== regionCode.toLowerCase()
+    const regionTextRaw = regionName && regionCode && regionName.toLowerCase() !== regionCode.toLowerCase()
       ? `${regionName} (${regionCode})`
-      : (regionName || regionCode);
+      : (regionName || regionCode || 'Unknown');
+    const regionDisplay = `${regionFlag ? `${regionFlag} ` : ''}${this.escapeHtml(regionTextRaw)}`;
 
     const br = p?.battle_royale || apiData?.battle_royale;
     const cs = p?.clash_squad || apiData?.clash_squad;
-    const brTier = this.isPresentValue(br?.tier) ? String(br.tier) : (this.isPresentValue(p?.br_rank || apiData?.br_rank) ? String(p?.br_rank || apiData?.br_rank) : '');
-    const brPoints = this.isPresentValue(br?.points) ? br.points : (this.isPresentValue(p?.br_rank_point || apiData?.br_rank_point) ? (p?.br_rank_point || apiData?.br_rank_point) : null);
-    const csTier = this.isPresentValue(cs?.tier) ? String(cs.tier) : (this.isPresentValue(p?.cs_rank || apiData?.cs_rank) ? String(p?.cs_rank || apiData?.cs_rank) : '');
-    const csPoints = this.isPresentValue(cs?.points) ? cs.points : (this.isPresentValue(p?.cs_rank_point || apiData?.cs_rank_point) ? (p?.cs_rank_point || apiData?.cs_rank_point) : null);
+    const brRankRaw = this.isPresentValue(br?.tier)
+      ? String(br.tier)
+      : (this.isPresentValue(p?.br_rank || apiData?.br_rank) ? String(p?.br_rank || apiData?.br_rank) : 'Unranked');
+    const brPointsRaw = this.isPresentValue(br?.points)
+      ? br.points
+      : (this.isPresentValue(p?.br_rank_point ?? apiData?.br_rank_point) ? (p?.br_rank_point ?? apiData?.br_rank_point) : 0);
 
-    const creditScore = p?.credit_score ?? apiData?.credit_score ?? p?.honor_score ?? apiData?.honor_score;
+    const csRankRaw = this.isPresentValue(cs?.tier)
+      ? String(cs.tier)
+      : (this.isPresentValue(p?.cs_rank || apiData?.cs_rank) ? String(p?.cs_rank || apiData?.cs_rank) : 'Unranked');
+    const csPointsRaw = this.isPresentValue(cs?.points)
+      ? cs.points
+      : (this.isPresentValue(p?.cs_rank_point ?? apiData?.cs_rank_point)
+          ? (p?.cs_rank_point ?? apiData?.cs_rank_point)
+          : (this.isPresentValue(cs?.peak_points) ? cs.peak_points : 0));
+
+    const honorScoreRaw = p?.honor_score ?? apiData?.honor_score ?? p?.credit_score ?? apiData?.credit_score ?? 100;
     const rawAccountStatus = p?.account_status || apiData?.account_status || p?.status || apiData?.status_text;
     const accountStatus = this.isPresentValue(rawAccountStatus)
       ? String(rawAccountStatus)
-      : (this.isPresentValue(creditScore)
-          ? (Number(creditScore) >= 90 ? `Active (Good • Credit: ${creditScore})` : `Restricted (Credit: ${creditScore})`)
-          : 'Active');
+      : (Number(honorScoreRaw) >= 90 ? 'Active' : 'Restricted');
 
-    const createdAt = this.isPresentValue(p?.created_at || apiData?.created_at) ? String(p?.created_at || apiData?.created_at) : '';
-    const lastLogin = this.isPresentValue(p?.last_login || apiData?.last_login) ? String(p?.last_login || apiData?.last_login) : '';
-    const obVersion = this.isPresentValue(p?.release_version || apiData?.release_version || apiData?.most_recent_ob)
-      ? String(p?.release_version || apiData?.release_version || apiData?.most_recent_ob)
-      : '';
     const valuation = p?.valuation || apiData?.valuation;
-    const rarityTier = this.isPresentValue(valuation?.rarity_tier) ? String(valuation.rarity_tier) : '';
+    const accountTier = this.isPresentValue(valuation?.rarity_tier)
+      ? String(valuation.rarity_tier)
+      : (this.isPresentValue(p?.tier || apiData?.tier) ? String(p?.tier || apiData?.tier) : 'Standard');
+    const gameVersion = this.isPresentValue(p?.release_version || apiData?.release_version || apiData?.most_recent_ob)
+      ? String(p?.release_version || apiData?.release_version || apiData?.most_recent_ob)
+      : 'Unknown';
+
+    const createdAt = this.isPresentValue(p?.created_at || apiData?.created_at) ? String(p?.created_at || apiData?.created_at) : 'Unknown';
+    const lastLogin = this.isPresentValue(p?.last_login || apiData?.last_login) ? String(p?.last_login || apiData?.last_login) : 'Unknown';
 
     const rawSig = this.isPresentValue(p?.signature || apiData?.signature) ? String(p?.signature || apiData?.signature) : '';
-    const cleanSig = rawSig ? this.cleanFfSignature(rawSig) : '';
+    const cleanBio = rawSig ? this.cleanFfSignature(rawSig).slice(0, 300) : 'No bio set';
 
-    const lines: string[] = [
-      '🔥 <b>FREE FIRE PLAYER PROFILE</b>',
-      '━━━━━━━━━━━━━━━━━━',
+    return [
+      headerTitle,
+      '━━━━━━━━━━━━━━━━━━━━',
+      '👤 <b>PLAYER IDENTITY</b>',
       `🆔 <b>UID:</b> <code>${this.escapeHtml(uid)}</code>`,
       `🏷 <b>Name:</b> ${this.escapeHtml(name)}`,
-      ...(regionText ? [`🌍 <b>Region:</b> ${regionFlag ? `${regionFlag} ` : ''}${this.escapeHtml(regionText)}`] : []),
-      `⭐ <b>Level:</b> ${this.escapeHtml(String(level))}${exp ? ` <i>(EXP: ${this.escapeHtml(String(exp))})</i>` : ''}`,
+      `🌍 <b>Region:</b> ${regionDisplay}`,
+      `⭐ <b>Level:</b> ${this.escapeHtml(String(level))} <code>(${this.escapeHtml(exp)} EXP)</code>`,
       `👍 <b>Likes:</b> ${this.escapeHtml(String(likes))}`,
-      `🟢 <b>Account Status:</b> ${this.escapeHtml(accountStatus)}`
-    ];
-
-    if (brTier) {
-      lines.push(`🏆 <b>BR Rank:</b> ${this.escapeHtml(brTier)}${brPoints !== null ? ` (${this.escapeHtml(String(brPoints))} pts)` : ''}`);
-    }
-    if (csTier) {
-      lines.push(`⚔️ <b>CS Rank:</b> ${this.escapeHtml(csTier)}${csPoints !== null ? ` (${this.escapeHtml(String(csPoints))} pts)` : ''}`);
-    }
-    if (obVersion) {
-      lines.push(`📦 <b>Version:</b> ${this.escapeHtml(obVersion)}`);
-    }
-    if (rarityTier) {
-      lines.push(`💎 <b>Tier:</b> ${this.escapeHtml(rarityTier)}`);
-    }
-    if (createdAt) {
-      lines.push(`📅 <b>Created:</b> ${this.escapeHtml(createdAt)}`);
-    }
-    if (lastLogin) {
-      lines.push(`🕒 <b>Last Login:</b> ${this.escapeHtml(lastLogin)}`);
-    }
-    if (cleanSig) {
-      lines.push('', `💬 <b>Bio:</b>\n<blockquote>${this.escapeHtml(cleanSig.slice(0, 300))}</blockquote>`);
-    }
-
-    return lines.join('\n');
+      '━━━━━━━━━━━━━━━━━━━━',
+      '🏆 <b>RANK INFORMATION</b>',
+      `🔰 <b>Battle Royale:</b> ${this.escapeHtml(brRankRaw)}`,
+      `└ 💠 <b>Points:</b> ${this.escapeHtml(String(brPointsRaw))}`,
+      `⚔️ <b>Clash Squad:</b> ${this.escapeHtml(csRankRaw)}`,
+      `└ 💠 <b>Points:</b> ${this.escapeHtml(String(csPointsRaw))}`,
+      '━━━━━━━━━━━━━━━━━━━━',
+      '💎 <b>ACCOUNT INFORMATION</b>',
+      `🟢 <b>Status:</b> ${this.escapeHtml(accountStatus)}`,
+      `🛡 <b>Honer score:</b> ${this.escapeHtml(String(honorScoreRaw))}/100`,
+      `💠 <b>Account Tier:</b> ${this.escapeHtml(accountTier)}`,
+      `📦 <b>Game Version:</b> ${this.escapeHtml(gameVersion)}`,
+      '━━━━━━━━━━━━━━━━━━━━',
+      `📅 <b>Created:</b> ${this.escapeHtml(createdAt)}`,
+      `🕒 <b>Last Login:</b> ${this.escapeHtml(lastLogin)}`,
+      '━━━━━━━━━━━━━━━━━━━━',
+      '💬 <b>PLAYER BIO</b>',
+      `<blockquote>${this.escapeHtml(cleanBio)}</blockquote>`,
+      '━━━━━━━━━━━━━━━━━━━━',
+      '⚡ <b>FREE FIRE PROFILE SYSTEM</b>',
+      '<tg-spoiler>✨ Powered by Zexi Team</tg-spoiler>'
+    ].join('\n');
   }
 
   private static async handleFreeFireUidCommand(
@@ -6958,58 +7001,127 @@ export class TelegramService {
     const data = cb.data;
     const chatId = cb.message?.chat?.id;
 
-    // FREE FIRE CHECK GUILD INFO CALLBACK (guild_<uid>)
+    // FREE FIRE CHECK GUILD INFO CALLBACK (guild_<uid>) — No alert popups; toggles cleanly to Check Leader Info
     if (data && /^guild_(\d+)$/i.test(data)) {
       const uidMatch = data.match(/^guild_(\d+)$/i);
       const targetUid = uidMatch ? uidMatch[1] : '';
+      await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
       try {
         const playerData = await this.fetchFreeFirePlayer(targetUid);
         if (!playerData) {
-          await this.callTelegramApi('answerCallbackQuery', {
-            callback_query_id: cb.id,
-            text: '❌ Player not found or API service is busy. Please try again later.',
-            show_alert: true
-          });
+          if (chatId && cb.message?.message_id) {
+            await this.callTelegramApi('editMessageText', {
+              chat_id: chatId,
+              message_id: cb.message.message_id,
+              text: '❌ <b>Player not found or API service is busy.</b> Please try again later.',
+              parse_mode: 'HTML'
+            }).catch(() => {});
+          }
           return;
         }
 
         const guild = this.extractGuildInfo(playerData);
         if (!guild.hasGuild) {
-          await this.callTelegramApi('answerCallbackQuery', {
-            callback_query_id: cb.id,
-            text: 'ℹ️ No guild found in this account.',
-            show_alert: true
-          });
+          if (chatId && cb.message?.message_id) {
+            const noGuildText = [
+              this.formatFreeFirePlayerMessage(playerData, targetUid),
+              '',
+              'ℹ️ <i>No guild found in this account.</i>'
+            ].join('\n');
+            await this.callTelegramApi('editMessageText', {
+              chat_id: chatId,
+              message_id: cb.message.message_id,
+              text: noGuildText,
+              parse_mode: 'HTML',
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: '🛡 Check Guild Info', callback_data: `guild_${targetUid}`, style: 'primary' }]
+                ]
+              }
+            }).catch(() => {});
+          }
           return;
         }
 
-        await this.callTelegramApi('answerCallbackQuery', {
-          callback_query_id: cb.id,
-          text: guild.summaryAlert,
-          show_alert: true
-        });
+        const guildKey = guild.id || guild.leaderUid || targetUid;
+        if (this.freeFireGuildCache.size > 200) {
+          const oldest = this.freeFireGuildCache.keys().next().value;
+          if (oldest) this.freeFireGuildCache.delete(oldest);
+        }
+        this.freeFireGuildCache.set(guildKey, { guild, sourceUid: targetUid, playerData });
 
         if (chatId && cb.message?.message_id) {
-          const updatedProfileText = `${this.formatFreeFirePlayerMessage(playerData, targetUid)}\n\n━━━━━━━━━━━━━━━━━━\n${guild.summaryHtml}`;
           await this.callTelegramApi('editMessageText', {
             chat_id: chatId,
             message_id: cb.message.message_id,
-            text: updatedProfileText,
+            text: this.formatGuildInfoMessage(guild, targetUid),
             parse_mode: 'HTML',
             reply_markup: {
               inline_keyboard: [
-                [{ text: '🛡 Check Guild Info', callback_data: `guild_${targetUid}`, style: 'primary' }]
+                [{ text: '👑 Check Leader Info', callback_data: `leader_${guildKey}`, style: 'primary' }]
               ]
             }
           }).catch(() => {});
         }
       } catch (err: any) {
         console.warn('[FreeFireUID] Guild callback error:', err?.message || err);
-        await this.callTelegramApi('answerCallbackQuery', {
-          callback_query_id: cb.id,
-          text: '❌ Player not found or API service is busy. Please try again later.',
-          show_alert: true
-        }).catch(() => {});
+      }
+      return;
+    }
+
+    // FREE FIRE CHECK GUILD LEADER INFO CALLBACK (leader_<guild_id>) — Fetches leader profile & toggles back to Check Guild Info
+    if (data && /^leader_(.+)$/i.test(data)) {
+      const leaderMatch = data.match(/^leader_(.+)$/i);
+      const guildKey = leaderMatch ? leaderMatch[1].trim() : '';
+      await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+      try {
+        let cachedEntry = this.freeFireGuildCache.get(guildKey);
+        if (!cachedEntry) {
+          const msgText = String(cb.message?.text || '');
+          const playerUidFromMsg = msgText.match(/Player UID:\s*(\d+)/i)?.[1] || msgText.match(/UID:\s*(\d+)/i)?.[1];
+          if (playerUidFromMsg) {
+            const pData = await this.fetchFreeFirePlayer(playerUidFromMsg);
+            if (pData) {
+              const extracted = this.extractGuildInfo(pData);
+              if (extracted.hasGuild) {
+                cachedEntry = { guild: extracted, sourceUid: playerUidFromMsg, playerData: pData };
+                this.freeFireGuildCache.set(guildKey, cachedEntry);
+              }
+            }
+          }
+        }
+
+        if (!cachedEntry) {
+          return;
+        }
+
+        const { guild, sourceUid } = cachedEntry;
+        const leaderUid = guild.leaderUid || sourceUid;
+        const liveLeaderData = leaderUid && /^\d+$/.test(leaderUid)
+          ? await this.fetchFreeFirePlayer(leaderUid)
+          : null;
+        const leaderPayload = liveLeaderData || guild.leaderFallback;
+
+        if (chatId && cb.message?.message_id && leaderPayload) {
+          const leaderProfileHtml = this.formatFreeFirePlayerMessage(
+            leaderPayload,
+            leaderUid,
+            '👑 <b>GUILD LEADER PROFILE</b>'
+          );
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: leaderProfileHtml,
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '🛡 Check Guild Info', callback_data: `guild_${sourceUid}`, style: 'primary' }]
+              ]
+            }
+          }).catch(() => {});
+        }
+      } catch (err: any) {
+        console.warn('[FreeFireUID] Leader callback error:', err?.message || err);
       }
       return;
     }

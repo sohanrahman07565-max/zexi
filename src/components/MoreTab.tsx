@@ -1398,9 +1398,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                       Multi-Bot
                     </span>
                   </div>
-                  <div className="text-[11px] text-white/60 mt-0.5">
-                    Manage active bot or clone a new bot instance
-                  </div>
                 </div>
               </div>
               <ChevronRight className="w-4 h-4 text-white/50" />
@@ -3130,7 +3127,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                                 key={c.id}
                                 className="w-full py-2 px-3 rounded-xl bg-blue-600 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm border border-blue-500/40 select-none"
                               >
-                                <span>📢 Join {c.name || 'Channel'} ↗️</span>
+                                <span>📢 Join {c.name || 'Channel'}</span>
                               </div>
                             ))}
                             <div className="w-full py-2 px-3 rounded-xl bg-emerald-600 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm border border-emerald-500/40 select-none">

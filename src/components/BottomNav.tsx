@@ -157,7 +157,7 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
         onPointerCancel={handlePointerCancel}
         className="lg-nav"
       >
-        {/* Sliding Liquid Glass Pill with Specular Top Highlight */}
+        {/* Sliding Liquid Glass Pill */}
         <div
           className={`lg-pill ${isDragging ? 'drag' : ''}`}
           style={{
