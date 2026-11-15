@@ -4801,7 +4801,7 @@ export class TelegramService {
   }
 
   // =========================================================================
-  // FREE FIRE UID CHECKER (/u <uid>, /uid <uid>) & DYNAMIC DUO STATUS
+  // FREE FIRE UID CHECKER (/u <uid>, /uid <uid>) & GUILD INFO CHECKER
   // =========================================================================
   private static freeFirePlayerCache: Map<string, { data: any; fetchedAt: number }> = new Map();
 
@@ -4835,6 +4835,29 @@ export class TelegramService {
       .replace(/\[(?:[0-9a-fA-F]{6}|[bciuhs]|\/[bciuhs])\]/gi, '')
       .trim();
     return stripped || String(sig || '').trim();
+  }
+
+  private static async setBotReaction(chatId: number | string, messageId: number | undefined, emoji: string): Promise<void> {
+    if (!messageId) return;
+    try {
+      await this.callTelegramApi('setMessageReaction', {
+        chat_id: chatId,
+        message_id: messageId,
+        reaction: [{ type: 'emoji', emoji }]
+      });
+    } catch {}
+  }
+
+  private static buildLoadingProgressText(percent: number, statusText: string): string {
+    const safePct = Math.min(100, Math.max(0, percent));
+    const totalBlocks = 10;
+    const filledBlocks = Math.round((safePct / 100) * totalBlocks);
+    const bar = '█'.repeat(filledBlocks) + '▒'.repeat(totalBlocks - filledBlocks);
+    return (
+      `🔄 <b>FETCHING INFO 📊</b>\n` +
+      `<code>${safePct}% [${bar}]</code>\n` +
+      `<i>${this.escapeHtml(statusText)}</i>`
+    );
   }
 
   public static async fetchFreeFirePlayer(uid: string, forceRefresh: boolean = false): Promise<any | null> {
@@ -4888,13 +4911,15 @@ export class TelegramService {
     }
   }
 
-  public static extractDynamicDuo(apiData: any): {
-    active: boolean;
-    partnerName?: string;
-    partnerUid?: string;
+  public static extractGuildInfo(apiData: any): {
+    hasGuild: boolean;
+    name?: string;
+    id?: string;
     level?: string | number;
-    intimacy?: string | number;
-    createdAt?: string;
+    memberCount?: string | number;
+    capacity?: string | number;
+    leaderName?: string;
+    leaderUid?: string;
     summaryAlert: string;
     summaryHtml: string;
   } {
@@ -4910,139 +4935,60 @@ export class TelegramService {
       parsedRawData = rawDataStr;
     }
 
-    const candidates = [
-      apiData?.dynamic_duo,
-      apiData?.dynamicDuo,
-      apiData?.duo,
-      apiData?.duo_info,
-      apiData?.duoInfo,
-      apiData?.lover,
-      apiData?.partner,
-      p?.dynamic_duo,
-      p?.dynamicDuo,
-      p?.duo,
-      p?.duo_info,
-      p?.duoInfo,
-      p?.lover,
-      p?.partner,
-      raw?.dynamic_duo,
-      raw?.dynamicDuo,
-      raw?.duo,
-      raw?.duo_info,
-      parsedRawData?.DynamicDuoInfo,
-      parsedRawData?.dynamicDuo,
-      parsedRawData?.dynamic_duo,
-      parsedRawData?.DuoInfo,
-      parsedRawData?.LoverInfo,
-      parsedRawData?.SocialInfo?.dynamicDuo,
-      parsedRawData?.SocialInfo?.duo
-    ];
+    const guildObj =
+      (p?.guild && typeof p.guild === 'object' ? p.guild : null) ||
+      (apiData?.guild && typeof apiData.guild === 'object' ? apiData.guild : null) ||
+      (parsedRawData?.GuildInfo && typeof parsedRawData.GuildInfo === 'object' ? parsedRawData.GuildInfo : null) ||
+      {};
 
-    let duoObj: any = null;
-    for (const c of candidates) {
-      if (c && typeof c === 'object' && Object.keys(c).length > 0) {
-        duoObj = c;
-        break;
-      }
-    }
+    const name = guildObj.name || guildObj.GuildName || apiData?.guild_name || raw?.guild_name;
+    const id = guildObj.id || guildObj.GuildID || apiData?.guild_id || raw?.guild_id;
+    const level = guildObj.level ?? guildObj.GuildLevel ?? apiData?.guild_level ?? raw?.guild_level;
+    const memberCount = guildObj.member_count ?? guildObj.GuildMember ?? apiData?.guild_member ?? raw?.guild_member;
+    const capacity = guildObj.capacity ?? guildObj.GuildCapacity ?? apiData?.guild_capacity ?? raw?.guild_capacity;
+    const leaderName = guildObj.leader_name || apiData?.guild_leader_name || raw?.guild_leader_name;
+    const leaderUid = guildObj.leader_uid || guildObj.owner_id || guildObj.GuildOwner || apiData?.guild_leader_uid || apiData?.guild_owner_id || raw?.guild_leader_uid;
 
-    const duoFlatFields: Record<string, any> = {};
-    const fieldSources = [apiData?.all_fields, p?.all_fields, raw?.all_fields];
-    for (const list of fieldSources) {
-      if (!Array.isArray(list)) continue;
-      for (const item of list) {
-        const key = String(item?.key || '').toLowerCase();
-        if (/(?:duo|lover|partner)/.test(key) && this.isPresentValue(item?.value) && item.value !== 0 && item.value !== false) {
-          duoFlatFields[key] = item.value;
-        }
-      }
-    }
-
-    const partnerName =
-      duoObj?.partner_name ||
-      duoObj?.partnerName ||
-      duoObj?.name ||
-      duoObj?.nickname ||
-      duoObj?.lover_name ||
-      duoObj?.loverName ||
-      duoFlatFields.duo_partner_name ||
-      duoFlatFields.dynamic_duo_name ||
-      duoFlatFields.duo_name ||
-      duoFlatFields.lover_name ||
-      apiData?.duo_partner_name ||
-      apiData?.dynamic_duo_name;
-
-    const partnerUid =
-      duoObj?.partner_uid ||
-      duoObj?.partnerUid ||
-      duoObj?.uid ||
-      duoObj?.accountId ||
-      duoObj?.partner_id ||
-      duoObj?.partnerId ||
-      duoObj?.lover_uid ||
-      duoFlatFields.duo_partner_uid ||
-      duoFlatFields.dynamic_duo_uid ||
-      duoFlatFields.duo_uid ||
-      apiData?.duo_partner_uid;
-
-    const level =
-      duoObj?.level ||
-      duoObj?.duo_level ||
-      duoObj?.duoLevel ||
-      duoFlatFields.duo_level ||
-      duoFlatFields.dynamic_duo_level ||
-      apiData?.duo_level;
-
-    const intimacy =
-      duoObj?.intimacy ||
-      duoObj?.points ||
-      duoObj?.hearts ||
-      duoObj?.score ||
-      duoFlatFields.duo_intimacy ||
-      duoFlatFields.duo_points;
-
-    const createdAt =
-      duoObj?.created_at ||
-      duoObj?.createdAt ||
-      duoObj?.createAt ||
-      duoFlatFields.duo_created_at;
-
-    const hasExplicitStatusTrue = Boolean(
-      (duoObj && (this.isPresentValue(partnerName) || this.isPresentValue(partnerUid) || this.isPresentValue(level) || Number(duoObj?.level) > 0)) ||
-      this.isPresentValue(duoFlatFields.dynamic_duo_status) ||
-      this.isPresentValue(partnerName) ||
-      this.isPresentValue(partnerUid)
-    );
-
-    if (!hasExplicitStatusTrue) {
+    const exists = Boolean(this.isPresentValue(name) || (this.isPresentValue(id) && String(id).trim() !== '0'));
+    if (!exists) {
       return {
-        active: false,
-        summaryAlert: 'ℹ️ No Dynamic Duo found for this player.',
-        summaryHtml: 'ℹ️ <i>No Dynamic Duo found for this player.</i>'
+        hasGuild: false,
+        summaryAlert: 'ℹ️ No guild found in this account.',
+        summaryHtml: 'ℹ️ <i>No guild found in this account.</i>'
       };
     }
 
-    const alertLines: string[] = ['👥 Dynamic Duo Active!'];
-    if (this.isPresentValue(partnerName)) alertLines.push(`Partner: ${String(partnerName)}`);
-    if (this.isPresentValue(partnerUid)) alertLines.push(`Partner UID: ${String(partnerUid)}`);
-    if (this.isPresentValue(level)) alertLines.push(`Duo Level: ${String(level)}`);
-    if (this.isPresentValue(intimacy)) alertLines.push(`Intimacy: ${String(intimacy)}`);
-    if (this.isPresentValue(createdAt)) alertLines.push(`Since: ${String(createdAt)}`);
+    const membersStr = this.isPresentValue(memberCount)
+      ? `${memberCount}${this.isPresentValue(capacity) ? `/${capacity}` : ''}`
+      : 'N/A';
 
-    const htmlLines: string[] = ['<b>👥 Dynamic Duo Status:</b> 🟢 Active'];
-    if (this.isPresentValue(partnerName)) htmlLines.push(`• <b>Partner:</b> ${this.escapeHtml(String(partnerName))}`);
-    if (this.isPresentValue(partnerUid)) htmlLines.push(`• <b>Partner UID:</b> <code>${this.escapeHtml(String(partnerUid))}</code>`);
-    if (this.isPresentValue(level)) htmlLines.push(`• <b>Duo Level:</b> ${this.escapeHtml(String(level))}`);
-    if (this.isPresentValue(intimacy)) htmlLines.push(`• <b>Intimacy:</b> ${this.escapeHtml(String(intimacy))}`);
-    if (this.isPresentValue(createdAt)) htmlLines.push(`• <b>Since:</b> ${this.escapeHtml(String(createdAt))}`);
+    const alertLines: string[] = ['🛡 Guild Info Found!'];
+    if (this.isPresentValue(name)) alertLines.push(`Name: ${String(name)}`);
+    if (this.isPresentValue(id)) alertLines.push(`Guild ID: ${String(id)}`);
+    if (this.isPresentValue(level)) alertLines.push(`Level: ${String(level)}`);
+    alertLines.push(`Members: ${membersStr}`);
+
+    const htmlLines: string[] = ['<b>🛡 GUILD INFORMATION</b>'];
+    if (this.isPresentValue(name)) htmlLines.push(`• <b>Guild Name:</b> ${this.escapeHtml(String(name))}`);
+    if (this.isPresentValue(id)) htmlLines.push(`• <b>Guild ID:</b> <code>${this.escapeHtml(String(id))}</code>`);
+    if (this.isPresentValue(level)) htmlLines.push(`• <b>Guild Level:</b> Lv. ${this.escapeHtml(String(level))}`);
+    htmlLines.push(`• <b>Members:</b> ${this.escapeHtml(membersStr)}`);
+    if (this.isPresentValue(leaderName) || this.isPresentValue(leaderUid)) {
+      const leaderLabel = this.isPresentValue(leaderName)
+        ? `${this.escapeHtml(String(leaderName))}${this.isPresentValue(leaderUid) ? ` (<code>${this.escapeHtml(String(leaderUid))}</code>)` : ''}`
+        : `<code>${this.escapeHtml(String(leaderUid))}</code>`;
+      htmlLines.push(`• <b>Leader:</b> ${leaderLabel}`);
+    }
 
     return {
-      active: true,
-      partnerName: this.isPresentValue(partnerName) ? String(partnerName) : undefined,
-      partnerUid: this.isPresentValue(partnerUid) ? String(partnerUid) : undefined,
+      hasGuild: true,
+      name: this.isPresentValue(name) ? String(name) : undefined,
+      id: this.isPresentValue(id) ? String(id) : undefined,
       level: this.isPresentValue(level) ? level : undefined,
-      intimacy: this.isPresentValue(intimacy) ? intimacy : undefined,
-      createdAt: this.isPresentValue(createdAt) ? String(createdAt) : undefined,
+      memberCount: this.isPresentValue(memberCount) ? memberCount : undefined,
+      capacity: this.isPresentValue(capacity) ? capacity : undefined,
+      leaderName: this.isPresentValue(leaderName) ? String(leaderName) : undefined,
+      leaderUid: this.isPresentValue(leaderUid) ? String(leaderUid) : undefined,
       summaryAlert: alertLines.join('\n').slice(0, 200),
       summaryHtml: htmlLines.join('\n')
     };
@@ -5071,54 +5017,50 @@ export class TelegramService {
     const csTier = this.isPresentValue(cs?.tier) ? String(cs.tier) : (this.isPresentValue(p?.cs_rank || apiData?.cs_rank) ? String(p?.cs_rank || apiData?.cs_rank) : '');
     const csPoints = this.isPresentValue(cs?.points) ? cs.points : (this.isPresentValue(p?.cs_rank_point || apiData?.cs_rank_point) ? (p?.cs_rank_point || apiData?.cs_rank_point) : null);
 
-    const guild = p?.guild || apiData?.guild;
-    const guildName = this.isPresentValue(guild?.name || apiData?.guild_name) ? String(guild?.name || apiData?.guild_name) : '';
-    const guildLevel = guild?.level ?? apiData?.guild_level;
-    const guildMembers = guild?.member_count ?? apiData?.guild_member;
-    const guildCap = guild?.capacity ?? apiData?.guild_capacity;
-
     const creditScore = p?.credit_score ?? apiData?.credit_score ?? p?.honor_score ?? apiData?.honor_score;
+    const rawAccountStatus = p?.account_status || apiData?.account_status || p?.status || apiData?.status_text;
+    const accountStatus = this.isPresentValue(rawAccountStatus)
+      ? String(rawAccountStatus)
+      : (this.isPresentValue(creditScore)
+          ? (Number(creditScore) >= 90 ? `Active (Good • Credit: ${creditScore})` : `Restricted (Credit: ${creditScore})`)
+          : 'Active');
+
     const createdAt = this.isPresentValue(p?.created_at || apiData?.created_at) ? String(p?.created_at || apiData?.created_at) : '';
     const lastLogin = this.isPresentValue(p?.last_login || apiData?.last_login) ? String(p?.last_login || apiData?.last_login) : '';
     const obVersion = this.isPresentValue(p?.release_version || apiData?.release_version || apiData?.most_recent_ob)
       ? String(p?.release_version || apiData?.release_version || apiData?.most_recent_ob)
       : '';
+    const valuation = p?.valuation || apiData?.valuation;
+    const rarityTier = this.isPresentValue(valuation?.rarity_tier) ? String(valuation.rarity_tier) : '';
 
     const rawSig = this.isPresentValue(p?.signature || apiData?.signature) ? String(p?.signature || apiData?.signature) : '';
     const cleanSig = rawSig ? this.cleanFfSignature(rawSig) : '';
 
     const lines: string[] = [
-      '🔥 <b>Free Fire Player Profile</b>',
-      '',
-      `🏷 <b>Player Name:</b> ${this.escapeHtml(name)}`,
+      '🔥 <b>FREE FIRE PLAYER PROFILE</b>',
+      '━━━━━━━━━━━━━━━━━━',
       `🆔 <b>UID:</b> <code>${this.escapeHtml(uid)}</code>`,
+      `🏷 <b>Name:</b> ${this.escapeHtml(name)}`,
+      ...(regionText ? [`🌍 <b>Region:</b> ${regionFlag ? `${regionFlag} ` : ''}${this.escapeHtml(regionText)}`] : []),
       `⭐ <b>Level:</b> ${this.escapeHtml(String(level))}${exp ? ` <i>(EXP: ${this.escapeHtml(String(exp))})</i>` : ''}`,
-      `👍 <b>Likes:</b> ${this.escapeHtml(String(likes))}`
+      `👍 <b>Likes:</b> ${this.escapeHtml(String(likes))}`,
+      `🟢 <b>Account Status:</b> ${this.escapeHtml(accountStatus)}`
     ];
 
-    if (regionText) {
-      lines.push(`🌍 <b>Region:</b> ${regionFlag ? `${regionFlag} ` : ''}${this.escapeHtml(regionText)}`);
-    }
     if (brTier) {
       lines.push(`🏆 <b>BR Rank:</b> ${this.escapeHtml(brTier)}${brPoints !== null ? ` (${this.escapeHtml(String(brPoints))} pts)` : ''}`);
     }
     if (csTier) {
       lines.push(`⚔️ <b>CS Rank:</b> ${this.escapeHtml(csTier)}${csPoints !== null ? ` (${this.escapeHtml(String(csPoints))} pts)` : ''}`);
     }
-    if (guildName) {
-      const guildMeta: string[] = [];
-      if (this.isPresentValue(guildLevel)) guildMeta.push(`Lv.${guildLevel}`);
-      if (this.isPresentValue(guildMembers)) guildMeta.push(`${guildMembers}/${guildCap || '?'} members`);
-      lines.push(`🛡 <b>Guild:</b> ${this.escapeHtml(guildName)}${guildMeta.length ? ` <i>(${this.escapeHtml(guildMeta.join(' • '))})</i>` : ''}`);
-    }
-    if (this.isPresentValue(creditScore)) {
-      lines.push(`🎖 <b>Credit Score:</b> ${this.escapeHtml(String(creditScore))}`);
-    }
     if (obVersion) {
       lines.push(`📦 <b>Version:</b> ${this.escapeHtml(obVersion)}`);
     }
+    if (rarityTier) {
+      lines.push(`💎 <b>Tier:</b> ${this.escapeHtml(rarityTier)}`);
+    }
     if (createdAt) {
-      lines.push(`📅 <b>Account Created:</b> ${this.escapeHtml(createdAt)}`);
+      lines.push(`📅 <b>Created:</b> ${this.escapeHtml(createdAt)}`);
     }
     if (lastLogin) {
       lines.push(`🕒 <b>Last Login:</b> ${this.escapeHtml(lastLogin)}`);
@@ -5138,6 +5080,7 @@ export class TelegramService {
     threadId?: number
   ): Promise<void> {
     if (!uid) {
+      this.setBotReaction(chatId, messageId, '😢').catch(() => {});
       const usageParams: any = {
         chat_id: chatId,
         text: '⚠️ <b>Please provide a valid Free Fire UID.</b>\nExample: <code>/u 8674177274</code>',
@@ -5152,33 +5095,113 @@ export class TelegramService {
       return;
     }
 
+    // 1. Immediately react to user's command message with thinking emoji (🤔)
+    this.setBotReaction(chatId, messageId, '🤔').catch(() => {});
+
+    // 2. Send initial 0% loading progress message immediately
+    const loadingParams: any = {
+      chat_id: chatId,
+      text: this.buildLoadingProgressText(0, 'Connecting to secure server...'),
+      parse_mode: 'HTML'
+    };
+    if (isGroup && messageId) loadingParams.reply_to_message_id = messageId;
+    if (threadId) loadingParams.message_thread_id = threadId;
+
+    let loadingMsgId: number | undefined;
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
     try {
-      const data = await this.fetchFreeFirePlayer(uid, true);
+      const fetchPromise = this.fetchFreeFirePlayer(uid, true);
+      const initRes = await this.callTelegramApi('sendMessage', loadingParams);
+      if (initRes?.ok && initRes.result?.message_id) {
+        loadingMsgId = initRes.result.message_id;
+        if (isGroup) {
+          this.trackAndLimitMessage(Number(chatId), loadingMsgId!).catch(() => {});
+        }
+      }
+
+      // 3. Animate progress smoothly while fetching API data
+      const progressSteps: Array<[number, string]> = [
+        [25, 'Verifying player UID...'],
+        [50, 'Fetching profile stats...'],
+        [75, 'Decoding account & rank info...']
+      ];
+
+      for (const [pct, label] of progressSteps) {
+        await sleep(260);
+        if (loadingMsgId) {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: loadingMsgId,
+            text: this.buildLoadingProgressText(pct, label),
+            parse_mode: 'HTML'
+          }).catch(() => {});
+        }
+      }
+
+      const data = await fetchPromise;
       if (!data) {
-        const errParams: any = {
-          chat_id: chatId,
-          text: '❌ <b>Player not found or API service is busy.</b> Please try again later.',
-          parse_mode: 'HTML'
-        };
-        if (isGroup && messageId) errParams.reply_to_message_id = messageId;
-        if (threadId) errParams.message_thread_id = threadId;
-        const errRes = await this.callTelegramApi('sendMessage', errParams);
-        if (isGroup && errRes?.ok && errRes.result?.message_id) {
-          await this.trackAndLimitMessage(Number(chatId), errRes.result.message_id);
+        // Error state: react with sad/error emoji (😢) and show clean error message
+        await this.setBotReaction(chatId, messageId, '😢');
+        const errHtml = '❌ <b>Player not found or API service is busy.</b> Please try again later.';
+        if (loadingMsgId) {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: loadingMsgId,
+            text: errHtml,
+            parse_mode: 'HTML'
+          }).catch(async () => {
+            const errParams: any = { chat_id: chatId, text: errHtml, parse_mode: 'HTML' };
+            if (isGroup && messageId) errParams.reply_to_message_id = messageId;
+            if (threadId) errParams.message_thread_id = threadId;
+            await this.callTelegramApi('sendMessage', errParams);
+          });
+        } else {
+          const errParams: any = { chat_id: chatId, text: errHtml, parse_mode: 'HTML' };
+          if (isGroup && messageId) errParams.reply_to_message_id = messageId;
+          if (threadId) errParams.message_thread_id = threadId;
+          await this.callTelegramApi('sendMessage', errParams);
         }
         return;
       }
 
+      // Complete bar at 100% briefly before displaying final profile
+      if (loadingMsgId) {
+        await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: loadingMsgId,
+          text: this.buildLoadingProgressText(100, 'Profile data loaded!'),
+          parse_mode: 'HTML'
+        }).catch(() => {});
+        await sleep(200);
+      }
+
       const formattedText = this.formatFreeFirePlayerMessage(data, uid);
+      const replyMarkup = {
+        inline_keyboard: [
+          [{ text: '🛡 Check Guild Info', callback_data: `guild_${uid}`, style: 'primary' }]
+        ]
+      };
+
+      // Update reaction to success emoji (💯)
+      await this.setBotReaction(chatId, messageId, '💯');
+
+      if (loadingMsgId) {
+        const editRes = await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: loadingMsgId,
+          text: formattedText,
+          parse_mode: 'HTML',
+          reply_markup: replyMarkup
+        });
+        if (editRes?.ok) return;
+      }
+
       const sendParams: any = {
         chat_id: chatId,
         text: formattedText,
         parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '👥 Dynamic Duo Status', callback_data: `duo_${uid}`, style: 'primary' }]
-          ]
-        }
+        reply_markup: replyMarkup
       };
       if (isGroup && messageId) sendParams.reply_to_message_id = messageId;
       if (threadId) sendParams.message_thread_id = threadId;
@@ -5189,14 +5212,21 @@ export class TelegramService {
       }
     } catch (err: any) {
       console.error('[FreeFireUID] Command handler error:', err?.message || err);
-      const errParams: any = {
-        chat_id: chatId,
-        text: '❌ <b>Player not found or API service is busy.</b> Please try again later.',
-        parse_mode: 'HTML'
-      };
-      if (isGroup && messageId) errParams.reply_to_message_id = messageId;
-      if (threadId) errParams.message_thread_id = threadId;
-      await this.callTelegramApi('sendMessage', errParams).catch(() => {});
+      await this.setBotReaction(chatId, messageId, '😢');
+      const errHtml = '❌ <b>Player not found or API service is busy.</b> Please try again later.';
+      if (loadingMsgId) {
+        await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: loadingMsgId,
+          text: errHtml,
+          parse_mode: 'HTML'
+        }).catch(() => {});
+      } else {
+        const errParams: any = { chat_id: chatId, text: errHtml, parse_mode: 'HTML' };
+        if (isGroup && messageId) errParams.reply_to_message_id = messageId;
+        if (threadId) errParams.message_thread_id = threadId;
+        await this.callTelegramApi('sendMessage', errParams).catch(() => {});
+      }
     }
   }
 
@@ -6928,9 +6958,9 @@ export class TelegramService {
     const data = cb.data;
     const chatId = cb.message?.chat?.id;
 
-    // FREE FIRE DYNAMIC DUO STATUS CALLBACK (duo_<uid>)
-    if (data && /^duo_(\d+)$/i.test(data)) {
-      const uidMatch = data.match(/^duo_(\d+)$/i);
+    // FREE FIRE CHECK GUILD INFO CALLBACK (guild_<uid>)
+    if (data && /^guild_(\d+)$/i.test(data)) {
+      const uidMatch = data.match(/^guild_(\d+)$/i);
       const targetUid = uidMatch ? uidMatch[1] : '';
       try {
         const playerData = await this.fetchFreeFirePlayer(targetUid);
@@ -6943,11 +6973,11 @@ export class TelegramService {
           return;
         }
 
-        const duo = this.extractDynamicDuo(playerData);
-        if (!duo.active) {
+        const guild = this.extractGuildInfo(playerData);
+        if (!guild.hasGuild) {
           await this.callTelegramApi('answerCallbackQuery', {
             callback_query_id: cb.id,
-            text: 'ℹ️ No Dynamic Duo found for this player.',
+            text: 'ℹ️ No guild found in this account.',
             show_alert: true
           });
           return;
@@ -6955,12 +6985,12 @@ export class TelegramService {
 
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
-          text: duo.summaryAlert,
+          text: guild.summaryAlert,
           show_alert: true
         });
 
         if (chatId && cb.message?.message_id) {
-          const updatedProfileText = `${this.formatFreeFirePlayerMessage(playerData, targetUid)}\n\n${duo.summaryHtml}`;
+          const updatedProfileText = `${this.formatFreeFirePlayerMessage(playerData, targetUid)}\n\n━━━━━━━━━━━━━━━━━━\n${guild.summaryHtml}`;
           await this.callTelegramApi('editMessageText', {
             chat_id: chatId,
             message_id: cb.message.message_id,
@@ -6968,13 +6998,13 @@ export class TelegramService {
             parse_mode: 'HTML',
             reply_markup: {
               inline_keyboard: [
-                [{ text: '👥 Dynamic Duo Status', callback_data: `duo_${targetUid}`, style: 'primary' }]
+                [{ text: '🛡 Check Guild Info', callback_data: `guild_${targetUid}`, style: 'primary' }]
               ]
             }
           }).catch(() => {});
         }
       } catch (err: any) {
-        console.warn('[FreeFireUID] Dynamic Duo callback error:', err?.message || err);
+        console.warn('[FreeFireUID] Guild callback error:', err?.message || err);
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
           text: '❌ Player not found or API service is busy. Please try again later.',
