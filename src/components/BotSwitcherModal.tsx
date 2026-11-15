@@ -26,6 +26,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
   // Clone bot form state
   const [showCloneForm, setShowCloneForm] = useState<boolean>(false);
   const [tokenInput, setTokenInput] = useState<string>('');
+  const [ownerInput, setOwnerInput] = useState<string>('');
   const [cloning, setCloning] = useState<boolean>(false);
   const [cloneError, setCloneError] = useState<string>('');
   
@@ -52,6 +53,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
       loadBots();
       setShowCloneForm(false);
       setTokenInput('');
+      setOwnerInput('');
       setCloneError('');
       setDeleteConfirmId(null);
     }
@@ -83,9 +85,10 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
     setCloneError('');
 
     try {
-      const newBot = await api.cloneBot(token);
+      const newBot = await api.cloneBot(token, ownerInput.trim() || undefined);
       toast.success(`Bot @${newBot.username || newBot.name} cloned & activated successfully!`);
       setTokenInput('');
+      setOwnerInput('');
       setShowCloneForm(false);
       await loadBots();
       // Automatically switch to the newly cloned bot
@@ -296,7 +299,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                     </div>
 
                     {/* Dedicated Sub-Admin Panel Credentials for Cloned Bots */}
-                    {!bot.isMain && (bot.adminUsername || bot.adminPassword) && (
+                    {!bot.isMain && (bot.id || bot.adminPassword) && (
                       <div className="mt-2.5 p-2.5 rounded-xl bg-white/[0.04] border border-white/15 space-y-1.5 text-[11px]">
                         <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-white/70">
                           <span>Sub-Admin Panel Credentials</span>
@@ -306,7 +309,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                               const base = typeof window !== 'undefined' ? window.location.origin : '';
                               const rawUrl = bot.panelUrl || `/panel?bot_id=${bot.id}`;
                               const url = rawUrl.startsWith('http') ? rawUrl : `${base}${rawUrl}`;
-                              navigator.clipboard.writeText(`Panel URL: ${url}\nUsername: ${bot.adminUsername || 'admin'}\nPassword: ${bot.adminPassword || 'secret'}`);
+                              navigator.clipboard.writeText(`Panel URL: ${url}\nBot ID: ${bot.id}\nPassword: ${bot.adminPassword || 'secret'}`);
                               toast.success('Sub-Admin credentials copied!');
                             }}
                             className="text-red-400 hover:text-red-300 flex items-center gap-1 cursor-pointer transition-colors"
@@ -334,10 +337,18 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                               );
                             })()}
                           </div>
-                          {bot.adminUsername && (
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-white/50">Bot ID:</span>
+                            <span className="text-red-300 font-bold select-all">{bot.id}</span>
+                          </div>
+                          {(bot.ownerUsername || bot.ownerId) && (
                             <div className="flex items-center justify-between gap-2">
-                              <span className="text-white/50">User:</span>
-                              <span className="text-red-300 font-bold select-all">{bot.adminUsername}</span>
+                              <span className="text-white/50">Owner:</span>
+                              <span className="text-emerald-300 font-semibold select-all truncate max-w-[210px]">
+                                {bot.ownerUsername
+                                  ? `@${bot.ownerUsername}${bot.ownerId && bot.ownerId !== bot.ownerUsername ? ` (${bot.ownerId})` : ''}`
+                                  : bot.ownerId}
+                              </span>
                             </div>
                           )}
                           {bot.adminPassword && (
@@ -438,6 +449,19 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                     value={tokenInput}
                     onChange={(e) => setTokenInput(e.target.value)}
                     placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
+                    className="w-full px-3 py-2 rounded-xl bg-black/60 border border-white/20 text-xs font-mono text-white placeholder-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold text-zinc-300 uppercase tracking-wider">
+                    New Owner User ID or @username
+                  </label>
+                  <input
+                    type="text"
+                    value={ownerInput}
+                    onChange={(e) => setOwnerInput(e.target.value)}
+                    placeholder="e.g. 123456789 or @username (optional)"
                     className="w-full px-3 py-2 rounded-xl bg-black/60 border border-white/20 text-xs font-mono text-white placeholder-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all"
                   />
                 </div>

@@ -180,34 +180,38 @@ async function findClonedBotAuth(cleanId: string, requestedBotId?: string): Prom
   await botStorage.loadLatest(false);
   const botAdmins = await botStorage.getAdmins();
 
-  const isTargetUsernameMatch =
+  const rawNumericBotId = target.id.replace(/^clone_/, '').toLowerCase();
+  const isTargetBotIdMatch =
+    target.id.toLowerCase() === cleanLower ||
+    rawNumericBotId === cleanLower ||
     (target.adminUsername && target.adminUsername.toLowerCase().trim() === cleanLower) ||
     (target.username && target.username.toLowerCase().trim() === cleanLower) ||
-    (target.username && `admin_${target.username.toLowerCase().trim()}` === cleanLower) ||
-    target.id.toLowerCase() === cleanLower;
+    (target.username && `admin_${target.username.toLowerCase().trim()}` === cleanLower);
 
   let adminUser = botAdmins.find(a =>
     (a.username && a.username.toLowerCase().trim() === cleanLower) ||
     (a.id && a.id.toLowerCase().trim() === cleanLower) ||
+    (a.telegramId && a.telegramId.toLowerCase().trim() === cleanLower) ||
     (a.name && a.name.toLowerCase().trim() === cleanLower)
   );
 
-  if (!adminUser && isTargetUsernameMatch) {
+  if (!adminUser && isTargetBotIdMatch) {
     adminUser = botAdmins.find(a => a.role === 'owner');
   }
 
-  if (!adminUser && isTargetUsernameMatch) {
+  if (!adminUser && isTargetBotIdMatch) {
+    const resolvedTgId = target.ownerId || target.ownerUsername || target.id.replace(/^clone_/, '');
     adminUser = {
-      id: `adm_${target.id.replace(/^clone_/, '')}`,
-      telegramId: target.id.replace(/^clone_/, ''),
-      name: `${target.name || 'Bot'} Administrator`,
-      username: target.adminUsername || cleanLower,
+      id: /^\d+$/.test(resolvedTgId) ? resolvedTgId : `owner_${target.id.replace(/^clone_/, '')}`,
+      telegramId: resolvedTgId,
+      name: target.ownerUsername ? `@${target.ownerUsername.replace(/^@+/, '')}` : `${target.name || 'Bot'} Owner`,
+      username: target.id,
       role: 'owner',
       passwordHash: await hashPassword(target.adminPassword || 'Zexi#Admin123'),
       permissions: {
         files_view: true, files_add: true, files_edit: true, files_delete: true,
         links_view: true, links_add: true, links_edit: true, links_delete: true,
-        messages_view: true, messages_edit: true, admins_manage: false,
+        messages_view: true, messages_edit: true, admins_manage: true,
         design_edit: true, settings_edit: true, cleanup_manage: true
       },
       enabled: true,
@@ -231,17 +235,18 @@ async function findClonedBotAuth(cleanId: string, requestedBotId?: string): Prom
 // POST /api/auth/login
 apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-  const telegramId = req.body.telegramId || req.body.username || req.body.adminName || req.body.email;
+  const telegramId = req.body.telegramId || req.body.username || req.body.adminName || req.body.email || req.body.botId || req.body.bot_id;
   const { password } = req.body;
   if (!telegramId || !password) {
-    return res.status(400).json({ error: 'Username/Email and password are required' });
+    return res.status(400).json({ error: 'Bot ID / Username and password are required' });
   }
 
   const cleanId = String(telegramId).trim();
+  const cleanLowerInput = cleanId.toLowerCase().replace(/^@/, '').trim();
   const cleanPassword = String(password).trim();
   console.info('[Auth] Admin login attempt for identifier:', cleanId);
 
-  const requestedBotId = (
+  let requestedBotId = (
     (req.headers['x-bot-id'] as string) ||
     (req.query.bot_id as string) ||
     (req.query.botId as string) ||
@@ -249,6 +254,20 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
     (req.body?.botId as string) ||
     'main'
   ).trim() || 'main';
+
+  // If logging in from main/root URL using a Cloned Bot ID (e.g. clone_9112185641), route strictly to that cloned bot
+  if (requestedBotId === 'main') {
+    const mainStore = StorageManager.getMainStorage();
+    await mainStore.loadLatest(false);
+    const allCloned = await mainStore.getClonedBots();
+    const matchedByBotId = allCloned.find(b =>
+      b.id.toLowerCase() === cleanLowerInput ||
+      (b.adminUsername && b.adminUsername.toLowerCase() === cleanLowerInput)
+    );
+    if (matchedByBotId) {
+      requestedBotId = matchedByBotId.id;
+    }
+  }
 
   // --- 1. CLONED BOT SUB-ADMIN AUTHENTICATION (Strictly Isolated to requestedBotId) ---
   if (requestedBotId !== 'main') {
@@ -258,7 +277,7 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
       return res.status(401).json({ error: 'Access Denied', field: 'email' });
     }
 
-    console.info(`[Auth] Cloned bot sub-admin login attempt for bot @${clonedAuth.clonedBot.username} (${clonedAuth.clonedBot.id}) with username: ${cleanId}`);
+    console.info(`[Auth] Cloned bot sub-admin login attempt for bot @${clonedAuth.clonedBot.username} (${clonedAuth.clonedBot.id}) with identifier: ${cleanId}`);
 
     let isPasswordValid = false;
     if (clonedAuth.storedPassword && cleanPassword === clonedAuth.storedPassword) {
@@ -288,7 +307,7 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
     clonedAuth.adminUser.lastLoginAt = new Date().toISOString();
     await clonedAuth.storage.saveAdmin(clonedAuth.adminUser);
 
-    console.info(`[Auth] Cloned bot sub-admin successfully authenticated for @${clonedAuth.clonedBot.username}!`);
+    console.info(`[Auth] Cloned bot sub-admin successfully authenticated for @${clonedAuth.clonedBot.username} (${clonedAuth.clonedBot.id})!`);
     return res.json({
       success: true,
       token: signedToken,
@@ -2276,17 +2295,30 @@ apiRouter.post('/bots/clone', authenticate, requirePermission('settings_edit'), 
       return res.status(403).json({ error: 'Cloned bot panels are not permitted to clone additional bots.' });
     }
 
-    const { token } = req.body;
+    const { token, owner, ownerId, ownerUsername } = req.body;
     if (!token || typeof token !== 'string' || !token.trim()) {
       return res.status(400).json({ error: 'Valid Telegram bot token is required' });
     }
 
     const admin = (req as any).admin;
     const createdBy = admin?.username || admin?.name || 'admin';
+    const rawOwner = typeof owner === 'string' ? owner.trim().replace(/^@+/, '') : '';
+    const cleanOwnerId = typeof ownerId === 'string' && ownerId.trim()
+      ? ownerId.trim().replace(/^@+/, '')
+      : (/^\d{4,20}$/.test(rawOwner) ? rawOwner : undefined);
+    const cleanOwnerUsername = typeof ownerUsername === 'string' && ownerUsername.trim()
+      ? ownerUsername.trim().replace(/^@+/, '')
+      : (rawOwner && !/^\d+$/.test(rawOwner) ? rawOwner : undefined);
+
     const reqHost = req.get('x-forwarded-host') || req.get('host') || '';
     const reqProto = req.get('x-forwarded-proto') || (req.secure ? 'https' : 'http');
     const customBase = reqHost ? `${reqProto}://${reqHost}` : undefined;
-    const result = await TelegramBotManager.cloneBot(token.trim(), createdBy, customBase);
+    const result = await TelegramBotManager.cloneBot(
+      token.trim(),
+      createdBy,
+      customBase,
+      (cleanOwnerId || cleanOwnerUsername) ? { ownerId: cleanOwnerId, ownerUsername: cleanOwnerUsername } : undefined
+    );
 
     if (!result.success) {
       return res.status(400).json({ error: result.error || 'Failed to clone bot' });

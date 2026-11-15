@@ -301,13 +301,15 @@ export const DEFAULT_BACKUP_SERVER_CONFIG: BackupServerConfig = {
 };
 
 export interface ClonedBotRecord {
-  id: string; // telegram bot id (numeric string)
+  id: string; // telegram bot id (numeric string or clone_<id>)
   token: string;
   name: string;
   username: string;
   status: 'active' | 'paused' | 'stopped';
   createdAt: string;
   createdBy?: string;
+  ownerId?: string;
+  ownerUsername?: string;
   filesCount?: number;
   usersCount?: number;
   adminUsername?: string;
@@ -1905,8 +1907,12 @@ export class SharedStorageService {
     // Check if this user has admin privileges
     const admins = await this.getAdmins();
     const settings = await this.getSettings();
-    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163').trim();
-    const isAdmin = userId === rootAdminId || rootAdminId.includes(userId) || admins.some(a => String(a.telegramId).trim() === userId || String(a.id).trim() === userId);
+    const rootAdminId = this.botId === 'main'
+      ? String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163').trim()
+      : String(settings.rootAdminId || '').trim();
+    const isAdmin = (Boolean(rootAdminId) && (userId === rootAdminId || rootAdminId.includes(userId))) ||
+      admins.some(a => String(a.telegramId).trim() === userId || String(a.id).trim() === userId ||
+        (user.username && a.username && a.username.replace(/^@+/, '').toLowerCase() === user.username.replace(/^@+/, '').toLowerCase()));
 
     // Exclude usernames ending with 'bot' (unless it's an authorized admin)
     const rawUsername = (user.username || '').replace(/^@+/, '').trim().toLowerCase();
@@ -1986,7 +1992,9 @@ export class SharedStorageService {
 
     const admins = this.db.admins;
     const settings = this.db.settings;
-    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163').trim();
+    const rootAdminId = this.botId === 'main'
+      ? String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163').trim()
+      : String(settings.rootAdminId || '').trim();
 
     const adminIds = new Set<string>();
     if (rootAdminId) adminIds.add(rootAdminId);
@@ -2020,10 +2028,11 @@ export class SharedStorageService {
 
     for (const admin of admins) {
       const adminId = String(admin.telegramId || admin.id).trim();
-      if (adminId && !this.db.botUsers[adminId]) {
+      if (adminId && /^\d+$/.test(adminId) && !this.db.botUsers[adminId]) {
+        const unameRaw = admin.username || admin.name;
         this.db.botUsers[adminId] = {
           id: adminId,
-          username: admin.name ? `@${admin.name.replace(/^@+/, '').trim()}` : undefined,
+          username: unameRaw ? `@${unameRaw.replace(/^@+/, '').trim()}` : undefined,
           firstName: admin.name || 'Admin',
           firstSeenAt: admin.createdAt || now,
           lastActiveAt: admin.lastLoginAt || admin.createdAt || now,
@@ -2035,11 +2044,13 @@ export class SharedStorageService {
       }
     }
 
-    if (rootAdminId && !this.db.botUsers[rootAdminId]) {
+    if (rootAdminId && /^\d+$/.test(rootAdminId) && !this.db.botUsers[rootAdminId]) {
       this.db.botUsers[rootAdminId] = {
         id: rootAdminId,
-        username: process.env.ADMIN_NAME ? `@${process.env.ADMIN_NAME.replace(/^@+/, '').trim()}` : '@sohan',
-        firstName: process.env.ADMIN_NAME || 'Owner Admin',
+        username: this.botId === 'main' && process.env.ADMIN_NAME
+          ? `@${process.env.ADMIN_NAME.replace(/^@+/, '').trim()}`
+          : undefined,
+        firstName: this.botId === 'main' ? (process.env.ADMIN_NAME || 'Owner Admin') : 'Owner Admin',
         firstSeenAt: now,
         lastActiveAt: now,
         isOnline: true,
@@ -2117,8 +2128,11 @@ export class SharedStorageService {
     // Safety constraint: Admins must NEVER be bannable!
     const admins = await this.getAdmins();
     const settings = await this.getSettings();
-    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163');
-    const isAdmin = cleanId === rootAdminId || rootAdminId.includes(cleanId) || admins.some(a => String(a.telegramId) === cleanId || String(a.id) === cleanId);
+    const rootAdminId = this.botId === 'main'
+      ? String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163')
+      : String(settings.rootAdminId || '');
+    const isAdmin = (Boolean(rootAdminId) && (cleanId === rootAdminId || rootAdminId.includes(cleanId))) ||
+      admins.some(a => String(a.telegramId) === cleanId || String(a.id) === cleanId);
     if (isAdmin) {
       throw new Error('Administrators cannot be banned');
     }

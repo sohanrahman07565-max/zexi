@@ -221,6 +221,8 @@ export interface BotInstance {
   filesCount: number;
   usersCount: number;
   createdAt?: string;
+  ownerId?: string;
+  ownerUsername?: string;
   adminUsername?: string;
   adminPassword?: string;
   panelUrl?: string;
@@ -1015,11 +1017,15 @@ export const api = {
     return data.bots || [];
   },
 
-  async cloneBot(token: string): Promise<any> {
+  async cloneBot(token: string, owner?: string): Promise<any> {
+    const cleanOwner = owner?.trim();
     const res = await authFetch('/api/bots/clone', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: token.trim() })
+      body: JSON.stringify({
+        token: token.trim(),
+        ...(cleanOwner ? { owner: cleanOwner } : {})
+      })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to clone bot');

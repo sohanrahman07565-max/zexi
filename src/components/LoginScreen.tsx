@@ -185,11 +185,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
     setPasswordError(null);
 
     if (!cleanId && !cleanPassword) {
-      triggerEmailError('Please enter your username and password');
+      triggerEmailError(targetBotId && targetBotId !== 'main' ? 'Please enter your Bot ID and password' : 'Please enter your Bot ID, username, or email and password');
       return;
     }
     if (!cleanId) {
-      triggerEmailError('Please enter your username');
+      triggerEmailError(targetBotId && targetBotId !== 'main' ? 'Please enter your Bot ID' : 'Please enter your Bot ID, username, or email');
       return;
     }
     if (!cleanPassword) {
@@ -202,6 +202,16 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
 
     try {
       const res = await api.login(cleanId, cleanPassword);
+
+      if (typeof window !== 'undefined' && res.botId && res.botId !== 'main') {
+        try {
+          const url = new URL(window.location.href);
+          if (url.searchParams.get('bot_id') !== res.botId) {
+            url.searchParams.set('bot_id', res.botId);
+            window.history.replaceState({}, '', url.toString());
+          }
+        } catch {}
+      }
 
       setIsSuccessExiting(true);
       toast.success(`Welcome back, ${res.admin.name || 'Admin'}!`);
@@ -859,7 +869,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
         <form onSubmit={handleSubmit} noValidate>
           <div className="zexi-login-field">
             <label className="zexi-login-label" htmlFor="u">
-              ENTER USERNAME OR EMAIL
+              {targetBotId && targetBotId !== 'main' ? 'ENTER BOT ID' : 'ENTER BOT ID, USERNAME OR EMAIL'}
             </label>
             <div className={`zexi-login-box ${emailError ? 'bad shake' : ''}`} key={`u-box-${emailShakeKey}`}>
               <span className="zexi-login-spg">
@@ -881,7 +891,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
                 ref={userInputRef}
                 id="u"
                 type="text"
-                placeholder="Enter Username or Email"
+                placeholder={targetBotId && targetBotId !== 'main' ? 'Enter Bot ID (e.g. clone_9112185641)' : 'Enter Bot ID, Username or Email'}
                 autoComplete="username"
                 value={identifier}
                 onChange={(e) => {

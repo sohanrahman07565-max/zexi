@@ -3,6 +3,16 @@ import { storage, ItemRecord, TriggerType, OpenMode, ScheduledDeletion, ForceSub
 import { hashPassword } from './auth';
 
 export const botTokenContext = new AsyncLocalStorage<string>();
+export const senderUsernameContext = new AsyncLocalStorage<string>();
+
+interface CloneSession {
+  token: string;
+  botInfo: any;
+  chatId: string;
+  createdBy: string;
+  createdAt: number;
+  promptMessageId?: number;
+}
 
 // In-memory conversation state for interactive private chat commands (like /add)
 interface AddSession {
@@ -65,6 +75,7 @@ interface AddSession {
 const activeAddSessions: Map<string, AddSession> = new Map();
 const activeEditSessions: Map<string, { templateKey: string }> = new Map();
 const activeSetChannelSessions: Map<string, { timestamp: number }> = new Map();
+const activeCloneSessions: Map<string, CloneSession> = new Map();
 
 // Deduplication map to prevent repeated deliveries from retried webhooks
 const recentDeliveries = new Map<string, number>();
@@ -591,7 +602,7 @@ export class TelegramService {
       // Ignore edited messages for commands and general replies to prevent double replies on edit
       if (update.edited_message && !update.message) {
         const fromId = String(update.edited_message.from?.id || '');
-        const isInInteractiveSession = activeAddSessions.has(fromId) || activeEditSessions.has(fromId);
+        const isInInteractiveSession = activeAddSessions.has(fromId) || activeEditSessions.has(fromId) || activeCloneSessions.has(fromId);
         if (!isInInteractiveSession) {
           return;
         }
@@ -673,67 +684,77 @@ export class TelegramService {
         }
       }
 
-      // Maintenance Mode Enforcement:
-      // When Maintenance Mode is ON, block responses to general commands, trigger keywords, and /start command.
-      // Immediately reply with customized notice supporting dynamic variables (@username, {user_id}, {bot_name}, {name}).
-      // Ensure admins can still access and use admin triggers/commands if needed.
-      const settings = await storage.getSettings();
-      if (settings.maintenanceMode) {
-        const isAdmin = await this.isAuthorizedAdmin(fromId);
-        if (!isAdmin) {
-          const rawNotice = settings.maintenanceNotice?.trim() || '⚠️ Bot is currently under maintenance. Please try again later.';
-          const botUsername = await this.getBotUsername();
-          const parsedNotice = this.resolveMaintenanceNotice(rawNotice, userPayload, fromId, botUsername);
+      const senderUname = (
+        userPayload?.username ||
+        update.message?.from?.username ||
+        update.edited_message?.from?.username ||
+        update.callback_query?.from?.username ||
+        ''
+      ).replace(/^@+/, '').trim().toLowerCase();
 
-          if (update.callback_query) {
-            await this.callTelegramApi('answerCallbackQuery', {
-              callback_query_id: update.callback_query.id,
-              text: parsedNotice.replace(/<[^>]+>/g, '').slice(0, 200), // strip HTML tags for alert popup (max 200 chars)
-              show_alert: true
-            });
-            return;
-          }
+      await senderUsernameContext.run(senderUname, async () => {
+        // Maintenance Mode Enforcement:
+        // When Maintenance Mode is ON, block responses to general commands, trigger keywords, and /start command.
+        // Immediately reply with customized notice supporting dynamic variables (@username, {user_id}, {bot_name}, {name}).
+        // Ensure admins can still access and use admin triggers/commands if needed.
+        const settings = await storage.getSettings();
+        if (settings.maintenanceMode) {
+          const isAdmin = await this.isAuthorizedAdmin(fromId, senderUname);
+          if (!isAdmin) {
+            const rawNotice = settings.maintenanceNotice?.trim() || '⚠️ Bot is currently under maintenance. Please try again later.';
+            const botUsername = await this.getBotUsername();
+            const parsedNotice = this.resolveMaintenanceNotice(rawNotice, userPayload, fromId, botUsername);
 
-          const msg = update.message || update.edited_message;
-          if (msg?.chat) {
-            if (msg.chat.type === 'private') {
-              await this.callTelegramApi('sendMessage', {
-                chat_id: msg.chat.id,
-                text: parsedNotice,
-                parse_mode: 'HTML'
+            if (update.callback_query) {
+              await this.callTelegramApi('answerCallbackQuery', {
+                callback_query_id: update.callback_query.id,
+                text: parsedNotice.replace(/<[^>]+>/g, '').slice(0, 200), // strip HTML tags for alert popup (max 200 chars)
+                show_alert: true
               });
-            } else if (msg.chat.type === 'group' || msg.chat.type === 'supergroup') {
-              const txt = (msg.text || msg.caption || '').trim();
-              // In groups, only respond if someone addressed the bot or used a slash command
-              if (txt.startsWith('/') || (botUsername && txt.toLowerCase().includes(`@${botUsername.toLowerCase()}`))) {
-                await this.sendAutoDeletingNotice(msg.chat.id, parsedNotice, 6000, msg.message_id);
+              return;
+            }
+
+            const msg = update.message || update.edited_message;
+            if (msg?.chat) {
+              if (msg.chat.type === 'private') {
+                await this.callTelegramApi('sendMessage', {
+                  chat_id: msg.chat.id,
+                  text: parsedNotice,
+                  parse_mode: 'HTML'
+                });
+              } else if (msg.chat.type === 'group' || msg.chat.type === 'supergroup') {
+                const txt = (msg.text || msg.caption || '').trim();
+                // In groups, only respond if someone addressed the bot or used a slash command
+                if (txt.startsWith('/') || (botUsername && txt.toLowerCase().includes(`@${botUsername.toLowerCase()}`))) {
+                  await this.sendAutoDeletingNotice(msg.chat.id, parsedNotice, 6000, msg.message_id);
+                }
               }
             }
+            return;
           }
+        }
+
+        // Handle Inline Button Clicks (Callback queries from /add flow and setup video navigation)
+        if (update.callback_query) {
+          await this.handleCallbackQuery(update.callback_query);
           return;
         }
-      }
 
-      // Handle Inline Button Clicks (Callback queries from /add flow and setup video navigation)
-      if (update.callback_query) {
-        await this.handleCallbackQuery(update.callback_query);
-        return;
-      }
+        // Support both new messages and edited messages during interactive setup
+        const message = update.message || update.edited_message;
+        if (!message) return;
 
-      // Support both new messages and edited messages during interactive setup
-      const message = update.message || update.edited_message;
-      if (!message) return;
+        const chat = message.chat;
+        const isGroup = chat.type === 'group' || chat.type === 'supergroup';
+        const isPrivate = chat.type === 'private';
+        const text = (message.text || message.caption || '').trim();
 
-      const chat = message.chat;
-      const isGroup = chat.type === 'group' || chat.type === 'supergroup';
-      const isPrivate = chat.type === 'private';
-      const text = (message.text || message.caption || '').trim();
-
-      if (isGroup) {
-        await this.handleGroupMessage(message, text);
-      } else if (isPrivate) {
-        await this.handlePrivateMessage(message, text);
-      }
+        if (isGroup) {
+          await this.handleGroupMessage(message, text);
+        } else if (isPrivate) {
+          await this.handlePrivateMessage(message, text);
+        }
+      });
     } finally {
       releaseExclusiveTelegramUpdate(keys);
     }
@@ -782,18 +803,60 @@ export class TelegramService {
   // =========================================================================
   // ADMIN AUTHORIZATION & AUTO-DELETING NOTICES (STRICT GROUP PRIVACY)
   // =========================================================================
-  public static async isAuthorizedAdmin(fromId: string | number): Promise<boolean> {
+  public static async isAuthorizedAdmin(fromId: string | number, fromUsername?: string): Promise<boolean> {
     if (!fromId) return false;
     const cleanId = String(fromId).trim();
+    const rawUname = (fromUsername || senderUsernameContext.getStore() || '').replace(/^@+/, '').trim().toLowerCase();
+
     await storage.loadLatest(false);
     const admins = await storage.getAdmins();
     const settings = await storage.getSettings();
-    const rootAdminId = String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || settings.rootAdminId || '8153757163').trim();
-    if (cleanId === rootAdminId || rootAdminId.includes(cleanId)) return true;
+    const mainStorage = StorageManager.getMainStorage();
+    const isMainBot = storage === mainStorage;
+
+    const rootAdminId = isMainBot
+      ? String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || settings.rootAdminId || '8153757163').trim()
+      : String(settings.rootAdminId || '').trim();
+
+    if (rootAdminId && (cleanId === rootAdminId || rootAdminId.split(',').map((s) => s.trim()).includes(cleanId))) {
+      return true;
+    }
+
     const admin = await storage.getAdmin(cleanId);
     if (admin && admin.enabled) return true;
-    if (admins.some(a => String(a.telegramId) === cleanId || String(a.id) === cleanId)) return true;
-    if (admins.length === 0) return true;
+
+    if (admins.some((a) => a.enabled !== false && (String(a.telegramId).trim() === cleanId || String(a.id).trim() === cleanId))) {
+      return true;
+    }
+
+    // Support @username-assigned cloned bot owners and auto-bind numeric Telegram User ID on first contact
+    if (rawUname) {
+      const matchedByUsername = admins.find((a) => {
+        if (a.enabled === false) return false;
+        const aUname = (a.username || '').replace(/^@+/, '').trim().toLowerCase();
+        const aName = (a.name || '').replace(/^@+/, '').trim().toLowerCase();
+        const aTg = (a.telegramId || '').replace(/^@+/, '').trim().toLowerCase();
+        return aUname === rawUname || aName === rawUname || aTg === rawUname;
+      });
+      if (matchedByUsername) {
+        if (/^\d+$/.test(cleanId) && !/^\d+$/.test(String(matchedByUsername.telegramId || ''))) {
+          matchedByUsername.telegramId = cleanId;
+          await storage.saveAdmin(matchedByUsername).catch(() => {});
+          if (matchedByUsername.role === 'owner' && !/^\d+$/.test(String(settings.rootAdminId || ''))) {
+            await storage.updateSettings({ rootAdminId: cleanId }).catch(() => {});
+          }
+        }
+        return true;
+      }
+      if (!isMainBot && rootAdminId.replace(/^@+/, '').toLowerCase() === rawUname) {
+        if (/^\d+$/.test(cleanId)) {
+          await storage.updateSettings({ rootAdminId: cleanId }).catch(() => {});
+        }
+        return true;
+      }
+    }
+
+    if (isMainBot && admins.length === 0) return true;
     return false;
   }
 
@@ -1995,6 +2058,7 @@ export class TelegramService {
             activeAddSessions.delete(fromId);
             await storage.deleteAddSession(fromId);
             activeEditSessions.delete(fromId);
+            activeCloneSessions.delete(fromId);
             const templates = await storage.getTemplates();
             const cancelMsg = templates.CANCEL_MESSAGE?.content || '❌ Operation cancelled.';
             if (addSession?.lastPromptMessageId) {
@@ -2158,45 +2222,63 @@ export class TelegramService {
     // MODERATION, BAN/UNBAN, REPORT & ANTI-FRAUD IN GROUPS
     // =========================================================================
 
+    // Pending /clone owner assignment reply in group chat
+    const pendingGroupClone = activeCloneSessions.get(fromId);
+    if (pendingGroupClone && pendingGroupClone.chatId === String(message.chat.id) && (text || message.reply_to_message?.from) && !text.startsWith('/')) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (isAdmin) {
+        await this.completeInteractiveClone(message.chat.id, fromId, pendingGroupClone, text, message, true);
+        return;
+      }
+    }
+
     // Admin /clone command in groups: /clone <bot_token>
     const groupCloneMatch = text.match(/^\/clone(?:@\w+)?(?:\s+(.+))?$/i);
     if (groupCloneMatch) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
       if (isAdmin) {
+        if (message.message_id) {
+          await this.deleteUserMessage(message.chat.id, message.message_id);
+        }
         const tokenArg = groupCloneMatch[1]?.trim();
         if (!tokenArg) {
           await this.sendAutoDeletingNotice(
             message.chat.id,
             `ℹ️ <b>How to Clone Bot:</b>\nType <code>/clone &lt;bot_token&gt;</code>\nExample: <code>/clone 123456789:ABCdef...</code>`,
-            7000,
-            message.message_id
+            7000
           );
           return;
         }
 
-        const result = await TelegramBotManager.cloneBot(tokenArg, fromId);
-        if (!result.success) {
-          const errText = result.error === 'Already this bot is already running.' 
-            ? '❌ <b>Already this bot is already running.</b>' 
-            : `❌ <b>Failed to Clone Bot:</b> ${result.error || 'Invalid token'}`;
-          await this.sendAutoDeletingNotice(
-            message.chat.id,
-            errText,
-            8000,
-            message.message_id
-          );
+        const check = await TelegramBotManager.validateCloneToken(tokenArg);
+        if (!check.ok || !check.info) {
+          const errText = check.error === 'Already this bot is already running.'
+            ? '❌ <b>Already this bot is already running.</b>'
+            : `❌ <b>Failed to Clone Bot:</b> ${check.error || 'Invalid token'}`;
+          await this.sendAutoDeletingNotice(message.chat.id, errText, 8000);
           return;
         }
 
-        const bot = result.bot!;
-        await this.sendAutoDeletingNotice(
-          message.chat.id,
-          `🤖 <b>Bot Cloned Successfully:</b> @${bot.username}\n` +
-          `• <b>Panel URL:</b> <a href="${bot.panelUrl}">${bot.panelUrl}</a>\n` +
-          `• <b>Admin:</b> <code>${bot.adminUsername}</code> | <b>Pass:</b> <code>${bot.adminPassword}</code>`,
-          20000,
-          message.message_id
-        );
+        const groupSession: CloneSession = {
+          token: check.cleanToken!,
+          botInfo: check.info,
+          chatId: String(message.chat.id),
+          createdBy: fromId,
+          createdAt: Date.now()
+        };
+
+        const promptRes = await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: `🤖 <b>Bot Token Verified:</b> @${check.info.username || check.info.first_name}\n\n👤 <b>Please reply with the Telegram User ID or Username of the new Owner for this cloned bot.</b>\n\n<i>Example:</i> <code>123456789</code> or <code>@username</code>`,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [[{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]]
+          }
+        });
+        if (promptRes?.ok && promptRes.result?.message_id) {
+          groupSession.promptMessageId = promptRes.result.message_id;
+        }
+        activeCloneSessions.set(fromId, groupSession);
         return;
       }
     }
@@ -2649,6 +2731,19 @@ export class TelegramService {
       return;
     }
 
+    // Free Fire UID Checker (/u <uid> or /uid <uid>) in Groups
+    const groupFfCmd = this.parseFreeFireUidCommand(text);
+    if (groupFfCmd.matched) {
+      await this.handleFreeFireUidCommand(
+        message.chat.id,
+        groupFfCmd.uid,
+        message.message_id,
+        true,
+        message.message_thread_id
+      );
+      return;
+    }
+
     // Check /filters command in groups (strictly requires '/' prefix)
     const isFilters = /^\/(?:filters|filter)(?:@\w+)?$/i.test(text.trim());
     if (isFilters) {
@@ -2911,6 +3006,145 @@ export class TelegramService {
   }
 
   // =========================================================================
+  // INTERACTIVE CLONE COMPLETION (OWNER ASSIGNMENT + BOT ID CREDENTIALS)
+  // =========================================================================
+  private static async completeInteractiveClone(
+    chatId: number | string,
+    fromId: string,
+    session: CloneSession,
+    rawText: string,
+    message: any,
+    isGroup: boolean
+  ): Promise<void> {
+    const trimmed = (rawText || '').trim();
+    let ownerId = '';
+    let ownerUsername = '';
+
+    if (/^\d{4,20}$/.test(trimmed)) {
+      ownerId = trimmed;
+    } else if (/^(?:me|self)$/i.test(trimmed)) {
+      ownerId = fromId;
+      ownerUsername = (message?.from?.username || '').replace(/^@+/, '').trim();
+    } else if (/^(?:https?:\/\/)?t\.me\/([a-zA-Z0-9_]{3,32})\/?$/i.test(trimmed)) {
+      const m = trimmed.match(/^(?:https?:\/\/)?t\.me\/([a-zA-Z0-9_]{3,32})\/?$/i);
+      ownerUsername = (m?.[1] || '').trim();
+    } else if (/^@[a-zA-Z0-9_]{3,32}$/.test(trimmed)) {
+      ownerUsername = trimmed.replace(/^@+/, '').trim();
+    } else if (/^[a-zA-Z][a-zA-Z0-9_]{2,31}$/.test(trimmed)) {
+      ownerUsername = trimmed;
+    } else if (!trimmed && message?.forward_from && !message.forward_from.is_bot) {
+      ownerId = String(message.forward_from.id || '').trim();
+      ownerUsername = (message.forward_from.username || '').replace(/^@+/, '').trim();
+    } else if (message?.reply_to_message?.from && !message.reply_to_message.from.is_bot && (!trimmed || /^(?:this|him|her|owner)$/i.test(trimmed))) {
+      ownerId = String(message.reply_to_message.from.id || '').trim();
+      ownerUsername = (message.reply_to_message.from.username || '').replace(/^@+/, '').trim();
+    }
+
+    if (!ownerId && !ownerUsername) {
+      const invalidMsg = `⚠️ <b>Invalid Owner format.</b>\n\nPlease reply with a valid <b>Telegram User ID</b> (e.g. <code>123456789</code>) or <b>Username</b> (e.g. <code>@username</code>).\n\n<i>Send /cancel to abort.</i>`;
+      if (isGroup) {
+        await this.sendAutoDeletingNotice(chatId, invalidMsg, 8000, message?.message_id);
+      } else {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: invalidMsg,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [[{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]]
+          }
+        });
+      }
+      return;
+    }
+
+    activeCloneSessions.delete(fromId);
+
+    const statusNotice = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: `⏳ <i>Finalizing clone for @${session.botInfo.username || session.botInfo.first_name} and assigning Owner...</i>`,
+      parse_mode: 'HTML'
+    });
+
+    const result = await TelegramBotManager.cloneBot(
+      session.token,
+      fromId,
+      undefined,
+      { ownerId: ownerId || undefined, ownerUsername: ownerUsername || undefined }
+    );
+
+    if (statusNotice?.ok && statusNotice.result?.message_id) {
+      await this.deleteUserMessage(chatId, statusNotice.result.message_id);
+    }
+
+    if (!result.success || !result.bot) {
+      const errorMsg = result.error === 'Already this bot is already running.'
+        ? '❌ <b>Already this bot is already running.</b>'
+        : `❌ <b>Failed to Clone Bot:</b>\n${result.error || 'Unknown error occurred.'}`;
+      if (isGroup) {
+        await this.sendAutoDeletingNotice(chatId, errorMsg, 8000);
+      } else {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: errorMsg,
+          parse_mode: 'HTML'
+        });
+      }
+      return;
+    }
+
+    const bot = result.bot;
+    const ownerDisplay = bot.ownerUsername && bot.ownerId && bot.ownerId !== bot.ownerUsername
+      ? `@${bot.ownerUsername} (<code>${bot.ownerId}</code>)`
+      : (bot.ownerUsername ? `@${bot.ownerUsername}` : `<code>${bot.ownerId || fromId}</code>`);
+
+    const successText =
+      `✅ <b>Telegram Bot Successfully Cloned!</b>\n\n` +
+      `🤖 <b>Bot Name:</b> ${bot.name}\n` +
+      `🔗 <b>Bot Username:</b> @${bot.username}\n` +
+      `🆔 <b>Bot ID:</b> <code>${bot.id}</code>\n` +
+      `👑 <b>Official Owner:</b> ${ownerDisplay}\n` +
+      `📡 <b>Status:</b> 🟢 Active &amp; Polling (Full Admin Access Granted)\n\n` +
+      `🔐 <b>Dedicated Sub-Admin Panel Login:</b>\n` +
+      `🌐 <b>Panel URL:</b> ${bot.panelUrl}\n` +
+      `🆔 <b>Bot ID:</b> <code>${bot.id}</code>\n` +
+      `🔑 <b>Admin Password:</b> <code>${bot.adminPassword}</code>\n\n` +
+      `<i>The assigned Owner now has full administrative privileges inside @${bot.username} and can log in to the web panel using the Bot ID above.</i>`;
+
+    if (isGroup) {
+      if (message?.message_id) {
+        await this.deleteUserMessage(chatId, message.message_id);
+      }
+      if (session.promptMessageId) {
+        await this.deleteUserMessage(chatId, session.promptMessageId);
+      }
+      const dmRes = await this.callTelegramApi('sendMessage', {
+        chat_id: fromId,
+        text: successText,
+        parse_mode: 'HTML'
+      });
+      if (dmRes?.ok) {
+        await this.sendAutoDeletingNotice(
+          chatId,
+          `✅ <b>Bot @${bot.username} cloned!</b> Owner: ${ownerDisplay}. Panel credentials sent to your private DM.`,
+          7000
+        );
+      } else {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: successText,
+          parse_mode: 'HTML'
+        });
+      }
+    } else {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: successText,
+        parse_mode: 'HTML'
+      });
+    }
+  }
+
+  // =========================================================================
   // PRIVATE MESSAGE HANDLING
   // =========================================================================
   private static async handlePrivateMessage(message: any, text: string): Promise<void> {
@@ -2925,7 +3159,7 @@ export class TelegramService {
 
     // Check if user is in an active /editthismessage session (allow built-in slash commands to bypass cleanly)
     const editSession = activeEditSessions.get(fromId);
-    if (editSession && text && !/^\/(?:cancel|start|filters?|allfiles?)(?:@\w+)?(?:\s|$)/i.test(text.trim())) {
+    if (editSession && text && !/^\/(?:cancel|start|filters?|allfiles?|u|uid)(?:@\w+)?(?:\s|$)/i.test(text.trim())) {
       await storage.updateTemplate(editSession.templateKey, text);
       activeEditSessions.delete(fromId);
       await this.callTelegramApi('sendMessage', {
@@ -2957,10 +3191,10 @@ export class TelegramService {
       }
     }
 
-    // Admin /clone command in private chat: /clone <bot_token>
+    // Admin /clone command in private chat: /clone <bot_token> (Step 1: verify token & prompt for new owner)
     const cloneMatch = text.match(/^\/clone(?:@\w+)?(?:\s+(.+))?$/i);
     if (cloneMatch) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
       if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
@@ -2974,17 +3208,17 @@ export class TelegramService {
       if (!tokenArg) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: `ℹ️ <b>How to Clone Telegram Bot:</b>\n\n1. Open @BotFather on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>The new bot will automatically start with its own isolated database for files and users.</i>`,
+          text: `ℹ️ <b>How to Clone Telegram Bot:</b>\n\n1. Open @BotFather on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>You will then be asked to assign the official Owner User ID or @username for the cloned bot.</i>`,
           parse_mode: 'HTML'
         });
         return;
       }
 
-      const result = await TelegramBotManager.cloneBot(tokenArg, fromId);
-      if (!result.success) {
-        const errorMsg = result.error === 'Already this bot is already running.'
+      const check = await TelegramBotManager.validateCloneToken(tokenArg);
+      if (!check.ok || !check.info) {
+        const errorMsg = check.error === 'Already this bot is already running.'
           ? '❌ <b>Already this bot is already running.</b>'
-          : `❌ <b>Failed to Clone Bot:</b>\n${result.error || 'Invalid bot token or failed to verify with Telegram.'}`;
+          : `❌ <b>Failed to Clone Bot:</b>\n${check.error || 'Invalid bot token or failed to verify with Telegram.'}`;
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
           text: errorMsg,
@@ -2993,21 +3227,26 @@ export class TelegramService {
         return;
       }
 
-      const bot = result.bot!;
-      await this.callTelegramApi('sendMessage', {
+      const session: CloneSession = {
+        token: check.cleanToken!,
+        botInfo: check.info,
+        chatId: String(chatId),
+        createdBy: fromId,
+        createdAt: Date.now()
+      };
+
+      const promptRes = await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `🤖 <b>Bot Cloned & Activated Successfully!</b>\n\n` +
-          `• <b>Bot Name:</b> ${bot.name}\n` +
-          `• <b>Username:</b> @${bot.username}\n` +
-          `• <b>Bot ID:</b> <code>${bot.id}</code>\n` +
-          `• <b>Status:</b> 🟢 Active & Polling\n\n` +
-          `🔐 <b>Dedicated Sub-Admin Credentials:</b>\n` +
-          `• <b>Panel URL:</b> <a href="${bot.panelUrl}">${bot.panelUrl}</a>\n` +
-          `• <b>Admin Username:</b> <code>${bot.adminUsername}</code>\n` +
-          `• <b>Admin Password:</b> <code>${bot.adminPassword}</code>\n\n` +
-          `✅ <i>This bot is completely isolated with its own private database. The sub-admin can log into the dedicated panel to manage files, filters, and settings independently!</i>`,
-        parse_mode: 'HTML'
+        text: `🤖 <b>Bot Token Verified:</b> @${check.info.username || check.info.first_name}\n\n👤 <b>Please reply with the Telegram User ID or Username of the new Owner for this cloned bot.</b>\n\n<i>Example:</i> <code>123456789</code> or <code>@username</code>`,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [[{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]]
+        }
       });
+      if (promptRes?.ok && promptRes.result?.message_id) {
+        session.promptMessageId = promptRes.result.message_id;
+      }
+      activeCloneSessions.set(fromId, session);
       return;
     }
 
@@ -3227,6 +3466,19 @@ export class TelegramService {
       return;
     }
 
+    // 2d. Free Fire UID Checker command (/u <uid> or /uid <uid>) in Private Chat
+    const privFfCmd = this.parseFreeFireUidCommand(text);
+    if (privFfCmd.matched) {
+      await this.handleFreeFireUidCommand(
+        chatId,
+        privFfCmd.uid,
+        message.message_id,
+        false,
+        message.message_thread_id
+      );
+      return;
+    }
+
     // 3. Command: /setstartmsg or /startmsg
     if (text.startsWith('/setstartmsg') || text.startsWith('/startmsg')) {
       await this.handleSetStartMessageCommand(fromId, chatId, text, message);
@@ -3265,6 +3517,7 @@ export class TelegramService {
     // 7. Command: /cancel (strictly requires '/' prefix)
     if (text === '/cancel' || text.startsWith('/cancel')) {
       activeSetChannelSessions.delete(fromId);
+      activeCloneSessions.delete(fromId);
       const addSession = activeAddSessions.get(fromId) || await storage.getAddSession(fromId);
       activeAddSessions.delete(fromId);
       await storage.deleteAddSession(fromId);
@@ -3291,7 +3544,14 @@ export class TelegramService {
       return;
     }
 
-    // 7. Check if user is inside an interactive /add session
+    // 7a. Check if user is completing an interactive /clone owner assignment
+    const pendingClone = activeCloneSessions.get(fromId);
+    if (pendingClone && !text.startsWith('/')) {
+      await this.completeInteractiveClone(chatId, fromId, pendingClone, text, message, false);
+      return;
+    }
+
+    // 7b. Check if user is inside an interactive /add session
     let addSession = activeAddSessions.get(fromId);
     if (!addSession) {
       addSession = await storage.getAddSession(fromId);
@@ -4538,6 +4798,406 @@ export class TelegramService {
     }
 
     return { ok: false, description: 'No media or message content specified' };
+  }
+
+  // =========================================================================
+  // FREE FIRE UID CHECKER (/u <uid>, /uid <uid>) & DYNAMIC DUO STATUS
+  // =========================================================================
+  private static freeFirePlayerCache: Map<string, { data: any; fetchedAt: number }> = new Map();
+
+  public static parseFreeFireUidCommand(rawText: string): { matched: boolean; uid: string | null } {
+    const cleaned = String(rawText || '')
+      .replace(/[\u200B-\u200F\u202A-\u202E\uFEFF\u00A0]/g, ' ')
+      .trim();
+    const match = cleaned.match(/^\/(?:u|uid)(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i);
+    if (!match) {
+      return { matched: false, uid: null };
+    }
+    const arg = (match[1] || '').trim();
+    const uidMatch = arg.match(/^(\d+)$/);
+    return {
+      matched: true,
+      uid: uidMatch ? uidMatch[1] : null
+    };
+  }
+
+  private static isPresentValue(val: any): boolean {
+    if (val === null || val === undefined) return false;
+    if (typeof val === 'string') {
+      const t = val.trim();
+      return Boolean(t) && t.toLowerCase() !== 'none' && t.toLowerCase() !== 'null' && t.toLowerCase() !== 'n/a';
+    }
+    return true;
+  }
+
+  private static cleanFfSignature(sig: string): string {
+    const stripped = String(sig || '')
+      .replace(/\[(?:[0-9a-fA-F]{6}|[bciuhs]|\/[bciuhs])\]/gi, '')
+      .trim();
+    return stripped || String(sig || '').trim();
+  }
+
+  public static async fetchFreeFirePlayer(uid: string, forceRefresh: boolean = false): Promise<any | null> {
+    const cleanUid = String(uid || '').trim();
+    if (!/^\d+$/.test(cleanUid)) return null;
+
+    const cached = this.freeFirePlayerCache.get(cleanUid);
+    if (!forceRefresh && cached && Date.now() - cached.fetchedAt < 10 * 60 * 1000) {
+      return cached.data;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 16000);
+      const res = await fetch(`https://auraffxserverinfocheckerapi.onrender.com/api/player?uid=${encodeURIComponent(cleanUid)}`, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+
+      if (!res.ok) {
+        return null;
+      }
+
+      const json: any = await res.json().catch(() => null);
+      if (!json || json.success === false || json.error) {
+        return null;
+      }
+
+      const playerObj = json.player && typeof json.player === 'object' && !json.player.error ? json.player : json;
+      const hasIdentity = Boolean(
+        this.isPresentValue(playerObj?.name) ||
+        this.isPresentValue(json?.name) ||
+        this.isPresentValue(playerObj?.uid) ||
+        this.isPresentValue(json?.uid)
+      );
+      if (!hasIdentity) {
+        return null;
+      }
+
+      if (this.freeFirePlayerCache.size > 200) {
+        const oldestKey = this.freeFirePlayerCache.keys().next().value;
+        if (oldestKey) this.freeFirePlayerCache.delete(oldestKey);
+      }
+      this.freeFirePlayerCache.set(cleanUid, { data: json, fetchedAt: Date.now() });
+      return json;
+    } catch (err: any) {
+      console.warn(`[FreeFireUID] Fetch error for UID ${cleanUid}:`, err?.message || err);
+      return null;
+    }
+  }
+
+  public static extractDynamicDuo(apiData: any): {
+    active: boolean;
+    partnerName?: string;
+    partnerUid?: string;
+    level?: string | number;
+    intimacy?: string | number;
+    createdAt?: string;
+    summaryAlert: string;
+    summaryHtml: string;
+  } {
+    const p = apiData?.player && typeof apiData.player === 'object' ? apiData.player : apiData;
+    const raw = apiData?.raw && typeof apiData.raw === 'object' ? apiData.raw : {};
+    let parsedRawData: any = null;
+    const rawDataStr = apiData?.raw_data || p?.raw_data || raw?.raw_data;
+    if (typeof rawDataStr === 'string' && rawDataStr.trim().startsWith('{')) {
+      try {
+        parsedRawData = JSON.parse(rawDataStr);
+      } catch {}
+    } else if (rawDataStr && typeof rawDataStr === 'object') {
+      parsedRawData = rawDataStr;
+    }
+
+    const candidates = [
+      apiData?.dynamic_duo,
+      apiData?.dynamicDuo,
+      apiData?.duo,
+      apiData?.duo_info,
+      apiData?.duoInfo,
+      apiData?.lover,
+      apiData?.partner,
+      p?.dynamic_duo,
+      p?.dynamicDuo,
+      p?.duo,
+      p?.duo_info,
+      p?.duoInfo,
+      p?.lover,
+      p?.partner,
+      raw?.dynamic_duo,
+      raw?.dynamicDuo,
+      raw?.duo,
+      raw?.duo_info,
+      parsedRawData?.DynamicDuoInfo,
+      parsedRawData?.dynamicDuo,
+      parsedRawData?.dynamic_duo,
+      parsedRawData?.DuoInfo,
+      parsedRawData?.LoverInfo,
+      parsedRawData?.SocialInfo?.dynamicDuo,
+      parsedRawData?.SocialInfo?.duo
+    ];
+
+    let duoObj: any = null;
+    for (const c of candidates) {
+      if (c && typeof c === 'object' && Object.keys(c).length > 0) {
+        duoObj = c;
+        break;
+      }
+    }
+
+    const duoFlatFields: Record<string, any> = {};
+    const fieldSources = [apiData?.all_fields, p?.all_fields, raw?.all_fields];
+    for (const list of fieldSources) {
+      if (!Array.isArray(list)) continue;
+      for (const item of list) {
+        const key = String(item?.key || '').toLowerCase();
+        if (/(?:duo|lover|partner)/.test(key) && this.isPresentValue(item?.value) && item.value !== 0 && item.value !== false) {
+          duoFlatFields[key] = item.value;
+        }
+      }
+    }
+
+    const partnerName =
+      duoObj?.partner_name ||
+      duoObj?.partnerName ||
+      duoObj?.name ||
+      duoObj?.nickname ||
+      duoObj?.lover_name ||
+      duoObj?.loverName ||
+      duoFlatFields.duo_partner_name ||
+      duoFlatFields.dynamic_duo_name ||
+      duoFlatFields.duo_name ||
+      duoFlatFields.lover_name ||
+      apiData?.duo_partner_name ||
+      apiData?.dynamic_duo_name;
+
+    const partnerUid =
+      duoObj?.partner_uid ||
+      duoObj?.partnerUid ||
+      duoObj?.uid ||
+      duoObj?.accountId ||
+      duoObj?.partner_id ||
+      duoObj?.partnerId ||
+      duoObj?.lover_uid ||
+      duoFlatFields.duo_partner_uid ||
+      duoFlatFields.dynamic_duo_uid ||
+      duoFlatFields.duo_uid ||
+      apiData?.duo_partner_uid;
+
+    const level =
+      duoObj?.level ||
+      duoObj?.duo_level ||
+      duoObj?.duoLevel ||
+      duoFlatFields.duo_level ||
+      duoFlatFields.dynamic_duo_level ||
+      apiData?.duo_level;
+
+    const intimacy =
+      duoObj?.intimacy ||
+      duoObj?.points ||
+      duoObj?.hearts ||
+      duoObj?.score ||
+      duoFlatFields.duo_intimacy ||
+      duoFlatFields.duo_points;
+
+    const createdAt =
+      duoObj?.created_at ||
+      duoObj?.createdAt ||
+      duoObj?.createAt ||
+      duoFlatFields.duo_created_at;
+
+    const hasExplicitStatusTrue = Boolean(
+      (duoObj && (this.isPresentValue(partnerName) || this.isPresentValue(partnerUid) || this.isPresentValue(level) || Number(duoObj?.level) > 0)) ||
+      this.isPresentValue(duoFlatFields.dynamic_duo_status) ||
+      this.isPresentValue(partnerName) ||
+      this.isPresentValue(partnerUid)
+    );
+
+    if (!hasExplicitStatusTrue) {
+      return {
+        active: false,
+        summaryAlert: 'ℹ️ No Dynamic Duo found for this player.',
+        summaryHtml: 'ℹ️ <i>No Dynamic Duo found for this player.</i>'
+      };
+    }
+
+    const alertLines: string[] = ['👥 Dynamic Duo Active!'];
+    if (this.isPresentValue(partnerName)) alertLines.push(`Partner: ${String(partnerName)}`);
+    if (this.isPresentValue(partnerUid)) alertLines.push(`Partner UID: ${String(partnerUid)}`);
+    if (this.isPresentValue(level)) alertLines.push(`Duo Level: ${String(level)}`);
+    if (this.isPresentValue(intimacy)) alertLines.push(`Intimacy: ${String(intimacy)}`);
+    if (this.isPresentValue(createdAt)) alertLines.push(`Since: ${String(createdAt)}`);
+
+    const htmlLines: string[] = ['<b>👥 Dynamic Duo Status:</b> 🟢 Active'];
+    if (this.isPresentValue(partnerName)) htmlLines.push(`• <b>Partner:</b> ${this.escapeHtml(String(partnerName))}`);
+    if (this.isPresentValue(partnerUid)) htmlLines.push(`• <b>Partner UID:</b> <code>${this.escapeHtml(String(partnerUid))}</code>`);
+    if (this.isPresentValue(level)) htmlLines.push(`• <b>Duo Level:</b> ${this.escapeHtml(String(level))}`);
+    if (this.isPresentValue(intimacy)) htmlLines.push(`• <b>Intimacy:</b> ${this.escapeHtml(String(intimacy))}`);
+    if (this.isPresentValue(createdAt)) htmlLines.push(`• <b>Since:</b> ${this.escapeHtml(String(createdAt))}`);
+
+    return {
+      active: true,
+      partnerName: this.isPresentValue(partnerName) ? String(partnerName) : undefined,
+      partnerUid: this.isPresentValue(partnerUid) ? String(partnerUid) : undefined,
+      level: this.isPresentValue(level) ? level : undefined,
+      intimacy: this.isPresentValue(intimacy) ? intimacy : undefined,
+      createdAt: this.isPresentValue(createdAt) ? String(createdAt) : undefined,
+      summaryAlert: alertLines.join('\n').slice(0, 200),
+      summaryHtml: htmlLines.join('\n')
+    };
+  }
+
+  public static formatFreeFirePlayerMessage(apiData: any, fallbackUid: string): string {
+    const p = apiData?.player && typeof apiData.player === 'object' && !apiData.player.error ? apiData.player : apiData;
+
+    const uid = String(p?.uid || apiData?.uid || fallbackUid).trim();
+    const name = this.isPresentValue(p?.name) ? String(p.name) : (this.isPresentValue(apiData?.name) ? String(apiData.name) : 'Unknown');
+    const level = p?.level ?? apiData?.level ?? 'N/A';
+    const exp = this.isPresentValue(p?.exp) && Number(p.exp) > 0 ? p.exp : null;
+    const likes = p?.likes ?? apiData?.likes ?? '0';
+
+    const regionFlag = this.isPresentValue(p?.region_flag || apiData?.region_flag) ? String(p?.region_flag || apiData?.region_flag).trim() : '';
+    const regionName = this.isPresentValue(p?.region_name || apiData?.region_name) ? String(p?.region_name || apiData?.region_name).trim() : '';
+    const regionCode = this.isPresentValue(p?.region || apiData?.region) ? String(p?.region || apiData?.region).trim() : '';
+    const regionText = regionName && regionCode && regionName.toLowerCase() !== regionCode.toLowerCase()
+      ? `${regionName} (${regionCode})`
+      : (regionName || regionCode);
+
+    const br = p?.battle_royale || apiData?.battle_royale;
+    const cs = p?.clash_squad || apiData?.clash_squad;
+    const brTier = this.isPresentValue(br?.tier) ? String(br.tier) : (this.isPresentValue(p?.br_rank || apiData?.br_rank) ? String(p?.br_rank || apiData?.br_rank) : '');
+    const brPoints = this.isPresentValue(br?.points) ? br.points : (this.isPresentValue(p?.br_rank_point || apiData?.br_rank_point) ? (p?.br_rank_point || apiData?.br_rank_point) : null);
+    const csTier = this.isPresentValue(cs?.tier) ? String(cs.tier) : (this.isPresentValue(p?.cs_rank || apiData?.cs_rank) ? String(p?.cs_rank || apiData?.cs_rank) : '');
+    const csPoints = this.isPresentValue(cs?.points) ? cs.points : (this.isPresentValue(p?.cs_rank_point || apiData?.cs_rank_point) ? (p?.cs_rank_point || apiData?.cs_rank_point) : null);
+
+    const guild = p?.guild || apiData?.guild;
+    const guildName = this.isPresentValue(guild?.name || apiData?.guild_name) ? String(guild?.name || apiData?.guild_name) : '';
+    const guildLevel = guild?.level ?? apiData?.guild_level;
+    const guildMembers = guild?.member_count ?? apiData?.guild_member;
+    const guildCap = guild?.capacity ?? apiData?.guild_capacity;
+
+    const creditScore = p?.credit_score ?? apiData?.credit_score ?? p?.honor_score ?? apiData?.honor_score;
+    const createdAt = this.isPresentValue(p?.created_at || apiData?.created_at) ? String(p?.created_at || apiData?.created_at) : '';
+    const lastLogin = this.isPresentValue(p?.last_login || apiData?.last_login) ? String(p?.last_login || apiData?.last_login) : '';
+    const obVersion = this.isPresentValue(p?.release_version || apiData?.release_version || apiData?.most_recent_ob)
+      ? String(p?.release_version || apiData?.release_version || apiData?.most_recent_ob)
+      : '';
+
+    const rawSig = this.isPresentValue(p?.signature || apiData?.signature) ? String(p?.signature || apiData?.signature) : '';
+    const cleanSig = rawSig ? this.cleanFfSignature(rawSig) : '';
+
+    const lines: string[] = [
+      '🔥 <b>Free Fire Player Profile</b>',
+      '',
+      `🏷 <b>Player Name:</b> ${this.escapeHtml(name)}`,
+      `🆔 <b>UID:</b> <code>${this.escapeHtml(uid)}</code>`,
+      `⭐ <b>Level:</b> ${this.escapeHtml(String(level))}${exp ? ` <i>(EXP: ${this.escapeHtml(String(exp))})</i>` : ''}`,
+      `👍 <b>Likes:</b> ${this.escapeHtml(String(likes))}`
+    ];
+
+    if (regionText) {
+      lines.push(`🌍 <b>Region:</b> ${regionFlag ? `${regionFlag} ` : ''}${this.escapeHtml(regionText)}`);
+    }
+    if (brTier) {
+      lines.push(`🏆 <b>BR Rank:</b> ${this.escapeHtml(brTier)}${brPoints !== null ? ` (${this.escapeHtml(String(brPoints))} pts)` : ''}`);
+    }
+    if (csTier) {
+      lines.push(`⚔️ <b>CS Rank:</b> ${this.escapeHtml(csTier)}${csPoints !== null ? ` (${this.escapeHtml(String(csPoints))} pts)` : ''}`);
+    }
+    if (guildName) {
+      const guildMeta: string[] = [];
+      if (this.isPresentValue(guildLevel)) guildMeta.push(`Lv.${guildLevel}`);
+      if (this.isPresentValue(guildMembers)) guildMeta.push(`${guildMembers}/${guildCap || '?'} members`);
+      lines.push(`🛡 <b>Guild:</b> ${this.escapeHtml(guildName)}${guildMeta.length ? ` <i>(${this.escapeHtml(guildMeta.join(' • '))})</i>` : ''}`);
+    }
+    if (this.isPresentValue(creditScore)) {
+      lines.push(`🎖 <b>Credit Score:</b> ${this.escapeHtml(String(creditScore))}`);
+    }
+    if (obVersion) {
+      lines.push(`📦 <b>Version:</b> ${this.escapeHtml(obVersion)}`);
+    }
+    if (createdAt) {
+      lines.push(`📅 <b>Account Created:</b> ${this.escapeHtml(createdAt)}`);
+    }
+    if (lastLogin) {
+      lines.push(`🕒 <b>Last Login:</b> ${this.escapeHtml(lastLogin)}`);
+    }
+    if (cleanSig) {
+      lines.push('', `💬 <b>Bio:</b>\n<blockquote>${this.escapeHtml(cleanSig.slice(0, 300))}</blockquote>`);
+    }
+
+    return lines.join('\n');
+  }
+
+  private static async handleFreeFireUidCommand(
+    chatId: number | string,
+    uid: string | null,
+    messageId?: number,
+    isGroup: boolean = false,
+    threadId?: number
+  ): Promise<void> {
+    if (!uid) {
+      const usageParams: any = {
+        chat_id: chatId,
+        text: '⚠️ <b>Please provide a valid Free Fire UID.</b>\nExample: <code>/u 8674177274</code>',
+        parse_mode: 'HTML'
+      };
+      if (isGroup && messageId) usageParams.reply_to_message_id = messageId;
+      if (threadId) usageParams.message_thread_id = threadId;
+      const usageRes = await this.callTelegramApi('sendMessage', usageParams);
+      if (isGroup && usageRes?.ok && usageRes.result?.message_id) {
+        await this.trackAndLimitMessage(Number(chatId), usageRes.result.message_id);
+      }
+      return;
+    }
+
+    try {
+      const data = await this.fetchFreeFirePlayer(uid, true);
+      if (!data) {
+        const errParams: any = {
+          chat_id: chatId,
+          text: '❌ <b>Player not found or API service is busy.</b> Please try again later.',
+          parse_mode: 'HTML'
+        };
+        if (isGroup && messageId) errParams.reply_to_message_id = messageId;
+        if (threadId) errParams.message_thread_id = threadId;
+        const errRes = await this.callTelegramApi('sendMessage', errParams);
+        if (isGroup && errRes?.ok && errRes.result?.message_id) {
+          await this.trackAndLimitMessage(Number(chatId), errRes.result.message_id);
+        }
+        return;
+      }
+
+      const formattedText = this.formatFreeFirePlayerMessage(data, uid);
+      const sendParams: any = {
+        chat_id: chatId,
+        text: formattedText,
+        parse_mode: 'HTML',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '👥 Dynamic Duo Status', callback_data: `duo_${uid}`, style: 'primary' }]
+          ]
+        }
+      };
+      if (isGroup && messageId) sendParams.reply_to_message_id = messageId;
+      if (threadId) sendParams.message_thread_id = threadId;
+
+      const sentRes = await this.callTelegramApi('sendMessage', sendParams);
+      if (isGroup && sentRes?.ok && sentRes.result?.message_id) {
+        await this.trackAndLimitMessage(Number(chatId), sentRes.result.message_id);
+      }
+    } catch (err: any) {
+      console.error('[FreeFireUID] Command handler error:', err?.message || err);
+      const errParams: any = {
+        chat_id: chatId,
+        text: '❌ <b>Player not found or API service is busy.</b> Please try again later.',
+        parse_mode: 'HTML'
+      };
+      if (isGroup && messageId) errParams.reply_to_message_id = messageId;
+      if (threadId) errParams.message_thread_id = threadId;
+      await this.callTelegramApi('sendMessage', errParams).catch(() => {});
+    }
   }
 
   // =========================================================================
@@ -6268,6 +6928,89 @@ export class TelegramService {
     const data = cb.data;
     const chatId = cb.message?.chat?.id;
 
+    // FREE FIRE DYNAMIC DUO STATUS CALLBACK (duo_<uid>)
+    if (data && /^duo_(\d+)$/i.test(data)) {
+      const uidMatch = data.match(/^duo_(\d+)$/i);
+      const targetUid = uidMatch ? uidMatch[1] : '';
+      try {
+        const playerData = await this.fetchFreeFirePlayer(targetUid);
+        if (!playerData) {
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: '❌ Player not found or API service is busy. Please try again later.',
+            show_alert: true
+          });
+          return;
+        }
+
+        const duo = this.extractDynamicDuo(playerData);
+        if (!duo.active) {
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: 'ℹ️ No Dynamic Duo found for this player.',
+            show_alert: true
+          });
+          return;
+        }
+
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: duo.summaryAlert,
+          show_alert: true
+        });
+
+        if (chatId && cb.message?.message_id) {
+          const updatedProfileText = `${this.formatFreeFirePlayerMessage(playerData, targetUid)}\n\n${duo.summaryHtml}`;
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: updatedProfileText,
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '👥 Dynamic Duo Status', callback_data: `duo_${targetUid}`, style: 'primary' }]
+              ]
+            }
+          }).catch(() => {});
+        }
+      } catch (err: any) {
+        console.warn('[FreeFireUID] Dynamic Duo callback error:', err?.message || err);
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: '❌ Player not found or API service is busy. Please try again later.',
+          show_alert: true
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    // CANCEL INTERACTIVE BOT CLONE OWNER PROMPT
+    if (data && data.startsWith('clone_cancel:')) {
+      const targetAdminId = data.slice('clone_cancel:'.length).trim();
+      if (targetAdminId && targetAdminId !== fromId && !(await this.isAuthorizedAdmin(fromId, cb.from?.username))) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Only the admin who started cloning can cancel this.',
+          show_alert: true
+        });
+        return;
+      }
+      activeCloneSessions.delete(targetAdminId || fromId);
+      await this.callTelegramApi('answerCallbackQuery', {
+        callback_query_id: cb.id,
+        text: 'Bot cloning cancelled.'
+      });
+      if (chatId && cb.message?.message_id) {
+        await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: cb.message.message_id,
+          text: '❌ <i>Bot cloning cancelled.</i>',
+          parse_mode: 'HTML'
+        }).catch(() => {});
+      }
+      return;
+    }
+
     // MANDATORY FORCE SUB VERIFICATION CALLBACK
     if (data && data.startsWith('forcesub_verify:')) {
       const targetPayload = data.substring('forcesub_verify:'.length).trim() || 'start';
@@ -7924,11 +8667,11 @@ export class TelegramBotManager {
     runner.start().catch(() => {});
   }
 
-  public static async cloneBot(token: string, createdBy?: string, customBaseUrl?: string): Promise<{ success: boolean; bot?: ClonedBotRecord; error?: string }> {
+  public static async validateCloneToken(token: string): Promise<{ ok: boolean; cleanToken?: string; info?: any; error?: string }> {
     const cleanToken = token.trim().replace(/^["']|["']$/g, '');
     const verification = await this.verifyBotToken(cleanToken);
     if (!verification.ok || !verification.info) {
-      return { success: false, error: verification.error || 'Invalid bot token' };
+      return { ok: false, error: verification.error || 'Invalid bot token' };
     }
 
     const info = verification.info;
@@ -7937,7 +8680,7 @@ export class TelegramBotManager {
     // 1. Check if token matches main bot's active token
     const mainBotToken = await TelegramService.getBotToken();
     if (cleanToken && mainBotToken && cleanToken === mainBotToken) {
-      return { success: false, error: 'Already this bot is already running.' };
+      return { ok: false, error: 'Already this bot is already running.' };
     }
 
     // 2. Check if token or bot ID is already in cloned bots registry
@@ -7945,12 +8688,49 @@ export class TelegramBotManager {
     const existing = await mainStorage.getClonedBots();
     const foundExisting = existing.find((b: ClonedBotRecord) => b.token === cleanToken || b.id === botId);
     if (foundExisting) {
-      return { success: false, error: 'Already this bot is already running.' };
+      return { ok: false, error: 'Already this bot is already running.' };
     }
 
-    // 3. Generate unique sub-admin credentials and full active web app panel URL
-    const cleanUsername = info.username ? info.username.toLowerCase().replace(/[^a-z0-9_]/g, '') : `bot_${info.id}`;
-    const adminUsername = `admin_${cleanUsername}`;
+    return { ok: true, cleanToken, info };
+  }
+
+  public static async cloneBot(
+    token: string,
+    createdBy?: string,
+    customBaseUrl?: string,
+    ownerInput?: { ownerId?: string; ownerUsername?: string }
+  ): Promise<{ success: boolean; bot?: ClonedBotRecord; error?: string }> {
+    const validation = await this.validateCloneToken(token);
+    if (!validation.ok || !validation.info || !validation.cleanToken) {
+      return { success: false, error: validation.error || 'Invalid bot token' };
+    }
+
+    const cleanToken = validation.cleanToken;
+    const info = validation.info;
+    const botId = `clone_${info.id}`;
+
+    // 1. Resolve official Owner User ID and/or Username
+    const mainStorage = StorageManager.getMainStorage();
+    let ownerId = (ownerInput?.ownerId || '').trim().replace(/^@+/, '');
+    let ownerUsername = (ownerInput?.ownerUsername || '').trim().replace(/^@+/, '');
+
+    if (ownerId && !/^\d+$/.test(ownerId) && !ownerUsername) {
+      ownerUsername = ownerId;
+      ownerId = '';
+    }
+
+    const lookupKey = ownerId || ownerUsername;
+    if (lookupKey) {
+      const foundUser = await mainStorage.findUserByIdOrUsername(lookupKey).catch(() => null);
+      if (foundUser) {
+        if (!ownerId && foundUser.id) ownerId = String(foundUser.id).trim();
+        if (!ownerUsername && foundUser.username) ownerUsername = foundUser.username.replace(/^@+/, '').trim();
+      }
+    }
+
+    const resolvedOwnerTelegramId = ownerId || ownerUsername || createdBy || String(info.id);
+
+    // 2. Generate secure password and use Bot ID (e.g. clone_9112185641) as login identifier
     const randPart = Math.random().toString(36).substring(2, 6).toUpperCase();
     const numPart = Math.floor(100 + Math.random() * 900);
     const adminPassword = `Zexi#${randPart}${numPart}`;
@@ -7965,35 +8745,38 @@ export class TelegramBotManager {
       status: 'active',
       createdAt: new Date().toISOString(),
       createdBy: createdBy || 'admin',
+      ownerId: resolvedOwnerTelegramId,
+      ownerUsername: ownerUsername || undefined,
       filesCount: 0,
       usersCount: 0,
-      adminUsername,
+      adminUsername: botId, // Login identifier is now the Bot ID (e.g. clone_9112185641)
       adminPassword,
       panelUrl
     };
 
     await mainStorage.saveClonedBot(newBot);
 
-    // Initialize isolated storage for this cloned bot
+    // 3. Initialize isolated storage for this cloned bot and assign official Owner
     const botStorage = StorageManager.getStorage(botId);
     await botStorage.init();
     await botStorage.updateSettings({
       botToken: cleanToken,
-      botUsername: info.username || ''
+      botUsername: info.username || '',
+      rootAdminId: resolvedOwnerTelegramId
     });
 
-    // 4. Create and register the dedicated Sub-Admin account strictly inside isolated bot storage
+    // 4. Register official Owner strictly inside isolated bot storage with full administrative permissions
     const subAdminAccount = {
-      id: `adm_${info.id}`,
-      telegramId: String(info.id),
-      name: `${info.first_name || 'Bot'} Administrator`,
-      username: adminUsername,
-      role: 'owner' as const, // Owner of this isolated cloned bot instance
+      id: /^\d+$/.test(resolvedOwnerTelegramId) ? resolvedOwnerTelegramId : `owner_${info.id}`,
+      telegramId: resolvedOwnerTelegramId,
+      name: ownerUsername ? `@${ownerUsername}` : `${info.first_name || 'Bot'} Owner`,
+      username: ownerUsername || botId,
+      role: 'owner' as const,
       passwordHash: await hashPassword(adminPassword),
       permissions: {
         files_view: true, files_add: true, files_edit: true, files_delete: true,
         links_view: true, links_add: true, links_edit: true, links_delete: true,
-        messages_view: true, messages_edit: true, admins_manage: false,
+        messages_view: true, messages_edit: true, admins_manage: true,
         design_edit: true, settings_edit: true, cleanup_manage: true
       },
       status: 'active' as const,
@@ -8001,21 +8784,22 @@ export class TelegramBotManager {
       createdAt: new Date().toISOString()
     };
 
-    // Save strictly in cloned bot's isolated storage (never pollute mainStorage.admins!)
     await botStorage.saveAdmin(subAdminAccount);
     await botStorage.syncToFirebaseCloud();
 
-    // Commit sub-admin record directly into Firebase Realtime Database under isolated paths
+    // Commit cloned bot owner/credentials into Firebase Realtime Database under isolated paths
     try {
       const rtdbToken = await mainStorage.getFirebaseAuthToken();
       const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
       const baseUrl = (process.env.FIREBASE_DATABASE_URL || (isSecondary ? 'https://zexi-official-default-rtdb.asia-southeast1.firebasedatabase.app' : 'https://zexiofficial844-default-rtdb.asia-southeast1.firebasedatabase.app')).replace(/\/+$/, '');
-      
+
       const subAdminData = {
         botId,
         botName: newBot.name,
         botUsername: newBot.username,
-        adminUsername,
+        ownerId: resolvedOwnerTelegramId,
+        ownerUsername: ownerUsername || '',
+        adminUsername: botId,
         adminPassword,
         status: 'active',
         enabled: true,
@@ -8024,17 +8808,15 @@ export class TelegramBotManager {
         panelUrl
       };
 
-      // Store under /cloned_bots/{bot_id}/sub_admins
-      const botSubAdminUrl = rtdbToken 
-        ? `${baseUrl}/cloned_bots/${botId}/sub_admins/${adminUsername}.json?auth=${encodeURIComponent(rtdbToken)}`
-        : `${baseUrl}/cloned_bots/${botId}/sub_admins/${adminUsername}.json`;
+      const botSubAdminUrl = rtdbToken
+        ? `${baseUrl}/cloned_bots/${botId}/sub_admins/${botId}.json?auth=${encodeURIComponent(rtdbToken)}`
+        : `${baseUrl}/cloned_bots/${botId}/sub_admins/${botId}.json`;
       fetch(botSubAdminUrl, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(subAdminData)
       }).catch(() => {});
 
-      // Store under global /sub_admins/{bot_id}
       const globalSubAdminUrl = rtdbToken
         ? `${baseUrl}/sub_admins/${botId}.json?auth=${encodeURIComponent(rtdbToken)}`
         : `${baseUrl}/sub_admins/${botId}.json`;
@@ -8048,7 +8830,7 @@ export class TelegramBotManager {
     }
 
     this.startBotInstance(newBot);
-    console.info(`[TelegramBotManager] Cloned bot @${newBot.username} (${newBot.id}) started and sub-admin ${adminUsername} registered successfully!`);
+    console.info(`[TelegramBotManager] Cloned bot @${newBot.username} (${newBot.id}) started! Owner: ${resolvedOwnerTelegramId}${ownerUsername ? ` (@${ownerUsername})` : ''}`);
     return { success: true, bot: newBot };
   }
 
@@ -8072,6 +8854,8 @@ export class TelegramBotManager {
     filesCount: number;
     usersCount: number;
     createdAt?: string;
+    ownerId?: string;
+    ownerUsername?: string;
     adminUsername?: string;
     adminPassword?: string;
     panelUrl?: string;
@@ -8105,7 +8889,9 @@ export class TelegramBotManager {
         filesCount: cItems.length,
         usersCount: cUsers.length,
         createdAt: c.createdAt,
-        adminUsername: c.adminUsername,
+        ownerId: c.ownerId,
+        ownerUsername: c.ownerUsername,
+        adminUsername: c.id,
         adminPassword: c.adminPassword,
         panelUrl: (c.panelUrl && c.panelUrl.startsWith('http'))
           ? c.panelUrl
