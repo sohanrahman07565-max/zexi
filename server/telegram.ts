@@ -856,8 +856,65 @@ export class TelegramService {
       }
     }
 
-    if (isMainBot && admins.length === 0) return true;
+    if (isMainBot && !rootAdminId && admins.length === 0) return true;
     return false;
+  }
+
+  private static async sendAdminHelpGuide(chatId: number | string, _fromId: string): Promise<void> {
+    const mainStorage = StorageManager.getMainStorage();
+    const isMainBot = storage === mainStorage;
+    const botUsername = await this.getBotUsername();
+    const botLabel = botUsername ? `@${botUsername.replace(/^@/, '')}` : (isMainBot ? 'Main Bot' : 'Cloned Bot');
+
+    const lines: string[] = [
+      `🛡️ <b>ADMINISTRATOR COMMAND GUIDE</b>`,
+      `🤖 <b>Active Bot:</b> ${this.escapeHtml(botLabel)}`,
+      `━━━━━━━━━━━━━━━━━━━━`,
+      `📁 <b>CONTENT &amp; FILE MANAGEMENT</b>`,
+      `• <code>/add</code> — Start interactive wizard to add Files, Links, or Text`,
+      `• <code>/cancel</code> — Cancel active setup wizard (/add, /clone, /setchannel)`,
+      `• <code>/editthismessage</code> — Reply to a bot message to edit its template`,
+      `• <code>/cleanup</code> — Remove tracked old bot messages (24h+)`,
+      ``,
+      `📢 <b>FORCE SUBSCRIBE &amp; CHANNELS</b>`,
+      `• <code>/connect &lt;id_or_@user&gt;</code> — Connect channel/group to Force Sub`,
+      `• <code>/setchannel</code> — Forward a private channel post to connect`,
+      `• <code>/disconnect &lt;id_or_@user&gt;</code> — Remove channel from Force Sub`,
+      ``,
+      `🛡️ <b>CHAT WHITELIST &amp; IGNORE GUARD</b>`,
+      `• <code>/allowchat [chat_id] [name]</code> — Whitelist group/channel &amp; enable guard`,
+      `• <code>/ignorechat [chat_id]</code> — Remove chat from whitelist (ignore it)`,
+      `• <code>/allowedchats</code> — View whitelisted chats &amp; guard status`,
+      ``,
+      `🔨 <b>MODERATION &amp; ACCESS CONTROL</b>`,
+      `• <code>/ban &lt;id_or_@user&gt;</code> — Ban user (or reply <code>/ban</code> in group)`,
+      `• <code>/unban &lt;id_or_@user&gt;</code> — Unban user &amp; clear warnings`,
+      `• <code>/admins</code> — View admin count, root ID &amp; total bot users`,
+      ``,
+      `⚙️ <b>BOT CUSTOMIZATION &amp; PANEL LOGIN</b>`,
+      `• <code>/setstartmsg &lt;text&gt;</code> — Update <code>/start</code> welcome message`,
+      `• <code>/setstartmedia &lt;url|file_id&gt;</code> — Attach photo/video to <code>/start</code>`,
+      `• <code>/clearstartmedia</code> — Remove media from <code>/start</code> message`,
+      `• <code>/webcode</code> — Generate 10-minute Web Panel login code`,
+      `• <code>/setpassword &lt;password&gt;</code> — Set/change Web Panel password`,
+      `• <code>/broadcast</code> · <code>/settings</code> — Panel broadcast &amp; filter guide`,
+      `• <code>/clone &lt;bot_token&gt;</code> — Clone an isolated bot instance`,
+      ``,
+      `👥 <b>PUBLIC GROUP COMMANDS (ALL USERS)</b>`,
+      `• <code>/u &lt;uid&gt;</code> or <code>/uid &lt;uid&gt;</code> — Free Fire profile &amp; Guild checker`,
+      `• <code>/allfile</code> — Browse &amp; copy links for stored files/links`,
+      `• <code>/filters</code> — List public <code>#hashtag</code> keywords`,
+      `• <code>/translate &lt;bd|ind|eng&gt;</code> — Translate text or replied messages`,
+      `• <code>/report &lt;@user_or_id&gt; &lt;reason&gt;</code> — Report a user to admins`,
+      `━━━━━━━━━━━━━━━━━━━━`,
+      `🔒 <i>Admin commands are restricted to authorized owners/sub-admins and delivered privately. Manage broadcasts, fraud rules &amp; advanced settings in the Web Admin Panel.</i>`
+    ];
+
+    await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: lines.join('\n'),
+      parse_mode: 'HTML'
+    });
   }
 
   public static async sendAutoDeletingNotice(
@@ -1963,7 +2020,7 @@ export class TelegramService {
       return;
     }
 
-    // 2. Identify Admin Commands in group
+    // 2. Identify Admin Commands in group (strictly restricted to authorized admins & private DM delivery)
     const isAddCommand = /^\/add(?:@\w+)?(?:\s+|$)/i.test(text);
     const isCancelCommand = /^\/cancel(?:@\w+)?(?:\s+|$)/i.test(text);
     const isWebCodeCommand = /^\/webcode(?:@\w+)?(?:\s+|$)/i.test(text);
@@ -1973,11 +2030,15 @@ export class TelegramService {
     const isClearStartMediaCommand = /^\/clearstartmedia(?:@\w+)?(?:\s+|$)/i.test(text);
     const isCleanupCommand = /^\/cleanup(?:@\w+)?(?:\s+|$)/i.test(text);
     const isAdminListCommand = /^\/(?:admins?|users?)(?:@\w+)?(?:\s+|$)/i.test(text);
-    const isConnectCommand = /^\/(?:connect|addchannel)(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isConnectCommand = /^\/(?:connect|addchannel|setchannel)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isDisconnectCommand = /^\/(?:disconnect|removechannel)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isAllowChatCommand = /^\/allowchat(?:@\w+)?(?:\s+|$)/i.test(text);
     const isIgnoreChatCommand = /^\/ignorechat(?:@\w+)?(?:\s+|$)/i.test(text);
     const isAllowedChatsCommand = /^\/(?:allowedchats|whitelistedchats)(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isCloneCommand = /^\/clone(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isBroadcastCommand = /^\/broadcast(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isSettingsCommand = /^\/(?:settings|config|setfilter|addfilter|delfilter|delfile|delete|del|editthismessage)(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isHelpCommand = /^\/help(?:@\w+)?(?:\s+|$)/i.test(text);
 
     const isAdminCommand =
       isAddCommand ||
@@ -1993,20 +2054,30 @@ export class TelegramService {
       isDisconnectCommand ||
       isAllowChatCommand ||
       isIgnoreChatCommand ||
-      isAllowedChatsCommand;
+      isAllowedChatsCommand ||
+      isCloneCommand ||
+      isBroadcastCommand ||
+      isSettingsCommand ||
+      isHelpCommand;
 
     if (isAdminCommand) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId);
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
 
-      // Immediately delete the admin command message from the group so group chat remains clean
+      // Immediately delete the admin command message from the group so group chat remains clean and tokens never leak
       if (message.message_id) {
         await this.deleteUserMessage(message.chat.id, message.message_id);
       }
 
       // If user is NOT an authorized administrator:
       if (!isAdmin) {
-        // STRICT PRIVACY: Never reveal admin panel responses or operational output in groups
         console.warn(`[Telegram] Unauthorized admin command rejected in group from: ${fromId}`);
+        if (isHelpCommand) {
+          await this.sendAutoDeletingNotice(
+            message.chat.id,
+            '🔒 <i>The /help command is restricted to bot administrators only.</i>',
+            4000
+          );
+        }
         return;
       }
 
@@ -2040,6 +2111,113 @@ export class TelegramService {
           );
         }
       };
+
+      if (isHelpCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.sendAdminHelpGuide(fromId, fromId);
+          },
+          'Admin command guide sent to your private messages.'
+        );
+        return;
+      }
+
+      if (isCloneCommand) {
+        const groupCloneMatch = text.match(/^\/clone(?:@\w+)?(?:\s+(.+))?$/i);
+        const tokenArg = groupCloneMatch?.[1]?.trim();
+        await executeWithPrivateDelivery(
+          async () => {
+            if (!tokenArg) {
+              await this.callTelegramApi('sendMessage', {
+                chat_id: fromId,
+                text: `ℹ️ <b>How to Clone Telegram Bot:</b>\n\n1. Open @BotFather on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>You will then be asked to assign the official Owner User ID or @username for the cloned bot.</i>`,
+                parse_mode: 'HTML'
+              });
+              return;
+            }
+
+            const check = await TelegramBotManager.validateCloneToken(tokenArg);
+            if (!check.ok || !check.info) {
+              const errText = check.error === 'Already this bot is already running.'
+                ? '❌ <b>Already this bot is already running.</b>'
+                : `❌ <b>Failed to Clone Bot:</b> ${check.error || 'Invalid token'}`;
+              await this.callTelegramApi('sendMessage', {
+                chat_id: fromId,
+                text: errText,
+                parse_mode: 'HTML'
+              });
+              return;
+            }
+
+            const dmSession: CloneSession = {
+              token: check.cleanToken!,
+              botInfo: check.info,
+              chatId: String(fromId),
+              createdBy: fromId,
+              createdAt: Date.now()
+            };
+
+            const promptRes = await this.callTelegramApi('sendMessage', {
+              chat_id: fromId,
+              text: `🤖 <b>Bot Token Verified:</b> @${check.info.username || check.info.first_name}\n\n👤 <b>Please reply with the Telegram User ID or Username of the new Owner for this cloned bot.</b>\n\n<i>Example:</i> <code>123456789</code> or <code>@username</code>`,
+              parse_mode: 'HTML',
+              reply_markup: {
+                inline_keyboard: [[{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]]
+              }
+            });
+            if (promptRes?.ok && promptRes.result?.message_id) {
+              dmSession.promptMessageId = promptRes.result.message_id;
+            }
+            activeCloneSessions.set(fromId, dmSession);
+          },
+          'Bot cloning workflow continued in your private messages.'
+        );
+        return;
+      }
+
+      if (isBroadcastCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.callTelegramApi('sendMessage', {
+              chat_id: fromId,
+              text:
+                `📢 <b>Broadcast &amp; Mass Messaging</b>\n\n` +
+                `For rich media formatting, targeted delivery &amp; delivery analytics, please use the <b>Broadcast</b> tool inside the Web Admin Panel.\n\n` +
+                `💡 Tip: Run <code>/webcode</code> to generate a quick login code or check <code>/admins</code> for total user reach.`,
+              parse_mode: 'HTML'
+            });
+          },
+          'Broadcast instructions sent to your private messages.'
+        );
+        return;
+      }
+
+      if (isSettingsCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            if (/^\/editthismessage/i.test(text)) {
+              await this.callTelegramApi('sendMessage', {
+                chat_id: fromId,
+                text: 'ℹ️ Reply directly to a bot message in this private chat with <code>/editthismessage</code> to edit its template.',
+                parse_mode: 'HTML'
+              });
+              return;
+            }
+            await this.callTelegramApi('sendMessage', {
+              chat_id: fromId,
+              text:
+                `⚙️ <b>Bot Settings &amp; Filter Configuration</b>\n\n` +
+                `• Use <code>/add</code> here to add files, links, or keyword filters.\n` +
+                `• Use <code>/connect</code> / <code>/disconnect</code> for Force Subscribe channels.\n` +
+                `• Use <code>/allowchat</code> / <code>/ignorechat</code> for group whitelist settings.\n` +
+                `• Use <code>/webcode</code> to sign in to the Web Admin Panel for full Settings, Design &amp; Fraud Filter controls.`,
+              parse_mode: 'HTML'
+            });
+          },
+          'Settings & filter guide sent to your private messages.'
+        );
+        return;
+      }
 
       if (isAddCommand) {
         await executeWithPrivateDelivery(
@@ -2222,7 +2400,7 @@ export class TelegramService {
     // MODERATION, BAN/UNBAN, REPORT & ANTI-FRAUD IN GROUPS
     // =========================================================================
 
-    // Pending /clone owner assignment reply in group chat
+    // Pending /clone owner assignment reply in group chat (legacy fallback if session opened in group)
     const pendingGroupClone = activeCloneSessions.get(fromId);
     if (pendingGroupClone && pendingGroupClone.chatId === String(message.chat.id) && (text || message.reply_to_message?.from) && !text.startsWith('/')) {
       const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
@@ -2232,177 +2410,130 @@ export class TelegramService {
       }
     }
 
-    // Admin /clone command in groups: /clone <bot_token>
-    const groupCloneMatch = text.match(/^\/clone(?:@\w+)?(?:\s+(.+))?$/i);
-    if (groupCloneMatch) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
-      if (isAdmin) {
-        if (message.message_id) {
-          await this.deleteUserMessage(message.chat.id, message.message_id);
-        }
-        const tokenArg = groupCloneMatch[1]?.trim();
-        if (!tokenArg) {
-          await this.sendAutoDeletingNotice(
-            message.chat.id,
-            `ℹ️ <b>How to Clone Bot:</b>\nType <code>/clone &lt;bot_token&gt;</code>\nExample: <code>/clone 123456789:ABCdef...</code>`,
-            7000
-          );
-          return;
-        }
-
-        const check = await TelegramBotManager.validateCloneToken(tokenArg);
-        if (!check.ok || !check.info) {
-          const errText = check.error === 'Already this bot is already running.'
-            ? '❌ <b>Already this bot is already running.</b>'
-            : `❌ <b>Failed to Clone Bot:</b> ${check.error || 'Invalid token'}`;
-          await this.sendAutoDeletingNotice(message.chat.id, errText, 8000);
-          return;
-        }
-
-        const groupSession: CloneSession = {
-          token: check.cleanToken!,
-          botInfo: check.info,
-          chatId: String(message.chat.id),
-          createdBy: fromId,
-          createdAt: Date.now()
-        };
-
-        const promptRes = await this.callTelegramApi('sendMessage', {
-          chat_id: message.chat.id,
-          text: `🤖 <b>Bot Token Verified:</b> @${check.info.username || check.info.first_name}\n\n👤 <b>Please reply with the Telegram User ID or Username of the new Owner for this cloned bot.</b>\n\n<i>Example:</i> <code>123456789</code> or <code>@username</code>`,
-          parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [[{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]]
-          }
-        });
-        if (promptRes?.ok && promptRes.result?.message_id) {
-          groupSession.promptMessageId = promptRes.result.message_id;
-        }
-        activeCloneSessions.set(fromId, groupSession);
-        return;
-      }
-    }
-
-    // 1. /ban Command: Admin replies /ban or runs /ban <user_id_or_username>
+    // 1. /ban Command (Admins Only): Admin replies /ban or runs /ban <user_id_or_username>
     const banMatch = text.match(/^\/ban(?:@\w+)?(?:\s+(.+))?$/i);
     if (banMatch) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId);
-      if (isAdmin) {
-        let targetId = '';
-        let targetName = '';
-        let targetUsername = '';
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        if (message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
+        return;
+      }
+      let targetId = '';
+      let targetName = '';
+      let targetUsername = '';
 
-        if (message.reply_to_message?.from) {
-          const targetUser = message.reply_to_message.from;
-          targetId = String(targetUser.id);
-          targetName = targetUser.first_name || targetUser.username || 'User';
-          targetUsername = targetUser.username ? `@${targetUser.username.replace(/^@/, '')}` : '';
-        } else if (banMatch[1]?.trim()) {
-          const query = banMatch[1].trim();
-          const found = await storage.findUserByIdOrUsername(query);
-          if (found) {
-            targetId = String(found.id);
-            targetName = found.firstName || found.username || 'User';
-            targetUsername = found.username ? `@${found.username.replace(/^@/, '')}` : '';
-          } else {
-            targetId = query.replace(/^@/, '');
-            targetName = query;
-            targetUsername = query.startsWith('@') ? query : '';
-          }
-        }
-
-        if (targetId) {
-          try {
-            await this.callTelegramApi('banChatMember', {
-              chat_id: message.chat.id,
-              user_id: Number(targetId) || targetId
-            });
-          } catch (e) {
-            console.warn('[Telegram] banChatMember error:', e);
-          }
-          await storage.setBotUserBanned(targetId, true);
-
-          const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
-          await this.callTelegramApi('sendMessage', {
-            chat_id: message.chat.id,
-            text: `OK Boss. ${userDisplay} has been successfully banned.`,
-            reply_to_message_id: message.message_id
-          });
-          if (message.message_id) {
-            setTimeout(() => {
-              TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
-            }, 3000);
-          }
-          return;
+      if (message.reply_to_message?.from) {
+        const targetUser = message.reply_to_message.from;
+        targetId = String(targetUser.id);
+        targetName = targetUser.first_name || targetUser.username || 'User';
+        targetUsername = targetUser.username ? `@${targetUser.username.replace(/^@/, '')}` : '';
+      } else if (banMatch[1]?.trim()) {
+        const query = banMatch[1].trim();
+        const found = await storage.findUserByIdOrUsername(query);
+        if (found) {
+          targetId = String(found.id);
+          targetName = found.firstName || found.username || 'User';
+          targetUsername = found.username ? `@${found.username.replace(/^@/, '')}` : '';
+        } else {
+          targetId = query.replace(/^@/, '');
+          targetName = query;
+          targetUsername = query.startsWith('@') ? query : '';
         }
       }
+
+      if (targetId) {
+        try {
+          await this.callTelegramApi('banChatMember', {
+            chat_id: message.chat.id,
+            user_id: Number(targetId) || targetId
+          });
+        } catch (e) {
+          console.warn('[Telegram] banChatMember error:', e);
+        }
+        await storage.setBotUserBanned(targetId, true);
+
+        const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: `OK Boss. ${userDisplay} has been successfully banned.`,
+          reply_to_message_id: message.message_id
+        });
+        if (message.message_id) {
+          setTimeout(() => {
+            TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
+          }, 3000);
+        }
+      }
+      return;
     }
 
-    // 2. /unban Command: Admin runs /unban <user_id_or_username> or replies /unban
+    // 2. /unban Command (Admins Only): Admin runs /unban <user_id_or_username> or replies /unban
     const unbanMatch = text.match(/^\/unban(?:@\w+)?(?:\s+(.+))?$/i);
     if (unbanMatch) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId);
-      if (isAdmin) {
-        let targetId = '';
-        let targetName = '';
-        let targetUsername = '';
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        if (message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
+        return;
+      }
+      let targetId = '';
+      let targetName = '';
+      let targetUsername = '';
 
-        if (message.reply_to_message?.from) {
-          const targetUser = message.reply_to_message.from;
-          targetId = String(targetUser.id);
-          targetName = targetUser.first_name || targetUser.username || 'User';
-          targetUsername = targetUser.username ? `@${targetUser.username.replace(/^@/, '')}` : '';
-        } else if (unbanMatch[1]?.trim()) {
-          const query = unbanMatch[1].trim();
-          const found = await storage.findUserByIdOrUsername(query);
-          if (found) {
-            targetId = String(found.id);
-            targetName = found.firstName || found.username || 'User';
-            targetUsername = found.username ? `@${found.username.replace(/^@/, '')}` : '';
-          } else {
-            targetId = query.replace(/^@/, '');
-            targetName = query;
-            targetUsername = query.startsWith('@') ? query : '';
-          }
-        }
-
-        if (targetId) {
-          try {
-            await this.callTelegramApi('unbanChatMember', {
-              chat_id: message.chat.id,
-              user_id: Number(targetId) || targetId,
-              only_if_banned: true
-            });
-          } catch (e) {
-            console.warn('[Telegram] unbanChatMember error in group:', e);
-          }
-          await storage.setBotUserBanned(targetId, false);
-          await storage.resetUserLinkWarning(message.chat.id, targetId);
-          await storage.resetUserFraudWarning(message.chat.id, targetId);
-          TelegramService.unbanUserInConnectedChats(targetId).catch(() => {});
-
-          const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
-          await this.callTelegramApi('sendMessage', {
-            chat_id: message.chat.id,
-            text: `✅ <b>OK Boss. ${userDisplay} has been successfully unbanned.</b>`,
-            parse_mode: 'HTML',
-            reply_to_message_id: message.message_id
-          });
-          if (message.message_id) {
-            setTimeout(() => {
-              TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
-            }, 3000);
-          }
-          return;
+      if (message.reply_to_message?.from) {
+        const targetUser = message.reply_to_message.from;
+        targetId = String(targetUser.id);
+        targetName = targetUser.first_name || targetUser.username || 'User';
+        targetUsername = targetUser.username ? `@${targetUser.username.replace(/^@/, '')}` : '';
+      } else if (unbanMatch[1]?.trim()) {
+        const query = unbanMatch[1].trim();
+        const found = await storage.findUserByIdOrUsername(query);
+        if (found) {
+          targetId = String(found.id);
+          targetName = found.firstName || found.username || 'User';
+          targetUsername = found.username ? `@${found.username.replace(/^@/, '')}` : '';
         } else {
-          await this.callTelegramApi('sendMessage', {
-            chat_id: message.chat.id,
-            text: `ℹ️ <b>How to Unban:</b>\nReply to any user's message with <code>/unban</code>, or type <code>/unban &lt;user_id_or_username&gt;</code>.`,
-            parse_mode: 'HTML',
-            reply_to_message_id: message.message_id
-          });
-          return;
+          targetId = query.replace(/^@/, '');
+          targetName = query;
+          targetUsername = query.startsWith('@') ? query : '';
         }
+      }
+
+      if (targetId) {
+        try {
+          await this.callTelegramApi('unbanChatMember', {
+            chat_id: message.chat.id,
+            user_id: Number(targetId) || targetId,
+            only_if_banned: true
+          });
+        } catch (e) {
+          console.warn('[Telegram] unbanChatMember error in group:', e);
+        }
+        await storage.setBotUserBanned(targetId, false);
+        await storage.resetUserLinkWarning(message.chat.id, targetId);
+        await storage.resetUserFraudWarning(message.chat.id, targetId);
+        TelegramService.unbanUserInConnectedChats(targetId).catch(() => {});
+
+        const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: `✅ <b>OK Boss. ${userDisplay} has been successfully unbanned.</b>`,
+          parse_mode: 'HTML',
+          reply_to_message_id: message.message_id
+        });
+        if (message.message_id) {
+          setTimeout(() => {
+            TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
+          }, 3000);
+        }
+        return;
+      } else {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: `ℹ️ <b>How to Unban:</b>\nReply to any user's message with <code>/unban</code>, or type <code>/unban &lt;user_id_or_username&gt;</code>.`,
+          parse_mode: 'HTML',
+          reply_to_message_id: message.message_id
+        });
+        return;
       }
     }
 
@@ -3191,6 +3322,21 @@ export class TelegramService {
       }
     }
 
+    // Admin /help command in private chat (Admins Only)
+    if (/^\/help(?:@\w+)?(?:\s+|$)/i.test(text.trim())) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <b>Access Denied:</b> The <code>/help</code> command is restricted to authorized administrators only.',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      await this.sendAdminHelpGuide(chatId, fromId);
+      return;
+    }
+
     // Admin /clone command in private chat: /clone <bot_token> (Step 1: verify token & prompt for new owner)
     const cloneMatch = text.match(/^\/clone(?:@\w+)?(?:\s+(.+))?$/i);
     if (cloneMatch) {
@@ -3253,56 +3399,76 @@ export class TelegramService {
     // Admin /ban command in private chat
     const privBanMatch = text.match(/^\/ban(?:@\w+)?(?:\s+(.+))?$/i);
     if (privBanMatch) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId);
-      if (isAdmin && privBanMatch[1]?.trim()) {
-        const query = privBanMatch[1].trim();
-        const found = await storage.findUserByIdOrUsername(query);
-        const targetId = found ? String(found.id) : query.replace(/^@/, '');
-        const targetName = found ? (found.firstName || found.username || 'User') : query;
-        const targetUsername = found?.username ? `@${found.username.replace(/^@/, '')}` : (query.startsWith('@') ? query : '');
-        await storage.setBotUserBanned(targetId, true);
-        const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: `OK Boss. ${userDisplay} has been successfully banned.`
+          text: '⛔ <i>Access Denied. Only authorized administrators can use /ban.</i>',
+          parse_mode: 'HTML'
         });
         return;
       }
+      if (!privBanMatch[1]?.trim()) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: `ℹ️ <b>How to Ban:</b>\nType <code>/ban &lt;user_id_or_username&gt;</code>`,
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      const query = privBanMatch[1].trim();
+      const found = await storage.findUserByIdOrUsername(query);
+      const targetId = found ? String(found.id) : query.replace(/^@/, '');
+      const targetName = found ? (found.firstName || found.username || 'User') : query;
+      const targetUsername = found?.username ? `@${found.username.replace(/^@/, '')}` : (query.startsWith('@') ? query : '');
+      await storage.setBotUserBanned(targetId, true);
+      const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `OK Boss. ${userDisplay} has been successfully banned.`
+      });
+      return;
     }
 
     // Admin /unban command in private chat
     const privUnbanMatch = text.match(/^\/unban(?:@\w+)?(?:\s+(.+))?$/i);
     if (privUnbanMatch) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId);
-      if (isAdmin) {
-        const query = privUnbanMatch[1]?.trim();
-        if (!query) {
-          await this.callTelegramApi('sendMessage', {
-            chat_id: chatId,
-            text: `ℹ️ <b>How to Unban:</b>\nType <code>/unban &lt;user_id_or_username&gt;</code>\nExample: <code>/unban 123456789</code> or <code>/unban @john_doe</code>`,
-            parse_mode: 'HTML'
-          });
-          return;
-        }
-
-        const found = await storage.findUserByIdOrUsername(query);
-        const targetId = found ? String(found.id) : query.replace(/^@/, '');
-        const targetName = found ? (found.firstName || found.username || 'User') : query;
-        const targetUsername = found?.username ? `@${found.username.replace(/^@/, '')}` : (query.startsWith('@') ? query : '');
-        
-        await storage.setBotUserBanned(targetId, false);
-        await storage.resetUserLinkWarning(targetId);
-        await storage.resetUserFraudWarning(targetId);
-        TelegramService.unbanUserInConnectedChats(targetId).catch(() => {});
-
-        const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: `✅ <b>OK Boss. ${userDisplay} has been successfully unbanned.</b>`,
+          text: '⛔ <i>Access Denied. Only authorized administrators can use /unban.</i>',
           parse_mode: 'HTML'
         });
         return;
       }
+      const query = privUnbanMatch[1]?.trim();
+      if (!query) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: `ℹ️ <b>How to Unban:</b>\nType <code>/unban &lt;user_id_or_username&gt;</code>\nExample: <code>/unban 123456789</code> or <code>/unban @john_doe</code>`,
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+
+      const found = await storage.findUserByIdOrUsername(query);
+      const targetId = found ? String(found.id) : query.replace(/^@/, '');
+      const targetName = found ? (found.firstName || found.username || 'User') : query;
+      const targetUsername = found?.username ? `@${found.username.replace(/^@/, '')}` : (query.startsWith('@') ? query : '');
+      
+      await storage.setBotUserBanned(targetId, false);
+      await storage.resetUserLinkWarning(targetId);
+      await storage.resetUserFraudWarning(targetId);
+      TelegramService.unbanUserInConnectedChats(targetId).catch(() => {});
+
+      const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `✅ <b>OK Boss. ${userDisplay} has been successfully unbanned.</b>`,
+        parse_mode: 'HTML'
+      });
+      return;
     }
 
     // /report command in private chat
@@ -3480,30 +3646,125 @@ export class TelegramService {
     }
 
     // 3. Command: /setstartmsg or /startmsg
-    if (text.startsWith('/setstartmsg') || text.startsWith('/startmsg')) {
+    if (/^\/(?:setstartmsg|startmsg)(?:@\w+)?(?:\s|$)/i.test(text)) {
       await this.handleSetStartMessageCommand(fromId, chatId, text, message);
       return;
     }
 
     // 3b. Command: /setstartmedia or /clearstartmedia
-    if (text.startsWith('/setstartmedia')) {
+    if (/^\/setstartmedia(?:@\w+)?(?:\s|$)/i.test(text)) {
       await this.handleSetStartMediaCommand(fromId, chatId, text, message);
       return;
     }
-    if (text === '/clearstartmedia') {
+    if (/^\/clearstartmedia(?:@\w+)?(?:\s|$)/i.test(text)) {
       await this.handleClearStartMediaCommand(fromId, chatId);
       return;
     }
 
     // 4. Command: /webcode
-    if (text === '/webcode') {
+    if (/^\/webcode(?:@\w+)?(?:\s|$)/i.test(text)) {
       await this.handleWebCodeCommand(fromId, chatId);
       return;
     }
 
     // 5. Command: /setpassword
-    if (text.startsWith('/setpassword')) {
+    if (/^\/setpassword(?:@\w+)?(?:\s|$)/i.test(text)) {
       await this.handleSetPasswordCommand(fromId, chatId, text);
+      return;
+    }
+
+    // 5b. Additional Admin Commands in Private DM (/cleanup, /admins, /users, /broadcast, /settings, etc.)
+    if (/^\/cleanup(?:@\w+)?(?:\s|$)/i.test(text)) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <i>Access Denied. Only authorized administrators can use /cleanup.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      const toDelete = await storage.getMessagesOlderThan(24);
+      let deletedCount = 0;
+      for (const item of toDelete) {
+        const res = await this.callTelegramApi('deleteMessage', {
+          chat_id: item.chatId,
+          message_id: item.messageId
+        });
+        if (res.ok) deletedCount++;
+      }
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `🧹 <b>Cleanup Complete</b>\n\nCleaned up ${deletedCount} old tracked messages.`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    if (/^\/(?:admins?|users?)(?:@\w+)?(?:\s|$)/i.test(text)) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <i>Access Denied. Only authorized administrators can view admin stats.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      const admins = await storage.getAdmins();
+      const settings = await storage.getSettings();
+      const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163');
+      const totalUsers = await storage.getTotalUserCount();
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `🛡️ <b>Administrators (${admins.length})</b>\nRoot ID: <code>${rootAdminId}</code>\nTotal Bot Users: <b>${totalUsers}</b>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    if (/^\/broadcast(?:@\w+)?(?:\s|$)/i.test(text)) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <i>Access Denied. Broadcasting is restricted to authorized administrators only.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text:
+          `📢 <b>Broadcast &amp; Mass Messaging</b>\n\n` +
+          `Use the <b>Broadcast</b> feature inside the Web Admin Panel to send rich announcements, media, and targeted messages to all bot users.\n\n` +
+          `💡 Run <code>/webcode</code> to generate a login verification code.`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    if (/^\/(?:settings|config|setfilter|addfilter|delfilter|delfile|delete|del)(?:@\w+)?(?:\s|$)/i.test(text)) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <i>Access Denied. Configuration commands are restricted to authorized administrators only.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text:
+          `⚙️ <b>Settings &amp; Management Guide</b>\n\n` +
+          `• Add files, links, or triggers: <code>/add</code>\n` +
+          `• Manage Force Sub channels: <code>/connect</code> / <code>/disconnect</code>\n` +
+          `• Manage Chat Whitelist: <code>/allowchat</code> / <code>/ignorechat</code>\n` +
+          `• Full Settings, Filter Rules &amp; File Deletion: Open the Web Admin Panel (run <code>/webcode</code> for login code).\n\n` +
+          `Send <code>/help</code> to view the complete admin command guide.`,
+        parse_mode: 'HTML'
+      });
       return;
     }
 
@@ -5780,18 +6041,12 @@ export class TelegramService {
   // ADMIN COMMANDS
   // =========================================================================
   private static async handleWebCodeCommand(fromId: string, chatId: string | number): Promise<void> {
-    await storage.loadLatest(true);
-    const admin = await storage.getAdmin(fromId);
-    const settings = await storage.getSettings();
-    const rootAdminId = (process.env.ROOT_ADMIN_ID || settings.rootAdminId || '').trim();
-    const isRoot = rootAdminId && rootAdminId === fromId;
-    const isFirstAdmin = (await storage.getAdmins()).length === 0;
-
-    if (!admin && !isRoot && !isFirstAdmin) {
+    const isAuthorized = await this.isAuthorizedAdmin(fromId);
+    if (!isAuthorized) {
       console.warn('[Telegram] /webcode rejected: sender not authorized telegramId:', fromId);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '❌ Access denied. You are not a registered administrator.'
+        text: '⛔ Access denied. You are not an authorized administrator.'
       });
       return;
     }
@@ -5817,21 +6072,25 @@ export class TelegramService {
   }
 
   private static async handleSetPasswordCommand(fromId: string, chatId: string | number, text: string): Promise<void> {
-    await storage.loadLatest(true);
-    const settings = await storage.getSettings();
-    const admin = await storage.getAdmin(fromId);
-    const rootAdminId = (process.env.ROOT_ADMIN_ID || settings.rootAdminId || '').trim();
-    const isRoot = rootAdminId && rootAdminId === fromId;
-    const isFirstAdmin = (await storage.getAdmins()).length === 0;
-
-    if (!isRoot && !admin && !isFirstAdmin) {
+    const isAuthorized = await this.isAuthorizedAdmin(fromId);
+    if (!isAuthorized) {
       console.warn('[Telegram] /setpassword rejected: unauthorized sender telegramId:', fromId);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '❌ Access denied. You must be an authorized admin to use /setpassword.'
+        text: '⛔ Access denied. You must be an authorized admin to use /setpassword.'
       });
       return;
     }
+    await storage.loadLatest(true);
+    const settings = await storage.getSettings();
+    const admin = await storage.getAdmin(fromId);
+    const mainStorage = StorageManager.getMainStorage();
+    const isMainBot = storage === mainStorage;
+    const rootAdminId = isMainBot
+      ? String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || settings.rootAdminId || '8153757163').trim()
+      : String(settings.rootAdminId || '').trim();
+    const isRoot = Boolean(rootAdminId && (fromId === rootAdminId || rootAdminId.split(',').map(s => s.trim()).includes(fromId)));
+    const isFirstAdmin = isMainBot && !rootAdminId && (await storage.getAdmins()).length === 0;
 
     const parts = text.split(/\s+/);
     if (parts.length < 2) {
@@ -5958,13 +6217,9 @@ export class TelegramService {
     message?: any,
     text?: string
   ): Promise<void> {
-    await storage.loadLatest(true);
-    const admins = await storage.getAdmins();
+    const isAuthorized = await this.isAuthorizedAdmin(fromId, message?.from?.username);
     const admin = await storage.getAdmin(fromId);
-    const settings = await storage.getSettings();
-    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163');
-    const isRoot = fromId === rootAdminId || rootAdminId.includes(fromId) || admin?.role === 'owner';
-    const hasPermission = isRoot || Boolean(admin?.permissions?.files_add) || admins.some(a => String(a.telegramId) === fromId || String(a.id) === fromId) || admins.length === 0;
+    const hasPermission = isAuthorized && (!admin || admin.role === 'owner' || admin.permissions?.files_add !== false);
 
     if (!hasPermission) {
       if (String(chatId).startsWith('-')) {
@@ -5972,7 +6227,7 @@ export class TelegramService {
       }
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `❌ Access Denied: You are not an authorized administrator.\nYour Telegram ID: <code>${fromId}</code>\nPlease ask an administrator to add your ID or sign in via web.`,
+        text: `⛔ Access Denied: You are not an authorized administrator.\nYour Telegram ID: <code>${fromId}</code>\nPlease ask an administrator to add your ID or sign in via web.`,
         parse_mode: 'HTML'
       });
       return;
@@ -7900,14 +8155,11 @@ export class TelegramService {
     text: string,
     message?: any
   ): Promise<void> {
-    await storage.loadLatest(true);
+    const isAuthorized = await this.isAuthorizedAdmin(fromId, message?.from?.username);
     const admin = await storage.getAdmin(fromId);
-    const settings = await storage.getSettings();
-    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '1192931448');
-    const isRoot = fromId === rootAdminId || rootAdminId.includes(fromId);
-    const hasPermission = isRoot || Boolean(admin?.permissions?.messages_edit);
+    const hasPermission = isAuthorized && (!admin || admin.role === 'owner' || admin.permissions?.messages_edit !== false);
 
-    if (!isRoot && (!admin || !hasPermission)) {
+    if (!hasPermission) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
         text: '⛔ You are not authorized to edit message templates.'
@@ -7973,14 +8225,11 @@ export class TelegramService {
     text: string,
     message?: any
   ): Promise<void> {
-    await storage.loadLatest(true);
+    const isAuthorized = await this.isAuthorizedAdmin(fromId, message?.from?.username);
     const admin = await storage.getAdmin(fromId);
-    const settings = await storage.getSettings();
-    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '1192931448');
-    const isRoot = fromId === rootAdminId || rootAdminId.includes(fromId);
-    const hasPermission = isRoot || Boolean(admin?.permissions?.messages_edit);
+    const hasPermission = isAuthorized && (!admin || admin.role === 'owner' || admin.permissions?.messages_edit !== false);
 
-    if (!isRoot && (!admin || !hasPermission)) {
+    if (!hasPermission) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
         text: '⛔ You are not authorized to edit message templates.'
@@ -8037,14 +8286,11 @@ export class TelegramService {
     fromId: string,
     chatId: string | number
   ): Promise<void> {
-    await storage.loadLatest(true);
+    const isAuthorized = await this.isAuthorizedAdmin(fromId);
     const admin = await storage.getAdmin(fromId);
-    const settings = await storage.getSettings();
-    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '1192931448');
-    const isRoot = fromId === rootAdminId || rootAdminId.includes(fromId);
-    const hasPermission = isRoot || Boolean(admin?.permissions?.messages_edit);
+    const hasPermission = isAuthorized && (!admin || admin.role === 'owner' || admin.permissions?.messages_edit !== false);
 
-    if (!isRoot && (!admin || !hasPermission)) {
+    if (!hasPermission) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
         text: '⛔ You are not authorized to edit message templates.'
@@ -8074,25 +8320,22 @@ export class TelegramService {
     const chatId = message.chat.id;
     const replyTo = message.reply_to_message;
 
-    if (!replyTo) {
+    const isAuthorized = await this.isAuthorizedAdmin(fromId, message.from?.username);
+    const admin = await storage.getAdmin(fromId);
+    const hasPermission = isAuthorized && (!admin || admin.role === 'owner' || admin.permissions?.messages_edit !== false);
+
+    if (!hasPermission) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: 'ℹ️ Reply to any bot message with /editthismessage to edit its template or text.'
+        text: '⛔ You are not authorized to edit message templates.'
       });
       return;
     }
 
-    await storage.loadLatest(true);
-    const admin = await storage.getAdmin(fromId);
-    const settings = await storage.getSettings();
-    const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '1192931448');
-    const isRoot = fromId === rootAdminId || rootAdminId.includes(fromId);
-    const hasPermission = isRoot || Boolean(admin?.permissions?.messages_edit);
-
-    if (!isRoot && (!admin || !hasPermission)) {
+    if (!replyTo) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '⛔ You are not authorized to edit message templates.'
+        text: 'ℹ️ Reply to any bot message with /editthismessage to edit its template or text.'
       });
       return;
     }
