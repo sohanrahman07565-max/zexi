@@ -1564,6 +1564,7 @@ apiRouter.post('/items', authenticate, async (req: Request, res: Response) => {
   item.hasSetupVideo = req.body.hasSetupVideo === true;
   if (item.hasSetupVideo) {
     item.setupVideoUrl = req.body.setupVideoUrl ? String(req.body.setupVideoUrl).trim() : undefined;
+    item.setupVideoTelegramFileId = req.body.setupVideoTelegramFileId ? String(req.body.setupVideoTelegramFileId).trim() : undefined;
     item.setupVideoType = req.body.setupVideoType === 'upload' ? 'upload' : 'url';
     item.setupVideoFileName = req.body.setupVideoFileName ? String(req.body.setupVideoFileName).trim() : undefined;
     item.setupVideoButtonText = req.body.setupVideoButtonText ? String(req.body.setupVideoButtonText).trim() : '🎬 Setup Video';
@@ -1571,6 +1572,7 @@ apiRouter.post('/items', authenticate, async (req: Request, res: Response) => {
     item.setupVideoMessage = req.body.setupVideoMessage ? String(req.body.setupVideoMessage).trim() : undefined;
   } else {
     item.setupVideoUrl = undefined;
+    item.setupVideoTelegramFileId = undefined;
     item.setupVideoType = undefined;
     item.setupVideoFileName = undefined;
     item.setupVideoButtonText = undefined;
@@ -1663,6 +1665,13 @@ apiRouter.put('/items/:id', authenticate, async (req: Request, res: Response) =>
     setupVideoUrl: req.body.hasSetupVideo === false
       ? undefined
       : (req.body.setupVideoUrl !== undefined ? (req.body.setupVideoUrl ? String(req.body.setupVideoUrl).trim() : undefined) : existing.setupVideoUrl),
+    setupVideoTelegramFileId: req.body.hasSetupVideo === false
+      ? undefined
+      : (req.body.setupVideoTelegramFileId !== undefined
+          ? (req.body.setupVideoTelegramFileId ? String(req.body.setupVideoTelegramFileId).trim() : undefined)
+          : (req.body.setupVideoUrl !== undefined && String(req.body.setupVideoUrl || '').trim() !== String(existing.setupVideoUrl || '').trim()
+              ? undefined
+              : existing.setupVideoTelegramFileId)),
     setupVideoType: req.body.hasSetupVideo === false
       ? undefined
       : (req.body.setupVideoType !== undefined ? req.body.setupVideoType : existing.setupVideoType),
@@ -2349,7 +2358,26 @@ apiRouter.post('/bots/clone', authenticate, requirePermission('settings_edit'), 
   }
 });
 
-// DELETE /api/bots/:id - Delete a cloned bot instance and stop its runner
+let cachedBotInfoPayload: { data: any; expiresAt: number; token: string } | null = null;
+const cachedClonedBotInfo = new Map<string, { data: any; expiresAt: number }>();
+
+function invalidateBotInfoCache(botId?: string) {
+  if (!botId || botId === 'main') {
+    cachedBotInfoPayload = null;
+  }
+  if (botId && botId !== 'main') {
+    const cleanLookup = botId.replace(/^clone_/i, '').replace(/[:_-]/g, '');
+    cachedClonedBotInfo.delete(botId);
+    cachedClonedBotInfo.delete(cleanLookup);
+    for (const key of Array.from(cachedClonedBotInfo.keys())) {
+      if (key.replace(/^clone_/i, '').replace(/[:_-]/g, '') === cleanLookup) {
+        cachedClonedBotInfo.delete(key);
+      }
+    }
+  }
+}
+
+// DELETE /api/bots/:id - Delete a cloned bot instance and hard-stop its runner
 apiRouter.delete('/bots/:id', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
   try {
     const sessionBotId = (req as any).sessionBotId || 'main';
@@ -2362,14 +2390,94 @@ apiRouter.delete('/bots/:id', authenticate, requirePermission('settings_edit'), 
     }
 
     const success = await TelegramBotManager.deleteClonedBot(id);
+    invalidateBotInfoCache(id);
     return res.json({ ok: success });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || 'Failed to delete cloned bot' });
   }
 });
 
-let cachedBotInfoPayload: { data: any; expiresAt: number; token: string } | null = null;
-const cachedClonedBotInfo = new Map<string, { data: any; expiresAt: number }>();
+// Helper to verify access when controlling a bot lifecycle endpoint
+function canControlBotTarget(req: Request, targetId: string): boolean {
+  const sessionBotId = String((req as any).sessionBotId || 'main').trim() || 'main';
+  if (sessionBotId === 'main') return true;
+  if (targetId === 'main') return false;
+  const cleanSession = sessionBotId.replace(/^clone_/i, '').replace(/[:_-]/g, '');
+  const cleanTarget = targetId.replace(/^clone_/i, '').replace(/[:_-]/g, '');
+  return cleanSession.length > 0 && cleanSession === cleanTarget;
+}
+
+// POST /api/bots/:id/start - Start / resume polling on main or cloned bot
+apiRouter.post('/bots/:id/start', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const targetId = String(req.params.id || '').trim() || 'main';
+    if (!canControlBotTarget(req, targetId)) {
+      return res.status(403).json({ error: 'Not authorized to control this bot instance.' });
+    }
+    const ok = await TelegramBotManager.startBot(targetId);
+    invalidateBotInfoCache(targetId);
+    if (!ok) {
+      return res.status(404).json({ error: 'Bot instance not found, deleted, or missing bot token.' });
+    }
+    return res.json({ ok: true, status: 'active', message: 'Bot started and listening for updates.' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to start bot' });
+  }
+});
+
+// POST /api/bots/:id/stop - Gracefully stop polling and update handling for main or cloned bot
+apiRouter.post('/bots/:id/stop', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const targetId = String(req.params.id || '').trim() || 'main';
+    if (!canControlBotTarget(req, targetId)) {
+      return res.status(403).json({ error: 'Not authorized to control this bot instance.' });
+    }
+    const ok = await TelegramBotManager.stopBot(targetId);
+    invalidateBotInfoCache(targetId);
+    if (!ok) {
+      return res.status(404).json({ error: 'Bot instance not found or already deleted.' });
+    }
+    return res.json({ ok: true, status: 'stopped', message: 'Bot stopped successfully.' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to stop bot' });
+  }
+});
+
+// POST /api/bots/:id/restart - Cleanly restart polling worker for main or cloned bot
+apiRouter.post('/bots/:id/restart', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const targetId = String(req.params.id || '').trim() || 'main';
+    if (!canControlBotTarget(req, targetId)) {
+      return res.status(403).json({ error: 'Not authorized to control this bot instance.' });
+    }
+    const ok = await TelegramBotManager.restartBot(targetId);
+    invalidateBotInfoCache(targetId);
+    if (!ok) {
+      return res.status(404).json({ error: 'Bot instance not found, deleted, or missing bot token.' });
+    }
+    return res.json({ ok: true, status: 'active', message: 'Bot restarted cleanly.' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to restart bot' });
+  }
+});
+
+// POST /api/bots/:id/clean-memory - Clear volatile caches/timers without touching persistent DB records
+apiRouter.post('/bots/:id/clean-memory', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const targetId = String(req.params.id || '').trim() || 'main';
+    if (!canControlBotTarget(req, targetId)) {
+      return res.status(403).json({ error: 'Not authorized to clean memory for this bot instance.' });
+    }
+    const result = await TelegramBotManager.cleanMemory(targetId);
+    return res.json({
+      ok: true,
+      ...result,
+      message: `Cleaned ${result.clearedRuntimeEntries + result.clearedStorageEntries} volatile cache entries (Heap: ${result.heapUsedMb} MB).`
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || 'Failed to clean bot memory' });
+  }
+});
 
 // GET /api/bot/info - Dynamic bot status & profile strictly isolated per activeBotId
 apiRouter.get('/bot/info', async (req: Request, res: Response) => {
@@ -2384,6 +2492,22 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
   ).trim() || 'main';
 
   if (activeBotId !== 'main') {
+    if (TelegramBotManager.isBotDeleted(activeBotId)) {
+      return res.status(404).json({
+        ok: false,
+        isMain: false,
+        botId: activeBotId,
+        isConnected: false,
+        hasToken: false,
+        botStatus: 'stopped',
+        pollingActive: false,
+        botName: '',
+        botUsername: '',
+        displayName: '',
+        error: 'This cloned bot has been deleted.'
+      });
+    }
+
     const cachedCloned = cachedClonedBotInfo.get(activeBotId);
     if (cachedCloned && Date.now() < cachedCloned.expiresAt) {
       return res.json(cachedCloned.data);
@@ -2398,14 +2522,17 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
         b.id.replace(/^clone_/i, '').replace(/[:_-]/g, '') === cleanActiveLookup
       );
 
-      if (currentCloned) {
+      if (currentCloned && !TelegramBotManager.isBotDeleted(currentCloned.id)) {
         let liveName = currentCloned.name || '';
         let liveUsername = (currentCloned.username || '').replace(/^@/, '');
         let liveId: string | number = currentCloned.id;
-        let isLive = currentCloned.status !== 'stopped';
+        const isStopped = TelegramBotManager.isBotStopped(currentCloned.id) || currentCloned.status === 'stopped';
+        let isLive = !isStopped;
 
-        // Ensure cloned bot runner is actively polling
-        TelegramBotManager.ensureBotRunning(currentCloned);
+        // Only auto-start runner if the bot is NOT manually stopped
+        if (!isStopped) {
+          TelegramBotManager.ensureBotRunning(currentCloned);
+        }
 
         if (currentCloned.token) {
           const meRes = await TelegramService.callTelegramApi('getMe', {}, currentCloned.token).catch(() => null);
@@ -2413,7 +2540,7 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
             liveName = meRes.result.first_name || liveName;
             liveUsername = (meRes.result.username || liveUsername).replace(/^@/, '');
             liveId = meRes.result.id || liveId;
-            isLive = true;
+            if (!isStopped) isLive = true;
           }
         }
 
@@ -2422,6 +2549,8 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
           isMain: false,
           botId: currentCloned.id,
           isConnected: isLive,
+          botStatus: isStopped ? 'stopped' : 'active',
+          pollingActive: TelegramBotManager.isBotActivelyRunning(currentCloned.id),
           hasToken: Boolean(currentCloned.token),
           botName: liveName || (liveUsername ? `@${liveUsername}` : 'Cloned Bot'),
           botFirstName: liveName,
@@ -2442,6 +2571,8 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
         isMain: false,
         botId: activeBotId,
         isConnected: false,
+        botStatus: 'stopped',
+        pollingActive: false,
         hasToken: false,
         botName: '',
         botUsername: '',
@@ -2454,6 +2585,8 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
         isMain: false,
         botId: activeBotId,
         isConnected: false,
+        botStatus: 'stopped',
+        pollingActive: false,
         hasToken: false,
         botName: '',
         botUsername: '',
@@ -2515,12 +2648,15 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
   const cleanHandle = botUsername ? `@${botUsername}` : '';
   const displayName = cleanHandle || (botFirstName ? botFirstName : (isConnected ? 'Telegram Bot' : ''));
 
+  const isManuallyStopped = TelegramService.isManuallyStopped() || Boolean(settings?.botStopped);
   const responsePayload = {
     ok: isConnected,
     isMain: true,
     botId: 'main',
     hasToken: Boolean(token),
-    isConnected,
+    isConnected: isManuallyStopped ? false : isConnected,
+    botStatus: isManuallyStopped ? 'stopped' : 'active',
+    pollingActive: TelegramService.isPollingActive(),
     botName: botFirstName || cleanHandle,
     botUsername: botUsername || (rawResult?.username ? String(rawResult.username).replace(/^@/, '') : ''),
     botFirstName,
@@ -2965,6 +3101,9 @@ apiRouter.post('/simulate', authenticate, async (req: Request, res: Response) =>
 apiRouter.post('/telegram-webhook', async (req: Request, res: Response) => {
   try {
     const update = req.body;
+    if (TelegramService.isManuallyStopped()) {
+      return res.status(200).json({ ok: true, status: 'ignored_bot_stopped' });
+    }
     // Strict safeguard: if polling worker is currently active, ignore webhook to eliminate duplicate message processing
     if (TelegramService.isPollingActive()) {
       return res.status(200).json({ ok: true, status: 'ignored_polling_active' });

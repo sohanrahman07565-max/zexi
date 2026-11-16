@@ -75,6 +75,7 @@ export interface ItemRecord {
   expiresAt?: string;
   hasSetupVideo?: boolean;
   setupVideoUrl?: string;
+  setupVideoTelegramFileId?: string;
   setupVideoType?: 'url' | 'upload';
   setupVideoFileName?: string;
   setupVideoButtonText?: string;
@@ -176,6 +177,7 @@ export interface BotSettings {
   antiForwardEnabled?: boolean;
   chatWhitelistEnabled?: boolean;
   allowedChats?: AllowedChatEntry[];
+  botStopped?: boolean;
 }
 
 export interface JoinRequestRecord {
@@ -529,7 +531,8 @@ export const DEFAULT_SETTINGS: BotSettings = {
   antiForwardEnabled: false,
   requiredChannels: [],
   chatWhitelistEnabled: false,
-  allowedChats: []
+  allowedChats: [],
+  botStopped: false
 };
 
 // Persistent storage paths for standalone Render Web Service and local environment (Dual Firebase projects)
@@ -956,7 +959,7 @@ export class SharedStorageService {
         }
       }
 
-      // For main bot, also merge /cloned_bots_meta so cloned bots are never lost across updates
+      // For main bot, also merge /cloned_bots_meta so cloned bots are never lost across updates (excluding deleted tombstones)
       if (this.botId === 'main') {
         try {
           const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
@@ -968,12 +971,14 @@ export class SharedStorageService {
           if (metaRes.ok) {
             const metaObj = await metaRes.json();
             if (metaObj && typeof metaObj === 'object') {
-              const metaBots = Object.values(metaObj).filter((b: any) => b && b.id && b.token) as ClonedBotRecord[];
+              const metaBots = Object.values(metaObj).filter((b: any) =>
+                b && b.id && b.token && !SharedStorageService.isClonedBotDeleted(b.id)
+              ) as ClonedBotRecord[];
               if (metaBots.length > 0) {
                 if (!cloudData) cloudData = {};
                 const merged = new Map<string, ClonedBotRecord>();
                 for (const b of (Array.isArray(cloudData.clonedBots) ? cloudData.clonedBots : [])) {
-                  if (b && b.id) merged.set(b.id, b);
+                  if (b && b.id && !SharedStorageService.isClonedBotDeleted(b.id)) merged.set(b.id, b);
                 }
                 for (const b of metaBots) {
                   if (!merged.has(b.id)) {
@@ -1053,6 +1058,58 @@ export class SharedStorageService {
         this.lruCache.delete(k);
       }
     }
+  }
+
+  public stopTimers(): void {
+    if (this.cloudSyncTimer) {
+      clearTimeout(this.cloudSyncTimer);
+      this.cloudSyncTimer = null;
+    }
+    if (this.pendingPersistTimer) {
+      clearTimeout(this.pendingPersistTimer);
+      this.pendingPersistTimer = null;
+    }
+    if (this.replicationDebounceTimer) {
+      clearTimeout(this.replicationDebounceTimer);
+      this.replicationDebounceTimer = null;
+    }
+  }
+
+  public async clearMemoryCaches(): Promise<{
+    clearedLruEntries: number;
+    clearedBlobs: number;
+    clearedMemoryFiles: number;
+    prunedSessions: number;
+    prunedWebcodes: number;
+  }> {
+    const now = Date.now();
+    const clearedLruEntries = this.lruCache.size;
+    this.lruCache.clear();
+
+    let clearedBlobs = 0;
+    for (const m of this.blobStore.values()) {
+      clearedBlobs += m.size;
+    }
+    this.blobStore.clear();
+
+    const clearedMemoryFiles = SharedStorageService.uploadedFilesMemory.size;
+    SharedStorageService.uploadedFilesMemory.clear();
+    this.revokedSessionTokens.clear();
+
+    const prevSessions = Array.isArray(this.db.sessions) ? this.db.sessions.length : 0;
+    this.db.sessions = (this.db.sessions || []).filter(s => s && s.expiresAt > now);
+    const prunedSessions = Math.max(0, prevSessions - this.db.sessions.length);
+
+    const prevCodes = Array.isArray(this.db.webcodes) ? this.db.webcodes.length : 0;
+    this.db.webcodes = (this.db.webcodes || []).filter(w => w && !w.used && w.expiresAt > now);
+    const prunedWebcodes = Math.max(0, prevCodes - this.db.webcodes.length);
+
+    this.rebuildCache();
+    if (prunedSessions > 0 || prunedWebcodes > 0) {
+      await this.persist(false).catch(() => {});
+    }
+
+    return { clearedLruEntries, clearedBlobs, clearedMemoryFiles, prunedSessions, prunedWebcodes };
   }
 
   // --- Hybrid Blob / Netlify Blobs Compatibility Layer ---
@@ -1165,7 +1222,8 @@ export class SharedStorageService {
 
     const isMainBot = this.botId === 'main';
     const existingClonedBots = Array.isArray(this.db.clonedBots) ? this.db.clonedBots : [];
-    const loadedClonedBots = Array.isArray(loadedData.clonedBots) ? loadedData.clonedBots : existingClonedBots;
+    const rawLoadedClonedBots = Array.isArray(loadedData.clonedBots) ? loadedData.clonedBots : existingClonedBots;
+    const loadedClonedBots = rawLoadedClonedBots.filter(b => b && b.id && !SharedStorageService.isClonedBotDeleted(b.id));
 
     this.db = {
       items: Array.isArray(loadedData.items) ? loadedData.items : [],
@@ -1702,7 +1760,19 @@ export class SharedStorageService {
     }
     const index = this.db.items.findIndex(i => i.id === cleanItem.id);
     if (index >= 0) {
-      this.db.items[index] = { ...this.db.items[index], ...cleanItem, updatedAt: new Date().toISOString() };
+      const prev = this.db.items[index];
+      const setupVideoChanged = cleanItem.hasSetupVideo === false || (
+        cleanItem.setupVideoUrl !== undefined && cleanItem.setupVideoUrl !== prev.setupVideoUrl
+      );
+      if (cleanItem.hasSetupVideo !== false && !cleanItem.setupVideoTelegramFileId && prev.setupVideoTelegramFileId && !setupVideoChanged) {
+        cleanItem.setupVideoTelegramFileId = prev.setupVideoTelegramFileId;
+      }
+      if (cleanItem.hasSetupVideo !== false && !cleanItem.setupVideoUrl && prev.setupVideoUrl) {
+        cleanItem.setupVideoUrl = prev.setupVideoUrl;
+        cleanItem.setupVideoType = cleanItem.setupVideoType || prev.setupVideoType;
+        cleanItem.setupVideoFileName = cleanItem.setupVideoFileName || prev.setupVideoFileName;
+      }
+      this.db.items[index] = { ...prev, ...cleanItem, updatedAt: new Date().toISOString() };
     } else {
       this.db.items.push(cleanItem);
     }
@@ -2755,8 +2825,8 @@ export class SharedStorageService {
       }
     }
 
-    // 3. Persist small/medium files (<= 4MB) directly in Firebase RTDB so web-uploaded media survives redeploy
-    if (size > 0 && size <= 4 * 1024 * 1024) {
+    // 3. Persist small/medium files (<= 3MB) directly in Firebase RTDB and larger videos (<= 24MB) via RTDB chunks so media survives restarts/updates
+    if (size > 0 && size <= 3 * 1024 * 1024) {
       try {
         const token = await this.getFirebaseAuthToken();
         const url = this.getRtdbUrl(`/uploaded_files/${cleanId}`, token);
@@ -2775,11 +2845,63 @@ export class SharedStorageService {
           body
         });
         if (!cloudRes.ok && token) {
-          cloudRes = await fetch(this.getRtdbUrl(`/uploaded_files/${cleanId}`), {
+          await fetch(this.getRtdbUrl(`/uploaded_files/${cleanId}`), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body
           });
+        }
+      } catch {}
+    } else if (size > 3 * 1024 * 1024 && size <= 24 * 1024 * 1024) {
+      try {
+        const token = await this.getFirebaseAuthToken();
+        const fullB64 = data.buffer.toString('base64');
+        const CHUNK_LEN = 1800000; // ~1.35MB binary per RTDB node
+        const totalChunks = Math.ceil(fullB64.length / CHUNK_LEN);
+        let allChunksOk = true;
+        for (let idx = 0; idx < totalChunks; idx++) {
+          const part = fullB64.slice(idx * CHUNK_LEN, (idx + 1) * CHUNK_LEN);
+          const cUrl = this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/c_${idx}`, token);
+          let cRes = await fetch(cUrl, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(part)
+          });
+          if (!cRes.ok && token) {
+            cRes = await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/c_${idx}`), {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(part)
+            });
+          }
+          if (!cRes.ok) {
+            allChunksOk = false;
+            break;
+          }
+        }
+        if (allChunksOk) {
+          const metaUrl = this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/meta`, token);
+          const metaBody = JSON.stringify({
+            id: cleanId,
+            fileName: data.fileName,
+            fileType: fType,
+            mimeType: mime,
+            size,
+            totalChunks,
+            createdAt
+          });
+          let mRes = await fetch(metaUrl, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: metaBody
+          });
+          if (!mRes.ok && token) {
+            await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/meta`), {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: metaBody
+            });
+          }
         }
       } catch {}
     }
@@ -2878,7 +3000,7 @@ export class SharedStorageService {
       }
     }
 
-    // 4. Hydrate from Firebase RTDB /uploaded_files/${cleanId} after redeploy
+    // 5. Hydrate from Firebase RTDB /uploaded_files/${cleanId} or chunked /uploaded_file_chunks/${cleanId}
     try {
       const token = await this.getFirebaseAuthToken();
       let res = await fetch(this.getRtdbUrl(`/uploaded_files/${cleanId}`, token));
@@ -2902,6 +3024,49 @@ export class SharedStorageService {
           return rec;
         }
       }
+
+      // Check chunked RTDB node for larger setup videos / files
+      let chunkMetaRes = await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/meta`, token));
+      if (!chunkMetaRes.ok && token) {
+        chunkMetaRes = await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/meta`));
+      }
+      if (chunkMetaRes.ok) {
+        const cMeta = await chunkMetaRes.json();
+        if (cMeta && Number(cMeta.totalChunks) > 0) {
+          const parts: string[] = [];
+          let missing = false;
+          for (let idx = 0; idx < Number(cMeta.totalChunks); idx++) {
+            let pRes = await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/c_${idx}`, token));
+            if (!pRes.ok && token) {
+              pRes = await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/c_${idx}`));
+            }
+            if (!pRes.ok) {
+              missing = true;
+              break;
+            }
+            const chunkStr = await pRes.json();
+            if (typeof chunkStr !== 'string') {
+              missing = true;
+              break;
+            }
+            parts.push(chunkStr);
+          }
+          if (!missing && parts.length === Number(cMeta.totalChunks)) {
+            const buffer = Buffer.from(parts.join(''), 'base64');
+            const rec: UploadedFileRecord = {
+              id: cleanId,
+              fileName: cMeta.fileName || 'file',
+              fileType: cMeta.fileType || 'document',
+              mimeType: cMeta.mimeType || 'application/octet-stream',
+              size: buffer.length,
+              buffer,
+              createdAt: cMeta.createdAt || new Date().toISOString()
+            };
+            SharedStorageService.uploadedFilesMemory.set(cleanId, rec);
+            return rec;
+          }
+        }
+      }
     } catch {}
 
     return null;
@@ -2919,6 +3084,11 @@ export class SharedStorageService {
         if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
       } catch {}
     }
+    try {
+      const token = await this.getFirebaseAuthToken();
+      await fetch(this.getRtdbUrl(`/uploaded_files/${cleanId}`, token), { method: 'DELETE' }).catch(() => {});
+      await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}`, token), { method: 'DELETE' }).catch(() => {});
+    } catch {}
     if (this.db.uploadedFilesIndex && this.db.uploadedFilesIndex[cleanId]) {
       delete this.db.uploadedFilesIndex[cleanId];
       await this.persist();
@@ -3519,13 +3689,47 @@ export class SharedStorageService {
   // =========================================================================
   // CLONED BOTS REGISTRY & PERSISTENCE
   // =========================================================================
+  private static deletedClonedBotIds = new Set<string>();
+
+  public static markClonedBotDeleted(id: string): void {
+    const clean = String(id || '').trim();
+    if (!clean) return;
+    const stripped = clean.replace(/^clone_/i, '').replace(/[:_-]/g, '');
+    this.deletedClonedBotIds.add(clean);
+    if (stripped) {
+      this.deletedClonedBotIds.add(stripped);
+      this.deletedClonedBotIds.add(`clone_${stripped}`);
+    }
+  }
+
+  public static unmarkClonedBotDeleted(id: string): void {
+    const clean = String(id || '').trim();
+    if (!clean) return;
+    const stripped = clean.replace(/^clone_/i, '').replace(/[:_-]/g, '');
+    this.deletedClonedBotIds.delete(clean);
+    if (stripped) {
+      this.deletedClonedBotIds.delete(stripped);
+      this.deletedClonedBotIds.delete(`clone_${stripped}`);
+    }
+  }
+
+  public static isClonedBotDeleted(id: string): boolean {
+    const clean = String(id || '').trim();
+    if (!clean) return false;
+    const stripped = clean.replace(/^clone_/i, '').replace(/[:_-]/g, '');
+    return this.deletedClonedBotIds.has(clean) || (stripped ? this.deletedClonedBotIds.has(stripped) : false);
+  }
+
   public async getClonedBots(): Promise<ClonedBotRecord[]> {
     await this.loadLatest(false);
-    return Array.isArray(this.db.clonedBots) ? [...this.db.clonedBots] : [];
+    return Array.isArray(this.db.clonedBots)
+      ? this.db.clonedBots.filter(b => b && b.id && !SharedStorageService.isClonedBotDeleted(b.id))
+      : [];
   }
 
   public async saveClonedBot(cloned: ClonedBotRecord): Promise<void> {
     if (!cloned || !cloned.id) return;
+    SharedStorageService.unmarkClonedBotDeleted(cloned.id);
     await this.loadLatest(false);
     if (!Array.isArray(this.db.clonedBots)) {
       this.db.clonedBots = [];
@@ -3562,24 +3766,44 @@ export class SharedStorageService {
 
   public async deleteClonedBot(id: string): Promise<boolean> {
     if (!id) return false;
+    const cleanId = String(id).trim();
+    const stripped = cleanId.replace(/^clone_/i, '').replace(/[:_-]/g, '');
+    const candidateIds = Array.from(new Set([cleanId, stripped, stripped ? `clone_${stripped}` : ''].filter(Boolean)));
+
+    for (const cid of candidateIds) {
+      SharedStorageService.markClonedBotDeleted(cid);
+    }
+
     await this.loadLatest(false);
-    if (!Array.isArray(this.db.clonedBots)) {
-      return false;
+    const prevLen = Array.isArray(this.db.clonedBots) ? this.db.clonedBots.length : 0;
+    if (Array.isArray(this.db.clonedBots)) {
+      this.db.clonedBots = this.db.clonedBots.filter(b => {
+        const bClean = String(b.id || '').trim();
+        const bStripped = bClean.replace(/^clone_/i, '').replace(/[:_-]/g, '');
+        return !candidateIds.includes(bClean) && !candidateIds.includes(bStripped);
+      });
     }
-    const prevLen = this.db.clonedBots.length;
-    this.db.clonedBots = this.db.clonedBots.filter(b => b.id !== id);
-    if (this.db.clonedBots.length !== prevLen) {
-      try {
-        const token = await this.getFirebaseAuthToken();
-        const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
-        const baseUrl = (process.env.FIREBASE_DATABASE_URL || (isSecondary ? SECONDARY_FIREBASE_RTDB_URL : FIREBASE_RTDB_URL)).replace(/\/+$/, '');
-        const metaUrl = token ? `${baseUrl}/cloned_bots_meta/${id}.json?auth=${encodeURIComponent(token)}` : `${baseUrl}/cloned_bots_meta/${id}.json`;
-        await fetch(metaUrl, { method: 'DELETE' }).catch(() => {});
-      } catch {}
-      await this.persist(true);
-      return true;
-    }
-    return false;
+    const removedLocally = Array.isArray(this.db.clonedBots) ? this.db.clonedBots.length !== prevLen : false;
+
+    // Always purge isolated Firebase RTDB records regardless of local cache state
+    try {
+      const token = await this.getFirebaseAuthToken();
+      const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
+      const baseUrl = (process.env.FIREBASE_DATABASE_URL || (isSecondary ? SECONDARY_FIREBASE_RTDB_URL : FIREBASE_RTDB_URL)).replace(/\/+$/, '');
+      const buildRtdbDeleteUrl = (p: string) =>
+        token ? `${baseUrl}${p}.json?auth=${encodeURIComponent(token)}` : `${baseUrl}${p}.json`;
+
+      await Promise.all(
+        candidateIds.flatMap((cid) => [
+          fetch(buildRtdbDeleteUrl(`/cloned_bots_meta/${cid}`), { method: 'DELETE' }).catch(() => {}),
+          fetch(buildRtdbDeleteUrl(`/cloned_bots/${cid}`), { method: 'DELETE' }).catch(() => {}),
+          fetch(buildRtdbDeleteUrl(`/sub_admins/${cid}`), { method: 'DELETE' }).catch(() => {})
+        ])
+      );
+    } catch {}
+
+    await this.persist(true);
+    return removedLocally || candidateIds.length > 0;
   }
 }
 
@@ -3605,6 +3829,33 @@ export class StorageManager {
       s.loadLatest(true).catch(() => {});
     }
     return s;
+  }
+
+  public static getLoadedStorageIds(): string[] {
+    return ['main', ...Array.from(this.instances.keys())];
+  }
+
+  public static async destroyStorage(botId: string): Promise<void> {
+    const cleanId = (botId || '').trim();
+    if (!cleanId || cleanId === 'main') return;
+    const stripped = cleanId.replace(/^clone_/i, '').replace(/[:_-]/g, '');
+    const candidates = Array.from(new Set([cleanId, stripped, stripped ? `clone_${stripped}` : ''].filter(Boolean)));
+
+    for (const cid of candidates) {
+      const inst = this.instances.get(cid);
+      if (inst) {
+        inst.stopTimers();
+        await inst.clearMemoryCaches().catch(() => {});
+        this.instances.delete(cid);
+      }
+      for (const filePath of getFallbackFilePaths(cid)) {
+        try {
+          if (fs.existsSync(filePath)) {
+            await fs.promises.unlink(filePath).catch(() => {});
+          }
+        } catch {}
+      }
+    }
   }
 
   public getMainStorage(): SharedStorageService {

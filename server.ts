@@ -1,4 +1,5 @@
 import express from 'express';
+import http from 'node:http';
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
 import path from 'node:path';
@@ -6,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { apiRouter } from './server/routes';
 import { storage } from './server/storage';
-import { TelegramService, TelegramBotManager } from './server/telegram';
+import { TelegramService, TelegramBotManager, activeBots } from './server/telegram';
 
 dotenv.config();
 
@@ -19,18 +20,31 @@ process.on('unhandledRejection', (reason: any) => {
   console.error('🛡️ [Process Guard] Caught unhandledRejection (service kept online 24/7):', reason?.message || reason);
 });
 
-// Graceful shutdown: Ensure all in-flight database changes are saved to Firebase Cloud before exit
-process.on('SIGTERM', async () => {
-  console.log('🛑 [Process] SIGTERM received. Flushing storage to Firebase Cloud before shutdown...');
-  await storage.flush().catch(() => {});
-  process.exit(0);
-});
+let activeHttpServer: http.Server | null = null;
+let isShuttingDown = false;
 
-process.on('SIGINT', async () => {
-  console.log('🛑 [Process] SIGINT received. Flushing storage to Firebase Cloud before shutdown...');
-  await storage.flush().catch(() => {});
+async function gracefulShutdown(signal: string) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+  console.log(`🛑 [Process] ${signal} received. Closing HTTP server, stopping bots & flushing storage...`);
+  try {
+    if (activeHttpServer) {
+      activeHttpServer.close();
+    }
+    await Promise.race([
+      Promise.allSettled([
+        ...Object.values(activeBots).map((handle) => handle.stop().catch(() => {})),
+        TelegramService.releaseLeaderLock().catch(() => {}),
+        storage.flush().catch(() => {})
+      ]),
+      new Promise<void>((resolve) => setTimeout(resolve, 1500))
+    ]);
+  } catch {}
   process.exit(0);
-});
+}
+
+process.on('SIGTERM', () => { gracefulShutdown('SIGTERM'); });
+process.on('SIGINT', () => { gracefulShutdown('SIGINT'); });
 
 // Render Keep-Alive 24/7 Heartbeat Monitor (Prevents Render Free Tier Idle Sleep)
 function initRenderKeepAlive(port: number) {
@@ -77,8 +91,56 @@ function initRenderKeepAlive(port: number) {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+async function initBackgroundServices() {
+  try {
+    // Explicitly check BOT_TOKEN from environment variables upon boot
+    const envBotToken = (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || process.env.TG_BOT_TOKEN || process.env.BOT_API_TOKEN || process.env.TOKEN || '').trim().replace(/^["']|["']$/g, '');
+    const envAdminId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '').trim().replace(/^["']|["']$/g, '');
+
+    if (envBotToken) {
+      console.log('🤖 Telegram Bot Token detected from environment. Synchronizing and verifying connection...');
+      const settingsUpdate: any = { botToken: envBotToken };
+      if (envAdminId) settingsUpdate.rootAdminId = envAdminId;
+      await storage.updateSettings(settingsUpdate);
+
+      try {
+        const me = await TelegramService.callTelegramApi('getMe', {});
+        if (me?.ok && me.result) {
+          const botUsername = me.result.username || '';
+          const botName = me.result.first_name || 'Bot';
+          console.log(`✅ [Telegram Connected] Bot: "${botName}" (@${botUsername}) | ID: ${me.result.id}`);
+          await storage.updateSettings({
+            botToken: envBotToken,
+            botUsername: botUsername
+          });
+        } else {
+          console.warn('⚠️ [Telegram] Connection verification returned unconfirmed:', me?.description || me);
+        }
+      } catch (botErr: any) {
+        console.error('❌ [Telegram] Failed to connect on startup:', botErr?.message || botErr);
+      }
+    } else {
+      console.log('ℹ️ No BOT_TOKEN or TELEGRAM_BOT_TOKEN found in environment variables. Bot features are awaiting token configuration.');
+    }
+
+    // Initialize scheduled file auto-delete worker (10-minute delivery timeout)
+    await TelegramService.initScheduledDeletionWorker();
+
+    // Initialize Telegram background polling worker immediately
+    await TelegramService.initPollingWorker();
+
+    // Initialize and run all active cloned Telegram bots
+    await TelegramBotManager.initAllBots();
+  } catch (err: any) {
+    console.error('⚠️ [Startup] Background service initialization notice:', err?.message || err);
+  }
+}
+
 async function startServer() {
   const app = express();
+  const httpServer = http.createServer(app);
+  activeHttpServer = httpServer;
+
   const PORT = Number(process.env.PORT) || 3000;
   const isProd = process.env.NODE_ENV === 'production';
 
@@ -114,56 +176,34 @@ async function startServer() {
     next();
   });
 
-  // Initialize storage
-  await storage.init();
+  // Start storage initialization concurrently so HTTP server binds port 3000 without network blocking
+  const storageInitPromise = storage.init().catch((err: any) => {
+    console.error('⚠️ [Storage] Initialization notice:', err?.message || err);
+  });
+  storageInitPromise.then(() => {
+    void initBackgroundServices();
+  });
 
-  // Explicitly check BOT_TOKEN from environment variables upon boot
-  const envBotToken = (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || process.env.TG_BOT_TOKEN || process.env.BOT_API_TOKEN || process.env.TOKEN || '').trim().replace(/^["']|["']$/g, '');
-  const envAdminId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '').trim().replace(/^["']|["']$/g, '');
-
-  if (envBotToken) {
-    console.log('🤖 Telegram Bot Token detected from environment. Synchronizing and verifying connection...');
-    const settingsUpdate: any = { botToken: envBotToken };
-    if (envAdminId) settingsUpdate.rootAdminId = envAdminId;
-    await storage.updateSettings(settingsUpdate);
-
-    try {
-      const me = await TelegramService.callTelegramApi('getMe', {});
-      if (me?.ok && me.result) {
-        const botUsername = me.result.username || '';
-        const botName = me.result.first_name || 'Bot';
-        console.log(`✅ [Telegram Connected] Bot: "${botName}" (@${botUsername}) | ID: ${me.result.id}`);
-        await storage.updateSettings({
-          botToken: envBotToken,
-          botUsername: botUsername
-        });
-      } else {
-        console.warn('⚠️ [Telegram] Connection verification returned unconfirmed:', me?.description || me);
-      }
-    } catch (botErr: any) {
-      console.error('❌ [Telegram] Failed to connect on startup:', botErr?.message || botErr);
+  // Ensure API data endpoints wait for initial storage load (health/ping respond immediately)
+  app.use('/api', async (req, _res, next) => {
+    if (req.path === '/health' || req.path === '/ping') {
+      return next();
     }
-  } else {
-    console.log('ℹ️ No BOT_TOKEN or TELEGRAM_BOT_TOKEN found in environment variables. Bot features are awaiting token configuration.');
-  }
-
-  // Initialize scheduled file auto-delete worker (10-minute delivery timeout)
-  await TelegramService.initScheduledDeletionWorker();
-
-  // Initialize Telegram background polling worker immediately
-  await TelegramService.initPollingWorker();
-
-  // Initialize and run all active cloned Telegram bots
-  await TelegramBotManager.initAllBots();
+    await storageInitPromise;
+    next();
+  });
 
   // Mount API Router
   app.use('/api', apiRouter);
 
-  // In development, hook up Vite dev server middleware
+  // In development, hook up Vite dev server middleware (bind HMR to httpServer to avoid port 24678 conflicts)
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : { server: httpServer }
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -176,7 +216,24 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  let listenRetries = 0;
+  httpServer.on('error', (err: any) => {
+    if (err?.code === 'EADDRINUSE' && listenRetries < 6) {
+      listenRetries++;
+      console.warn(`⚠️ [Server] Port ${PORT} busy during restart, retrying in 500ms (${listenRetries}/6)...`);
+      setTimeout(() => {
+        try {
+          httpServer.close();
+        } catch {}
+        httpServer.listen(PORT, '0.0.0.0');
+      }, 500);
+      return;
+    }
+    console.error('❌ [Server] HTTP server failed to bind port:', err?.message || err);
+    process.exit(1);
+  });
+
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on http://0.0.0.0:${PORT}`);
     initRenderKeepAlive(PORT);
   });

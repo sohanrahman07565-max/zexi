@@ -60,6 +60,7 @@ export interface ItemRecord {
   expiresAt?: string;
   hasSetupVideo?: boolean;
   setupVideoUrl?: string;
+  setupVideoTelegramFileId?: string;
   setupVideoType?: 'url' | 'upload';
   setupVideoFileName?: string;
   setupVideoButtonText?: string;
@@ -150,6 +151,7 @@ export interface BotSettings {
   antiForwardEnabled?: boolean;
   chatWhitelistEnabled?: boolean;
   allowedChats?: AllowedChatEntry[];
+  botStopped?: boolean;
 }
 
 export interface JoinRequestRecord {
@@ -1039,5 +1041,48 @@ export const api = {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to delete bot');
     return Boolean(data.ok);
+  },
+
+  async startBot(id: string): Promise<{ ok: boolean; status: string; message: string }> {
+    const res = await authFetch(`/api/bots/${encodeURIComponent(id)}/start`, {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to start bot');
+    return data;
+  },
+
+  async stopBot(id: string): Promise<{ ok: boolean; status: string; message: string }> {
+    const res = await authFetch(`/api/bots/${encodeURIComponent(id)}/stop`, {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to stop bot');
+    return data;
+  },
+
+  async restartBot(id: string): Promise<{ ok: boolean; status: string; message: string }> {
+    const res = await authFetch(`/api/bots/${encodeURIComponent(id)}/restart`, {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to restart bot');
+    return data;
+  },
+
+  async cleanBotMemory(id: string): Promise<{
+    ok: boolean;
+    clearedRuntimeEntries: number;
+    clearedStorageEntries: number;
+    rssMb: number;
+    heapUsedMb: number;
+    message: string;
+  }> {
+    const res = await authFetch(`/api/bots/${encodeURIComponent(id)}/clean-memory`, {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to clean bot memory');
+    return data;
   }
 };

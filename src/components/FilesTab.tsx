@@ -69,6 +69,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
   const [hasSetupVideo, setHasSetupVideo] = useState<boolean>(false);
   const [setupVideoChoice, setSetupVideoChoice] = useState<'url' | 'upload'>('url');
   const [setupVideoUrl, setSetupVideoUrl] = useState<string>('');
+  const [setupVideoTelegramFileId, setSetupVideoTelegramFileId] = useState<string>('');
   const [setupVideoFile, setSetupVideoFile] = useState<File | null>(null);
   const [setupVideoFileName, setSetupVideoFileName] = useState<string>('');
   const [setupVideoButtonText, setSetupVideoButtonText] = useState<string>('🎬 Setup Video');
@@ -128,6 +129,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
     setHasSetupVideo(false);
     setSetupVideoChoice('url');
     setSetupVideoUrl('');
+    setSetupVideoTelegramFileId('');
     setSetupVideoFile(null);
     setSetupVideoFileName('');
     setSetupVideoButtonText('🎬 Setup Video');
@@ -156,6 +158,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
     setHasSetupVideo(Boolean(item.hasSetupVideo));
     setSetupVideoChoice(item.setupVideoType || 'url');
     setSetupVideoUrl(item.setupVideoUrl || '');
+    setSetupVideoTelegramFileId(item.setupVideoTelegramFileId || '');
     setSetupVideoFile(null);
     setSetupVideoFileName(item.setupVideoFileName || '');
     setSetupVideoButtonText(item.setupVideoButtonText || '🎬 Setup Video');
@@ -354,6 +357,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
     try {
       // Process Setup Video upload if configured
       let finalSetupVideoUrl = setupVideoUrl.trim();
+      let finalSetupVideoTelegramFileId = setupVideoTelegramFileId.trim();
       let finalSetupVideoFileName = setupVideoFileName;
       if (hasSetupVideo) {
         if (setupVideoChoice === 'upload' && setupVideoFile) {
@@ -364,7 +368,10 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
           vFd.append('fileType', 'video');
           const vRes = await api.uploadFile(vFd);
           finalSetupVideoUrl = vRes.uploadedFileId || vRes.fileId;
+          finalSetupVideoTelegramFileId = (vRes.fileId && vRes.fileId !== vRes.uploadedFileId) ? vRes.fileId : '';
           finalSetupVideoFileName = setupVideoFile.name;
+        } else if (selectedItem && finalSetupVideoUrl !== (selectedItem.setupVideoUrl || '').trim()) {
+          finalSetupVideoTelegramFileId = '';
         }
       }
 
@@ -412,6 +419,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
           retentionDays: itemType === 'file' && retentionType === 'temporary' ? retentionDays : undefined,
           hasSetupVideo,
           setupVideoUrl: hasSetupVideo ? finalSetupVideoUrl : undefined,
+          setupVideoTelegramFileId: hasSetupVideo ? (finalSetupVideoTelegramFileId || undefined) : undefined,
           setupVideoType: hasSetupVideo ? setupVideoChoice : undefined,
           setupVideoFileName: hasSetupVideo ? finalSetupVideoFileName : undefined,
           setupVideoButtonText: hasSetupVideo ? (setupVideoButtonText.trim() || '🎬 Setup Video') : undefined,
@@ -438,6 +446,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
             retentionDays: retentionType === 'temporary' ? retentionDays : undefined,
             hasSetupVideo,
             setupVideoUrl: hasSetupVideo ? finalSetupVideoUrl : undefined,
+            setupVideoTelegramFileId: hasSetupVideo ? (finalSetupVideoTelegramFileId || undefined) : undefined,
             setupVideoType: hasSetupVideo ? setupVideoChoice : undefined,
             setupVideoFileName: hasSetupVideo ? finalSetupVideoFileName : undefined,
             setupVideoButtonText: hasSetupVideo ? (setupVideoButtonText.trim() || '🎬 Setup Video') : undefined,
@@ -499,6 +508,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
               retentionDays: retentionType === 'temporary' ? retentionDays : undefined,
               hasSetupVideo,
               setupVideoUrl: hasSetupVideo ? finalSetupVideoUrl : undefined,
+              setupVideoTelegramFileId: hasSetupVideo ? (finalSetupVideoTelegramFileId || undefined) : undefined,
               setupVideoType: hasSetupVideo ? setupVideoChoice : undefined,
               setupVideoFileName: hasSetupVideo ? finalSetupVideoFileName : undefined,
               setupVideoButtonText: hasSetupVideo ? (setupVideoButtonText.trim() || '🎬 Setup Video') : undefined,
@@ -523,6 +533,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
             retentionDays: retentionType === 'temporary' ? retentionDays : undefined,
             hasSetupVideo,
             setupVideoUrl: hasSetupVideo ? finalSetupVideoUrl : undefined,
+            setupVideoTelegramFileId: hasSetupVideo ? (finalSetupVideoTelegramFileId || undefined) : undefined,
             setupVideoType: hasSetupVideo ? setupVideoChoice : undefined,
             setupVideoFileName: hasSetupVideo ? finalSetupVideoFileName : undefined,
             setupVideoButtonText: hasSetupVideo ? (setupVideoButtonText.trim() || '🎬 Setup Video') : undefined,

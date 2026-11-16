@@ -9,7 +9,7 @@ import {
   ChevronRight, Edit2, Check, RefreshCw, Plus, Minus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi,
   Megaphone, Image as ImageIcon, Video as VideoIcon, Music, Mic, Pin, Paperclip, Loader2, Radio,
   Flag, Ban, CheckCircle, ShieldAlert, ExternalLink, ShieldCheck,
-  Copy, Upload, Bot, VolumeX
+  Copy, Upload, Bot, VolumeX, Play, Square, RotateCcw
 } from 'lucide-react';
 import { EmojiStore } from './EmojiStore';
 
@@ -355,6 +355,10 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   });
   const [botStatusMsg, setBotStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [settingSaving, setSettingSaving] = useState(false);
+  const [botRuntimeStatus, setBotRuntimeStatus] = useState<'active' | 'stopped'>(settings?.botStopped ? 'stopped' : 'active');
+  const [botRuntimePolling, setBotRuntimePolling] = useState<boolean>(!settings?.botStopped);
+  const [botLifecycleBusy, setBotLifecycleBusy] = useState<'start' | 'stop' | 'restart' | 'clean-memory' | null>(null);
+  const [lastMemCleanNote, setLastMemCleanNote] = useState<string>('');
 
   // Force Sub Add Channel form state
   const [newChannelName, setNewChannelName] = useState('');
@@ -385,6 +389,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       }));
       setChatWhitelistEnabled(Boolean(settings.chatWhitelistEnabled));
       setAllowedChats(Array.isArray(settings.allowedChats) ? settings.allowedChats : []);
+      if (typeof settings.botStopped === 'boolean') {
+        setBotRuntimeStatus(settings.botStopped ? 'stopped' : 'active');
+      }
     }
   }, [settings]);
 
@@ -409,6 +416,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       loadCleanupStatus();
     } else if (subView === 'settings') {
       loadJoinRequests();
+      loadBotRuntimeStatus();
     } else if (subView === 'whitelist') {
       loadChatWhitelist();
     }
@@ -417,6 +425,54 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       setBroadcastUsersCount(users.length);
     }).catch(() => {});
   }, [subView]);
+
+  const loadBotRuntimeStatus = async () => {
+    try {
+      const info = await api.getBotInfo();
+      const stopped = info?.botStatus === 'stopped';
+      setBotRuntimeStatus(stopped ? 'stopped' : 'active');
+      setBotRuntimePolling(Boolean(info?.pollingActive));
+    } catch {}
+  };
+
+  const handleBotLifecycleAction = async (action: 'start' | 'stop' | 'restart' | 'clean-memory') => {
+    const targetId = api.getActiveBotId() || currentUser.botId || 'main';
+    setBotLifecycleBusy(action);
+    setBotStatusMsg(null);
+    try {
+      if (action === 'start') {
+        const res = await api.startBot(targetId);
+        setBotRuntimeStatus('active');
+        setBotRuntimePolling(true);
+        toast.success(res.message || 'Bot started!');
+        setBotStatusMsg({ type: 'success', text: res.message || 'Bot started and listening for updates.' });
+      } else if (action === 'stop') {
+        const res = await api.stopBot(targetId);
+        setBotRuntimeStatus('stopped');
+        setBotRuntimePolling(false);
+        toast.success(res.message || 'Bot stopped!');
+        setBotStatusMsg({ type: 'success', text: res.message || 'Bot stopped cleanly.' });
+      } else if (action === 'restart') {
+        const res = await api.restartBot(targetId);
+        setBotRuntimeStatus('active');
+        setBotRuntimePolling(true);
+        toast.success(res.message || 'Bot restarted!');
+        setBotStatusMsg({ type: 'success', text: res.message || 'Bot restarted cleanly.' });
+      } else {
+        const res = await api.cleanBotMemory(targetId);
+        setLastMemCleanNote(`Cleared ${res.clearedRuntimeEntries + res.clearedStorageEntries} cached entries · Heap ${res.heapUsedMb} MB`);
+        toast.success(res.message || 'Memory cleaned!');
+        setBotStatusMsg({ type: 'success', text: res.message || 'Memory caches cleaned without affecting database items.' });
+      }
+      onRefreshSettings();
+    } catch (err: any) {
+      const msg = err?.message || `Failed to ${action} bot`;
+      toast.error(msg);
+      setBotStatusMsg({ type: 'error', text: msg });
+    } finally {
+      setBotLifecycleBusy(null);
+    }
+  };
 
   const loadJoinRequests = async () => {
     setLoadingJoinRequests(true);
@@ -2501,6 +2557,90 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             <span>{botStatusMsg.text}</span>
           </div>
         )}
+
+        {/* Bot Runtime & Memory Control Card */}
+        <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
+                botRuntimeStatus === 'stopped'
+                  ? 'bg-rose-500/15 border-rose-500/30 text-rose-400'
+                  : 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400'
+              }`}>
+                <Bot className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white flex items-center gap-2">
+                  <span>Bot Process &amp; Memory Control</span>
+                </div>
+                <div className="text-[11px] text-zinc-400 flex items-center gap-1.5 mt-0.5">
+                  <span className={`w-1.5 h-1.5 rounded-full ${
+                    botRuntimeStatus === 'stopped' ? 'bg-rose-400' : 'bg-emerald-400 animate-pulse'
+                  }`} />
+                  <span className={botRuntimeStatus === 'stopped' ? 'text-rose-300 font-semibold' : 'text-emerald-300 font-semibold'}>
+                    {botRuntimeStatus === 'stopped' ? 'Stopped' : botRuntimePolling ? 'Running (Polling Active)' : 'Running'}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={loadBotRuntimeStatus}
+              className="p-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-white transition-colors cursor-pointer"
+              title="Refresh runtime status"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <button
+              type="button"
+              disabled={botLifecycleBusy !== null || botRuntimeStatus === 'active'}
+              onClick={() => handleBotLifecycleAction('start')}
+              className="py-2 px-3 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {botLifecycleBusy === 'start' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+              <span>Start Bot</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={botLifecycleBusy !== null || botRuntimeStatus === 'stopped'}
+              onClick={() => handleBotLifecycleAction('stop')}
+              className="py-2 px-3 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {botLifecycleBusy === 'stop' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Square className="w-3.5 h-3.5" />}
+              <span>Stop Bot</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={botLifecycleBusy !== null}
+              onClick={() => handleBotLifecycleAction('restart')}
+              className="py-2 px-3 rounded-xl bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 border border-sky-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-40"
+            >
+              {botLifecycleBusy === 'restart' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+              <span>Restart</span>
+            </button>
+
+            <button
+              type="button"
+              disabled={botLifecycleBusy !== null}
+              onClick={() => handleBotLifecycleAction('clean-memory')}
+              className="py-2 px-3 rounded-xl bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-40"
+            >
+              {botLifecycleBusy === 'clean-memory' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
+              <span>Clean Memory</span>
+            </button>
+          </div>
+
+          {lastMemCleanNote && (
+            <div className="text-[11px] text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded-xl px-3 py-1.5 font-mono">
+              {lastMemCleanNote}
+            </div>
+          )}
+        </div>
 
         <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-4">
           <form onSubmit={handleSaveSettings} className="space-y-3.5">

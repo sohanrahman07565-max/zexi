@@ -99,6 +99,36 @@ function isDuplicateDelivery(chatId: string | number, payload: string): boolean 
 // Unique process instance identifier for distributed leader election and update locking
 export const BOT_INSTANCE_ID = 'inst_' + Math.random().toString(36).substring(2, 9) + '_' + Date.now();
 
+// Global singleton active bot map (keyed by canonical botId: 'main' or normalized numeric clone ID)
+export interface ActiveBotHandle {
+  botId: string;
+  token: string;
+  stop: (options?: { dropPendingUpdates?: boolean }) => Promise<void>;
+  isAlive: () => boolean;
+}
+export const activeBots: Record<string, ActiveBotHandle> = {};
+
+// Per-bot async startup/stop mutex to prevent concurrent duplicate launches
+const botLifecycleLocks = new Map<string, Promise<void>>();
+async function withBotLifecycleLock<T>(key: string, task: () => Promise<T>): Promise<T> {
+  const previous = botLifecycleLocks.get(key) || Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const chained = previous.catch(() => {}).then(() => current);
+  botLifecycleLocks.set(key, chained);
+  await previous.catch(() => {});
+  try {
+    return await task();
+  } finally {
+    release();
+    if (botLifecycleLocks.get(key) === chained) {
+      botLifecycleLocks.delete(key);
+    }
+  }
+}
+
 // In-flight update lock set to prevent parallel concurrent execution of the same update
 const inFlightUpdateKeys = new Set<string>();
 
@@ -239,7 +269,16 @@ export class TelegramService {
     return (settings?.botToken || '').trim().replace(/^["']|["']$/g, '');
   }
 
-  public static async callTelegramApi(method: string, payload: Record<string, any>, tokenOverride?: string): Promise<any> {
+  public static async callTelegramApi(
+    method: string,
+    payload: Record<string, any>,
+    tokenOverride?: string,
+    externalSignal?: AbortSignal
+  ): Promise<any> {
+    if (externalSignal?.aborted) {
+      return { ok: false, aborted: true, description: 'Aborted' };
+    }
+
     const rawToken = tokenOverride || botTokenContext.getStore() || await this.getBotToken();
     const token = (rawToken || '').trim().replace(/^["']|["']$/g, '');
     if (!token) {
@@ -260,6 +299,14 @@ export class TelegramService {
     const executeRequest = async (reqPayload: Record<string, any>): Promise<any> => {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), timeoutSeconds * 1000);
+      const onExternalAbort = () => controller.abort();
+      if (externalSignal) {
+        if (externalSignal.aborted) {
+          clearTimeout(timeoutId);
+          throw new DOMException('Aborted', 'AbortError');
+        }
+        externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+      }
       try {
         const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
           method: 'POST',
@@ -270,6 +317,9 @@ export class TelegramService {
         return await res.json();
       } finally {
         clearTimeout(timeoutId);
+        if (externalSignal) {
+          externalSignal.removeEventListener('abort', onExternalAbort);
+        }
       }
     };
 
@@ -588,6 +638,15 @@ export class TelegramService {
   public static async handleUpdate(update: any, tokenOverride?: string, botId: string = 'main'): Promise<void> {
     if (!update) return;
 
+    // Hard lifecycle guard: halt all processing immediately for deleted or stopped bots
+    if (botId !== 'main') {
+      if (TelegramBotManager.isBotDeleted(botId) || TelegramBotManager.isBotStopped(botId)) {
+        return;
+      }
+    } else if (TelegramService.isManuallyStopped()) {
+      return;
+    }
+
     if (tokenOverride && !botTokenContext.getStore()) {
       return botTokenContext.run(tokenOverride, () => this.handleUpdate(update, undefined, botId));
     }
@@ -899,6 +958,13 @@ export class TelegramService {
       `• <code>/setpassword &lt;password&gt;</code> — Set/change Web Panel password`,
       `• <code>/broadcast</code> · <code>/settings</code> — Panel broadcast &amp; filter guide`,
       `• <code>/clone &lt;bot_token&gt;</code> — Clone an isolated bot instance`,
+      ``,
+      `🤖 <b>BOT LIFECYCLE &amp; MEMORY CONTROL</b>`,
+      `• <code>/botstatus</code> — Check live polling status &amp; RAM usage`,
+      `• <code>/botrestart${isMainBot ? ' [bot_id]' : ''}</code> — Restart bot listener &amp; flush caches`,
+      `• <code>/botstop${isMainBot ? ' [bot_id]' : ''}</code> — Stop bot polling listener`,
+      ...(isMainBot ? [`• <code>/botstart [bot_id]</code> — Start a stopped bot instance`] : []),
+      `• <code>/memclean</code> — Purge runtime caches &amp; free server memory`,
       ``,
       `👥 <b>PUBLIC GROUP COMMANDS (ALL USERS)</b>`,
       `• <code>/u &lt;uid&gt;</code> or <code>/uid &lt;uid&gt;</code> — Free Fire profile &amp; Guild checker`,
@@ -2038,6 +2104,7 @@ export class TelegramService {
     const isCloneCommand = /^\/clone(?:@\w+)?(?:\s+|$)/i.test(text);
     const isBroadcastCommand = /^\/broadcast(?:@\w+)?(?:\s+|$)/i.test(text);
     const isSettingsCommand = /^\/(?:settings|config|setfilter|addfilter|delfilter|delfile|delete|del|editthismessage)(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isBotLifecycleCommand = /^\/(?:botstart|startbot|botstop|stopbot|botrestart|restartbot|botstatus|memclean|cleanmemory|clearcache)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isHelpCommand = /^\/help(?:@\w+)?(?:\s+|$)/i.test(text);
 
     const isAdminCommand =
@@ -2058,6 +2125,7 @@ export class TelegramService {
       isCloneCommand ||
       isBroadcastCommand ||
       isSettingsCommand ||
+      isBotLifecycleCommand ||
       isHelpCommand;
 
     if (isAdminCommand) {
@@ -2111,6 +2179,16 @@ export class TelegramService {
           );
         }
       };
+
+      if (isBotLifecycleCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleBotLifecycleCommand(fromId, fromId, text);
+          },
+          'Bot control result sent to your private messages.'
+        );
+        return;
+      }
 
       if (isHelpCommand) {
         await executeWithPrivateDelivery(
@@ -3768,6 +3846,21 @@ export class TelegramService {
       return;
     }
 
+    // 5c. Bot Lifecycle & Memory Control Commands in Private DM (/botstart, /botstop, /botrestart, /botstatus, /memclean)
+    if (/^\/(?:botstart|startbot|botstop|stopbot|botrestart|restartbot|botstatus|memclean|cleanmemory|clearcache)(?:@\w+)?(?:\s+|$)/i.test(text)) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <i>Access Denied. Bot lifecycle and memory commands are restricted to authorized administrators only.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      await this.handleBotLifecycleCommand(fromId, chatId, text);
+      return;
+    }
+
     // 6. Command: /add (strictly requires '/' prefix)
     const isAddCommand = /^\/add(?:@\w+)?(?:\s+|$)/i.test(text);
     if (isAddCommand) {
@@ -4752,7 +4845,41 @@ export class TelegramService {
 
     const caption = `🎬 <b>Setup Video:</b> ${item.name}`;
 
-    // 1. Check if setup video is stored as an uploaded file
+    // 1. If we already have a cached permanent Telegram file_id for this video, use it first
+    const isRemoteFileId = (val?: string) => Boolean(
+      val &&
+      !val.startsWith('upload_') &&
+      !val.startsWith('local_') &&
+      !val.startsWith('phone_') &&
+      !/^https?:\/\//i.test(val)
+    );
+
+    if (isRemoteFileId(item.setupVideoTelegramFileId)) {
+      if (messageIdToEdit) {
+        try {
+          await this.callTelegramApi('deleteMessage', { chat_id: chatId, message_id: messageIdToEdit });
+        } catch {}
+      }
+      const tgRes = await this.callTelegramApi('sendVideo', {
+        chat_id: chatId,
+        video: item.setupVideoTelegramFileId,
+        caption,
+        parse_mode: 'HTML',
+        reply_markup: backKeyboard
+      });
+      if (tgRes && tgRes.ok) return;
+
+      const docFallback = await this.callTelegramApi('sendDocument', {
+        chat_id: chatId,
+        document: item.setupVideoTelegramFileId,
+        caption,
+        parse_mode: 'HTML',
+        reply_markup: backKeyboard
+      });
+      if (docFallback && docFallback.ok) return;
+    }
+
+    // 2. Check if setup video is stored as an uploaded file (disk or Firebase RTDB / chunked RTDB)
     const isUpload = Boolean(
       item.setupVideoType === 'upload' ||
       item.setupVideoUrl.startsWith('upload_') ||
@@ -4778,20 +4905,31 @@ export class TelegramService {
         fileType: 'video'
       }, caption, backKeyboard);
 
-      if (res && res.ok) return;
+      if (res && res.ok) {
+        // Persist Telegram's returned file_id without erasing setupVideoUrl so video survives any future update/restart
+        const cachedTgId =
+          res.result?.video?.file_id ||
+          res.result?.document?.file_id ||
+          res.result?.animation?.file_id;
+        if (cachedTgId && cachedTgId !== item.setupVideoTelegramFileId) {
+          item.setupVideoTelegramFileId = cachedTgId;
+          await storage.saveItem(item).catch(() => {});
+        }
+        return;
+      }
     }
 
-    // 2. If it's a URL or fileId: try sendVideo if it's direct video file or fileId
+    // 3. If it's a URL or fileId: try sendVideo if it's direct video file or fileId
     const isExternalUrl = /^https?:\/\//i.test(item.setupVideoUrl);
     const isDirectVideoExt = /\.(mp4|mov|avi|mkv|webm)(\?.*)?$/i.test(item.setupVideoUrl);
 
-    if (!isExternalUrl || isDirectVideoExt) {
+    if (!isUpload && (!isExternalUrl || isDirectVideoExt)) {
       if (messageIdToEdit) {
         try {
           await this.callTelegramApi('deleteMessage', { chat_id: chatId, message_id: messageIdToEdit });
         } catch {}
       }
-      let res = await this.callTelegramApi('sendVideo', {
+      const res = await this.callTelegramApi('sendVideo', {
         chat_id: chatId,
         video: item.setupVideoUrl,
         caption,
@@ -7066,6 +7204,9 @@ export class TelegramService {
 
     const hasSetupVideo = Boolean(session.hasSetupVideo && session.setupVideoUrl);
     const setupVideoUrl = hasSetupVideo ? session.setupVideoUrl : undefined;
+    const setupVideoTelegramFileId = (hasSetupVideo && setupVideoUrl && !/^https?:\/\//i.test(setupVideoUrl) && !setupVideoUrl.startsWith('upload_') && !setupVideoUrl.startsWith('local_') && !setupVideoUrl.startsWith('phone_'))
+      ? setupVideoUrl
+      : undefined;
     const setupVideoType = hasSetupVideo ? (session.setupVideoType || 'url') : undefined;
     const setupVideoFileName = hasSetupVideo ? session.setupVideoFileName : undefined;
     const setupVideoButtonText = hasSetupVideo ? '🎬 Setup Video' : undefined;
@@ -7099,6 +7240,7 @@ export class TelegramService {
         expiresAt,
         hasSetupVideo,
         setupVideoUrl,
+        setupVideoTelegramFileId,
         setupVideoType,
         setupVideoFileName,
         setupVideoButtonText,
@@ -7133,6 +7275,7 @@ export class TelegramService {
         expiresAt,
         hasSetupVideo,
         setupVideoUrl,
+        setupVideoTelegramFileId,
         setupVideoType,
         setupVideoFileName,
         setupVideoButtonText,
@@ -7168,6 +7311,7 @@ export class TelegramService {
         expiresAt,
         hasSetupVideo,
         setupVideoUrl,
+        setupVideoTelegramFileId,
         setupVideoType,
         setupVideoFileName,
         setupVideoButtonText,
@@ -8653,14 +8797,23 @@ export class TelegramService {
   }
 
   // =========================================================================
-  // TELEGRAM POLLING & WEBHOOK HYBRID WORKER WITH LEADER ELECTION
+  // TELEGRAM POLLING & WEBHOOK HYBRID WORKER WITH LEADER ELECTION & LIFECYCLE
   // =========================================================================
   private static pollingActive = false;
+  private static manuallyStopped = false;
   private static pollingOffset = 0;
   private static isInitializing = false;
   private static isLoopRunning = false;
   private static isLeader = false;
   private static leaderCheckTimer: any = null;
+  private static pollingAbortController: AbortController | null = null;
+  private static pollingRestartTimer: NodeJS.Timeout | null = null;
+  private static pollingEpoch: number = 0;
+  private static activePollingPromise: Promise<void> | null = null;
+
+  public static isManuallyStopped(): boolean {
+    return this.manuallyStopped;
+  }
 
   public static async initPollingWorker(): Promise<void> {
     if (this.leaderCheckTimer) {
@@ -8677,6 +8830,14 @@ export class TelegramService {
       }
     } catch {}
 
+    const mainStorage = StorageManager.getMainStorage();
+    const initSettings = await mainStorage.getSettings().catch(() => ({} as any));
+    if (initSettings?.botStopped) {
+      this.manuallyStopped = true;
+      console.info('[Telegram] Main bot is configured as stopped (botStopped=true). Staying dormant until started.');
+      return;
+    }
+
     const token = await this.getBotToken();
     if (!token) {
       console.info('[Telegram] No bot token configured, polling worker waiting.');
@@ -8688,9 +8849,8 @@ export class TelegramService {
       const me = await this.callTelegramApi('getMe', {});
       if (me?.ok && me.result) {
         console.info(`[Telegram] Connection verified for @${me.result.username || 'Bot'} (ID: ${me.result.id})`);
-        const settings = await storage.getSettings();
-        if (!settings.botUsername || settings.botUsername !== me.result.username) {
-          await storage.updateSettings({ botUsername: me.result.username || '' });
+        if (!initSettings.botUsername || initSettings.botUsername !== me.result.username) {
+          await mainStorage.updateSettings({ botUsername: me.result.username || '' });
         }
       }
     } catch (e: any) {
@@ -8700,6 +8860,17 @@ export class TelegramService {
     // Leader election loop: checks every 4 seconds to guarantee EXACTLY ONE worker polls across Dev, Preview, and external hosts
     const checkLeadershipAndRun = async () => {
       try {
+        if (this.manuallyStopped) {
+          if (this.pollingActive || this.isLoopRunning) {
+            await this.stopPollingAsync();
+          }
+          if (this.isLeader) {
+            this.isLeader = false;
+            await storage.releasePollingLeader(BOT_INSTANCE_ID).catch(() => {});
+          }
+          return;
+        }
+
         const claimResult = await storage.tryClaimPollingLeader(BOT_INSTANCE_ID, 12000);
         if (claimResult.isLeader) {
           if (!this.isLeader) {
@@ -8708,6 +8879,8 @@ export class TelegramService {
           }
           if (!this.pollingActive) {
             this.pollingActive = true;
+          }
+          if (!this.isLoopRunning && !this.activePollingPromise) {
             this.startPollingLoop();
           }
         } else {
@@ -8715,8 +8888,8 @@ export class TelegramService {
             console.warn(`[Telegram] Leadership yielded to ${claimResult.currentLeader}. Halting local polling loop.`);
             this.isLeader = false;
           }
-          if (this.pollingActive) {
-            this.stopPolling();
+          if (this.pollingActive || this.isLoopRunning) {
+            await this.stopPollingAsync();
           }
         }
       } catch (err: any) {
@@ -8726,7 +8899,9 @@ export class TelegramService {
 
     // Run first check immediately, then schedule every 4 seconds
     await checkLeadershipAndRun();
-    this.leaderCheckTimer = setInterval(checkLeadershipAndRun, 4000);
+    if (!this.leaderCheckTimer && !this.manuallyStopped) {
+      this.leaderCheckTimer = setInterval(checkLeadershipAndRun, 4000);
+    }
 
     // Cleanly release leadership lock on process termination
     const onExit = async () => {
@@ -8742,52 +8917,342 @@ export class TelegramService {
   }
 
   public static isPollingActive(): boolean {
-    return this.pollingActive && this.isLeader;
+    return !this.manuallyStopped && this.pollingActive && this.isLeader;
   }
 
   public static stopPolling(): void {
+    this.pollingEpoch += 1;
     this.pollingActive = false;
+    this.isLoopRunning = false;
+    if (this.pollingRestartTimer) {
+      clearTimeout(this.pollingRestartTimer);
+      this.pollingRestartTimer = null;
+    }
+    if (this.pollingAbortController) {
+      try {
+        this.pollingAbortController.abort();
+      } catch {}
+      this.pollingAbortController = null;
+    }
+    delete activeBots['main'];
+  }
+
+  public static async stopPollingAsync(options?: { dropPendingUpdates?: boolean }): Promise<void> {
+    const runningPromise = this.activePollingPromise;
+    this.stopPolling();
+    if (runningPromise) {
+      await Promise.race([
+        runningPromise.catch(() => {}),
+        new Promise<void>((resolve) => setTimeout(resolve, 2500))
+      ]);
+    }
+    this.activePollingPromise = null;
+    this.isLoopRunning = false;
+    if (options?.dropPendingUpdates) {
+      this.pollingOffset = 0;
+      const token = await this.getBotToken().catch(() => '');
+      if (token) {
+        await this.callTelegramApi('deleteWebhook', { drop_pending_updates: true }, token).catch(() => {});
+      }
+    }
   }
 
   public static async releaseLeaderLock(): Promise<void> {
-    this.pollingActive = false;
+    await this.stopPollingAsync();
     this.isLeader = false;
     try {
       await storage.releasePollingLeader(BOT_INSTANCE_ID);
     } catch {}
   }
 
+  public static async stopBot(persist: boolean = true): Promise<void> {
+    return withBotLifecycleLock('main', async () => {
+      this.manuallyStopped = true;
+      if (this.leaderCheckTimer) {
+        clearInterval(this.leaderCheckTimer);
+        this.leaderCheckTimer = null;
+      }
+      await this.stopPollingAsync({ dropPendingUpdates: true });
+      this.isLeader = false;
+      await StorageManager.getMainStorage().releasePollingLeader(BOT_INSTANCE_ID).catch(() => {});
+      if (persist) {
+        await StorageManager.getMainStorage().updateSettings({ botStopped: true }).catch(() => {});
+      }
+      console.info('[Telegram] Main bot polling stopped and all timers/listeners cleared.');
+    });
+  }
+
+  public static async startBot(): Promise<void> {
+    return withBotLifecycleLock('main', async () => {
+      const token = await this.getBotToken().catch(() => '');
+      // Stop any existing main polling instance or conflicting activeBots entry sharing this token
+      if (activeBots['main']) {
+        await activeBots['main'].stop({ dropPendingUpdates: true }).catch(() => {});
+        delete activeBots['main'];
+      }
+      for (const [k, handle] of Object.entries(activeBots)) {
+        if (k !== 'main' && token && handle.token === token) {
+          await handle.stop({ dropPendingUpdates: true }).catch(() => {});
+          delete activeBots[k];
+        }
+      }
+      await this.stopPollingAsync({ dropPendingUpdates: true });
+
+      this.manuallyStopped = false;
+      this.pollingOffset = 0;
+      await StorageManager.getMainStorage().updateSettings({ botStopped: false }).catch(() => {});
+
+      if (!this.leaderCheckTimer) {
+        await this.initPollingWorker();
+        return;
+      }
+      const claimResult = await StorageManager.getMainStorage().tryClaimPollingLeader(BOT_INSTANCE_ID, 12000).catch(() => ({ isLeader: true }));
+      if (claimResult.isLeader) {
+        this.isLeader = true;
+        this.pollingActive = true;
+        this.startPollingLoop();
+      }
+      console.info('[Telegram] Main bot polling started cleanly (singleton verified).');
+    });
+  }
+
+  public static async restartBot(): Promise<{ cleaned: Awaited<ReturnType<typeof TelegramService.cleanBotMemory>> }> {
+    await this.stopBot(false);
+    const cleaned = await this.cleanBotMemory();
+    await new Promise((r) => setTimeout(r, 350));
+    await this.startBot();
+    console.info('[Telegram] Main bot restarted cleanly.');
+    return { cleaned };
+  }
+
+  public static async cleanBotMemory(targetStorage?: any): Promise<{
+    clearedRuntimeEntries: number;
+    clearedStorageEntries: number;
+    rssMb: number;
+    heapUsedMb: number;
+  }> {
+    const now = Date.now();
+    let expiredProcessedCleared = 0;
+    for (const [k, ts] of processedUpdateKeys.entries()) {
+      if (now - ts > 120000) {
+        processedUpdateKeys.delete(k);
+        expiredProcessedCleared++;
+      }
+    }
+
+    const runtimeCount =
+      activeAddSessions.size +
+      activeEditSessions.size +
+      activeSetChannelSessions.size +
+      activeCloneSessions.size +
+      recentDeliveries.size +
+      expiredProcessedCleared +
+      this.forceSubCache.size +
+      this.groupAdminCache.size +
+      this.freeFirePlayerCache.size +
+      this.freeFireGuildCache.size;
+
+    activeAddSessions.clear();
+    activeEditSessions.clear();
+    activeSetChannelSessions.clear();
+    activeCloneSessions.clear();
+    recentDeliveries.clear();
+    // Preserve inFlightUpdateKeys and recent (<2m) processedUpdateKeys to block duplicate update replay on restart
+    this.forceSubCache.clear();
+    this.groupAdminCache.clear();
+    this.freeFirePlayerCache.clear();
+    this.freeFireGuildCache.clear();
+
+    let clearedStorageEntries = 0;
+    const storagesToClean = targetStorage
+      ? [targetStorage]
+      : StorageManager.getLoadedStorageIds().map(id => StorageManager.getStorage(id));
+
+    for (const st of storagesToClean) {
+      if (st && typeof st.clearMemoryCaches === 'function') {
+        const res = await st.clearMemoryCaches().catch(() => null);
+        if (res) {
+          clearedStorageEntries +=
+            (res.clearedLruEntries || 0) +
+            (res.clearedBlobs || 0) +
+            (res.clearedMemoryFiles || 0) +
+            (res.prunedSessions || 0) +
+            (res.prunedWebcodes || 0);
+        }
+      }
+    }
+
+    try {
+      if (typeof (global as any).gc === 'function') {
+        (global as any).gc();
+      }
+    } catch {}
+
+    const mem = process.memoryUsage();
+    return {
+      clearedRuntimeEntries: runtimeCount,
+      clearedStorageEntries,
+      rssMb: Math.round((mem.rss / (1024 * 1024)) * 10) / 10,
+      heapUsedMb: Math.round((mem.heapUsed / (1024 * 1024)) * 10) / 10
+    };
+  }
+
+  private static async handleBotLifecycleCommand(
+    fromId: string,
+    chatId: string | number,
+    text: string
+  ): Promise<void> {
+    const cleanText = text.trim();
+    const match = cleanText.match(/^\/(botstart|startbot|botstop|stopbot|botrestart|restartbot|botstatus|memclean|cleanmemory|clearcache)(?:@\w+)?(?:\s+(.+))?$/i);
+    if (!match) return;
+
+    const cmd = match[1].toLowerCase();
+    const arg = (match[2] || '').trim().replace(/^clone_/i, '').replace(/[:_-]/g, '');
+    const currentStorage = storage;
+    const currentBotId = (currentStorage as any)?.botId || 'main';
+    const targetBotId = (currentBotId === 'main' && arg) ? arg : currentBotId;
+
+    if (cmd === 'memclean' || cmd === 'cleanmemory' || cmd === 'clearcache') {
+      const stats = await TelegramBotManager.cleanMemory(targetBotId);
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text:
+          `🧹 <b>Memory &amp; Cache Cleaned</b>\n\n` +
+          `🤖 <b>Scope:</b> <code>${this.escapeHtml(targetBotId)}</code>\n` +
+          `🗑️ <b>Runtime Caches Purged:</b> ${stats.clearedRuntimeEntries}\n` +
+          `📦 <b>Storage Cache Entries Cleared:</b> ${stats.clearedStorageEntries}\n` +
+          `📊 <b>Memory Usage:</b> ${stats.heapUsedMb} MB heap · ${stats.rssMb} MB RSS`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    if (cmd === 'botstatus') {
+      const mem = process.memoryUsage();
+      const rssMb = Math.round((mem.rss / (1024 * 1024)) * 10) / 10;
+      const heapMb = Math.round((mem.heapUsed / (1024 * 1024)) * 10) / 10;
+      const isMain = targetBotId === 'main';
+      const isRunning = isMain
+        ? (!this.manuallyStopped && (this.pollingActive || Boolean(this.leaderCheckTimer)))
+        : TelegramBotManager.isBotActivelyRunning(targetBotId);
+      const items = await StorageManager.getStorage(targetBotId).getItems().catch(() => []);
+      const allBots = isMain ? await TelegramBotManager.getAllBots().catch(() => []) : [];
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text:
+          `📊 <b>BOT RUNTIME STATUS</b>\n` +
+          `━━━━━━━━━━━━━━━━━━━━\n` +
+          `🤖 <b>Bot ID:</b> <code>${this.escapeHtml(targetBotId)}</code>\n` +
+          `📡 <b>State:</b> ${isRunning ? '🟢 Running' : '🔴 Stopped'}\n` +
+          `📁 <b>Stored Items:</b> ${items.length}\n` +
+          (isMain ? `🧬 <b>Fleet Size:</b> ${allBots.length} bot(s)\n` : '') +
+          `🧠 <b>Memory:</b> ${heapMb} MB heap · ${rssMb} MB RSS\n` +
+          `⏱️ <b>Uptime:</b> ${Math.floor(process.uptime())}s`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    if (cmd === 'botstop' || cmd === 'stopbot') {
+      if (targetBotId !== 'main' && currentBotId === 'main') {
+        const ok = await TelegramBotManager.stopBot(targetBotId);
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: ok
+            ? `⏹️ <b>Cloned Bot Stopped</b>\n\nBot <code>${this.escapeHtml(targetBotId)}</code> polling listener has been stopped. It will ignore updates until started again.`
+            : `❌ Could not find bot <code>${this.escapeHtml(targetBotId)}</code>.`,
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `⏹️ <b>Stopping Bot Listener...</b>\n\nPolling for <code>${this.escapeHtml(targetBotId)}</code> is now halting. Re-enable anytime from the Web Admin Panel${currentBotId === 'main' ? ' or via /botstart on main panel' : ''}.`,
+        parse_mode: 'HTML'
+      });
+      await TelegramBotManager.stopBot(targetBotId);
+      return;
+    }
+
+    if (cmd === 'botstart' || cmd === 'startbot') {
+      const ok = await TelegramBotManager.startBot(targetBotId);
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: ok
+          ? `▶️ <b>Bot Started</b>\n\nBot <code>${this.escapeHtml(targetBotId)}</code> is now 🟢 active and polling.`
+          : `❌ Could not start bot <code>${this.escapeHtml(targetBotId)}</code>.`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    if (cmd === 'botrestart' || cmd === 'restartbot') {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `🔄 <b>Restarting Bot &amp; Cleaning Caches...</b>\nTarget: <code>${this.escapeHtml(targetBotId)}</code>`,
+        parse_mode: 'HTML'
+      });
+      const ok = await TelegramBotManager.restartBot(targetBotId);
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: ok
+          ? `✅ <b>Restart Complete!</b>\n\nBot <code>${this.escapeHtml(targetBotId)}</code> is online with freshly cleared runtime caches.`
+          : `❌ Failed to restart bot <code>${this.escapeHtml(targetBotId)}</code>.`,
+        parse_mode: 'HTML'
+      }).catch(() => {});
+      return;
+    }
+  }
+
   private static startPollingLoop(): void {
-    if (this.isLoopRunning) return;
+    if (this.isLoopRunning || this.activePollingPromise || this.manuallyStopped || !this.pollingActive || !this.isLeader) {
+      return;
+    }
+    this.pollingEpoch += 1;
+    const myEpoch = this.pollingEpoch;
     this.isLoopRunning = true;
-    this.runPollingLoop().catch((err) => {
-      this.isLoopRunning = false;
+
+    this.getBotToken().then((token) => {
+      if (this.pollingEpoch !== myEpoch || this.manuallyStopped) return;
+      activeBots['main'] = {
+        botId: 'main',
+        token: token || '',
+        stop: (opts) => this.stopPollingAsync(opts),
+        isAlive: () => !this.manuallyStopped && this.pollingActive && this.isLoopRunning
+      };
+    }).catch(() => {});
+
+    const loopPromise = this.runPollingLoop(myEpoch).catch((err) => {
+      if (this.pollingEpoch !== myEpoch) return;
       console.warn('[Telegram Polling] Polling loop caught error, auto-recovering in 2s...', err?.message || err);
-      setTimeout(() => {
-        if (this.pollingActive && this.isLeader) {
+      if (this.pollingRestartTimer) clearTimeout(this.pollingRestartTimer);
+      this.pollingRestartTimer = setTimeout(() => {
+        this.pollingRestartTimer = null;
+        if (this.pollingEpoch === myEpoch && !this.manuallyStopped && this.pollingActive && this.isLeader) {
           this.startPollingLoop();
         }
       }, 2000);
     });
+    this.activePollingPromise = loopPromise;
   }
 
-  private static async runPollingLoop(): Promise<void> {
+  private static async runPollingLoop(myEpoch: number): Promise<void> {
+    this.pollingAbortController = new AbortController();
+    const signal = this.pollingAbortController.signal;
     try {
-      // Clear any stale webhook and DROP all pending backlogged updates to start clean
+      // Unconditionally clear any webhook and drop all queued pending updates before polling
       try {
-        const webhookInfo = await this.callTelegramApi('getWebhookInfo', {});
-        if (webhookInfo?.result?.url) {
-          console.info(`[Telegram Polling] Found active webhook (${webhookInfo.result.url}). Deleting webhook and dropping pending updates...`);
-          await this.callTelegramApi('deleteWebhook', { drop_pending_updates: true });
-        }
+        await this.callTelegramApi('deleteWebhook', { drop_pending_updates: true }, undefined, signal);
+        console.info('[Telegram Polling] Cleared webhook & dropped pending updates before starting polling loop.');
       } catch (err: any) {
-        console.warn('[Telegram Polling] Webhook cleanup check:', err?.message || err);
+        if (signal.aborted || myEpoch !== this.pollingEpoch) return;
+        console.warn('[Telegram Polling] Webhook cleanup notice:', err?.message || err);
       }
 
       // Initialize pollingOffset to latest update_id so old queued messages are flushed immediately
-      if (this.pollingOffset === 0) {
+      if (this.pollingOffset === 0 && !this.manuallyStopped && myEpoch === this.pollingEpoch && !signal.aborted) {
         try {
-          const peek = await this.callTelegramApi('getUpdates', { offset: -1, limit: 1 });
+          const peek = await this.callTelegramApi('getUpdates', { offset: -1, limit: 1 }, undefined, signal);
           if (peek?.ok && Array.isArray(peek.result) && peek.result.length > 0) {
             this.pollingOffset = peek.result[0].update_id + 1;
             console.info(`[Telegram Polling] Advanced initial polling offset to ${this.pollingOffset} to discard stale backlog.`);
@@ -8795,7 +9260,7 @@ export class TelegramService {
         } catch {}
       }
 
-      while (this.pollingActive && this.isLeader) {
+      while (myEpoch === this.pollingEpoch && !this.manuallyStopped && this.pollingActive && this.isLeader && !signal.aborted) {
         try {
           const res = await this.callTelegramApi('getUpdates', {
             offset: this.pollingOffset,
@@ -8805,14 +9270,17 @@ export class TelegramService {
               'inline_query', 'chosen_inline_result', 'callback_query',
               'my_chat_member', 'chat_member', 'chat_join_request'
             ]
-          });
+          }, undefined, signal);
 
-          if (!this.pollingActive || !this.isLeader) {
+          if (myEpoch !== this.pollingEpoch || this.manuallyStopped || !this.pollingActive || !this.isLeader || signal.aborted) {
             break;
           }
 
           if (res && res.ok && Array.isArray(res.result)) {
             for (const update of res.result) {
+              if (myEpoch !== this.pollingEpoch || this.manuallyStopped || !this.pollingActive || !this.isLeader || signal.aborted) {
+                break;
+              }
               this.pollingOffset = Math.max(this.pollingOffset, update.update_id + 1);
               try {
                 await this.handleUpdate(update);
@@ -8822,6 +9290,7 @@ export class TelegramService {
             }
           }
         } catch (err: any) {
+          if (myEpoch !== this.pollingEpoch || this.manuallyStopped || signal.aborted) break;
           if (err?.message && err.message.includes('409')) {
             console.warn('[Telegram Polling] 409 Conflict: another instance is active. Yielding leadership for 6s...');
             this.isLeader = false;
@@ -8832,73 +9301,153 @@ export class TelegramService {
         }
       }
     } finally {
-      this.isLoopRunning = false;
+      if (this.pollingEpoch === myEpoch) {
+        this.isLoopRunning = false;
+        this.activePollingPromise = null;
+        delete activeBots['main'];
+      }
     }
   }
 }
 
 export class ClonedBotRunner {
   private isRunning: boolean = false;
+  private isStarting: boolean = false;
   private isLoopActive: boolean = false;
   private pollingOffset: number = 0;
   private lastPollAt: number = Date.now();
   private abortController: AbortController | null = null;
+  private restartTimer: NodeJS.Timeout | null = null;
+  private loopEpoch: number = 0;
+  private activeLoopPromise: Promise<void> | null = null;
 
   constructor(public readonly bot: ClonedBotRecord) {}
 
   public isAlive(): boolean {
-    return this.isRunning && this.isLoopActive && (Date.now() - this.lastPollAt < 90000);
+    if (!this.isRunning || TelegramBotManager.isBotDeleted(this.bot.id) || TelegramBotManager.isBotStopped(this.bot.id)) {
+      return false;
+    }
+    if (this.isStarting) return true;
+    return this.isLoopActive && (Date.now() - this.lastPollAt < 90000);
   }
 
   public async start(): Promise<void> {
-    if (this.isRunning && this.isLoopActive) return;
+    if (TelegramBotManager.isBotDeleted(this.bot.id) || TelegramBotManager.isBotStopped(this.bot.id)) {
+      return;
+    }
+    if (this.isRunning && (this.isStarting || this.isLoopActive)) {
+      return;
+    }
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     this.isRunning = true;
+    this.isStarting = true;
+    this.pollingOffset = 0;
     this.lastPollAt = Date.now();
     this.abortController = new AbortController();
 
     console.info(`[ClonedBot ${this.bot.id}] Starting isolated runner for @${this.bot.username}...`);
 
     try {
-      await TelegramService.callTelegramApi('deleteWebhook', { drop_pending_updates: false }, this.bot.token);
+      await TelegramService.callTelegramApi('deleteWebhook', { drop_pending_updates: true }, this.bot.token, this.abortController.signal);
     } catch {}
+
+    if (!this.isRunning || TelegramBotManager.isBotDeleted(this.bot.id) || TelegramBotManager.isBotStopped(this.bot.id)) {
+      this.isStarting = false;
+      return;
+    }
 
     this.launchLoop();
   }
 
   private launchLoop(): void {
-    if (!this.isRunning || this.isLoopActive) return;
+    if (
+      !this.isRunning ||
+      this.isLoopActive ||
+      this.activeLoopPromise ||
+      TelegramBotManager.isBotDeleted(this.bot.id) ||
+      TelegramBotManager.isBotStopped(this.bot.id)
+    ) {
+      this.isStarting = false;
+      return;
+    }
+    this.loopEpoch += 1;
+    const myEpoch = this.loopEpoch;
     this.isLoopActive = true;
-    this.runLoop()
+    this.isStarting = false;
+
+    const p = this.runLoop(myEpoch)
       .catch(err => {
-        console.warn(`[ClonedBot ${this.bot.id}] Runner error:`, err?.message || err);
+        if (this.loopEpoch === myEpoch) {
+          console.warn(`[ClonedBot ${this.bot.id}] Runner error:`, err?.message || err);
+        }
       })
       .finally(() => {
+        if (this.loopEpoch !== myEpoch) return;
         this.isLoopActive = false;
-        if (this.isRunning) {
-          setTimeout(() => {
-            if (this.isRunning) {
+        this.activeLoopPromise = null;
+        if (
+          this.isRunning &&
+          !TelegramBotManager.isBotDeleted(this.bot.id) &&
+          !TelegramBotManager.isBotStopped(this.bot.id)
+        ) {
+          this.restartTimer = setTimeout(() => {
+            this.restartTimer = null;
+            if (
+              this.loopEpoch === myEpoch &&
+              this.isRunning &&
+              !TelegramBotManager.isBotDeleted(this.bot.id) &&
+              !TelegramBotManager.isBotStopped(this.bot.id)
+            ) {
               this.launchLoop();
             }
           }, 2000);
         }
       });
+    this.activeLoopPromise = p;
   }
 
-  public stop(): void {
+  public async stop(options?: { dropPendingUpdates?: boolean }): Promise<void> {
+    this.loopEpoch += 1;
     this.isRunning = false;
-    this.isLoopActive = false;
+    this.isStarting = false;
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
     if (this.abortController) {
-      this.abortController.abort();
+      try {
+        this.abortController.abort();
+      } catch {}
       this.abortController = null;
     }
-    console.info(`[ClonedBot ${this.bot.id}] Runner stopped.`);
+    const loopPromise = this.activeLoopPromise;
+    if (loopPromise) {
+      await Promise.race([
+        loopPromise.catch(() => {}),
+        new Promise<void>((resolve) => setTimeout(resolve, 2500))
+      ]);
+    }
+    this.isLoopActive = false;
+    this.activeLoopPromise = null;
+    this.pollingOffset = 0;
+    if (options?.dropPendingUpdates && this.bot.token) {
+      await TelegramService.callTelegramApi('deleteWebhook', { drop_pending_updates: true }, this.bot.token).catch(() => {});
+    }
+    console.info(`[ClonedBot ${this.bot.id}] Runner stopped cleanly.`);
   }
 
-  private async runLoop(): Promise<void> {
+  private async runLoop(myEpoch: number): Promise<void> {
+    const signal = this.abortController?.signal;
     const botStorage = StorageManager.getStorage(this.bot.id);
     try {
       await botStorage.init();
       await botStorage.loadLatest(true).catch(() => {});
+      if (myEpoch !== this.loopEpoch || !this.isRunning || TelegramBotManager.isBotDeleted(this.bot.id) || TelegramBotManager.isBotStopped(this.bot.id)) {
+        return;
+      }
       const st = await botStorage.getSettings();
       if (!st.botToken || st.botToken !== this.bot.token || (!st.botUsername && this.bot.username)) {
         await botStorage.updateSettings({
@@ -8910,16 +9459,16 @@ export class ClonedBotRunner {
       console.warn(`[ClonedBot ${this.bot.id}] Storage init notice:`, initErr?.message || initErr);
     }
 
-    if (this.pollingOffset === 0) {
+    if (this.pollingOffset === 0 && myEpoch === this.loopEpoch && this.isRunning && !signal?.aborted && !TelegramBotManager.isBotDeleted(this.bot.id)) {
       try {
-        const peek = await TelegramService.callTelegramApi('getUpdates', { offset: -1, limit: 1 }, this.bot.token);
+        const peek = await TelegramService.callTelegramApi('getUpdates', { offset: -1, limit: 1 }, this.bot.token, signal);
         if (peek?.ok && Array.isArray(peek.result) && peek.result.length > 0) {
           this.pollingOffset = peek.result[0].update_id + 1;
         }
       } catch {}
     }
 
-    while (this.isRunning) {
+    while (myEpoch === this.loopEpoch && this.isRunning && !signal?.aborted && !TelegramBotManager.isBotDeleted(this.bot.id) && !TelegramBotManager.isBotStopped(this.bot.id)) {
       try {
         this.lastPollAt = Date.now();
         const res = await TelegramService.callTelegramApi('getUpdates', {
@@ -8930,13 +9479,18 @@ export class ClonedBotRunner {
             'inline_query', 'chosen_inline_result', 'callback_query',
             'my_chat_member', 'chat_member', 'chat_join_request'
           ]
-        }, this.bot.token);
+        }, this.bot.token, signal);
         this.lastPollAt = Date.now();
 
-        if (!this.isRunning) break;
+        if (myEpoch !== this.loopEpoch || !this.isRunning || signal?.aborted || TelegramBotManager.isBotDeleted(this.bot.id) || TelegramBotManager.isBotStopped(this.bot.id)) {
+          break;
+        }
 
         if (res && res.ok && Array.isArray(res.result)) {
           for (const update of res.result) {
+            if (myEpoch !== this.loopEpoch || !this.isRunning || signal?.aborted || TelegramBotManager.isBotDeleted(this.bot.id) || TelegramBotManager.isBotStopped(this.bot.id)) {
+              break;
+            }
             this.pollingOffset = Math.max(this.pollingOffset, update.update_id + 1);
             try {
               await storageContext.run(botStorage, async () => {
@@ -8952,7 +9506,9 @@ export class ClonedBotRunner {
           await new Promise(r => setTimeout(r, 5000));
         }
       } catch (err: any) {
-        if (!this.isRunning) break;
+        if (myEpoch !== this.loopEpoch || !this.isRunning || signal?.aborted || TelegramBotManager.isBotDeleted(this.bot.id) || TelegramBotManager.isBotStopped(this.bot.id)) {
+          break;
+        }
         await new Promise(r => setTimeout(r, 2000));
       }
     }
@@ -8962,6 +9518,39 @@ export class ClonedBotRunner {
 export class TelegramBotManager {
   private static runners: Map<string, ClonedBotRunner> = new Map();
   private static watchdogTimer: NodeJS.Timeout | null = null;
+  private static deletedBotIds: Set<string> = new Set();
+  private static stoppedBotIds: Set<string> = new Set();
+
+  private static normalizeBotKey(id: string): string {
+    return String(id || '').trim().replace(/^clone_/i, '').replace(/[:_-]/g, '');
+  }
+
+  public static isBotDeleted(id: string): boolean {
+    if (!id || id === 'main') return false;
+    const clean = String(id).trim();
+    const norm = this.normalizeBotKey(clean);
+    return this.deletedBotIds.has(clean) || (norm ? this.deletedBotIds.has(norm) : false);
+  }
+
+  public static isBotStopped(id: string): boolean {
+    if (!id) return false;
+    if (id === 'main') return TelegramService.isManuallyStopped();
+    const clean = String(id).trim();
+    const norm = this.normalizeBotKey(clean);
+    return this.stoppedBotIds.has(clean) || (norm ? this.stoppedBotIds.has(norm) : false);
+  }
+
+  public static isBotActivelyRunning(id: string): boolean {
+    if (id === 'main') return TelegramService.isPollingActive();
+    if (this.isBotDeleted(id) || this.isBotStopped(id)) return false;
+    const norm = this.normalizeBotKey(id);
+    for (const [key, runner] of this.runners.entries()) {
+      if (key === id || this.normalizeBotKey(key) === norm) {
+        return runner.isAlive();
+      }
+    }
+    return false;
+  }
 
   public static async verifyBotToken(token: string): Promise<{ ok: boolean; info?: any; error?: string }> {
     try {
@@ -8978,10 +9567,13 @@ export class TelegramBotManager {
   }
 
   public static ensureBotRunning(bot: ClonedBotRecord): void {
-    if (!bot || bot.status === 'stopped') return;
-    const existing = this.runners.get(bot.id);
+    if (!bot || bot.status === 'stopped' || this.isBotDeleted(bot.id) || this.isBotStopped(bot.id)) return;
+    const norm = this.normalizeBotKey(bot.id);
+    const existing =
+      this.runners.get(bot.id) ||
+      Array.from(this.runners.entries()).find(([k]) => this.normalizeBotKey(k) === norm)?.[1];
     if (!existing || !existing.isAlive()) {
-      this.startBotInstance(bot);
+      void this.startBotInstance(bot);
     }
   }
 
@@ -8996,13 +9588,42 @@ export class TelegramBotManager {
           await mainStorage.loadLatest(true).catch(() => {});
           bots = await mainStorage.getClonedBots().catch(() => []);
         }
+        const activeRegistryNorms = new Set<string>();
         for (const bot of bots) {
-          if (bot.status !== 'stopped') {
-            const runner = this.runners.get(bot.id);
+          if (this.isBotDeleted(bot.id)) continue;
+          const norm = this.normalizeBotKey(bot.id);
+          activeRegistryNorms.add(bot.id);
+          if (norm) activeRegistryNorms.add(norm);
+          if (bot.status === 'stopped') {
+            this.stoppedBotIds.add(bot.id);
+            for (const [k, r] of Array.from(this.runners.entries())) {
+              if (k === bot.id || this.normalizeBotKey(k) === norm) {
+                await r.stop({ dropPendingUpdates: true }).catch(() => {});
+                this.runners.delete(k);
+              }
+            }
+            if (norm && activeBots[norm]) {
+              await activeBots[norm].stop({ dropPendingUpdates: true }).catch(() => {});
+              delete activeBots[norm];
+            }
+          } else if (!this.isBotStopped(bot.id)) {
+            const runner =
+              this.runners.get(bot.id) ||
+              Array.from(this.runners.entries()).find(([k]) => this.normalizeBotKey(k) === norm)?.[1];
             if (!runner || !runner.isAlive()) {
               console.info(`[Watchdog] Reviving polling runner for cloned bot @${bot.username} (${bot.id})...`);
-              this.startBotInstance(bot);
+              await this.startBotInstance(bot);
             }
+          }
+        }
+        // Clean up any orphaned runners not in active registry
+        for (const [runnerId, runner] of Array.from(this.runners.entries())) {
+          const norm = this.normalizeBotKey(runnerId);
+          if ((!activeRegistryNorms.has(runnerId) && !activeRegistryNorms.has(norm)) || this.isBotDeleted(runnerId)) {
+            console.info(`[Watchdog] Shutting down orphaned runner (${runnerId})...`);
+            await runner.stop({ dropPendingUpdates: true }).catch(() => {});
+            this.runners.delete(runnerId);
+            if (norm) delete activeBots[norm];
           }
         }
       } catch (err: any) {
@@ -9019,8 +9640,12 @@ export class TelegramBotManager {
       const bots = await mainStorage.getClonedBots();
       console.info(`[TelegramBotManager] Initializing ${bots.length} cloned bots...`);
       for (const bot of bots) {
-        if (bot.status !== 'stopped') {
-          this.startBotInstance(bot);
+        if (this.isBotDeleted(bot.id)) continue;
+        if (bot.status === 'stopped') {
+          this.stoppedBotIds.add(bot.id);
+        } else {
+          this.stoppedBotIds.delete(bot.id);
+          await this.startBotInstance(bot);
         }
       }
       this.startWatchdog();
@@ -9043,13 +9668,136 @@ export class TelegramBotManager {
     return envUrl.trim().replace(/\/+$/, '');
   }
 
-  public static startBotInstance(bot: ClonedBotRecord): void {
-    if (this.runners.has(bot.id)) {
-      this.runners.get(bot.id)?.stop();
+  public static async startBotInstance(bot: ClonedBotRecord): Promise<void> {
+    if (this.isBotDeleted(bot.id) || this.isBotStopped(bot.id) || bot.status === 'stopped') {
+      return;
     }
-    const runner = new ClonedBotRunner(bot);
-    this.runners.set(bot.id, runner);
-    runner.start().catch(() => {});
+    const cleanNorm = this.normalizeBotKey(bot.id) || bot.id;
+    return withBotLifecycleLock(`clone:${cleanNorm}`, async () => {
+      if (this.isBotDeleted(bot.id) || this.isBotStopped(bot.id) || bot.status === 'stopped') {
+        return;
+      }
+
+      // Stop and destroy ANY existing active runner / handle matching this bot ID or token before launching
+      for (const [key, existingRunner] of Array.from(this.runners.entries())) {
+        const sameId = key === bot.id || this.normalizeBotKey(key) === cleanNorm;
+        const sameToken = Boolean(bot.token && existingRunner.bot?.token === bot.token);
+        if (sameId || sameToken) {
+          console.info(`[BotSingleton] Stopping existing runner (${key}) before launching ${bot.id}...`);
+          await existingRunner.stop({ dropPendingUpdates: true }).catch(() => {});
+          this.runners.delete(key);
+        }
+      }
+      for (const [activeKey, handle] of Object.entries(activeBots)) {
+        const sameId = activeKey === bot.id || activeKey === cleanNorm;
+        const sameToken = Boolean(bot.token && handle.token === bot.token);
+        if (sameId || sameToken) {
+          await handle.stop({ dropPendingUpdates: true }).catch(() => {});
+          delete activeBots[activeKey];
+        }
+      }
+
+      const runner = new ClonedBotRunner(bot);
+      this.runners.set(bot.id, runner);
+      activeBots[cleanNorm] = {
+        botId: bot.id,
+        token: bot.token,
+        stop: (opts) => runner.stop(opts),
+        isAlive: () => runner.isAlive()
+      };
+      await runner.start().catch(() => {});
+    });
+  }
+
+  public static async stopBot(id: string): Promise<boolean> {
+    if (!id || id === 'main') {
+      await TelegramService.stopBot(true);
+      return true;
+    }
+
+    const mainStorage = StorageManager.getMainStorage();
+    const bots = await mainStorage.getClonedBots().catch(() => []);
+    const cleanNorm = this.normalizeBotKey(id);
+    const target = bots.find(b => b.id === id || this.normalizeBotKey(b.id) === cleanNorm);
+    const targetId = target?.id || id;
+    const lockKey = cleanNorm || targetId;
+
+    return withBotLifecycleLock(`clone:${lockKey}`, async () => {
+      this.stoppedBotIds.add(targetId);
+      if (cleanNorm) this.stoppedBotIds.add(cleanNorm);
+
+      for (const [key, runner] of Array.from(this.runners.entries())) {
+        if (key === targetId || (cleanNorm && this.normalizeBotKey(key) === cleanNorm)) {
+          await runner.stop({ dropPendingUpdates: true }).catch(() => {});
+          this.runners.delete(key);
+        }
+      }
+      if (cleanNorm && activeBots[cleanNorm]) {
+        await activeBots[cleanNorm].stop({ dropPendingUpdates: true }).catch(() => {});
+        delete activeBots[cleanNorm];
+      }
+      if (activeBots[targetId]) {
+        await activeBots[targetId].stop({ dropPendingUpdates: true }).catch(() => {});
+        delete activeBots[targetId];
+      }
+
+      if (target) {
+        await mainStorage.saveClonedBot({ ...target, status: 'stopped' }).catch(() => {});
+        return true;
+      }
+      return false;
+    });
+  }
+
+  public static async startBot(id: string): Promise<boolean> {
+    if (!id || id === 'main') {
+      await TelegramService.startBot();
+      return true;
+    }
+    if (this.isBotDeleted(id)) return false;
+
+    const mainStorage = StorageManager.getMainStorage();
+    const bots = await mainStorage.getClonedBots().catch(() => []);
+    const cleanNorm = this.normalizeBotKey(id);
+    const target = bots.find(b => b.id === id || this.normalizeBotKey(b.id) === cleanNorm);
+    if (!target) return false;
+
+    this.stoppedBotIds.delete(target.id);
+    this.stoppedBotIds.delete(cleanNorm);
+
+    const updated: ClonedBotRecord = { ...target, status: 'active' };
+    await mainStorage.saveClonedBot(updated).catch(() => {});
+    await this.startBotInstance(updated);
+    return true;
+  }
+
+  public static async restartBot(id: string): Promise<boolean> {
+    if (!id || id === 'main') {
+      await TelegramService.restartBot();
+      return true;
+    }
+    if (this.isBotDeleted(id)) return false;
+
+    const mainStorage = StorageManager.getMainStorage();
+    const bots = await mainStorage.getClonedBots().catch(() => []);
+    const cleanNorm = this.normalizeBotKey(id);
+    const target = bots.find(b => b.id === id || this.normalizeBotKey(b.id) === cleanNorm);
+    if (!target) return false;
+
+    await this.stopBot(target.id);
+    await TelegramService.cleanBotMemory(StorageManager.getStorage(target.id)).catch(() => {});
+    await new Promise(r => setTimeout(r, 300));
+    return this.startBot(target.id);
+  }
+
+  public static async cleanMemory(id?: string): Promise<{
+    clearedRuntimeEntries: number;
+    clearedStorageEntries: number;
+    rssMb: number;
+    heapUsedMb: number;
+  }> {
+    const targetStorage = (id && id !== 'main') ? StorageManager.getStorage(id) : undefined;
+    return TelegramService.cleanBotMemory(targetStorage);
   }
 
   public static async validateCloneToken(token: string): Promise<{ ok: boolean; cleanToken?: string; info?: any; error?: string }> {
@@ -9097,6 +9845,12 @@ export class TelegramBotManager {
     const cleanToken = validation.cleanToken;
     const info = validation.info;
     const botId = String(info.id).replace(/[^a-zA-Z0-9]/g, '');
+
+    // Ensure tombstone flags are cleared if this bot ID is being freshly cloned
+    this.deletedBotIds.delete(botId);
+    this.deletedBotIds.delete(`clone_${botId}`);
+    this.stoppedBotIds.delete(botId);
+    this.stoppedBotIds.delete(`clone_${botId}`);
 
     // 1. Resolve official Owner User ID and/or Username
     const mainStorage = StorageManager.getMainStorage();
@@ -9218,20 +9972,49 @@ export class TelegramBotManager {
       console.warn('[TelegramBotManager] Error writing sub-admin to Firebase RTDB:', e?.message || e);
     }
 
-    this.startBotInstance(newBot);
+    this.startBotInstance(newBot).catch(() => {});
     console.info(`[TelegramBotManager] Cloned bot @${newBot.username} (${newBot.id}) started! Owner: ${resolvedOwnerTelegramId}${ownerUsername ? ` (@${ownerUsername})` : ''}`);
     return { success: true, bot: newBot };
   }
 
   public static async deleteClonedBot(id: string): Promise<boolean> {
-    if (id === 'main') return false;
-    if (this.runners.has(id)) {
-      this.runners.get(id)?.stop();
-      this.runners.delete(id);
+    if (!id || id === 'main') return false;
+    const cleanId = String(id).trim();
+    const cleanNorm = this.normalizeBotKey(cleanId);
+    const candidateIds = Array.from(new Set([cleanId, cleanNorm, cleanNorm ? `clone_${cleanNorm}` : ''].filter(Boolean)));
+
+    // 1. Immediately mark tombstones so in-flight updates, callbacks, or watchdogs stop instantly
+    for (const cid of candidateIds) {
+      this.deletedBotIds.add(cid);
+      this.stoppedBotIds.add(cid);
     }
+
+    // 2. Hard-stop any matching active runners, abort in-flight polling fetch, and drop Telegram webhook/pending updates
     const mainStorage = StorageManager.getMainStorage();
-    await mainStorage.deleteClonedBot(id);
-    return true;
+    const existingList = await mainStorage.getClonedBots().catch(() => []);
+    const matchedBot = existingList.find(b => candidateIds.includes(b.id) || this.normalizeBotKey(b.id) === cleanNorm);
+
+    for (const [runnerKey, runner] of Array.from(this.runners.entries())) {
+      if (candidateIds.includes(runnerKey) || this.normalizeBotKey(runnerKey) === cleanNorm) {
+        await runner.stop({ dropPendingUpdates: true }).catch(() => {});
+        this.runners.delete(runnerKey);
+      }
+    }
+    for (const cid of candidateIds) {
+      if (activeBots[cid]) {
+        await activeBots[cid].stop({ dropPendingUpdates: true }).catch(() => {});
+        delete activeBots[cid];
+      }
+    }
+    if (matchedBot?.token) {
+      await TelegramService.callTelegramApi('deleteWebhook', { drop_pending_updates: true }, matchedBot.token).catch(() => {});
+    }
+
+    // 3. Destroy isolated StorageManager instance, local JSON files, and isolated Firebase RTDB records
+    await StorageManager.destroyStorage(cleanId);
+    const removed = await mainStorage.deleteClonedBot(cleanId);
+    console.info(`[TelegramBotManager] Deleted cloned bot (${cleanId}): runner destroyed and isolated data purged.`);
+    return removed;
   }
 
   public static async getAllBots(): Promise<Array<{
@@ -9254,28 +10037,31 @@ export class TelegramBotManager {
     const mainItems = await mainStorage.getItems().catch(() => []);
     const mainUsers = await mainStorage.getBotUsers().catch(() => []);
 
+    const mainStopped = TelegramService.isManuallyStopped() || Boolean(mainSettings?.botStopped);
     const list: any[] = [{
       id: 'main',
       name: mainSettings.botUsername ? `@${mainSettings.botUsername}` : 'Main Bot',
       username: mainSettings.botUsername || '',
       isMain: true,
-      status: 'active',
+      status: mainStopped ? 'stopped' : 'active',
       filesCount: mainItems.length,
       usersCount: mainUsers.length
     }];
 
     const cloned = await mainStorage.getClonedBots().catch(() => []);
     for (const c of cloned) {
+      if (this.isBotDeleted(c.id)) continue;
       const cStorage = StorageManager.getStorage(c.id);
       const cItems = await cStorage.getItems().catch(() => []);
       const cUsers = await cStorage.getBotUsers().catch(() => []);
       const cleanBotId = String(c.id).replace(/^clone_/i, '').replace(/[:_-]/g, '');
+      const isStopped = c.status === 'stopped' || this.isBotStopped(c.id);
       list.push({
         id: c.id,
         name: c.name || `@${c.username}`,
         username: c.username,
         isMain: false,
-        status: this.runners.has(c.id) ? 'active' : (c.status || 'active'),
+        status: isStopped ? 'stopped' : 'active',
         filesCount: cItems.length,
         usersCount: cUsers.length,
         createdAt: c.createdAt,

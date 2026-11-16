@@ -3,7 +3,7 @@ import { BotInstance, api } from '../lib/api';
 import { toast } from '../lib/toast';
 import { 
   Bot, Check, Plus, Trash2, ExternalLink, RefreshCw, Loader2, 
-  X, Shield, Sparkles, AlertCircle, Copy
+  X, Shield, Sparkles, AlertCircle, Copy, Play, Square, RotateCcw
 } from 'lucide-react';
 
 interface BotSwitcherModalProps {
@@ -33,6 +33,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
   // Delete confirm state
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<boolean>(false);
+  const [lifecycleBusy, setLifecycleBusy] = useState<string | null>(null);
 
   const loadBots = async () => {
     setLoading(true);
@@ -117,7 +118,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
     setDeleting(true);
     try {
       await api.deleteClonedBot(id);
-      toast.success('Cloned bot removed successfully.');
+      toast.success('Cloned bot terminated & removed completely.');
       setDeleteConfirmId(null);
       if (activeBotId === id) {
         api.setActiveBotId('main');
@@ -129,6 +130,36 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
       toast.error(err?.message || 'Failed to remove bot');
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleBotLifecycle = async (bot: BotInstance, action: 'start' | 'stop' | 'restart' | 'clean-memory') => {
+    const busyKey = `${bot.id}:${action}`;
+    setLifecycleBusy(busyKey);
+    try {
+      if (action === 'start') {
+        const res = await api.startBot(bot.id);
+        toast.success(res.message || 'Bot started!');
+      } else if (action === 'stop') {
+        const res = await api.stopBot(bot.id);
+        toast.success(res.message || 'Bot stopped!');
+      } else if (action === 'restart') {
+        const res = await api.restartBot(bot.id);
+        toast.success(res.message || 'Bot restarted!');
+      } else {
+        const res = await api.cleanBotMemory(bot.id);
+        toast.success(res.message || 'Bot memory cleaned!');
+      }
+      if (action !== 'clean-memory') {
+        await loadBots();
+        if (bot.id === activeBotId) {
+          onBotSwitched(bot.id);
+        }
+      }
+    } catch (err: any) {
+      toast.error(err?.message || `Failed to ${action} bot`);
+    } finally {
+      setLifecycleBusy(null);
     }
   };
 
@@ -154,7 +185,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
               <h2 className="text-base font-bold text-white flex items-center gap-1.5 leading-tight">
                 <span>Switch Telegram Bot</span>
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 text-white/90 font-mono font-semibold border border-white/20">
-                  {bots.length} Active
+                  {bots.filter(b => b.status !== 'stopped').length}/{bots.length} Running
                 </span>
               </h2>
               <p className="text-[11px] text-white/60 truncate">
@@ -281,7 +312,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                       </div>
                     </div>
 
-        {/* Stats & Meta Footer */}
+                    {/* Stats & Meta Footer */}
                     <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[11px] text-white/60">
                       <div className="flex items-center gap-3">
                         <span className="flex items-center gap-1">
@@ -292,10 +323,64 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                           <span className="font-semibold text-white">{bot.usersCount}</span> users
                         </span>
                       </div>
-                      <div className="flex items-center gap-1.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                        <span className="text-[10px] text-emerald-400 font-medium">Running Isolated</span>
-                      </div>
+                      {bot.status === 'stopped' ? (
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
+                          <span className="text-[10px] text-rose-400 font-medium">Stopped</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                          <span className="text-[10px] text-emerald-400 font-medium">
+                            {bot.isMain ? 'Running' : 'Running Isolated'}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Runtime Lifecycle & Memory Controls */}
+                    <div className="mt-2 pt-2 border-t border-white/5 grid grid-cols-3 gap-1.5">
+                      {bot.status === 'stopped' ? (
+                        <button
+                          type="button"
+                          disabled={lifecycleBusy !== null}
+                          onClick={() => handleBotLifecycle(bot, 'start')}
+                          className="py-1.5 px-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-[10px] font-semibold flex items-center justify-center gap-1 transition-all cursor-pointer disabled:opacity-50"
+                        >
+                          {lifecycleBusy === `${bot.id}:start` ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                          <span>Start</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={lifecycleBusy !== null}
+                          onClick={() => handleBotLifecycle(bot, 'stop')}
+                          className="py-1.5 px-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-semibold flex items-center justify-center gap-1 transition-all cursor-pointer disabled:opacity-50"
+                        >
+                          {lifecycleBusy === `${bot.id}:stop` ? <Loader2 className="w-3 h-3 animate-spin" /> : <Square className="w-3 h-3" />}
+                          <span>Stop</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        disabled={lifecycleBusy !== null}
+                        onClick={() => handleBotLifecycle(bot, 'restart')}
+                        className="py-1.5 px-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 text-[10px] font-semibold flex items-center justify-center gap-1 transition-all cursor-pointer disabled:opacity-50"
+                      >
+                        {lifecycleBusy === `${bot.id}:restart` ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
+                        <span>Restart</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={lifecycleBusy !== null}
+                        onClick={() => handleBotLifecycle(bot, 'clean-memory')}
+                        className="py-1.5 px-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[10px] font-semibold flex items-center justify-center gap-1 transition-all cursor-pointer disabled:opacity-50"
+                      >
+                        {lifecycleBusy === `${bot.id}:clean-memory` ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                        <span>Clean Mem</span>
+                      </button>
                     </div>
 
                     {/* Dedicated Sub-Admin Panel Credentials for Cloned Bots */}
@@ -355,7 +440,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                           <span>Stop &amp; Remove @{bot.username}?</span>
                         </div>
                         <p className="text-[11px] text-rose-200/80">
-                          This will stop the runner process and unlink this bot from the panel.
+                          This will immediately stop polling, terminate the bot instance, and purge its isolated storage.
                         </p>
                         <div className="flex items-center gap-2 pt-1">
                           <button
