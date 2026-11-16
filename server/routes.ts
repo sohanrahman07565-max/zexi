@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import multer from 'multer';
 import dotenv from 'dotenv';
 import { storage, StorageManager, storageContext, AdminUser, ItemRecord, TriggerType, OpenMode, ClonedBotRecord, SharedStorageService } from './storage';
-import { TelegramService, TelegramBotManager, getItemPayload } from './telegram';
+import { TelegramService, TelegramBotManager, BotSingletonLock, getItemPayload } from './telegram';
 import { hashPassword, verifyPassword, signSessionToken, verifySessionToken } from './auth';
 
 dotenv.config({ override: true });
@@ -50,7 +50,9 @@ apiRouter.all(['/health', '/ping'], async (_req: Request, res: Response) => {
     bot: {
       hasToken: Boolean(botToken),
       botUsername: settings?.botUsername || null,
-      isPolling: TelegramService.isPollingActive()
+      isPolling: TelegramService.isPollingActive(),
+      conflict: BotSingletonLock.getConflict('main'),
+      conflicts: BotSingletonLock.getAllConflicts()
     }
   });
 });
@@ -2417,6 +2419,10 @@ apiRouter.post('/bots/:id/start', authenticate, requirePermission('settings_edit
     const ok = await TelegramBotManager.startBot(targetId);
     invalidateBotInfoCache(targetId);
     if (!ok) {
+      const conflict = BotSingletonLock.getConflict(targetId);
+      if (conflict) {
+        return res.status(409).json({ error: conflict.message, conflict });
+      }
       return res.status(404).json({ error: 'Bot instance not found, deleted, or missing bot token.' });
     }
     return res.json({ ok: true, status: 'active', message: 'Bot started and listening for updates.' });
@@ -2453,6 +2459,10 @@ apiRouter.post('/bots/:id/restart', authenticate, requirePermission('settings_ed
     const ok = await TelegramBotManager.restartBot(targetId);
     invalidateBotInfoCache(targetId);
     if (!ok) {
+      const conflict = BotSingletonLock.getConflict(targetId);
+      if (conflict) {
+        return res.status(409).json({ error: conflict.message, conflict });
+      }
       return res.status(404).json({ error: 'Bot instance not found, deleted, or missing bot token.' });
     }
     return res.json({ ok: true, status: 'active', message: 'Bot restarted cleanly.' });
@@ -2551,6 +2561,7 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
           isConnected: isLive,
           botStatus: isStopped ? 'stopped' : 'active',
           pollingActive: TelegramBotManager.isBotActivelyRunning(currentCloned.id),
+          lockConflict: BotSingletonLock.getConflict(currentCloned.id),
           hasToken: Boolean(currentCloned.token),
           botName: liveName || (liveUsername ? `@${liveUsername}` : 'Cloned Bot'),
           botFirstName: liveName,
@@ -2657,6 +2668,7 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
     isConnected: isManuallyStopped ? false : isConnected,
     botStatus: isManuallyStopped ? 'stopped' : 'active',
     pollingActive: TelegramService.isPollingActive(),
+    lockConflict: BotSingletonLock.getConflict('main'),
     botName: botFirstName || cleanHandle,
     botUsername: botUsername || (rawResult?.username ? String(rawResult.username).replace(/^@/, '') : ''),
     botFirstName,

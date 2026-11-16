@@ -1,5 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { storage, ItemRecord, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord } from './storage';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { storage, ItemRecord, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord, SharedStorageService } from './storage';
 import { hashPassword } from './auth';
 
 export const botTokenContext = new AsyncLocalStorage<string>();
@@ -126,6 +129,370 @@ async function withBotLifecycleLock<T>(key: string, task: () => Promise<T>): Pro
     if (botLifecycleLocks.get(key) === chained) {
       botLifecycleLocks.delete(key);
     }
+  }
+}
+
+export interface BotLockConflict {
+  botId: string;
+  reason: 'local_process_lock' | 'remote_instance_lock' | 'external_webhook_active' | 'telegram_409_conflict';
+  holder: string;
+  message: string;
+  detectedAt: string;
+  detectedAtMs: number;
+}
+
+interface HeldBotLockEntry {
+  token: string;
+  tokenHash: string;
+  botId: string;
+  lockPath: string;
+  timer: NodeJS.Timeout;
+}
+
+/**
+ * Multi-layer Singleton Lock for Telegram bot polling instances:
+ * 1) Local OS PID lockfile in os.tmpdir() (prevents duplicate local Node processes/restarts)
+ * 2) Cross-server Firebase RTDB token lock (/bot_token_locks/<sha256>) (prevents Render + Dev/Preview dual polling)
+ * 3) Telegram API getWebhookInfo & getUpdates probe (catches unknown external pollers/webhooks via 409)
+ */
+export class BotSingletonLock {
+  private static heldLocks = new Map<string, HeldBotLockEntry>();
+  private static conflicts = new Map<string, BotLockConflict>();
+  private static readonly LOCAL_STALE_MS = 35000;
+  private static readonly RTDB_TTL_MS = 22000;
+  private static readonly HEARTBEAT_INTERVAL_MS = 6000;
+
+  private static getEnvLabel(): string {
+    if (process.env.RENDER || process.env.RENDER_EXTERNAL_URL || process.env.RENDER_SERVICE_ID) {
+      return `render(${process.env.RENDER_EXTERNAL_HOSTNAME || os.hostname()})`;
+    }
+    return `${process.env.NODE_ENV || 'development'}(${os.hostname()})`;
+  }
+
+  private static getLockFilePath(tokenHash: string): string {
+    return path.join(os.tmpdir(), `tg_bot_singleton_${tokenHash}.lock`);
+  }
+
+  private static isPidAlive(pid: number): boolean {
+    if (!pid || !Number.isInteger(pid) || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err: any) {
+      // EPERM means process exists but owned by another user
+      return err?.code === 'EPERM';
+    }
+  }
+
+  public static recordConflict(
+    botId: string,
+    reason: BotLockConflict['reason'],
+    holder: string,
+    message: string
+  ): BotLockConflict {
+    const conflict: BotLockConflict = {
+      botId,
+      reason,
+      holder,
+      message,
+      detectedAt: new Date().toISOString(),
+      detectedAtMs: Date.now()
+    };
+    this.conflicts.set(botId, conflict);
+    return conflict;
+  }
+
+  public static clearConflict(botId: string): void {
+    this.conflicts.delete(botId);
+  }
+
+  public static getConflict(botId: string): Omit<BotLockConflict, 'detectedAtMs'> | null {
+    const c = this.conflicts.get(botId);
+    if (!c) return null;
+    const { detectedAtMs: _ignored, ...pub } = c;
+    return pub;
+  }
+
+  public static getAllConflicts(): Record<string, Omit<BotLockConflict, 'detectedAtMs'>> {
+    const out: Record<string, Omit<BotLockConflict, 'detectedAtMs'>> = {};
+    for (const [id, c] of this.conflicts.entries()) {
+      const { detectedAtMs: _ignored, ...pub } = c;
+      out[id] = pub;
+    }
+    return out;
+  }
+
+  public static hasRecentConflict(botId: string, withinMs: number = 60000): boolean {
+    const c = this.conflicts.get(botId);
+    if (!c) return false;
+    return (Date.now() - c.detectedAtMs) < withinMs;
+  }
+
+  public static isHoldingLock(token: string): boolean {
+    if (!token) return false;
+    const tokenHash = SharedStorageService.hashToken(token);
+    return this.heldLocks.has(tokenHash);
+  }
+
+  private static writeLocalLockPayload(lockPath: string, tokenHash: string, botId: string, exclusive: boolean): void {
+    const payload = JSON.stringify({
+      tokenHash,
+      botId,
+      pid: process.pid,
+      instanceId: BOT_INSTANCE_ID,
+      host: os.hostname(),
+      env: this.getEnvLabel(),
+      heartbeat: Date.now(),
+      startedAt: new Date().toISOString()
+    });
+    fs.writeFileSync(lockPath, payload, exclusive ? { flag: 'wx', mode: 0o600 } : { flag: 'w', mode: 0o600 });
+  }
+
+  private static handleExitIfConfigured(botId: string, reason: string): void {
+    if (process.env.EXIT_ON_BOT_CONFLICT === 'true') {
+      console.error(`🛑 [BotSingletonLock] EXIT_ON_BOT_CONFLICT=true — exiting process due to conflict on bot "${botId}" (${reason}).`);
+      setTimeout(() => process.exit(1), 150);
+    }
+  }
+
+  public static async acquire(
+    token: string,
+    botId: string,
+    opts?: { probeTelegram?: boolean }
+  ): Promise<{ ok: true; tokenHash: string } | { ok: false; conflict: BotLockConflict }> {
+    const cleanToken = String(token || '').trim().replace(/^["']|["']$/g, '');
+    if (!cleanToken) {
+      const conflict = this.recordConflict(botId, 'local_process_lock', 'missing_token', 'Bot token is missing.');
+      return { ok: false, conflict };
+    }
+
+    const tokenHash = SharedStorageService.hashToken(cleanToken);
+    const lockPath = this.getLockFilePath(tokenHash);
+    const alreadyHeld = this.heldLocks.get(tokenHash);
+
+    // 1. Check / acquire local OS PID lockfile
+    try {
+      if (fs.existsSync(lockPath)) {
+        let existing: any = null;
+        try {
+          existing = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+        } catch {
+          existing = null;
+        }
+
+        const sameProcess = existing && Number(existing.pid) === process.pid;
+        const aliveOther =
+          existing &&
+          !sameProcess &&
+          this.isPidAlive(Number(existing.pid)) &&
+          (Date.now() - Number(existing.heartbeat || 0)) < this.LOCAL_STALE_MS;
+
+        if (aliveOther) {
+          const holder = `PID ${existing.pid} (${existing.instanceId || 'local'}) on ${existing.host || os.hostname()}`;
+          const message = `Local process lock conflict for bot "${botId}": already polling in ${holder}. Refusing duplicate background listener.`;
+          console.error(`\n❌ [BotSingletonLock] LOCAL PROCESS LOCK CONFLICT [${botId}]\n   Holder: ${holder}\n   Lockfile: ${lockPath}\n   Action: Halted conflicting bot listener.\n`);
+          const conflict = this.recordConflict(botId, 'local_process_lock', holder, message);
+          this.handleExitIfConfigured(botId, 'local_process_lock');
+          return { ok: false, conflict };
+        }
+
+        if (!sameProcess) {
+          try { fs.unlinkSync(lockPath); } catch {}
+        }
+      }
+
+      if (!alreadyHeld) {
+        try {
+          this.writeLocalLockPayload(lockPath, tokenHash, botId, true);
+        } catch (err: any) {
+          if (err?.code === 'EEXIST') {
+            let racer: any = null;
+            try { racer = JSON.parse(fs.readFileSync(lockPath, 'utf8')); } catch {}
+            if (!racer || Number(racer.pid) !== process.pid) {
+              const holder = racer ? `PID ${racer.pid} (${racer.instanceId || 'local'})` : 'another local process';
+              const message = `Local startup lock race detected for bot "${botId}": lock claimed by ${holder}.`;
+              console.error(`\n❌ [BotSingletonLock] LOCAL STARTUP RACE CONFLICT [${botId}]\n   Claimed by: ${holder}\n   Action: Terminated duplicate startup.\n`);
+              const conflict = this.recordConflict(botId, 'local_process_lock', holder, message);
+              this.handleExitIfConfigured(botId, 'local_process_lock');
+              return { ok: false, conflict };
+            }
+          } else {
+            throw err;
+          }
+        }
+      } else {
+        this.writeLocalLockPayload(lockPath, tokenHash, botId, false);
+      }
+    } catch (fsErr: any) {
+      console.warn(`[BotSingletonLock] Local lockfile notice (${lockPath}):`, fsErr?.message || fsErr);
+    }
+
+    // 2. Check / claim distributed cross-server Firebase RTDB lock
+    const meta = {
+      instanceId: BOT_INSTANCE_ID,
+      host: os.hostname(),
+      pid: process.pid,
+      botId,
+      env: this.getEnvLabel()
+    };
+
+    const mainStorage = StorageManager.getMainStorage();
+    const rtdbClaim = await mainStorage.tryClaimTokenLock(cleanToken, meta, this.RTDB_TTL_MS);
+    if (!rtdbClaim.acquired && rtdbClaim.conflict) {
+      if (!alreadyHeld) {
+        try { fs.unlinkSync(lockPath); } catch {}
+      }
+      const c = rtdbClaim.conflict;
+      const holder = `${c.env || c.host} (PID ${c.pid}, ${c.instanceId})`;
+      const message = `Cross-server singleton lock conflict for bot "${botId}": already active on ${holder}. Dual polling blocked to prevent duplicate replies.`;
+      console.error(`\n❌ [BotSingletonLock] CROSS-SERVER TOKEN CONFLICT [${botId}]\n   Active Instance: ${holder}\n   Token Hash: ${tokenHash}\n   Action: Blocking conflicting bot listener in this process.\n`);
+      const conflict = this.recordConflict(botId, 'remote_instance_lock', holder, message);
+      this.handleExitIfConfigured(botId, 'remote_instance_lock');
+      return { ok: false, conflict };
+    }
+
+    // 3. Probe Telegram API for an active external webhook or live 409 getUpdates conflict
+    if (opts?.probeTelegram !== false) {
+      // 3a. External reachable webhook check (prevents stealing a live Render/production webhook)
+      try {
+        const whInfo = await TelegramService.callTelegramApi('getWebhookInfo', {}, cleanToken);
+        const whUrl = String(whInfo?.result?.url || '').trim();
+        if (whInfo?.ok && whUrl) {
+          let ownHost = '';
+          let whHost = '';
+          try { ownHost = new URL(TelegramBotManager.getActiveBaseUrl()).hostname.toLowerCase(); } catch {}
+          try { whHost = new URL(whUrl).hostname.toLowerCase(); } catch {}
+          if (whHost && whHost !== ownHost && process.env.TAKEOVER_EXTERNAL_WEBHOOK !== 'true') {
+            let externalReachable = false;
+            try {
+              const probeCtrl = new AbortController();
+              const probeTimer = setTimeout(() => probeCtrl.abort(), 2500);
+              const probeRes = await fetch(whUrl, { method: 'HEAD', signal: probeCtrl.signal }).catch(() => null);
+              clearTimeout(probeTimer);
+              if (probeRes && probeRes.status < 500) {
+                externalReachable = true;
+              }
+            } catch {}
+
+            if (externalReachable) {
+              if (!alreadyHeld) {
+                try { fs.unlinkSync(lockPath); } catch {}
+              }
+              await mainStorage.releaseTokenLock(cleanToken, BOT_INSTANCE_ID).catch(() => {});
+              const holder = `Webhook ${whUrl}`;
+              const message = `Webhook conflict for bot "${botId}": reachable external webhook active at ${whUrl}. Refusing to override live webhook with polling.`;
+              console.error(`\n❌ [BotSingletonLock] LIVE WEBHOOK CONFLICT [${botId}]\n   Active Webhook: ${whUrl}\n   Action: Polling aborted to protect live webhook host.\n`);
+              const conflict = this.recordConflict(botId, 'external_webhook_active', holder, message);
+              this.handleExitIfConfigured(botId, 'external_webhook_active');
+              return { ok: false, conflict };
+            }
+          }
+        }
+      } catch {}
+
+      // 3b. Telegram getUpdates 409 session conflict probe (catches any external host polling without shared RTDB)
+      try {
+        const probeRes = await TelegramService.callTelegramApi('getUpdates', { offset: -1, limit: 1, timeout: 0 }, cleanToken);
+        const probeDesc = String(probeRes?.description || '').toLowerCase();
+        if (
+          probeRes &&
+          !probeRes.ok &&
+          (probeRes.error_code === 409 || probeDesc.includes('409') || probeDesc.includes('terminated by other getupdates'))
+        ) {
+          if (!alreadyHeld) {
+            try { fs.unlinkSync(lockPath); } catch {}
+          }
+          await mainStorage.releaseTokenLock(cleanToken, BOT_INSTANCE_ID).catch(() => {});
+          const holder = 'Telegram remote poller (409 Conflict)';
+          const message = `Telegram 409 session conflict for bot "${botId}": ${probeRes.description || 'another instance is actively polling this token'}.`;
+          console.error(`\n❌ [BotSingletonLock] TELEGRAM 409 SESSION CONFLICT [${botId}]\n   Telegram Response: ${probeRes.description || '409 Conflict'}\n   Token Hash: ${tokenHash}\n   Action: Terminating conflicting bot startup immediately.\n`);
+          const conflict = this.recordConflict(botId, 'telegram_409_conflict', holder, message);
+          this.handleExitIfConfigured(botId, 'telegram_409_conflict');
+          return { ok: false, conflict };
+        }
+      } catch {}
+    }
+
+    // 4. Register / refresh heartbeat timer keeping BOTH local lockfile and RTDB lock alive
+    if (alreadyHeld) {
+      clearInterval(alreadyHeld.timer);
+    }
+    const timer = setInterval(() => {
+      try {
+        this.writeLocalLockPayload(lockPath, tokenHash, botId, false);
+      } catch {}
+      StorageManager.getMainStorage().tryClaimTokenLock(cleanToken, meta, this.RTDB_TTL_MS).catch(() => {});
+    }, this.HEARTBEAT_INTERVAL_MS);
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+
+    this.heldLocks.set(tokenHash, {
+      token: cleanToken,
+      tokenHash,
+      botId,
+      lockPath,
+      timer
+    });
+    this.clearConflict(botId);
+    console.info(`🔒 [BotSingletonLock] Lock acquired for bot "${botId}" (hash: ${tokenHash}, PID: ${process.pid}, env: ${this.getEnvLabel()}).`);
+    return { ok: true, tokenHash };
+  }
+
+  public static async release(tokenOrHash: string, _botId?: string): Promise<void> {
+    if (!tokenOrHash) return;
+    const isHash = /^[a-f0-9]{20}$/i.test(tokenOrHash);
+    const tokenHash = isHash ? tokenOrHash : SharedStorageService.hashToken(tokenOrHash);
+    const entry = this.heldLocks.get(tokenHash);
+    if (entry) {
+      clearInterval(entry.timer);
+      this.heldLocks.delete(tokenHash);
+      try {
+        if (fs.existsSync(entry.lockPath)) {
+          fs.unlinkSync(entry.lockPath);
+        }
+      } catch {}
+      await StorageManager.getMainStorage().releaseTokenLock(entry.token, BOT_INSTANCE_ID).catch(() => {});
+    } else if (!isHash) {
+      const lockPath = this.getLockFilePath(tokenHash);
+      try {
+        if (fs.existsSync(lockPath)) {
+          const existing = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+          if (Number(existing?.pid) === process.pid) {
+            fs.unlinkSync(lockPath);
+          }
+        }
+      } catch {}
+      await StorageManager.getMainStorage().releaseTokenLock(tokenOrHash, BOT_INSTANCE_ID).catch(() => {});
+    }
+  }
+
+  public static async releaseAll(): Promise<void> {
+    const entries = Array.from(this.heldLocks.values());
+    this.heldLocks.clear();
+    await Promise.allSettled(
+      entries.map(async (entry) => {
+        clearInterval(entry.timer);
+        try {
+          if (fs.existsSync(entry.lockPath)) {
+            fs.unlinkSync(entry.lockPath);
+          }
+        } catch {}
+        await StorageManager.getMainStorage().releaseTokenLock(entry.token, BOT_INSTANCE_ID).catch(() => {});
+      })
+    );
+  }
+
+  public static releaseAllSync(): void {
+    for (const entry of this.heldLocks.values()) {
+      clearInterval(entry.timer);
+      try {
+        if (fs.existsSync(entry.lockPath)) {
+          fs.unlinkSync(entry.lockPath);
+        }
+      } catch {}
+    }
+    this.heldLocks.clear();
   }
 }
 
@@ -8844,6 +9211,17 @@ export class TelegramService {
       return;
     }
 
+    // Enforce cross-server & local singleton lock before starting any polling or timers
+    const lockRes = await BotSingletonLock.acquire(token, 'main', { probeTelegram: true });
+    if (!lockRes.ok) {
+      this.pollingActive = false;
+      this.isLeader = false;
+      this.isLoopRunning = false;
+      delete activeBots['main'];
+      console.error(`[Telegram] Main bot startup halted safely: ${lockRes.conflict.message}`);
+      return;
+    }
+
     // Verify Telegram connection & ensure username is saved
     try {
       const me = await this.callTelegramApi('getMe', {});
@@ -8903,13 +9281,14 @@ export class TelegramService {
       this.leaderCheckTimer = setInterval(checkLeadershipAndRun, 4000);
     }
 
-    // Cleanly release leadership lock on process termination
+    // Cleanly release leadership & singleton locks on process termination
     const onExit = async () => {
       if (this.isLeader) {
         try {
           await storage.releasePollingLeader(BOT_INSTANCE_ID);
         } catch {}
       }
+      await BotSingletonLock.releaseAll().catch(() => {});
     };
     process.once('SIGINT', onExit);
     process.once('SIGTERM', onExit);
@@ -8948,12 +9327,15 @@ export class TelegramService {
     }
     this.activePollingPromise = null;
     this.isLoopRunning = false;
-    if (options?.dropPendingUpdates) {
-      this.pollingOffset = 0;
-      const token = await this.getBotToken().catch(() => '');
-      if (token) {
+    const token = await this.getBotToken().catch(() => '');
+    if (token) {
+      await BotSingletonLock.release(token, 'main').catch(() => {});
+      if (options?.dropPendingUpdates) {
+        this.pollingOffset = 0;
         await this.callTelegramApi('deleteWebhook', { drop_pending_updates: true }, token).catch(() => {});
       }
+    } else if (options?.dropPendingUpdates) {
+      this.pollingOffset = 0;
     }
   }
 
@@ -8963,6 +9345,10 @@ export class TelegramService {
     try {
       await storage.releasePollingLeader(BOT_INSTANCE_ID);
     } catch {}
+    const token = await this.getBotToken().catch(() => '');
+    if (token) {
+      await BotSingletonLock.release(token, 'main').catch(() => {});
+    }
   }
 
   public static async stopBot(persist: boolean = true): Promise<void> {
@@ -8975,28 +9361,48 @@ export class TelegramService {
       await this.stopPollingAsync({ dropPendingUpdates: true });
       this.isLeader = false;
       await StorageManager.getMainStorage().releasePollingLeader(BOT_INSTANCE_ID).catch(() => {});
+      const token = await this.getBotToken().catch(() => '');
+      if (token) {
+        await BotSingletonLock.release(token, 'main').catch(() => {});
+      }
       if (persist) {
         await StorageManager.getMainStorage().updateSettings({ botStopped: true }).catch(() => {});
       }
-      console.info('[Telegram] Main bot polling stopped and all timers/listeners cleared.');
+      console.info('[Telegram] Main bot polling stopped and all timers/listeners/locks cleared.');
     });
   }
 
-  public static async startBot(): Promise<void> {
+  public static async startBot(): Promise<boolean> {
     return withBotLifecycleLock('main', async () => {
       const token = await this.getBotToken().catch(() => '');
+      if (!token) {
+        console.warn('[Telegram] Cannot start main bot: no bot token configured.');
+        return false;
+      }
+
       // Stop any existing main polling instance or conflicting activeBots entry sharing this token
       if (activeBots['main']) {
-        await activeBots['main'].stop({ dropPendingUpdates: true }).catch(() => {});
+        await activeBots['main'].stop({ dropPendingUpdates: false }).catch(() => {});
         delete activeBots['main'];
       }
       for (const [k, handle] of Object.entries(activeBots)) {
-        if (k !== 'main' && token && handle.token === token) {
-          await handle.stop({ dropPendingUpdates: true }).catch(() => {});
+        if (k !== 'main' && handle.token === token) {
+          await handle.stop({ dropPendingUpdates: false }).catch(() => {});
           delete activeBots[k];
         }
       }
-      await this.stopPollingAsync({ dropPendingUpdates: true });
+      await this.stopPollingAsync({ dropPendingUpdates: false });
+
+      // Clear stale manual conflict notice before verifying lock synchronously
+      BotSingletonLock.clearConflict('main');
+      const lockRes = await BotSingletonLock.acquire(token, 'main', { probeTelegram: true });
+      if (!lockRes.ok) {
+        this.pollingActive = false;
+        this.isLeader = false;
+        this.isLoopRunning = false;
+        console.error(`[Telegram] Main bot start blocked by singleton lock: ${lockRes.conflict.message}`);
+        return false;
+      }
 
       this.manuallyStopped = false;
       this.pollingOffset = 0;
@@ -9004,7 +9410,7 @@ export class TelegramService {
 
       if (!this.leaderCheckTimer) {
         await this.initPollingWorker();
-        return;
+        return !BotSingletonLock.getConflict('main') && (this.pollingActive || !this.manuallyStopped);
       }
       const claimResult = await StorageManager.getMainStorage().tryClaimPollingLeader(BOT_INSTANCE_ID, 12000).catch(() => ({ isLeader: true }));
       if (claimResult.isLeader) {
@@ -9012,17 +9418,20 @@ export class TelegramService {
         this.pollingActive = true;
         this.startPollingLoop();
       }
-      console.info('[Telegram] Main bot polling started cleanly (singleton verified).');
+      console.info('[Telegram] Main bot polling started cleanly (singleton lock verified).');
+      return true;
     });
   }
 
-  public static async restartBot(): Promise<{ cleaned: Awaited<ReturnType<typeof TelegramService.cleanBotMemory>> }> {
+  public static async restartBot(): Promise<{ ok: boolean; cleaned: Awaited<ReturnType<typeof TelegramService.cleanBotMemory>> }> {
     await this.stopBot(false);
     const cleaned = await this.cleanBotMemory();
     await new Promise((r) => setTimeout(r, 350));
-    await this.startBot();
-    console.info('[Telegram] Main bot restarted cleanly.');
-    return { cleaned };
+    const ok = await this.startBot();
+    if (ok) {
+      console.info('[Telegram] Main bot restarted cleanly.');
+    }
+    return { ok, cleaned };
   }
 
   public static async cleanBotMemory(targetStorage?: any): Promise<{
@@ -9288,13 +9697,48 @@ export class TelegramService {
                 console.error('[Telegram Polling] Error handling update:', updateErr?.message || updateErr);
               }
             }
+          } else if (res && !res.ok) {
+            const desc = String(res.description || '').toLowerCase();
+            if (res.error_code === 409 || desc.includes('409') || desc.includes('terminated by other getupdates')) {
+              console.error(`\n❌ [BotSingletonLock] TELEGRAM 409 SESSION CONFLICT MID-RUN [main]\n   Telegram Response: ${res.description || '409 Conflict'}\n   Action: Terminating conflicting polling listener safely.\n`);
+              BotSingletonLock.recordConflict('main', 'telegram_409_conflict', 'remote_poller', String(res.description || '409 Conflict: terminated by other getUpdates request'));
+              const activeToken = await this.getBotToken().catch(() => '');
+              if (activeToken) {
+                await BotSingletonLock.release(activeToken, 'main').catch(() => {});
+              }
+              this.isLeader = false;
+              this.pollingActive = false;
+              if (this.leaderCheckTimer) {
+                clearInterval(this.leaderCheckTimer);
+                this.leaderCheckTimer = null;
+              }
+              this.stopPolling();
+              if (process.env.EXIT_ON_BOT_CONFLICT === 'true') {
+                setTimeout(() => process.exit(1), 150);
+              }
+              break;
+            }
           }
         } catch (err: any) {
           if (myEpoch !== this.pollingEpoch || this.manuallyStopped || signal.aborted) break;
-          if (err?.message && err.message.includes('409')) {
-            console.warn('[Telegram Polling] 409 Conflict: another instance is active. Yielding leadership for 6s...');
+          const errMsg = String(err?.message || '').toLowerCase();
+          if (errMsg.includes('409') || errMsg.includes('terminated by other getupdates')) {
+            console.error(`\n❌ [BotSingletonLock] TELEGRAM 409 SESSION CONFLICT [main]\n   Error: ${err?.message || err}\n   Action: Halting conflicting polling listener safely.\n`);
+            BotSingletonLock.recordConflict('main', 'telegram_409_conflict', 'remote_poller', String(err?.message || '409 Conflict'));
+            const activeToken = await this.getBotToken().catch(() => '');
+            if (activeToken) {
+              await BotSingletonLock.release(activeToken, 'main').catch(() => {});
+            }
             this.isLeader = false;
-            await new Promise((r) => setTimeout(r, 6000));
+            this.pollingActive = false;
+            if (this.leaderCheckTimer) {
+              clearInterval(this.leaderCheckTimer);
+              this.leaderCheckTimer = null;
+            }
+            this.stopPolling();
+            if (process.env.EXIT_ON_BOT_CONFLICT === 'true') {
+              setTimeout(() => process.exit(1), 150);
+            }
             break;
           }
           await new Promise((r) => setTimeout(r, 2000));
@@ -9331,12 +9775,12 @@ export class ClonedBotRunner {
     return this.isLoopActive && (Date.now() - this.lastPollAt < 90000);
   }
 
-  public async start(): Promise<void> {
+  public async start(): Promise<boolean> {
     if (TelegramBotManager.isBotDeleted(this.bot.id) || TelegramBotManager.isBotStopped(this.bot.id)) {
-      return;
+      return false;
     }
     if (this.isRunning && (this.isStarting || this.isLoopActive)) {
-      return;
+      return true;
     }
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
@@ -9348,7 +9792,15 @@ export class ClonedBotRunner {
     this.lastPollAt = Date.now();
     this.abortController = new AbortController();
 
-    console.info(`[ClonedBot ${this.bot.id}] Starting isolated runner for @${this.bot.username}...`);
+    console.info(`[ClonedBot ${this.bot.id}] Acquiring singleton lock for @${this.bot.username}...`);
+    const lockRes = await BotSingletonLock.acquire(this.bot.token, this.bot.id, { probeTelegram: true });
+    if (!lockRes.ok) {
+      this.isRunning = false;
+      this.isStarting = false;
+      this.isLoopActive = false;
+      console.error(`[ClonedBot ${this.bot.id}] Startup aborted safely due to singleton lock conflict: ${lockRes.conflict.message}`);
+      return false;
+    }
 
     try {
       await TelegramService.callTelegramApi('deleteWebhook', { drop_pending_updates: true }, this.bot.token, this.abortController.signal);
@@ -9356,10 +9808,12 @@ export class ClonedBotRunner {
 
     if (!this.isRunning || TelegramBotManager.isBotDeleted(this.bot.id) || TelegramBotManager.isBotStopped(this.bot.id)) {
       this.isStarting = false;
-      return;
+      await BotSingletonLock.release(this.bot.token, this.bot.id).catch(() => {});
+      return false;
     }
 
     this.launchLoop();
+    return true;
   }
 
   private launchLoop(): void {
@@ -9433,8 +9887,11 @@ export class ClonedBotRunner {
     this.isLoopActive = false;
     this.activeLoopPromise = null;
     this.pollingOffset = 0;
-    if (options?.dropPendingUpdates && this.bot.token) {
-      await TelegramService.callTelegramApi('deleteWebhook', { drop_pending_updates: true }, this.bot.token).catch(() => {});
+    if (this.bot.token) {
+      await BotSingletonLock.release(this.bot.token, this.bot.id).catch(() => {});
+      if (options?.dropPendingUpdates) {
+        await TelegramService.callTelegramApi('deleteWebhook', { drop_pending_updates: true }, this.bot.token).catch(() => {});
+      }
     }
     console.info(`[ClonedBot ${this.bot.id}] Runner stopped cleanly.`);
   }
@@ -9502,11 +9959,36 @@ export class ClonedBotRunner {
               console.error(`[ClonedBot ${this.bot.id}] Update error:`, err?.message || err);
             }
           }
-        } else if (res && res.description && String(res.description).includes('409')) {
-          await new Promise(r => setTimeout(r, 5000));
+        } else if (res && !res.ok) {
+          const desc = String(res.description || '').toLowerCase();
+          if (res.error_code === 409 || desc.includes('409') || desc.includes('terminated by other getupdates')) {
+            console.error(`\n❌ [BotSingletonLock] TELEGRAM 409 SESSION CONFLICT MID-RUN [${this.bot.id} @${this.bot.username}]\n   Telegram Response: ${res.description || '409 Conflict'}\n   Action: Terminating conflicting cloned bot runner safely.\n`);
+            BotSingletonLock.recordConflict(this.bot.id, 'telegram_409_conflict', 'remote_poller', String(res.description || '409 Conflict'));
+            this.isRunning = false;
+            this.isStarting = false;
+            await BotSingletonLock.release(this.bot.token, this.bot.id).catch(() => {});
+            TelegramBotManager.cleanupConflictedRunner(this.bot.id);
+            if (process.env.EXIT_ON_BOT_CONFLICT === 'true') {
+              setTimeout(() => process.exit(1), 150);
+            }
+            break;
+          }
         }
       } catch (err: any) {
         if (myEpoch !== this.loopEpoch || !this.isRunning || signal?.aborted || TelegramBotManager.isBotDeleted(this.bot.id) || TelegramBotManager.isBotStopped(this.bot.id)) {
+          break;
+        }
+        const errMsg = String(err?.message || '').toLowerCase();
+        if (errMsg.includes('409') || errMsg.includes('terminated by other getupdates')) {
+          console.error(`\n❌ [BotSingletonLock] TELEGRAM 409 SESSION CONFLICT [${this.bot.id} @${this.bot.username}]\n   Error: ${err?.message || err}\n   Action: Terminating conflicting cloned bot runner safely.\n`);
+          BotSingletonLock.recordConflict(this.bot.id, 'telegram_409_conflict', 'remote_poller', String(err?.message || '409 Conflict'));
+          this.isRunning = false;
+          this.isStarting = false;
+          await BotSingletonLock.release(this.bot.token, this.bot.id).catch(() => {});
+          TelegramBotManager.cleanupConflictedRunner(this.bot.id);
+          if (process.env.EXIT_ON_BOT_CONFLICT === 'true') {
+            setTimeout(() => process.exit(1), 150);
+          }
           break;
         }
         await new Promise(r => setTimeout(r, 2000));
@@ -9566,8 +10048,24 @@ export class TelegramBotManager {
     }
   }
 
+  public static cleanupConflictedRunner(id: string): void {
+    const cleanNorm = this.normalizeBotKey(id);
+    for (const key of Array.from(this.runners.keys())) {
+      if (key === id || (cleanNorm && this.normalizeBotKey(key) === cleanNorm)) {
+        this.runners.delete(key);
+      }
+    }
+    if (cleanNorm && activeBots[cleanNorm]) {
+      delete activeBots[cleanNorm];
+    }
+    if (activeBots[id]) {
+      delete activeBots[id];
+    }
+  }
+
   public static ensureBotRunning(bot: ClonedBotRecord): void {
     if (!bot || bot.status === 'stopped' || this.isBotDeleted(bot.id) || this.isBotStopped(bot.id)) return;
+    if (BotSingletonLock.hasRecentConflict(bot.id, 60000)) return;
     const norm = this.normalizeBotKey(bot.id);
     const existing =
       this.runners.get(bot.id) ||
@@ -9607,11 +10105,14 @@ export class TelegramBotManager {
               delete activeBots[norm];
             }
           } else if (!this.isBotStopped(bot.id)) {
+            if (BotSingletonLock.hasRecentConflict(bot.id, 60000)) {
+              continue;
+            }
             const runner =
               this.runners.get(bot.id) ||
               Array.from(this.runners.entries()).find(([k]) => this.normalizeBotKey(k) === norm)?.[1];
             if (!runner || !runner.isAlive()) {
-              console.info(`[Watchdog] Reviving polling runner for cloned bot @${bot.username} (${bot.id})...`);
+              console.info(`[Watchdog] Checking/reviving polling runner for cloned bot @${bot.username} (${bot.id})...`);
               await this.startBotInstance(bot);
             }
           }
@@ -9668,14 +10169,14 @@ export class TelegramBotManager {
     return envUrl.trim().replace(/\/+$/, '');
   }
 
-  public static async startBotInstance(bot: ClonedBotRecord): Promise<void> {
+  public static async startBotInstance(bot: ClonedBotRecord): Promise<boolean> {
     if (this.isBotDeleted(bot.id) || this.isBotStopped(bot.id) || bot.status === 'stopped') {
-      return;
+      return false;
     }
     const cleanNorm = this.normalizeBotKey(bot.id) || bot.id;
     return withBotLifecycleLock(`clone:${cleanNorm}`, async () => {
       if (this.isBotDeleted(bot.id) || this.isBotStopped(bot.id) || bot.status === 'stopped') {
-        return;
+        return false;
       }
 
       // Stop and destroy ANY existing active runner / handle matching this bot ID or token before launching
@@ -9684,7 +10185,7 @@ export class TelegramBotManager {
         const sameToken = Boolean(bot.token && existingRunner.bot?.token === bot.token);
         if (sameId || sameToken) {
           console.info(`[BotSingleton] Stopping existing runner (${key}) before launching ${bot.id}...`);
-          await existingRunner.stop({ dropPendingUpdates: true }).catch(() => {});
+          await existingRunner.stop({ dropPendingUpdates: false }).catch(() => {});
           this.runners.delete(key);
         }
       }
@@ -9692,7 +10193,7 @@ export class TelegramBotManager {
         const sameId = activeKey === bot.id || activeKey === cleanNorm;
         const sameToken = Boolean(bot.token && handle.token === bot.token);
         if (sameId || sameToken) {
-          await handle.stop({ dropPendingUpdates: true }).catch(() => {});
+          await handle.stop({ dropPendingUpdates: false }).catch(() => {});
           delete activeBots[activeKey];
         }
       }
@@ -9705,7 +10206,13 @@ export class TelegramBotManager {
         stop: (opts) => runner.stop(opts),
         isAlive: () => runner.isAlive()
       };
-      await runner.start().catch(() => {});
+      const started = await runner.start().catch(() => false);
+      if (!started) {
+        this.runners.delete(bot.id);
+        delete activeBots[cleanNorm];
+        return false;
+      }
+      return true;
     });
   }
 
@@ -9751,8 +10258,7 @@ export class TelegramBotManager {
 
   public static async startBot(id: string): Promise<boolean> {
     if (!id || id === 'main') {
-      await TelegramService.startBot();
-      return true;
+      return await TelegramService.startBot();
     }
     if (this.isBotDeleted(id)) return false;
 
@@ -9762,19 +10268,23 @@ export class TelegramBotManager {
     const target = bots.find(b => b.id === id || this.normalizeBotKey(b.id) === cleanNorm);
     if (!target) return false;
 
+    BotSingletonLock.clearConflict(target.id);
     this.stoppedBotIds.delete(target.id);
     this.stoppedBotIds.delete(cleanNorm);
 
     const updated: ClonedBotRecord = { ...target, status: 'active' };
+    const started = await this.startBotInstance(updated);
+    if (!started) {
+      return false;
+    }
     await mainStorage.saveClonedBot(updated).catch(() => {});
-    await this.startBotInstance(updated);
     return true;
   }
 
   public static async restartBot(id: string): Promise<boolean> {
     if (!id || id === 'main') {
-      await TelegramService.restartBot();
-      return true;
+      const res = await TelegramService.restartBot();
+      return res.ok;
     }
     if (this.isBotDeleted(id)) return false;
 
@@ -10007,8 +10517,10 @@ export class TelegramBotManager {
       }
     }
     if (matchedBot?.token) {
+      await BotSingletonLock.release(matchedBot.token, cleanId).catch(() => {});
       await TelegramService.callTelegramApi('deleteWebhook', { drop_pending_updates: true }, matchedBot.token).catch(() => {});
     }
+    BotSingletonLock.clearConflict(cleanId);
 
     // 3. Destroy isolated StorageManager instance, local JSON files, and isolated Firebase RTDB records
     await StorageManager.destroyStorage(cleanId);

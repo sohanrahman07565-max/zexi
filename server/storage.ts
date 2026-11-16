@@ -3575,6 +3575,95 @@ export class SharedStorageService {
   // DISTRIBUTED LEADER ELECTION & UPDATE DEDUPLICATION LOCKS (RTDB)
   // =========================================================================
 
+  public static hashToken(botToken: string): string {
+    return crypto.createHash('sha256').update(String(botToken || '').trim()).digest('hex').slice(0, 20);
+  }
+
+  // Distributed Token Lock across all servers (Render, Dev, Preview) keyed by SHA-256 token hash
+  public async tryClaimTokenLock(
+    botToken: string,
+    metadata: { instanceId: string; host: string; pid: number; botId: string; env: string },
+    ttlMs: number = 22000
+  ): Promise<{
+    acquired: boolean;
+    conflict?: { instanceId: string; host: string; pid: number; botId: string; env: string; heartbeat: number };
+  }> {
+    if (!botToken || !botToken.trim()) {
+      return { acquired: false };
+    }
+    const tokenHash = SharedStorageService.hashToken(botToken);
+    try {
+      const authToken = await this.getFirebaseAuthToken();
+      const url = this.getRtdbUrl(`/bot_token_locks/${tokenHash}`, authToken);
+      const res = await fetch(url);
+      const now = Date.now();
+      let existing: any = null;
+      if (res.ok) {
+        existing = await res.json();
+      }
+
+      const activeOther =
+        existing &&
+        existing.instanceId &&
+        existing.instanceId !== metadata.instanceId &&
+        (now - Number(existing.heartbeat || 0)) < ttlMs;
+
+      if (activeOther) {
+        return { acquired: false, conflict: existing };
+      }
+
+      const claimPayload = {
+        ...metadata,
+        tokenHash,
+        heartbeat: now,
+        updatedAt: new Date().toISOString()
+      };
+
+      await fetch(url, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(claimPayload)
+      });
+
+      // Read-after-write check to resolve near-simultaneous startup races across hosts
+      if (!existing || existing.instanceId !== metadata.instanceId) {
+        await new Promise((r) => setTimeout(r, 40));
+        const verifyRes = await fetch(url).catch(() => null);
+        if (verifyRes && verifyRes.ok) {
+          const verified = await verifyRes.json().catch(() => null);
+          if (verified && verified.instanceId && verified.instanceId !== metadata.instanceId && (Date.now() - Number(verified.heartbeat || 0)) < ttlMs) {
+            return { acquired: false, conflict: verified };
+          }
+        }
+      }
+
+      return { acquired: true };
+    } catch {
+      // Fallback to local OS lockfile & Telegram 409 check if RTDB is unreachable
+      return { acquired: true };
+    }
+  }
+
+  public async releaseTokenLock(botToken: string, instanceId: string): Promise<void> {
+    if (!botToken || !botToken.trim()) return;
+    const tokenHash = SharedStorageService.hashToken(botToken);
+    try {
+      const authToken = await this.getFirebaseAuthToken();
+      const url = this.getRtdbUrl(`/bot_token_locks/${tokenHash}`, authToken);
+      const res = await fetch(url);
+      if (res.ok) {
+        const existing = await res.json();
+        if (existing?.instanceId === instanceId) {
+          await fetch(url, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ instanceId: '', heartbeat: 0, releasedAt: new Date().toISOString() })
+          });
+        }
+      }
+    } catch {}
+  }
+
   // Distributed Leader Election for Telegram Polling across multi-instance environments
   public async tryClaimPollingLeader(instanceId: string, ttlMs: number = 10000): Promise<{ isLeader: boolean; currentLeader: string }> {
     try {

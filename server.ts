@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { apiRouter } from './server/routes';
 import { storage } from './server/storage';
-import { TelegramService, TelegramBotManager, activeBots } from './server/telegram';
+import { TelegramService, TelegramBotManager, BotSingletonLock, activeBots } from './server/telegram';
 
 dotenv.config();
 
@@ -35,16 +35,19 @@ async function gracefulShutdown(signal: string) {
       Promise.allSettled([
         ...Object.values(activeBots).map((handle) => handle.stop().catch(() => {})),
         TelegramService.releaseLeaderLock().catch(() => {}),
+        BotSingletonLock.releaseAll().catch(() => {}),
         storage.flush().catch(() => {})
       ]),
       new Promise<void>((resolve) => setTimeout(resolve, 1500))
     ]);
   } catch {}
+  BotSingletonLock.releaseAllSync();
   process.exit(0);
 }
 
 process.on('SIGTERM', () => { gracefulShutdown('SIGTERM'); });
 process.on('SIGINT', () => { gracefulShutdown('SIGINT'); });
+process.once('exit', () => { BotSingletonLock.releaseAllSync(); });
 
 // Render Keep-Alive 24/7 Heartbeat Monitor (Prevents Render Free Tier Idle Sleep)
 function initRenderKeepAlive(port: number) {
@@ -220,7 +223,7 @@ async function startServer() {
   httpServer.on('error', (err: any) => {
     if (err?.code === 'EADDRINUSE' && listenRetries < 6) {
       listenRetries++;
-      console.warn(`⚠️ [Server] Port ${PORT} busy during restart, retrying in 500ms (${listenRetries}/6)...`);
+      console.warn(`⚠️ [PortConflict] Port ${PORT} busy during restart (EADDRINUSE), retrying in 500ms (${listenRetries}/6)...`);
       setTimeout(() => {
         try {
           httpServer.close();
@@ -229,7 +232,12 @@ async function startServer() {
       }, 500);
       return;
     }
-    console.error('❌ [Server] HTTP server failed to bind port:', err?.message || err);
+    if (err?.code === 'EADDRINUSE') {
+      console.error(`\n❌ [PortConflict] CRITICAL: Port ${PORT} is already in use (EADDRINUSE) by another running process.\n   Resolve by stopping the conflicting process on port ${PORT} or setting a different PORT env variable.\n   Terminating process safely.\n`);
+    } else {
+      console.error('❌ [Server] HTTP server failed to bind port:', err?.message || err);
+    }
+    BotSingletonLock.releaseAllSync();
     process.exit(1);
   });
 
