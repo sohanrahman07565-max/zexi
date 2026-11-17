@@ -599,8 +599,8 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
   return (
     <div className="space-y-4 pb-28">
       {/* Search and Unified Add Button */}
-      <div className="flex items-center gap-2">
-        <div className="relative flex-1">
+      <div className="flex items-center gap-2 min-w-0">
+        <div className="relative flex-1 min-w-0">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/50" />
           <input
             type="text"
@@ -615,7 +615,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
         {(canAddFile || canAddLink) && (
           <button
             onClick={() => openAddModal('file')}
-            className="tap py-2.5 px-3.5 rounded-2xl text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer border border-white/25 shrink-0 whitespace-nowrap"
+            className="tap py-2.5 px-3 min-[340px]:px-3.5 rounded-2xl text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer border border-white/25 shrink-0 whitespace-nowrap"
             style={{
               background: 'linear-gradient(135deg, var(--a), var(--a2))',
               boxShadow: '0 8px 20px -4px color-mix(in srgb, var(--a) 55%, transparent)',
@@ -775,9 +775,9 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                 {/* Content details snippet */}
                 {item.type === 'file' && (
                   <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80 text-xs text-zinc-300 space-y-1.5">
-                    <div className="flex items-center justify-between text-[11px] text-zinc-400">
-                      <span>{item.isTextOnly ? 'Delivery: Only Text (No File Attachment)' : `File: ${item.fileName || 'Telegram Media'}`}</span>
-                      <span className="font-mono text-[10px] bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800 text-zinc-400">
+                    <div className="flex items-center justify-between gap-2 min-w-0 text-[11px] text-zinc-400">
+                      <span className="min-w-0 flex-1 truncate">{item.isTextOnly ? 'Delivery: Only Text (No File Attachment)' : `File: ${item.fileName || 'Telegram Media'}`}</span>
+                      <span className="font-mono text-[10px] bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800 text-zinc-400 shrink-0">
                         ID: {item.id}
                       </span>
                     </div>
@@ -813,27 +813,27 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                     </div>
 
                     {(item.caption || item.replyMessage) && (
-                      <div className="text-zinc-300 italic pt-0.5 text-[11px]">"{item.caption || item.replyMessage}"</div>
+                      <div className="text-zinc-300 italic pt-0.5 text-[11px] break-words">"{item.caption || item.replyMessage}"</div>
                     )}
                   </div>
                 )}
 
                 {item.type === 'link' && (
                   <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80 text-xs text-zinc-300 space-y-1.5">
-                    <div className="flex items-center justify-between text-[11px] text-zinc-400">
-                      <span className="truncate max-w-[220px] text-zinc-300 font-mono">{item.url}</span>
-                      <span className="font-mono text-[10px] bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800 text-zinc-400">
+                    <div className="flex items-center justify-between gap-2 min-w-0 text-[11px] text-zinc-400">
+                      <span className="min-w-0 flex-1 truncate text-zinc-300 font-mono">{item.url}</span>
+                      <span className="font-mono text-[10px] bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800 text-zinc-400 shrink-0">
                         ID: {item.id}
                       </span>
                     </div>
                     {(item.replyMessage || item.caption) && (
-                      <div className="text-zinc-300 italic text-[11px]">"{item.replyMessage || item.caption}"</div>
+                      <div className="text-zinc-300 italic text-[11px] break-words">"{item.replyMessage || item.caption}"</div>
                     )}
-                    <div className="flex items-center justify-between text-[11px]">
+                    <div className="flex items-center justify-between flex-wrap gap-1.5 text-[11px]">
                       <span className="text-indigo-400 font-medium">
                         {item.openMode === 'webapp' ? '📱 Telegram Mini App' : '🌐 Normal Browser'}
                       </span>
-                      <span className="text-zinc-400">
+                      <span className="text-zinc-400 min-w-0 break-words">
                         Button: <strong className="text-white">{item.buttonText || 'Open Link'}</strong>
                       </span>
                     </div>
@@ -846,20 +846,20 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                   <button
                     type="button"
                     onClick={() => openEditModal(item)}
-                    className="tap py-2 px-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-white/90 hover:text-white border border-white/10 hover:border-white/25 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="tap min-w-0 py-2 px-1.5 min-[360px]:px-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-white/90 hover:text-white border border-white/10 hover:border-white/25 text-[11px] min-[360px]:text-xs font-semibold flex items-center justify-center gap-1 min-[360px]:gap-1.5 cursor-pointer"
                   >
                     <Edit2 className="w-3.5 h-3.5 text-[#7c9cff] shrink-0" />
-                    <span>Edit</span>
+                    <span className="truncate">Edit</span>
                   </button>
 
                   {/* Quick Option 2: Delete */}
                   <button
                     type="button"
                     onClick={() => setDeleteConfirmId(item.id)}
-                    className="tap py-2 px-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-200 hover:text-rose-100 border border-rose-400/20 hover:border-rose-400/35 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="tap min-w-0 py-2 px-1.5 min-[360px]:px-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-200 hover:text-rose-100 border border-rose-400/20 hover:border-rose-400/35 text-[11px] min-[360px]:text-xs font-semibold flex items-center justify-center gap-1 min-[360px]:gap-1.5 cursor-pointer"
                   >
                     <Trash2 className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                    <span>Delete</span>
+                    <span className="truncate">Delete</span>
                   </button>
 
                   {/* Quick Option 3: Generated Link */}
@@ -867,7 +867,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                     type="button"
                     onClick={() => copyDeepLink(item.id, deepLink)}
                     title={deepLink}
-                    className={`tap py-2 px-2 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer truncate ${
+                    className={`tap min-w-0 py-2 px-1.5 min-[360px]:px-2 rounded-xl border text-[11px] min-[360px]:text-xs font-semibold flex items-center justify-center gap-1 min-[360px]:gap-1.5 cursor-pointer truncate ${
                       isCopied
                         ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40'
                         : 'bg-[#7c9cff]/15 hover:bg-[#7c9cff]/25 text-[#c7d4ff] border-[#7c9cff]/30'
@@ -936,19 +936,19 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
       {modalMode !== 'none' && createPortal(
         <div 
           onClick={() => setModalMode('none')}
-          className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-md overscroll-contain animate-in fade-in duration-200"
+          className="fixed inset-0 z-[100] flex items-center justify-center p-2.5 sm:p-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-black/75 backdrop-blur-md overscroll-contain animate-in fade-in duration-200"
         >
           <div 
             onClick={(e) => e.stopPropagation()}
-            className="glass-panel w-full sm:max-w-md max-h-[85vh] h-auto flex flex-col rounded-[24px] overflow-hidden animate-in zoom-in-95 duration-200 my-auto"
+            className="glass-panel w-full max-w-md max-h-[90dvh] h-auto flex flex-col rounded-[24px] overflow-hidden animate-in zoom-in-95 duration-200 my-auto"
           >
             {/* Modal Header - Pinned at Top */}
-            <div className="shrink-0 p-4 sm:p-5 border-b border-white/10 bg-white/[0.03] flex items-center justify-between">
-              <div>
-                <h3 className="font-bold text-white text-base">
+            <div className="shrink-0 p-4 sm:p-5 border-b border-white/10 bg-white/[0.03] flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <h3 className="font-bold text-white text-base truncate">
                   {modalMode === 'edit' ? 'Edit Stored Item' : 'Add New File / Link'}
                 </h3>
-                <div className="flex items-center gap-2 mt-0.5 text-[11px] text-white/55">
+                <div className="flex items-center gap-2 mt-0.5 text-[11px] text-white/55 flex-wrap">
                   <span className="font-mono text-[#34d3ee] font-semibold">ID: {autoGeneratedId}</span>
                   <span className="text-white/30">•</span>
                   <span>Auto-Generated</span>
@@ -956,29 +956,29 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
               </div>
               <button
                 onClick={() => setModalMode('none')}
-                className="tap p-1.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.16] text-white/70 hover:text-white border border-white/10 cursor-pointer transition-colors"
+                className="tap p-1.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.16] text-white/70 hover:text-white border border-white/10 cursor-pointer transition-colors shrink-0"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             {/* Step Navigation Bar */}
-            <div className="shrink-0 px-4 sm:px-5 py-2.5 bg-white/[0.04] border-b border-white/10 flex items-center justify-between gap-2">
+            <div className="shrink-0 px-3 sm:px-5 py-2.5 bg-white/[0.04] border-b border-white/10 flex items-center justify-between gap-1.5 sm:gap-2">
               <button
                 type="button"
                 onClick={() => setFormStep(1)}
-                className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                className={`flex-1 min-w-0 py-1.5 px-2 sm:px-3 rounded-xl text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1.5 sm:gap-2 transition-all cursor-pointer ${
                   formStep === 1
                     ? 'bg-blue-600/20 text-blue-300 border border-blue-500/40 shadow-xs'
                     : 'bg-zinc-800/60 text-zinc-400 hover:text-white border border-transparent'
                 }`}
               >
-                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border ${
+                <span className={`w-5 h-5 rounded-full shrink-0 flex items-center justify-center text-[10px] font-bold border ${
                   formStep === 1
                     ? 'bg-blue-500/30 text-blue-300 border-blue-400/50'
                     : 'bg-zinc-700/60 text-zinc-400 border-zinc-600/40'
                 }`}>1</span>
-                <span>Primary Details</span>
+                <span className="truncate">Primary Details</span>
               </button>
 
               <ArrowRight className="w-3.5 h-3.5 text-zinc-600 shrink-0" />
@@ -986,29 +986,29 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
               <button
                 type="button"
                 onClick={() => handleNextToSetupVideo()}
-                className={`flex-1 py-1.5 px-3 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                className={`flex-1 min-w-0 py-1.5 px-2 sm:px-3 rounded-xl text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1.5 sm:gap-2 transition-all cursor-pointer ${
                   formStep === 2
                     ? 'bg-purple-600/20 text-purple-300 border border-purple-500/40 shadow-xs'
                     : 'bg-zinc-800/60 text-zinc-400 hover:text-white border border-transparent'
                 }`}
               >
-                <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold border ${
+                <span className={`w-5 h-5 rounded-full shrink-0 flex items-center justify-center text-[10px] font-bold border ${
                   formStep === 2
                     ? 'bg-purple-500/30 text-purple-300 border-purple-400/50'
                     : 'bg-zinc-700/60 text-zinc-400 border-zinc-600/40'
                 }`}>2</span>
-                <span className="flex items-center gap-1.5">
-                  <span>Setup Video</span>
+                <span className="flex items-center gap-1 min-w-0">
+                  <span className="truncate">Setup Video</span>
                   {hasSetupVideo && (
-                    <span className="px-1.5 py-0.2 text-[9px] rounded-full bg-purple-500/30 text-purple-300 border border-purple-500/50 font-bold">ON</span>
+                    <span className="px-1.5 py-0.2 text-[9px] rounded-full bg-purple-500/30 text-purple-300 border border-purple-500/50 font-bold shrink-0">ON</span>
                   )}
                 </span>
               </button>
             </div>
 
-            {/* Modal Scrollable Body - max-h 85vh & padding-bottom 120px ensures smooth scroll without cutoff */}
+            {/* Modal Scrollable Body */}
             <form onSubmit={handleSave} className="flex-1 min-h-0 flex flex-col">
-              <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-5 space-y-4 pb-[120px]">
+              <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 sm:p-5 space-y-4 pb-8">
                 {error && (
                   <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-300 text-xs flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
@@ -1021,21 +1021,21 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                   <div className="space-y-4 animate-in fade-in duration-150">
                     {/* Type Switcher for Add Mode (File vs Link vs Text) */}
                     {modalMode === 'add' && (
-                      <div className="grid grid-cols-3 gap-2 p-1 bg-zinc-900 border border-zinc-800 rounded-xl">
+                      <div className="grid grid-cols-3 gap-1.5 sm:gap-2 p-1 bg-zinc-900 border border-zinc-800 rounded-xl">
                         <button
                           type="button"
                           onClick={() => {
                             setItemType('file');
                             setAutoGeneratedId(generateRandomId('file'));
                           }}
-                          className={`py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                          className={`min-w-0 py-2 px-1 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1 sm:gap-1.5 transition-all cursor-pointer ${
                             itemType === 'file'
                               ? 'bg-red-500/20 text-sky-300 border border-red-500/40 shadow-xs'
                               : 'text-zinc-400 hover:text-white'
                           }`}
                         >
-                          <FileText className="w-3.5 h-3.5" />
-                          <span>File / Media</span>
+                          <FileText className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">File / Media</span>
                         </button>
 
                         <button
@@ -1044,14 +1044,14 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                             setItemType('link');
                             setAutoGeneratedId(generateRandomId('link'));
                           }}
-                          className={`py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                          className={`min-w-0 py-2 px-1 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1 sm:gap-1.5 transition-all cursor-pointer ${
                             itemType === 'link'
                               ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40 shadow-xs'
                               : 'text-zinc-400 hover:text-white'
                           }`}
                         >
-                          <Link2 className="w-3.5 h-3.5" />
-                          <span>Web Link</span>
+                          <Link2 className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">Web Link</span>
                         </button>
 
                         <button
@@ -1060,14 +1060,14 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                             setItemType('text');
                             setAutoGeneratedId(generateRandomId('text'));
                           }}
-                          className={`py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                          className={`min-w-0 py-2 px-1 rounded-lg text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1 sm:gap-1.5 transition-all cursor-pointer ${
                             itemType === 'text'
                               ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-xs'
                               : 'text-zinc-400 hover:text-white'
                           }`}
                         >
-                          <MessageSquare className="w-3.5 h-3.5" />
-                          <span>Text Only</span>
+                          <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+                          <span className="truncate">Text Only</span>
                         </button>
                       </div>
                     )}
@@ -1238,8 +1238,8 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                                     ) : (
                                       <FileText className="w-4 h-4 text-red-400 shrink-0" />
                                     )}
-                                    <div className="min-w-0">
-                                      <div className="text-xs font-medium text-white truncate max-w-[200px]">
+                                    <div className="min-w-0 flex-1">
+                                      <div className="text-xs font-medium text-white truncate">
                                         {f.name}
                                       </div>
                                       <div className="text-[10px] text-zinc-500">
@@ -1288,7 +1288,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
 
                         <div>
                           <label className="block text-xs font-semibold text-zinc-300 mb-1.5">Open Mode *</label>
-                          <div className="grid grid-cols-2 gap-2">
+                          <div className="grid grid-cols-1 min-[340px]:grid-cols-2 gap-2">
                             <button
                               type="button"
                               onClick={() => setOpenMode('browser')}
@@ -1407,7 +1407,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                         </span>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-1 min-[340px]:grid-cols-2 gap-2">
                         <button
                           type="button"
                           onClick={() => setRetentionType('permanent')}
@@ -1451,7 +1451,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                             </span>
                           </div>
 
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <input
                               type="number"
                               min="1"
@@ -1577,7 +1577,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                             <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
                               Setup Video Source *
                             </label>
-                            <div className="grid grid-cols-2 gap-2">
+                            <div className="grid grid-cols-1 min-[340px]:grid-cols-2 gap-2">
                               <button
                                 type="button"
                                 onClick={() => setSetupVideoChoice('url')}
@@ -1625,7 +1625,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                               />
 
                               {/* Clean Small "Upload from Gallery" Button Right Underneath Video URL */}
-                              <div className="flex items-center justify-between pt-1">
+                              <div className="flex items-center justify-between flex-wrap gap-2 pt-1">
                                 <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/35 text-purple-200 text-xs font-semibold cursor-pointer transition-all active:scale-95 shadow-xs">
                                   <Video className="w-3.5 h-3.5 text-purple-400" />
                                   <span>Upload from Gallery</span>
@@ -1793,20 +1793,20 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                       <div className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">
                         Summary Review
                       </div>
-                      <div className="grid grid-cols-2 gap-2 text-[11px]">
-                        <div>
+                      <div className="grid grid-cols-1 min-[360px]:grid-cols-2 gap-2 text-[11px]">
+                        <div className="min-w-0 break-words">
                           <span className="text-zinc-500">Item: </span>
                           <strong className="text-white">{name || 'Unnamed'}</strong> ({itemType})
                         </div>
-                        <div>
+                        <div className="min-w-0 break-words">
                           <span className="text-zinc-500">Trigger: </span>
                           <strong className="font-mono text-red-400">{previewTrigger()}</strong>
                         </div>
-                        <div>
+                        <div className="min-w-0 break-words">
                           <span className="text-zinc-500">Storage: </span>
                           <span className="text-zinc-300">{retentionType === 'temporary' ? `${retentionDays}d (Temp)` : 'Permanent'}</span>
                         </div>
-                        <div>
+                        <div className="min-w-0 break-words">
                           <span className="text-zinc-500">Setup Video: </span>
                           <strong className={hasSetupVideo ? 'text-purple-400 font-bold' : 'text-zinc-400'}>
                             {hasSetupVideo ? 'Enabled' : 'Disabled'}
@@ -1816,7 +1816,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                     </div>
 
                     {/* Confirmation Flow Action Buttons */}
-                    <div className="flex gap-2 pt-3 pb-2">
+                    <div className="flex flex-col min-[340px]:flex-row gap-2 pt-3 pb-2">
                       <button
                         type="button"
                         onClick={() => setFormStep(1)}

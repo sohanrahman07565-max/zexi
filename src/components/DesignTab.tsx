@@ -63,10 +63,10 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
   return (
     <div className="space-y-4 pb-28">
       {/* Header & Save Action */}
-      <div className="flex items-center justify-between gap-2 px-1">
-        <div>
+      <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+        <div className="min-w-0">
           <h2 className="text-sm font-extrabold text-white flex items-center gap-2">
-            <Palette className="w-4 h-4" style={{ color: 'var(--a)' }} /> Accent Color
+            <Palette className="w-4 h-4 shrink-0" style={{ color: 'var(--a)' }} /> Accent Color
           </h2>
           <p className="text-[11px] text-white/60">Customize Aurora orbs, rings &amp; glass glow</p>
         </div>
@@ -98,8 +98,8 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
         className="glass lg-rise rounded-[24px] p-4 space-y-3"
         style={{ '--i': 0 } as React.CSSProperties}
       >
-        <div className="flex items-center justify-between gap-2">
-          <div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0 flex-1">
             <div className="text-xs font-extrabold text-white">Liquid Glass Accent Colour</div>
             <div className="text-[11px] text-white/60">
               Updates the live Aurora orbs, rings &amp; glass highlights instantly

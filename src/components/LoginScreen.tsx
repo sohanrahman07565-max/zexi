@@ -69,7 +69,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
 
   // Desktop subtle 3D perspective tilt matching reference design
   useEffect(() => {
-    if (typeof window === 'undefined' || !window.matchMedia('(hover:hover)').matches) return;
+    if (
+      typeof window === 'undefined' ||
+      !window.matchMedia('(hover:hover)').matches ||
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    ) {
+      return;
+    }
 
     const handleMouseMove = (e: MouseEvent) => {
       if (!cardRef.current || isSuccessExiting) return;
@@ -185,11 +191,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
     setPasswordError(null);
 
     if (!cleanId && !cleanPassword) {
-      triggerEmailError(targetBotId && targetBotId !== 'main' ? 'Please enter your Bot ID and password' : 'Please enter your Bot ID, username, or email and password');
+      triggerEmailError(targetBotId && targetBotId !== 'main' ? 'Please enter your Admin ID and password' : 'Please enter your username or email and password');
       return;
     }
     if (!cleanId) {
-      triggerEmailError(targetBotId && targetBotId !== 'main' ? 'Please enter your Bot ID' : 'Please enter your Bot ID, username, or email');
+      triggerEmailError(targetBotId && targetBotId !== 'main' ? 'Please enter your Admin ID' : 'Please enter your username or email');
       return;
     }
     if (!cleanPassword) {
@@ -300,19 +306,20 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
           --zexi-blue: #60a5fa;
           --zexi-green: #34d399;
           min-height: 100vh;
-          min-height: 100svh;
+          min-height: 100dvh;
           width: 100%;
+          box-sizing: border-box;
           background: var(--zexi-bg);
           color: var(--zexi-text);
           font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
           display: flex;
+          flex-direction: column;
           align-items: center;
           justify-content: center;
           overflow-x: hidden;
           overflow-y: auto;
           position: relative;
-          padding-top: env(safe-area-inset-top, 0px);
-          padding-bottom: env(safe-area-inset-bottom, 0px);
+          padding: max(12px, env(safe-area-inset-top, 0px)) max(12px, env(safe-area-inset-right, 0px)) max(12px, env(safe-area-inset-bottom, 0px)) max(12px, env(safe-area-inset-left, 0px));
         }
 
         .zexi-login-goo-svg {
@@ -395,8 +402,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
         .zexi-login-card {
           position: relative;
           z-index: 2;
-          width: min(92vw, 400px);
-          margin: 16px;
+          width: min(100%, 400px);
+          margin: auto;
+          box-sizing: border-box;
           padding: 34px 26px 26px;
           border-radius: 34px;
           background: var(--zexi-card);
@@ -817,6 +825,63 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
           animation: zexiLoginFlow 7s linear infinite;
         }
 
+        @media (max-width: 360px) {
+          .zexi-login-card {
+            padding: 26px 18px 22px;
+            border-radius: 26px;
+          }
+          .zexi-login-logo {
+            width: 66px;
+            height: 66px;
+            margin-bottom: 14px;
+          }
+          .zexi-login-title {
+            font-size: clamp(20px, 6.8vw, 27px);
+            letter-spacing: 0.06em;
+          }
+          .zexi-login-sub {
+            letter-spacing: 0.2em;
+            margin: 8px 0 22px;
+          }
+          .zexi-login-box,
+          .zexi-login-signin {
+            height: 50px;
+          }
+          .zexi-login-spg {
+            margin: 0 10px;
+          }
+          .zexi-login-foot {
+            letter-spacing: 0.18em;
+            font-size: 11px;
+          }
+        }
+
+        @media (max-height: 620px) {
+          .zexi-login-card {
+            padding: 24px 22px 20px;
+          }
+          .zexi-login-logo {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 12px;
+          }
+          .zexi-login-sub {
+            margin: 6px 0 18px;
+          }
+          .zexi-login-field {
+            margin-bottom: 14px;
+          }
+          .zexi-login-google {
+            margin-top: 14px;
+            width: 44px;
+            height: 44px;
+          }
+          .zexi-login-foot-wrap {
+            margin-top: 16px;
+            padding-top: 14px;
+          }
+        }
+
         @media (prefers-reduced-motion: reduce) {
           .zexi-login-root * {
             animation-duration: 0.01s !important;
@@ -869,7 +934,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
         <form onSubmit={handleSubmit} noValidate>
           <div className="zexi-login-field">
             <label className="zexi-login-label" htmlFor="u">
-              {targetBotId && targetBotId !== 'main' ? 'ENTER BOT ID' : 'ENTER BOT ID, USERNAME OR EMAIL'}
+              {targetBotId && targetBotId !== 'main' ? 'ENTER ADMIN ID' : 'ENTER USERNAME OR EMAIL'}
             </label>
             <div className={`zexi-login-box ${emailError ? 'bad shake' : ''}`} key={`u-box-${emailShakeKey}`}>
               <span className="zexi-login-spg">
@@ -891,7 +956,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
                 ref={userInputRef}
                 id="u"
                 type="text"
-                placeholder={targetBotId && targetBotId !== 'main' ? 'Enter Bot ID (e.g. 9112185641)' : 'Enter Bot ID, Username or Email'}
+                placeholder={targetBotId && targetBotId !== 'main' ? 'Enter Admin ID' : 'Enter Username or Email'}
                 autoComplete="username"
                 value={identifier}
                 onChange={(e) => {

@@ -1,5 +1,9 @@
 @import "tailwindcss";
 
+@theme {
+  --breakpoint-xs: 360px;
+}
+
 @layer base {
   :root {
     color-scheme: dark;
@@ -20,6 +24,12 @@
       0 2px 6px rgba(0, 0, 0, 0.25);
   }
 
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
   html {
     min-height: 100%;
     height: auto;
@@ -32,6 +42,7 @@
 
   body {
     min-height: 100%;
+    min-height: 100dvh;
     height: auto;
     background-color: #05060d;
     color: #ffffff;
@@ -47,8 +58,9 @@
 
   #root {
     min-height: 100%;
+    min-height: 100dvh;
     height: auto;
-    overflow-x: hidden;
+    overflow-x: clip;
     overflow-y: visible;
     display: flex;
     flex-direction: column;
@@ -266,11 +278,11 @@
 /* Liquid Glass Hero Number & SVG Progress Ring */
 .lg-hero {
   border-radius: 26px;
-  padding: 18px;
+  padding: clamp(14px, 4vw, 18px);
 }
 
 .lg-big {
-  font-size: 40px;
+  font-size: clamp(28px, 10.5vw, 40px);
   font-weight: 900;
   line-height: 1;
   letter-spacing: -0.04em;
@@ -283,16 +295,16 @@
 
 .lg-ring {
   position: relative;
-  width: 96px;
-  height: 96px;
+  width: clamp(74px, 24vw, 96px);
+  height: clamp(74px, 24vw, 96px);
   display: grid;
   place-items: center;
   flex-shrink: 0;
 }
 
 .lg-ring svg {
-  width: 96px;
-  height: 96px;
+  width: 100%;
+  height: 100%;
   transform: rotate(-90deg);
 }
 
@@ -374,9 +386,88 @@
   left: 50%;
   bottom: max(14px, env(safe-area-inset-bottom, 0px));
   transform: translateX(-50%);
-  width: min(440px, calc(100% - 24px));
+  width: min(440px, calc(100% - 24px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)));
   z-index: 40;
   pointer-events: none;
+}
+
+@media (min-width: 768px) {
+  .lg-nav-shell {
+    width: min(520px, calc(100% - 32px));
+  }
+}
+
+@media (max-width: 359px) {
+  .lg-col {
+    width: 38px;
+    height: 38px;
+    border-radius: 13px;
+  }
+
+  .lg-nav {
+    height: 62px;
+    padding: 5px;
+  }
+
+  .lg-pill {
+    top: 5px;
+    bottom: 5px;
+    left: 5px;
+    width: calc((100% - 10px) / 5);
+  }
+
+  .lg-nb {
+    font-size: 9.5px;
+    gap: 2px;
+  }
+
+  .lg-nb svg {
+    width: 18px;
+    height: 18px;
+  }
+}
+
+@media (max-height: 500px) and (orientation: landscape) {
+  .lg-nav-shell {
+    bottom: max(8px, env(safe-area-inset-bottom, 0px));
+  }
+
+  .lg-nav {
+    height: 56px;
+    padding: 4px;
+  }
+
+  .lg-pill {
+    top: 4px;
+    bottom: 4px;
+    left: 4px;
+    width: calc((100% - 8px) / 5);
+  }
+
+  .lg-nb {
+    font-size: 9.5px;
+    gap: 1px;
+  }
+
+  .lg-nb svg {
+    width: 17px;
+    height: 17px;
+  }
+}
+
+@media (min-width: 1600px) {
+  .o1 {
+    width: 540px;
+    height: 540px;
+  }
+  .o2 {
+    width: 480px;
+    height: 480px;
+  }
+  .o3 {
+    width: 380px;
+    height: 380px;
+  }
 }
 
 .lg-nav {

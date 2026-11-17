@@ -721,11 +721,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       <div
         ref={modalScrollRef}
         onClick={() => setEditingTemplate(null)}
-        className="fixed inset-0 z-50 flex items-start justify-center p-3 sm:p-5 pt-3 sm:pt-6 pb-28 bg-black/85 backdrop-blur-md overflow-y-auto overscroll-contain animate-in fade-in duration-200"
+        className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-5 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-black/85 backdrop-blur-md overflow-y-auto overscroll-contain animate-in fade-in duration-200"
       >
         <div
           onClick={(e) => e.stopPropagation()}
-          className="glass-panel w-full max-w-lg rounded-3xl p-5 border border-red-500/35 shadow-[0_0_50px_-10px_rgba(239,68,68,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-2 relative animate-in zoom-in-95 duration-200"
+          className="glass-panel w-full max-w-lg max-h-[90dvh] overflow-y-auto overscroll-contain rounded-3xl p-4 sm:p-5 border border-red-500/35 shadow-[0_0_50px_-10px_rgba(239,68,68,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-auto relative animate-in zoom-in-95 duration-200"
         >
           {/* Subtle top border glow */}
           <div
@@ -733,26 +733,26 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             style={{ background: 'linear-gradient(90deg, transparent, #ef4444, transparent)' }}
           />
 
-          <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
-            <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-xl bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center">
+          <div className="flex items-center justify-between gap-2 pb-2 border-b border-zinc-800">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <div className="w-9 h-9 rounded-xl bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center shrink-0">
                 <Edit2 className="w-4 h-4" />
               </div>
-              <div>
-                <h4 className="font-bold text-white text-sm">{editingTemplate.name}</h4>
-                <p className="text-[11px] text-zinc-400">{editingTemplate.description || 'Edit bot message template'}</p>
+              <div className="min-w-0">
+                <h4 className="font-bold text-white text-sm truncate">{editingTemplate.name}</h4>
+                <p className="text-[11px] text-zinc-400 truncate">{editingTemplate.description || 'Edit bot message template'}</p>
               </div>
             </div>
             <button
               onClick={() => setEditingTemplate(null)}
-              className="w-8 h-8 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+              className="w-8 h-8 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
             >
               <X className="w-4 h-4" />
             </button>
           </div>
 
           <div>
-            <div className="flex items-center justify-between mb-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1.5">
               <label className="text-xs font-semibold text-zinc-300">Message Text (HTML format)</label>
               <span className="text-[10px] text-zinc-500">Supports &lt;b&gt;, &lt;i&gt;, &lt;code&gt;</span>
             </div>
@@ -787,7 +787,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     key={m}
                     type="button"
                     onClick={() => setTemplateMediaType(m)}
-                    className={`py-2 px-2 rounded-xl text-xs font-semibold capitalize border transition-all cursor-pointer ${
+                    className={`min-w-0 py-2 px-1 sm:px-2 rounded-xl text-[11px] sm:text-xs font-semibold capitalize border transition-all cursor-pointer truncate ${
                       templateMediaType === m
                         ? 'bg-blue-600/20 text-sky-300 border-blue-500/60 shadow-sm'
                         : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-white'
@@ -1320,13 +1320,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         <div 
           onClick={handleHeaderSecretTap}
           title="Admin Profile"
-          className={`glass-panel lg-rise tap rounded-full py-3.5 px-5 flex items-center justify-between gap-3 cursor-pointer select-none ${
+          className={`glass-panel lg-rise tap rounded-full py-3 sm:py-3.5 px-3.5 sm:px-5 flex items-center justify-between gap-2.5 sm:gap-3 cursor-pointer select-none ${
             gestureFeedback
               ? '!border-emerald-400/60 shadow-[0_0_30px_rgba(52,211,153,0.35)]'
               : ''
           }`}
         >
-          <div className="flex items-center gap-3.5 min-w-0">
+          <div className="flex items-center gap-3 sm:gap-3.5 min-w-0 flex-1">
             {/* Official Telegram Logo Avatar */}
             <div className="w-11 h-11 shrink-0 rounded-full overflow-hidden flex items-center justify-center shadow-[0_6px_16px_rgba(34,158,217,0.35)] bg-[#229ED9]">
               <svg viewBox="0 0 48 48" className="w-full h-full" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -1361,27 +1361,27 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         </div>
 
         {/* Smooth Animated Admin Details Popup */}
-        {showAdminDetailsPopup && (
+        {showAdminDetailsPopup && createPortal(
           <div 
-            className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-200"
+            className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-black/75 backdrop-blur-md animate-in fade-in duration-200"
             onClick={() => setShowAdminDetailsPopup(false)}
           >
             <div 
-              className="glass-panel w-full max-w-sm rounded-[24px] p-5 text-white relative animate-in zoom-in-95 duration-200"
+              className="glass-panel w-full max-w-sm max-h-[90dvh] overflow-y-auto overscroll-contain rounded-[24px] p-4 sm:p-5 text-white relative animate-in zoom-in-95 duration-200"
               onClick={(e) => e.stopPropagation()}
             >
               {/* Header Title */}
-              <div className="flex items-center justify-between pb-3.5 border-b border-white/10">
-                <div className="flex items-center gap-2.5">
-                  <div className="lg-tile w-8 h-8 rounded-xl bg-[#7c9cff]/20 flex items-center justify-center text-[#7c9cff]">
+              <div className="flex items-center justify-between gap-2 pb-3.5 border-b border-white/10">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="lg-tile w-8 h-8 rounded-xl bg-[#7c9cff]/20 flex items-center justify-center text-[#7c9cff] shrink-0">
                     <ShieldCheck className="w-4 h-4" />
                   </div>
-                  <h3 className="text-sm font-bold text-white tracking-tight">Admin Details</h3>
+                  <h3 className="text-sm font-bold text-white tracking-tight truncate">Admin Details</h3>
                 </div>
                 <button
                   type="button"
                   onClick={() => setShowAdminDetailsPopup(false)}
-                  className="tap w-7 h-7 rounded-lg bg-white/[0.08] hover:bg-white/[0.16] border border-white/10 text-white/70 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                  className="tap w-7 h-7 rounded-lg bg-white/[0.08] hover:bg-white/[0.16] border border-white/10 text-white/70 hover:text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -1391,12 +1391,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               <div className="space-y-3 pt-4">
                 <div className="p-3 rounded-2xl bg-white/[0.05] border border-white/10 space-y-1">
                   <span className="text-[10px] uppercase font-bold text-white/50 tracking-wider block">Admin ID</span>
-                  <span className="text-sm font-mono font-bold text-white block select-all">{currentUser.telegramId || currentUser.id || 'N/A'}</span>
+                  <span className="text-sm font-mono font-bold text-white block select-all break-all">{currentUser.telegramId || currentUser.id || 'N/A'}</span>
                 </div>
 
                 <div className="p-3 rounded-2xl bg-white/[0.05] border border-white/10 space-y-1">
                   <span className="text-[10px] uppercase font-bold text-white/50 tracking-wider block">Username</span>
-                  <span className="text-sm font-mono font-bold text-[#7c9cff] block select-all">
+                  <span className="text-sm font-mono font-bold text-[#7c9cff] block select-all break-all">
                     {currentUser.username ? (currentUser.username.startsWith('@') ? currentUser.username : `@${currentUser.username}`) : `@${(currentUser.name || 'admin').toLowerCase().replace(/\s+/g, '_')}`}
                   </span>
                 </div>
@@ -1426,7 +1426,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 </button>
               </div>
             </div>
-          </div>
+          </div>,
+          document.body
         )}
 
         {/* Menu Items */}
@@ -1435,11 +1436,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {onOpenBotSwitcher && (
             <button
               onClick={() => onOpenBotSwitcher()}
-              className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer bg-white/[0.02]"
+              className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer bg-white/[0.02]"
             >
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 min-w-0 flex-1">
                 <div
-                  className="lg-tile"
+                  className="lg-tile shrink-0"
                   style={{
                     background: 'color-mix(in srgb, var(--a) 24%, rgba(255,255,255,.06))',
                     '--c': 'rgba(124,156,255,0.45)',
@@ -1447,8 +1448,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 >
                   <Bot className="w-4 h-4 text-sky-300" />
                 </div>
-                <div>
-                  <div className="text-xs font-bold text-white flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
                     <span>Switch Bot &amp; Fleet Manager</span>
                     <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-white/10 text-sky-200 font-semibold border border-white/20">
                       Multi-Bot
@@ -1456,56 +1457,56 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   </div>
                 </div>
               </div>
-              <ChevronRight className="w-4 h-4 text-white/50" />
+              <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
             </button>
           )}
 
           {/* Templates */}
           <button
             onClick={() => setSubView('templates')}
-            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
-            <div className="flex items-center gap-3">
-              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #60a5fa 20%, rgba(255,255,255,.06))' }}>
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #60a5fa 20%, rgba(255,255,255,.06))' }}>
                 <MessageSquare className="w-4 h-4 text-sky-300" />
               </div>
-              <div>
-                <div className="text-xs font-bold text-white">Message Templates</div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white truncate">Message Templates</div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-white/50" />
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
           </button>
 
           {/* Admins */}
           <button
             onClick={() => setSubView('admins')}
-            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
-            <div className="flex items-center gap-3">
-              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #818cf8 20%, rgba(255,255,255,.06))' }}>
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #818cf8 20%, rgba(255,255,255,.06))' }}>
                 <Users className="w-4 h-4 text-indigo-300" />
               </div>
-              <div>
-                <div className="text-xs font-bold text-white">Sub-Admins &amp; Permissions</div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white truncate">Sub-Admins &amp; Permissions</div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-white/50" />
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
           </button>
 
           {/* Bot Settings */}
           <button
             onClick={() => setSubView('settings')}
-            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
-            <div className="flex items-center gap-3">
-              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #fbbf24 20%, rgba(255,255,255,.06))' }}>
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #fbbf24 20%, rgba(255,255,255,.06))' }}>
                 <Settings className="w-4 h-4 text-amber-300" />
               </div>
-              <div>
-                <div className="text-xs font-bold text-white">Bot Settings</div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white truncate">Bot Settings</div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-white/50" />
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
           </button>
 
           {/* File Auto-Delete & Cleanup */}
@@ -1514,14 +1515,14 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               loadCleanupStatus();
               setSubView('cleanup');
             }}
-            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
-            <div className="flex items-center gap-3">
-              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #f472b6 20%, rgba(255,255,255,.06))' }}>
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #f472b6 20%, rgba(255,255,255,.06))' }}>
                 <Clock className="w-4 h-4 text-pink-300" />
               </div>
-              <div>
-                <div className="text-xs font-bold text-white flex items-center gap-1.5">
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
                   <span>File Auto-Delete &amp; Cleanup</span>
                   <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-pink-500/20 text-pink-200 font-mono font-semibold border border-pink-400/25">
                     {botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10}m Timeout
@@ -1529,20 +1530,20 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 </div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-white/50" />
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
           </button>
 
           {/* Broadcast Notification System */}
           <button
             onClick={() => setSubView('broadcast')}
-            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
-            <div className="flex items-center gap-3">
-              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #c084fc 22%, rgba(255,255,255,.06))' }}>
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #c084fc 22%, rgba(255,255,255,.06))' }}>
                 <Megaphone className="w-4 h-4 text-purple-300" />
               </div>
-              <div>
-                <div className="text-xs font-bold text-white flex items-center gap-1.5">
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
                   <span>Broadcast System</span>
                   <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-purple-500/20 text-purple-200 font-mono font-semibold border border-purple-400/25">
                     {broadcastUsersCount > 0 ? `${broadcastUsersCount} Users` : 'Rich Media'}
@@ -1550,20 +1551,20 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 </div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-white/50" />
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
           </button>
 
           {/* User Reports & Moderation */}
           <button
             onClick={() => setSubView('reports')}
-            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
-            <div className="flex items-center gap-3">
-              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #fb7185 20%, rgba(255,255,255,.06))' }}>
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #fb7185 20%, rgba(255,255,255,.06))' }}>
                 <Flag className="w-4 h-4 text-rose-300" />
               </div>
-              <div>
-                <div className="text-xs font-bold text-white flex items-center gap-1.5">
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
                   <span>User Reports</span>
                   {reportsList.filter(r => r.status === 'pending').length > 0 ? (
                     <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-rose-500/30 text-rose-200 font-mono font-semibold animate-pulse">
@@ -1577,20 +1578,20 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 </div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-white/50" />
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
           </button>
 
           {/* Fraud Protection & Word Filter */}
           <button
             onClick={() => setSubView('fraud')}
-            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
-            <div className="flex items-center gap-3">
-              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #fbbf24 20%, rgba(255,255,255,.06))' }}>
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #fbbf24 20%, rgba(255,255,255,.06))' }}>
                 <ShieldAlert className="w-4 h-4 text-amber-300" />
               </div>
-              <div>
-                <div className="text-xs font-bold text-white flex items-center gap-1.5">
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
                   <span>Fraud &amp; Word Filter</span>
                   <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-amber-500/20 text-amber-200 font-mono font-semibold border border-amber-400/25">
                     {fraudRulesList.filter(r => r.enabled).length} Active Rules
@@ -1598,7 +1599,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 </div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-white/50" />
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
           </button>
 
           {/* Chat Ignore / Whitelist */}
@@ -1631,14 +1632,14 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {/* Emoji Store */}
           <button
             onClick={() => setSubView('emoji')}
-            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
-            <div className="flex items-center gap-3">
-              <div className="lg-tile" style={{ background: 'color-mix(in srgb, #f472b6 20%, rgba(255,255,255,.06))' }}>
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #f472b6 20%, rgba(255,255,255,.06))' }}>
                 <Smile className="w-4 h-4 text-pink-300" />
               </div>
-              <div>
-                <div className="text-xs font-bold text-white flex items-center gap-1.5">
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
                   <span>Emoji Store</span>
                   <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-pink-500/20 text-pink-200 font-mono font-semibold">
                     Hot
@@ -1646,7 +1647,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 </div>
               </div>
             </div>
-            <ChevronRight className="w-4 h-4 text-white/50" />
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
           </button>
         </div>
 
@@ -1678,7 +1679,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
     return (
       <div className="space-y-4 pb-28">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <button
             onClick={() => setSubView('menu')}
             className="text-xs text-red-400 hover:text-sky-300 font-medium cursor-pointer"
@@ -1691,9 +1692,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         {/* Featured: Start Message Template (/start) */}
         {startTemplate && (
           <div className="p-4 rounded-2xl bg-gradient-to-br from-sky-500/15 via-indigo-500/10 to-zinc-900 border border-red-500/40 shadow-lg space-y-3">
-            <div className="flex items-start justify-between gap-2">
-              <div>
-                <div className="flex items-center gap-1.5 mb-1">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-1.5 flex-wrap mb-1">
                   <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-500/20 text-sky-300 border border-red-500/30">
                     /start Command
                   </span>
@@ -1701,7 +1702,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> Active
                   </span>
                 </div>
-                <h3 className="text-sm font-bold text-white">{startTemplate.name}</h3>
+                <h3 className="text-sm font-bold text-white break-words">{startTemplate.name}</h3>
               </div>
               <button
                 onClick={() => {
@@ -1717,7 +1718,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               </button>
             </div>
 
-            <div className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 text-xs font-mono text-zinc-200 whitespace-pre-wrap">
+            <div className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 text-xs font-mono text-zinc-200 whitespace-pre-wrap break-words overflow-x-auto">
               {startTemplate.content}
             </div>
 
@@ -1742,9 +1743,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               key={tpl.key}
               className="glass-panel rounded-2xl p-4 border border-zinc-800/80 hover:border-zinc-700/80 transition-all space-y-2"
             >
-              <div className="flex items-start justify-between">
-                <div>
-                  <h4 className="text-xs font-bold text-white">{tpl.name}</h4>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <h4 className="text-xs font-bold text-white break-words">{tpl.name}</h4>
                 </div>
                 <button
                   onClick={() => {
@@ -1753,14 +1754,14 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     setTemplateMediaType(tpl.mediaType || 'none');
                     setTemplateMediaUrl(tpl.mediaUrl || '');
                   }}
-                  className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-red-400 cursor-pointer"
+                  className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-red-400 cursor-pointer shrink-0"
                 >
                   <Edit2 className="w-3.5 h-3.5" />
                 </button>
               </div>
 
               {/* Template Content Box */}
-              <div className="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 text-xs font-mono text-zinc-200 whitespace-pre-wrap">
+              <div className="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 text-xs font-mono text-zinc-200 whitespace-pre-wrap break-words overflow-x-auto">
                 {tpl.content}
               </div>
 
@@ -1792,7 +1793,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
     return (
       <div className="space-y-4 pb-28">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <button
             onClick={() => setSubView('menu')}
             className="text-xs text-red-400 hover:text-sky-300 font-medium cursor-pointer"
@@ -1802,7 +1803,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {currentUser.role === 'owner' && (
             <button
               onClick={() => setShowAddAdmin(true)}
-              className="py-1.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-600/30 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+              className="py-1.5 px-3 rounded-xl bg-blue-600 hover:bg-blue-500 text-white shadow-md shadow-blue-600/30 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors shrink-0"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Add Sub-Admin</span>
@@ -1842,9 +1843,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   }`}
                 >
                   <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="text-xs font-bold text-white flex items-center gap-2 flex-wrap">
-                        <span>{adm.name}</span>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-bold text-white flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                        <span className="break-words">{adm.name}</span>
                         <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-semibold uppercase ${
                           isOwner 
                             ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' 
@@ -1860,8 +1861,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                           {isEnabled ? '● Active' : '○ Disabled'}
                         </span>
                       </div>
-                      <div className="text-[11px] text-zinc-400 font-mono mt-1 flex items-center gap-2">
-                        <span>Telegram ID: <span className="text-zinc-200 font-semibold">{adm.telegramId}</span></span>
+                      <div className="text-[11px] text-zinc-400 font-mono mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        <span className="break-all">Telegram ID: <span className="text-zinc-200 font-semibold">{adm.telegramId}</span></span>
                         {adm.lastLoginAt && (
                           <span className="text-zinc-500 text-[10px]">
                             • Last active {new Date(adm.lastLoginAt).toLocaleDateString()}
@@ -1946,25 +1947,25 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         {showAddAdmin && createPortal(
           <div
             onClick={() => setShowAddAdmin(false)}
-            className="fixed inset-0 z-50 flex items-start justify-center p-3 sm:p-5 pt-3 sm:pt-6 pb-28 bg-black/85 backdrop-blur-md overflow-y-auto overscroll-contain animate-in fade-in duration-200"
+            className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-5 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-black/85 backdrop-blur-md overflow-y-auto overscroll-contain animate-in fade-in duration-200"
           >
             <div
               onClick={(e) => e.stopPropagation()}
-              className="glass-panel w-full max-w-lg rounded-3xl p-5 border border-sky-500/35 shadow-[0_0_50px_-10px_rgba(14,165,233,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-2 relative animate-in zoom-in-95 duration-200"
+              className="glass-panel w-full max-w-lg max-h-[90dvh] overflow-y-auto overscroll-contain rounded-3xl p-4 sm:p-5 border border-sky-500/35 shadow-[0_0_50px_-10px_rgba(14,165,233,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-auto relative animate-in zoom-in-95 duration-200"
             >
-              <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-9 h-9 rounded-xl bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center">
+              <div className="flex items-center justify-between gap-2 pb-2 border-b border-zinc-800">
+                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                  <div className="w-9 h-9 rounded-xl bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center shrink-0">
                     <Plus className="w-4 h-4" />
                   </div>
-                  <div>
-                    <h4 className="font-bold text-white text-sm">Add New Sub-Admin</h4>
-                    <p className="text-[11px] text-zinc-400">Configure credentials & granular permissions</p>
+                  <div className="min-w-0">
+                    <h4 className="font-bold text-white text-sm truncate">Add New Sub-Admin</h4>
+                    <p className="text-[11px] text-zinc-400 truncate">Configure credentials & granular permissions</p>
                   </div>
                 </div>
                 <button
                   onClick={() => setShowAddAdmin(false)}
-                  className="w-8 h-8 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                  className="w-8 h-8 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2010,12 +2011,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
                 {/* Permissions Toggles with Select All / Deselect All */}
                 <div className="pt-2 border-t border-zinc-800 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
                       <div className="font-semibold text-white text-xs">Granular Permissions (14 Capabilities)</div>
                       <div className="text-[10px] text-zinc-400">Toggle exactly what this sub-admin is allowed to do</div>
                     </div>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 shrink-0">
                       <button
                         type="button"
                         onClick={() => {
@@ -2111,25 +2112,25 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         {editingAdmin && createPortal(
           <div
             onClick={() => setEditingAdmin(null)}
-            className="fixed inset-0 z-50 flex items-start justify-center p-3 sm:p-5 pt-3 sm:pt-6 pb-28 bg-black/85 backdrop-blur-md overflow-y-auto overscroll-contain animate-in fade-in duration-200"
+            className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-5 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-black/85 backdrop-blur-md overflow-y-auto overscroll-contain animate-in fade-in duration-200"
           >
             <div
               onClick={(e) => e.stopPropagation()}
-              className="glass-panel w-full max-w-lg rounded-3xl p-5 border border-blue-500/35 shadow-[0_0_50px_-10px_rgba(59,130,246,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-2 relative animate-in zoom-in-95 duration-200"
+              className="glass-panel w-full max-w-lg max-h-[90dvh] overflow-y-auto overscroll-contain rounded-3xl p-4 sm:p-5 border border-blue-500/35 shadow-[0_0_50px_-10px_rgba(59,130,246,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-auto relative animate-in zoom-in-95 duration-200"
             >
-              <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-9 h-9 rounded-xl bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center">
+              <div className="flex items-center justify-between gap-2 pb-2 border-b border-zinc-800">
+                <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                  <div className="w-9 h-9 rounded-xl bg-blue-600/20 text-blue-400 border border-blue-500/30 flex items-center justify-center shrink-0">
                     <Edit2 className="w-4 h-4" />
                   </div>
-                  <div>
-                    <h4 className="font-bold text-white text-sm">Edit Sub-Admin</h4>
-                    <p className="text-[11px] text-zinc-400">Telegram ID: {editingAdmin.telegramId}</p>
+                  <div className="min-w-0">
+                    <h4 className="font-bold text-white text-sm truncate">Edit Sub-Admin</h4>
+                    <p className="text-[11px] text-zinc-400 truncate">Telegram ID: {editingAdmin.telegramId}</p>
                   </div>
                 </div>
                 <button
                   onClick={() => setEditingAdmin(null)}
-                  className="w-8 h-8 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                  className="w-8 h-8 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -2182,12 +2183,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
                 {/* Permissions Toggles with Select All / Deselect All */}
                 <div className="pt-2 border-t border-zinc-800 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
                       <div className="font-semibold text-white text-xs">Granular Permissions (14 Capabilities)</div>
                       <div className="text-[10px] text-zinc-400">Toggle permissions individually without restrictions</div>
                     </div>
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1.5 shrink-0">
                       <button
                         type="button"
                         onClick={() => {
@@ -2316,15 +2317,15 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </p>
 
           <div className="p-3 rounded-xl bg-zinc-900 border border-zinc-800 space-y-1.5 text-xs text-zinc-300">
-            <div className="flex justify-between">
+            <div className="flex flex-wrap justify-between gap-2">
               <span className="text-zinc-400">Max bot messages per chat:</span>
               <span className="font-semibold text-white">10 messages</span>
             </div>
-            <div className="flex justify-between">
+            <div className="flex flex-wrap justify-between gap-2">
               <span className="text-zinc-400">Tracked bot messages:</span>
               <span className="font-semibold text-red-400">{cleanupStatus?.trackedMessagesCount || 0} messages</span>
             </div>
-            <div className="flex justify-between">
+            <div className="flex flex-wrap justify-between gap-2">
               <span className="text-zinc-400">User message protection:</span>
               <span className="font-semibold text-emerald-400">Never touched</span>
             </div>
@@ -2354,19 +2355,19 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
         {/* Delivery Files Auto-Destruct Status & Configurable Timer */}
         <div className="glass-panel rounded-2xl p-4 border border-rose-500/30 bg-rose-950/15 space-y-3.5">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
                 <Clock className="w-4 h-4" />
               </div>
-              <div>
-                <div className="text-xs font-bold text-white">
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white break-words">
                   Delivery File Auto-Delete ({botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10}m Timeout)
                 </div>
                 <div className="text-[10px] text-zinc-400">Configurable self-destruct timer for delivered files</div>
               </div>
             </div>
-            <label className="relative inline-flex items-center cursor-pointer">
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
               <input
                 type="checkbox"
                 checked={botSettings.autoDeleteDeliveryEnabled}
@@ -2431,7 +2432,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 <span className="text-[10px] text-zinc-400">Set exact minutes (e.g. 5, 10, 45, 120)</span>
               </div>
 
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
                 <button
                   type="button"
                   onClick={() => {
@@ -2598,40 +2599,40 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               type="button"
               disabled={botLifecycleBusy !== null || botRuntimeStatus === 'active'}
               onClick={() => handleBotLifecycleAction('start')}
-              className="py-2 px-3 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              className="min-w-0 py-2 px-2 sm:px-3 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {botLifecycleBusy === 'start' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-              <span>Start Bot</span>
+              {botLifecycleBusy === 'start' ? <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" /> : <Play className="w-3.5 h-3.5 shrink-0" />}
+              <span className="truncate">Start Bot</span>
             </button>
 
             <button
               type="button"
               disabled={botLifecycleBusy !== null || botRuntimeStatus === 'stopped'}
               onClick={() => handleBotLifecycleAction('stop')}
-              className="py-2 px-3 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              className="min-w-0 py-2 px-2 sm:px-3 rounded-xl bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {botLifecycleBusy === 'stop' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Square className="w-3.5 h-3.5" />}
-              <span>Stop Bot</span>
+              {botLifecycleBusy === 'stop' ? <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" /> : <Square className="w-3.5 h-3.5 shrink-0" />}
+              <span className="truncate">Stop Bot</span>
             </button>
 
             <button
               type="button"
               disabled={botLifecycleBusy !== null}
               onClick={() => handleBotLifecycleAction('restart')}
-              className="py-2 px-3 rounded-xl bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 border border-sky-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-40"
+              className="min-w-0 py-2 px-2 sm:px-3 rounded-xl bg-sky-600/20 hover:bg-sky-600/30 text-sky-300 border border-sky-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-40"
             >
-              {botLifecycleBusy === 'restart' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
-              <span>Restart</span>
+              {botLifecycleBusy === 'restart' ? <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" /> : <RotateCcw className="w-3.5 h-3.5 shrink-0" />}
+              <span className="truncate">Restart</span>
             </button>
 
             <button
               type="button"
               disabled={botLifecycleBusy !== null}
               onClick={() => handleBotLifecycleAction('clean-memory')}
-              className="py-2 px-3 rounded-xl bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-40"
+              className="min-w-0 py-2 px-2 sm:px-3 rounded-xl bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 text-xs font-semibold flex items-center justify-center gap-1.5 transition-all cursor-pointer disabled:opacity-40"
             >
-              {botLifecycleBusy === 'clean-memory' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Sparkles className="w-3.5 h-3.5" />}
-              <span>Clean Memory</span>
+              {botLifecycleBusy === 'clean-memory' ? <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" /> : <Sparkles className="w-3.5 h-3.5 shrink-0" />}
+              <span className="truncate">Clean Memory</span>
             </button>
           </div>
 
@@ -2646,16 +2647,16 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           <form onSubmit={handleSaveSettings} className="space-y-3.5">
             {/* Delivery Auto-Remove / Timeout Settings */}
             <div className="p-3.5 rounded-2xl bg-gradient-to-br from-rose-950/20 via-zinc-900/80 to-zinc-950/90 border border-rose-500/30 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400">
+              <div className="flex items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
                     <Clock className="w-4 h-4" />
                   </div>
-                  <div>
-                    <div className="text-xs font-bold text-white">Delivery File Auto-Delete (Timeout)</div>
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-white break-words">Delivery File Auto-Delete (Timeout)</div>
                   </div>
                 </div>
-                <label className="relative inline-flex items-center cursor-pointer">
+                <label className="relative inline-flex items-center cursor-pointer shrink-0">
                   <input
                     type="checkbox"
                     checked={botSettings.autoDeleteDeliveryEnabled}
@@ -2760,13 +2761,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
             {/* Bot Maintenance Mode Toggle & Editable Custom Maintenance Notice */}
             <div className="p-3.5 rounded-2xl bg-gradient-to-br from-amber-950/25 via-zinc-900/80 to-zinc-950/90 border border-amber-500/30 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400">
+              <div className="flex items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
                     <Shield className="w-4 h-4" />
                   </div>
-                  <div>
-                    <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
                       <span>Bot Maintenance Mode</span>
                       <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
                         botSettings.maintenanceMode 
@@ -2779,7 +2780,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   </div>
                 </div>
 
-                <label className="relative inline-flex items-center cursor-pointer">
+                <label className="relative inline-flex items-center cursor-pointer shrink-0">
                   <input
                     type="checkbox"
                     checked={botSettings.maintenanceMode}
@@ -2849,13 +2850,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
             {/* Anti-Forward Protection System (Block & Auto-Delete Forwarded Messages) */}
             <div className="p-3.5 rounded-2xl bg-gradient-to-br from-violet-950/25 via-zinc-900/80 to-zinc-950/90 border border-violet-500/30 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-xl bg-violet-500/20 border border-violet-500/30 flex items-center justify-center text-violet-400">
+              <div className="flex items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <div className="w-8 h-8 rounded-xl bg-violet-500/20 border border-violet-500/30 flex items-center justify-center text-violet-400 shrink-0">
                     <ShieldAlert className="w-4 h-4" />
                   </div>
-                  <div>
-                    <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
                       <span>Anti-Forward Protection</span>
                       <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
                         botSettings.antiForwardEnabled 
@@ -2871,7 +2872,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   </div>
                 </div>
 
-                <label className="relative inline-flex items-center cursor-pointer">
+                <label className="relative inline-flex items-center cursor-pointer shrink-0">
                   <input
                     type="checkbox"
                     checked={botSettings.antiForwardEnabled || false}
@@ -2885,13 +2886,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
             {/* Force Sub / Mandatory Channel Join System */}
             <div className="p-3.5 rounded-2xl bg-gradient-to-br from-indigo-950/25 via-zinc-900/80 to-zinc-950/90 border border-indigo-500/30 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+              <div className="flex items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <div className="w-8 h-8 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
                     <Radio className="w-4 h-4" />
                   </div>
-                  <div>
-                    <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
                       <span>Mandatory Channel Join (Force Sub)</span>
                       <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
                         botSettings.forceSubEnabled 
@@ -2907,7 +2908,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   </div>
                 </div>
 
-                <label className="relative inline-flex items-center cursor-pointer">
+                <label className="relative inline-flex items-center cursor-pointer shrink-0">
                   <input
                     type="checkbox"
                     checked={botSettings.forceSubEnabled || false}
@@ -2945,13 +2946,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
                   {/* Private Channels & Groups: Join Request & Auto-Approval Settings */}
                   <div className="p-3 rounded-xl bg-zinc-950/70 border border-emerald-500/30 space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className="w-7 h-7 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+                    <div className="flex items-center justify-between gap-2.5">
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <div className="w-7 h-7 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
                           <CheckCircle2 className="w-4 h-4" />
                         </div>
-                        <div>
-                          <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                        <div className="min-w-0">
+                          <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
                             <span>Auto-Approve Join Requests</span>
                             <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
                               SMART AUTO-APPROVAL
@@ -2963,7 +2964,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                         </div>
                       </div>
 
-                      <label className="relative inline-flex items-center cursor-pointer">
+                      <label className="relative inline-flex items-center cursor-pointer shrink-0">
                         <input
                           type="checkbox"
                           checked={botSettings.autoApproveJoinRequests !== false}
@@ -2975,7 +2976,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     </div>
 
                     {/* Join Request Records Drawer / Stats */}
-                    <div className="pt-2 border-t border-zinc-800/80 flex items-center justify-between gap-2 text-xs">
+                    <div className="pt-2 border-t border-zinc-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
                       <div className="flex items-center gap-2 text-[11px] text-zinc-400">
                         <span className="text-zinc-300 font-medium">Join Requests Recorded:</span>
                         <span className="px-1.5 py-0.5 rounded bg-zinc-800 font-mono text-white text-[10px] border border-zinc-700">
@@ -3066,9 +3067,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
                   {/* List of Detected & Configured Channels / Groups */}
                   <div>
-                    <div className="flex items-center justify-between mb-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                       <div>
-                        <label className="text-[11px] font-semibold text-zinc-300 flex items-center gap-1.5">
+                        <label className="text-[11px] font-semibold text-zinc-300 flex flex-wrap items-center gap-1.5">
                           <span>Channels & Groups List</span>
                           <span className="text-[10px] font-normal px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
                             {(botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false).length} active of {(botSettings.requiredChannels || []).length}
@@ -3097,7 +3098,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                           return (
                             <div
                               key={ch.id}
-                              className={`p-3 rounded-xl border transition-all text-xs flex items-center justify-between gap-3 ${
+                              className={`p-3 rounded-xl border transition-all text-xs flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 ${
                                 isChanActive 
                                   ? 'bg-zinc-950/80 border-indigo-500/40 shadow-sm' 
                                   : 'bg-zinc-900/40 border-zinc-800/60 opacity-60'
@@ -3131,8 +3132,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                                   </span>
                                 </div>
 
-                                <div className="flex items-center gap-2 text-[10px] text-zinc-400">
-                                  <span className="font-mono text-indigo-400 bg-indigo-500/10 px-1.5 py-0.2 rounded border border-indigo-500/20 truncate">
+                                <div className="flex flex-wrap items-center gap-2 text-[10px] text-zinc-400 min-w-0">
+                                  <span className="font-mono text-indigo-400 bg-indigo-500/10 px-1.5 py-0.2 rounded border border-indigo-500/20 truncate max-w-full">
                                     {ch.chatId}
                                   </span>
 
@@ -3141,16 +3142,16 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                                       href={ch.inviteLink}
                                       target="_blank"
                                       rel="noopener noreferrer"
-                                      className="text-zinc-400 hover:text-indigo-300 truncate inline-flex items-center gap-1 transition-colors"
+                                      className="text-zinc-400 hover:text-indigo-300 min-w-0 break-all inline-flex items-center gap-1 transition-colors"
                                     >
-                                      <span>{ch.inviteLink}</span>
+                                      <span className="truncate max-w-[200px] sm:max-w-none">{ch.inviteLink}</span>
                                       <ExternalLink className="w-2.5 h-2.5 shrink-0" />
                                     </a>
                                   )}
                                 </div>
                               </div>
 
-                              <div className="flex items-center gap-2 shrink-0">
+                              <div className="flex items-center gap-2 shrink-0 ml-auto">
                                 {/* Toggle Switch (ON / OFF) */}
                                 <label className="relative inline-flex items-center cursor-pointer" title={isChanActive ? "Click to exclude channel" : "Click to require channel"}>
                                   <input
@@ -3192,9 +3193,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
                     {showManualAddChannel && (
                       <div className="mt-2 p-3 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-2.5">
-                        <div className="text-[11px] font-bold text-indigo-300 flex items-center justify-between">
+                        <div className="text-[11px] font-bold text-indigo-300 flex flex-wrap items-center justify-between gap-1.5">
                           <span className="flex items-center gap-1">
-                            <Plus className="w-3.5 h-3.5" />
+                            <Plus className="w-3.5 h-3.5 shrink-0" />
                             <span>Add Channel / Group by ID or Username</span>
                           </span>
                           <span className="text-[10px] text-zinc-400 font-normal">No invite link required</span>
@@ -3223,7 +3224,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                           </div>
                         </div>
 
-                        <div className="flex items-center justify-between gap-2 pt-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                           <p className="text-[10px] text-zinc-400">
                             💡 You can also send <code className="text-indigo-300">/connect &lt;channel_id&gt;</code> directly in Telegram.
                           </p>
@@ -3243,7 +3244,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   {/* Telegram Inline Button Theme Preview (Showing only active channels) */}
                   {Array.isArray(botSettings.requiredChannels) && botSettings.requiredChannels.length > 0 && (
                     <div className="p-3.5 rounded-xl bg-zinc-950/70 border border-indigo-500/30 space-y-2.5">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-400 flex items-center justify-between">
+                      <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-400 flex flex-wrap items-center justify-between gap-1.5">
                         <span>Telegram Inline Button Theme Preview</span>
                         <span className="text-zinc-400 font-normal">
                           {(botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false).length} active channel(s)
@@ -3267,7 +3268,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                                 key={c.id}
                                 className="w-full py-2 px-3 rounded-xl bg-blue-600 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm border border-blue-500/40 select-none"
                               >
-                                <span>📢 Join {c.name || 'Channel'}</span>
+                                <span className="truncate">📢 Join {c.name || 'Channel'}</span>
                               </div>
                             ))}
                             <div className="w-full py-2 px-3 rounded-xl bg-emerald-600 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm border border-emerald-500/40 select-none">
@@ -3284,7 +3285,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   )}
 
                   {/* Quick Save Force Sub Button */}
-                  <div className="pt-2 border-t border-indigo-500/20 flex items-center justify-between gap-2">
+                  <div className="pt-2 border-t border-indigo-500/20 flex flex-wrap items-center justify-between gap-2">
                     <span className="text-[10px] text-zinc-400">
                       {(botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false).length} active channel(s) in mandatory join list
                     </span>
@@ -3292,7 +3293,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                       type="button"
                       disabled={settingSaving}
                       onClick={() => handleSaveSettings()}
-                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-sm disabled:opacity-50"
+                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-sm disabled:opacity-50 shrink-0"
                     >
                       <Check className="w-3.5 h-3.5" />
                       <span>{settingSaving ? 'Saving...' : 'Save Channels'}</span>
@@ -3344,12 +3345,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             ) : (
               <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
             )}
-            <div className="space-y-1">
-              <div className="font-semibold">{webhookStatusMsg.text}</div>
+            <div className="min-w-0 space-y-1">
+              <div className="font-semibold break-words">{webhookStatusMsg.text}</div>
               {webhookStatusMsg.details && (
                 <div className="text-[11px] font-mono text-zinc-300 bg-zinc-950/70 p-2 rounded-lg border border-zinc-800 space-y-0.5">
-                  <div>Bot Name: {webhookStatusMsg.details.first_name}</div>
-                  <div>Username: @{webhookStatusMsg.details.username}</div>
+                  <div className="break-words">Bot Name: {webhookStatusMsg.details.first_name}</div>
+                  <div className="break-all">Username: @{webhookStatusMsg.details.username}</div>
                   <div>Bot ID: {webhookStatusMsg.details.id}</div>
                 </div>
               )}
@@ -3371,7 +3372,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             />
           </div>
 
-          <div className="grid grid-cols-2 gap-2 pt-1">
+          <div className="grid grid-cols-1 min-[340px]:grid-cols-2 gap-2 pt-1">
             <button
               type="button"
               onClick={handleCheckBotInfo}
@@ -3411,7 +3412,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     return (
       <div className="space-y-4 pb-28">
         {/* Navigation Bar */}
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <button
             onClick={() => setSubView('settings')}
             className="text-xs text-red-400 hover:text-sky-300 font-medium flex items-center gap-1 cursor-pointer transition-colors"
@@ -3425,14 +3426,14 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         </div>
 
         {/* Broadcast Container */}
-        <div className="glass-panel rounded-3xl p-5 border border-zinc-800 space-y-4 shadow-xl">
+        <div className="glass-panel rounded-3xl p-4 sm:p-5 border border-zinc-800 space-y-4 shadow-xl">
           {/* Header */}
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-red-500/20 to-rose-600/30 text-red-400 border border-red-500/40 flex items-center justify-center shrink-0 shadow-md shadow-red-500/10">
               <Megaphone className="w-5 h-5" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
                 <h3 className="text-sm font-bold text-white tracking-tight">Mass Broadcast Notification</h3>
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/40 font-mono font-semibold">
                   All Media
@@ -3449,7 +3450,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             <label className="block text-xs font-semibold text-zinc-300 mb-1.5">
               Select Notification Type *
             </label>
-            <div className="grid grid-cols-5 gap-1.5 p-1 bg-zinc-900 border border-zinc-800 rounded-2xl">
+            <div className="grid grid-cols-5 gap-1 sm:gap-1.5 p-1 bg-zinc-900 border border-zinc-800 rounded-2xl">
               <button
                 type="button"
                 onClick={() => {
@@ -3457,66 +3458,66 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   setBroadcastFile(null);
                   setBroadcastMediaUrl('');
                 }}
-                className={`py-2 px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
+                className={`min-w-0 py-2 px-0.5 sm:px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
                   broadcastMediaType === 'text'
                     ? 'bg-red-500/20 text-sky-300 border border-red-500/40 shadow-xs'
                     : 'text-zinc-400 hover:text-white'
                 }`}
               >
                 <MessageSquare className="w-4 h-4" />
-                <span className="text-[11px]">Text</span>
+                <span className="text-[10px] sm:text-[11px] truncate max-w-full">Text</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setBroadcastMediaType('photo')}
-                className={`py-2 px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
+                className={`min-w-0 py-2 px-0.5 sm:px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
                   broadcastMediaType === 'photo'
                     ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 shadow-xs'
                     : 'text-zinc-400 hover:text-white'
                 }`}
               >
                 <ImageIcon className="w-4 h-4" />
-                <span className="text-[11px]">Photo</span>
+                <span className="text-[10px] sm:text-[11px] truncate max-w-full">Photo</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setBroadcastMediaType('video')}
-                className={`py-2 px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
+                className={`min-w-0 py-2 px-0.5 sm:px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
                   broadcastMediaType === 'video'
                     ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40 shadow-xs'
                     : 'text-zinc-400 hover:text-white'
                 }`}
               >
                 <VideoIcon className="w-4 h-4" />
-                <span className="text-[11px]">Video</span>
+                <span className="text-[10px] sm:text-[11px] truncate max-w-full">Video</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setBroadcastMediaType('audio')}
-                className={`py-2 px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
+                className={`min-w-0 py-2 px-0.5 sm:px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
                   broadcastMediaType === 'audio'
                     ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-xs'
                     : 'text-zinc-400 hover:text-white'
                 }`}
               >
                 <Music className="w-4 h-4" />
-                <span className="text-[11px]">Audio</span>
+                <span className="text-[10px] sm:text-[11px] truncate max-w-full">Audio</span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setBroadcastMediaType('voice')}
-                className={`py-2 px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
+                className={`min-w-0 py-2 px-0.5 sm:px-1 rounded-xl text-xs font-semibold flex flex-col items-center gap-1 transition-all cursor-pointer ${
                   broadcastMediaType === 'voice'
                     ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-xs'
                     : 'text-zinc-400 hover:text-white'
                 }`}
               >
                 <Mic className="w-4 h-4" />
-                <span className="text-[11px]">Voice</span>
+                <span className="text-[10px] sm:text-[11px] truncate max-w-full">Voice</span>
               </button>
             </div>
           </div>
@@ -3524,7 +3525,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {/* 2. Media Source Selection & File Picker (When mediaType !== 'text') */}
           {broadcastMediaType !== 'text' && (
             <div className="p-3.5 rounded-2xl bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs font-bold text-white flex items-center gap-1.5">
                   {broadcastMediaType === 'photo' && <ImageIcon className="w-4 h-4 text-rose-400" />}
                   {broadcastMediaType === 'video' && <VideoIcon className="w-4 h-4 text-purple-400" />}
@@ -3790,7 +3791,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 <span>{broadcastResult.text}</span>
               </div>
               {broadcastResult.details && (
-                <div className="text-[11px] text-zinc-300 font-mono pt-1 border-t border-emerald-500/20 flex items-center gap-4">
+                <div className="text-[11px] text-zinc-300 font-mono pt-1 border-t border-emerald-500/20 flex flex-wrap items-center gap-x-4 gap-y-1">
                   <span>Total: <b>{broadcastResult.details.total}</b></span>
                   <span className="text-emerald-400">Delivered: <b>{broadcastResult.details.sent}</b></span>
                   {broadcastResult.details.failed > 0 && (
@@ -3890,7 +3891,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             Review reports submitted by group members using the <code className="text-rose-300 font-mono">/report</code> command. Take instant action to ban violators or dismiss false flags.
           </p>
 
-          <div className="grid grid-cols-4 gap-2 pt-2">
+          <div className="grid grid-cols-2 min-[360px]:grid-cols-4 gap-2 pt-2">
             <div className="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 text-center">
               <div className="text-lg font-bold text-white font-mono">{reportsList.length}</div>
               <div className="text-[10px] text-zinc-400">Total</div>
@@ -3911,12 +3912,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         </div>
 
         {/* Filter Tabs */}
-        <div className="flex items-center gap-1.5 p-1 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-medium">
+        <div className="grid grid-cols-2 min-[360px]:grid-cols-4 gap-1.5 p-1 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-medium">
           {(['all', 'pending', 'resolved', 'dismissed'] as const).map((filter) => (
             <button
               key={filter}
               onClick={() => setReportFilter(filter)}
-              className={`flex-1 py-1.5 rounded-lg text-center capitalize transition-colors cursor-pointer ${
+              className={`min-w-0 py-1.5 px-2 rounded-lg text-center capitalize transition-colors cursor-pointer truncate ${
                 reportFilter === filter
                   ? 'bg-rose-500 text-white font-semibold shadow-sm'
                   : 'text-zinc-400 hover:text-white'
@@ -3951,7 +3952,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 className="p-4 rounded-2xl glass-panel border border-zinc-800 hover:border-zinc-700 transition-all space-y-3"
               >
                 {/* Header: Status and timestamp */}
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <span
                     className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
                       report.status === 'pending'
@@ -4071,7 +4072,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   if (subView === 'fraud') {
     return (
       <div className="space-y-4 pb-28">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <button
             onClick={() => setSubView('menu')}
             className="text-xs text-red-400 hover:text-sky-300 font-medium cursor-pointer"
@@ -4080,7 +4081,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </button>
           <button
             onClick={() => setShowAddFraudRule(!showAddFraudRule)}
-            className="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+            className="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm shrink-0"
           >
             <Plus className="w-3.5 h-3.5" />
             <span>{showAddFraudRule ? 'Close Form' : 'Add Word Rule'}</span>
@@ -4104,12 +4105,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             onSubmit={handleCreateFraudRule}
             className="p-4 rounded-2xl glass-panel border border-amber-500/40 bg-zinc-900/95 space-y-3 shadow-xl"
           >
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between gap-2">
               <h3 className="text-xs font-bold text-white uppercase tracking-wider">Add Restricted Keyword Rule</h3>
               <button
                 type="button"
                 onClick={() => setShowAddFraudRule(false)}
-                className="text-zinc-500 hover:text-zinc-300"
+                className="text-zinc-500 hover:text-zinc-300 shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -4128,7 +4129,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-1 min-[360px]:grid-cols-2 gap-2">
               <div>
                 <label className="text-[11px] font-semibold text-zinc-300 block mb-1">Match Type</label>
                 <select
@@ -4172,7 +4173,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   </div>
 
                   {/* Custom Number + Unit Input */}
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 min-[340px]:grid-cols-2 gap-2">
                     <input
                       type="number"
                       min={1}
@@ -4356,8 +4357,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
                   <div className="flex items-center gap-1.5 shrink-0 w-full sm:w-auto">
                     {newFraudVideoName ? (
-                      <div className="flex items-center gap-1.5 w-full sm:w-auto">
-                        <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 text-xs font-medium border border-amber-500/40 truncate max-w-[150px]">
+                      <div className="flex items-center gap-1.5 min-w-0 w-full sm:w-auto">
+                        <span className="px-2.5 py-1 rounded-lg bg-amber-500/20 text-amber-300 text-xs font-medium border border-amber-500/40 truncate min-w-0 flex-1 sm:max-w-[200px]">
                           {newFraudVideoName}
                         </span>
                         <button
@@ -4431,9 +4432,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   rule.enabled ? 'border-zinc-800 hover:border-zinc-700' : 'border-zinc-800/40 opacity-60'
                 }`}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-sm font-bold text-white font-mono bg-zinc-950 px-2.5 py-0.5 rounded-lg border border-zinc-800">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="flex items-center gap-2 flex-wrap min-w-0 flex-1">
+                    <span className="text-sm font-bold text-white font-mono bg-zinc-950 px-2.5 py-0.5 rounded-lg border border-zinc-800 break-all max-w-full">
                       {rule.keyword}
                     </span>
                     <span className="text-[10px] px-2 py-0.5 rounded-md bg-zinc-800 text-zinc-300 font-mono">
@@ -4471,7 +4472,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 shrink-0">
                     <button
                       onClick={() => handleToggleFraudRule(rule)}
                       className={`text-[10px] font-bold px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
@@ -4493,7 +4494,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 </div>
 
                 {rule.warningText && (
-                  <div className="p-2.5 rounded-xl bg-zinc-950/80 border border-zinc-800 text-xs text-zinc-300 italic">
+                  <div className="p-2.5 rounded-xl bg-zinc-950/80 border border-zinc-800 text-xs text-zinc-300 italic break-words">
                     {rule.warningText}
                   </div>
                 )}
@@ -4596,8 +4597,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     return (
       <div className="space-y-4 animate-tab-fade-in">
         {/* Header */}
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
             <button
               onClick={() => setSubView('menu')}
               className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white cursor-pointer shrink-0"
@@ -4607,7 +4608,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             <div className="min-w-0">
               <h2 className="text-base font-bold text-white flex items-center gap-1.5 truncate">
                 <VolumeX className="w-4 h-4 text-cyan-400 shrink-0" />
-                <span>Chat Ignore / Whitelist</span>
+                <span className="truncate">Chat Ignore / Whitelist</span>
               </h2>
               <p className="text-[11px] text-zinc-400 truncate">
                 Silently ignore all non-whitelisted groups, supergroups &amp; channels
@@ -4626,9 +4627,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
         {/* Master Guard Card */}
         <div className="p-4 rounded-2xl glass-panel border border-zinc-800 space-y-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-xs font-bold text-white flex items-center gap-2">
+          <div className="flex flex-col min-[380px]:flex-row min-[380px]:items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-bold text-white flex flex-wrap items-center gap-2">
                 <span>Strict Chat Whitelist Guard</span>
                 <span
                   className={`text-[10px] px-2 py-0.5 rounded-md font-semibold ${
@@ -4692,7 +4693,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               />
             </div>
           </div>
-          <div className="flex items-center justify-between gap-2 pt-1">
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
             <span className="text-[10px] text-zinc-400">
               Adding a chat automatically enables Strict Guard.
             </span>
@@ -4720,7 +4721,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   key={ch.chatId}
                   className="p-2.5 rounded-xl bg-zinc-950/80 border border-zinc-800 flex items-center justify-between gap-2"
                 >
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <div className="text-xs font-semibold text-white truncate">{ch.name}</div>
                     <div className="text-[10px] font-mono text-zinc-400 truncate">{ch.chatId}</div>
                   </div>
@@ -4766,7 +4767,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   key={entry.chatId}
                   className="p-3.5 rounded-2xl glass-panel border border-zinc-800 flex items-center justify-between gap-2.5"
                 >
-                  <div className="min-w-0 space-y-1">
+                  <div className="min-w-0 flex-1 space-y-1">
                     <div className="flex items-center gap-2 min-w-0">
                       <span className="text-xs font-bold text-white truncate">
                         {entry.title || `Chat ${entry.chatId}`}
@@ -4775,8 +4776,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                         {entry.type || 'group'}
                       </span>
                     </div>
-                    <div className="flex items-center gap-2 text-[11px] text-zinc-400 font-mono">
-                      <span>{entry.chatId}</span>
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-zinc-400 font-mono">
+                      <span className="break-all">{entry.chatId}</span>
                       {entry.username && <span className="text-cyan-400 truncate">{entry.username}</span>}
                     </div>
                   </div>

@@ -139,10 +139,10 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
   const modalContent = (
     <div 
       onClick={onClose}
-      className="fixed inset-0 z-50 flex items-center justify-center p-3.5 sm:p-5 pb-24 sm:pb-28 bg-black/85 backdrop-blur-md animate-in fade-in duration-200 overscroll-contain select-none"
+      className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-5 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-black/85 backdrop-blur-md animate-in fade-in duration-200 overscroll-contain select-none"
     >
       <div 
-        className="w-full max-w-lg max-h-[85vh] sm:max-h-[calc(100vh-120px)] flex flex-col rounded-3xl glass-water-card border border-white/20 shadow-[0_25px_50px_-12px_rgba(0,0,0,0.95),0_0_40px_rgba(255,255,255,0.1)] overflow-hidden relative animate-in zoom-in-95 duration-200 select-text"
+        className="w-full max-w-lg max-h-[90dvh] flex flex-col rounded-3xl glass-water-card border border-white/20 shadow-[0_25px_50px_-12px_rgba(0,0,0,0.95),0_0_40px_rgba(255,255,255,0.1)] overflow-hidden relative animate-in zoom-in-95 duration-200 select-text"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Subtle top card border glow accent */}
@@ -154,28 +154,28 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
         />
 
         {/* Modal Header */}
-        <div className="shrink-0 p-4 sm:p-5 border-b border-white/10 flex items-center justify-between bg-white/[0.04]">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-2xl bg-white/10 border border-white/20 text-white flex items-center justify-center shadow-[0_0_15px_rgba(255,255,255,0.15)] backdrop-blur-md">
+        <div className="shrink-0 p-3.5 sm:p-5 border-b border-white/10 flex flex-wrap sm:flex-nowrap items-start sm:items-center justify-between gap-2.5 bg-white/[0.04]">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1">
+            <div className="w-10 h-10 rounded-2xl bg-white/10 border border-white/20 text-white flex items-center justify-center shadow-[0_0_15px_rgba(255,255,255,0.15)] backdrop-blur-md shrink-0">
               <Users className="w-5 h-5" />
             </div>
-            <div>
-              <div className="flex items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
                 <h2 className="text-base font-bold text-white tracking-tight">Bot Users</h2>
                 <span className="px-2 py-0.5 rounded-full bg-zinc-800/90 text-zinc-300 border border-zinc-700/60 text-xs font-semibold">
                   {users.length}
                 </span>
-                <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 text-xs font-semibold flex items-center gap-1">
+                <span className="px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/25 text-xs font-semibold flex items-center gap-1 whitespace-nowrap">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                   {onlineCount} Online
                 </span>
               </div>
-              <p className="text-xs text-zinc-400 mt-0.5">
+              <p className="text-xs text-zinc-400 mt-0.5 leading-snug">
                 Manage all Telegram users who interacted with or used this bot
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 ml-auto">
             {/* Sleek Single Toggle Button in Header Area */}
             <button
               type="button"
@@ -266,7 +266,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
         </div>
 
         {/* Users List Body (Scrollable Middle Area) */}
-        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-4 space-y-2.5 pb-[90px]">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-4 space-y-2.5 pb-4 sm:pb-5">
           {loading && users.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-zinc-400">
               <RefreshCw className="w-6 h-6 animate-spin text-red-500 mb-2" />
@@ -306,7 +306,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
               return (
                 <div
                   key={user.id}
-                  className={`p-3.5 rounded-2xl glass-water-card card-interactive transition-all flex items-center justify-between gap-3 ${
+                  className={`p-3 sm:p-3.5 rounded-2xl glass-water-card card-interactive transition-all flex items-center justify-between gap-2.5 sm:gap-3 ${
                     isBanned
                       ? 'border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.25)]'
                       : isAdmin
@@ -343,16 +343,16 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
                     </div>
 
                     {/* Second line: User ID and Username (@username) */}
-                    <div className="flex items-center gap-2 text-xs text-zinc-400 mt-0.5 font-mono">
+                    <div className="flex items-center flex-wrap gap-x-2 gap-y-0.5 text-xs text-zinc-400 mt-0.5 font-mono">
                       <span className="text-zinc-300">ID: {user.id}</span>
                       <span>·</span>
-                      <span className="text-red-400 font-sans">
+                      <span className="text-red-400 font-sans truncate max-w-full">
                         {user.username ? (user.username.startsWith('@') ? user.username : `@${user.username}`) : 'No @username'}
                       </span>
                     </div>
 
                     {/* Status Indicator: Online / Offline status badge */}
-                    <div className="flex items-center gap-2 mt-2">
+                    <div className="flex items-center flex-wrap gap-1.5 sm:gap-2 mt-2">
                       <span
                         className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${
                           online
@@ -369,7 +369,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
                       </span>
 
                       <span className="text-[11px] text-zinc-500 flex items-center gap-1">
-                        <Clock className="w-3 h-3 text-zinc-600" />
+                        <Clock className="w-3 h-3 text-zinc-600 shrink-0" />
                         <span>{formatRelativeTime(user.lastActiveAt)}</span>
                       </span>
                     </div>
@@ -378,20 +378,20 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
                   {/* Right Side: Action Control */}
                   {/* - Place a "Ban" / "Unban" toggle button on the right side of each user row */}
                   {/* - Important Constraint: Admins must NEVER be bannable (disabled or hidden for Admin accounts) */}
-                  <div className="shrink-0 pl-2">
+                  <div className="shrink-0 pl-0 sm:pl-2">
                     {isAdmin ? (
                       <div
                         title="Administrators cannot be banned"
-                        className="px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 text-xs font-medium flex items-center gap-1.5 cursor-not-allowed select-none opacity-80"
+                        className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 text-xs font-medium flex items-center gap-1.5 cursor-not-allowed select-none opacity-80"
                       >
-                        <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
+                        <ShieldCheck className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                         <span>Protected</span>
                       </div>
                     ) : (
                       <button
                         onClick={() => handleToggleBan(user)}
                         disabled={isProcessing}
-                        className={`px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 disabled:opacity-50 ${
+                        className={`px-2.5 sm:px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 disabled:opacity-50 ${
                           isBanned
                             ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-600/30'
                             : 'bg-red-600 hover:bg-red-500 text-white shadow-md shadow-red-600/30'

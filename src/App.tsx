@@ -457,7 +457,7 @@ export default function App() {
   // If unauthenticated -> Render Main Login Screen
   if (!currentUser) {
     return (
-      <div className="relative min-h-screen w-full bg-[#07060f] text-white overflow-x-hidden overflow-y-auto selection:bg-pink-500 selection:text-white">
+      <div className="relative min-h-[100dvh] w-full bg-[#07060f] text-white overflow-x-clip overflow-y-auto selection:bg-pink-500 selection:text-white">
         <LoginScreen
           design={design}
           onSuccess={(admin) => {
@@ -473,7 +473,7 @@ export default function App() {
 
   // Authenticated Liquid Glass Mobile-First Admin Panel
   return (
-    <div className="relative min-h-screen w-full bg-[#05060d] text-white selection:bg-indigo-500 selection:text-white flex justify-center overflow-x-hidden overflow-y-auto">
+    <div className="relative min-h-[100dvh] w-full bg-[#05060d] text-white selection:bg-indigo-500 selection:text-white flex justify-center overflow-x-clip">
       {/* Deep Space Aurora Background Layer */}
       <div className="aurora" aria-hidden="true">
         <div className="orb o1" />
@@ -482,7 +482,7 @@ export default function App() {
       </div>
 
       {/* Liquid Glass Screen Container */}
-      <div className="relative z-10 w-full max-w-[480px] min-h-screen flex flex-col px-3.5 pt-1 pb-28 sm:pb-32">
+      <div className="relative z-10 w-full max-w-[480px] md:max-w-[560px] lg:max-w-[600px] 2xl:max-w-[640px] min-h-[100dvh] flex flex-col pl-[max(0.875rem,env(safe-area-inset-left))] pr-[max(0.875rem,env(safe-area-inset-right))] sm:px-5 pt-1 pb-[calc(6.75rem+env(safe-area-inset-bottom,0px))]">
         {/* Interactive Dynamic Island Top Bar */}
         <DynamicIslandHeader
           currentTab={currentTab}
@@ -503,7 +503,7 @@ export default function App() {
         <main
           onTouchStart={handleTouchStart}
           onTouchEnd={handleTouchEnd}
-          className="flex-1 w-full overflow-y-auto overscroll-y-auto"
+          className="flex-1 w-full min-w-0"
         >
           {/* Dashboard Tab */}
           <div className={currentTab === 'dashboard' ? 'block animate-tab-fade-in' : 'hidden'}>

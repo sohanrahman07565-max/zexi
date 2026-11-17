@@ -17,7 +17,7 @@ export const ToastContainer: React.FC = () => {
   return (
     <div 
       aria-live="polite"
-      className="fixed top-3.5 sm:top-5 inset-x-0 z-[9999] flex flex-col items-center pointer-events-none px-3.5 sm:px-4 gap-2.5 max-w-md mx-auto"
+      className="fixed top-[max(0.875rem,env(safe-area-inset-top))] sm:top-[max(1.25rem,env(safe-area-inset-top))] inset-x-0 z-[9999] flex flex-col items-center pointer-events-none px-3.5 sm:px-4 gap-2.5 max-w-md mx-auto"
     >
       {toasts.map((item) => {
         const isSuccess = item.type === 'success';

@@ -222,9 +222,9 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({
           position: absolute;
           left: 50%;
           bottom: 24%;
-          width: 150px;
+          width: min(150px, 46vw);
           height: 4px;
-          margin-left: -75px;
+          transform: translateX(-50%);
           border-radius: 4px;
           background: rgba(255, 255, 255, 0.1);
           overflow: hidden;
@@ -246,6 +246,15 @@ export const SplashScreen: React.FC<SplashScreenProps> = ({
 
         @keyframes zexiSplashBarFade {
           to { opacity: 0; }
+        }
+
+        @media (max-height: 480px) {
+          .zexi-splash-zwrap {
+            font-size: clamp(64px, 24vh, 140px);
+          }
+          .zexi-splash-bar {
+            bottom: 16%;
+          }
         }
 
         @media (prefers-reduced-motion: reduce) {

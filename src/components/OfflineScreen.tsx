@@ -78,7 +78,7 @@ export const OfflineScreen: React.FC<OfflineScreenProps> = ({
   }, [isChecking, onRetry]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#060608] text-white selection:bg-red-500 selection:text-white overflow-x-hidden overflow-y-auto select-none">
+    <div className="fixed inset-0 z-50 flex flex-col items-center justify-center p-3 sm:p-4 py-[max(1rem,env(safe-area-inset-top))] bg-[#060608] text-white selection:bg-red-500 selection:text-white overflow-x-clip overflow-y-auto select-none">
       {/* Background radial glow matching the admin panel aesthetics */}
       <div
         className="absolute w-[620px] h-[620px] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full blur-[140px] pointer-events-none transition-all duration-700"
@@ -101,7 +101,7 @@ export const OfflineScreen: React.FC<OfflineScreenProps> = ({
 
       {/* Central Container Card with red glow and border */}
       <div
-        className={`w-full max-w-sm relative z-10 rounded-3xl p-6 sm:p-8 bg-[#0c0c13]/95 border shadow-2xl backdrop-blur-2xl transition-all duration-300 overflow-hidden flex flex-col items-center text-center ${
+        className={`w-full max-w-sm my-auto relative z-10 rounded-3xl p-5 sm:p-8 bg-[#0c0c13]/95 border shadow-2xl backdrop-blur-2xl transition-all duration-300 overflow-hidden flex flex-col items-center text-center ${
           shake ? 'animate-offline-shake' : 'animate-login-scale-in'
         }`}
         style={{
@@ -130,7 +130,7 @@ export const OfflineScreen: React.FC<OfflineScreenProps> = ({
         </div>
 
         {/* Central Animated Illustration: Cool Character/Bot actively moving phone up & down searching for a signal */}
-        <div className="relative w-52 h-52 my-1 flex items-center justify-center">
+        <div className="relative w-40 h-40 min-[360px]:w-48 min-[360px]:h-48 sm:w-52 sm:h-52 my-1 flex items-center justify-center">
           {/* Glowing aura behind bot */}
           <div
             className="absolute w-40 h-40 rounded-full blur-2xl opacity-40 animate-pulse pointer-events-none"

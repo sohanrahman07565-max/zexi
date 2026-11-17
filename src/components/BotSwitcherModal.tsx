@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { BotInstance, api } from '../lib/api';
 import { toast } from '../lib/toast';
 import { 
@@ -163,15 +164,18 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md animate-in fade-in duration-200">
+  const modalContent = (
+    <div 
+      onClick={onClose}
+      className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-black/85 backdrop-blur-md animate-in fade-in duration-200"
+    >
       <div 
-        className="w-full max-w-md max-h-[92vh] flex flex-col rounded-3xl glass-water-card border border-white/20 p-4 sm:p-5 shadow-[0_20px_60px_rgba(0,0,0,0.9),0_0_30px_rgba(239,68,68,0.25)] text-white relative animate-in zoom-in-95 duration-200 overflow-hidden"
+        className="w-full max-w-md max-h-[90dvh] flex flex-col rounded-3xl glass-water-card border border-white/20 p-4 sm:p-5 shadow-[0_20px_60px_rgba(0,0,0,0.9),0_0_30px_rgba(239,68,68,0.25)] text-white relative animate-in zoom-in-95 duration-200 overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between pb-3.5 border-b border-white/10 shrink-0">
-          <div className="flex items-center gap-2.5 min-w-0">
+        <div className="flex items-center justify-between gap-2 pb-3.5 border-b border-white/10 shrink-0">
+          <div className="flex items-center gap-2.5 min-w-0 flex-1">
             <div
               className="lg-tile w-10 h-10 rounded-2xl text-white shrink-0"
               style={{
@@ -181,10 +185,10 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
             >
               <Bot className="w-5 h-5 text-white" />
             </div>
-            <div className="min-w-0">
-              <h2 className="text-base font-bold text-white flex items-center gap-1.5 leading-tight">
+            <div className="min-w-0 flex-1">
+              <h2 className="text-base font-bold text-white flex items-center flex-wrap gap-1.5 leading-tight">
                 <span>Switch Telegram Bot</span>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 text-white/90 font-mono font-semibold border border-white/20">
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-white/10 text-white/90 font-mono font-semibold border border-white/20 shrink-0">
                   {bots.filter(b => b.status !== 'stopped').length}/{bots.length} Running
                 </span>
               </h2>
@@ -195,7 +199,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
           </div>
           <button
             onClick={onClose}
-            className="tap w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-white/70 hover:text-white flex items-center justify-center cursor-pointer"
+            className="tap w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 text-white/70 hover:text-white flex items-center justify-center cursor-pointer shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
@@ -313,7 +317,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                     </div>
 
                     {/* Stats & Meta Footer */}
-                    <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between text-[11px] text-white/60">
+                    <div className="mt-2.5 pt-2 border-t border-white/10 flex items-center justify-between flex-wrap gap-2 text-[11px] text-white/60">
                       <div className="flex items-center gap-3">
                         <span className="flex items-center gap-1">
                           <span className="font-semibold text-white">{bot.filesCount}</span> files
@@ -324,12 +328,12 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                         </span>
                       </div>
                       {bot.status === 'stopped' ? (
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1.5 shrink-0">
                           <span className="w-1.5 h-1.5 rounded-full bg-rose-400" />
                           <span className="text-[10px] text-rose-400 font-medium">Stopped</span>
                         </div>
                       ) : (
-                        <div className="flex items-center gap-1.5">
+                        <div className="flex items-center gap-1.5 shrink-0">
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                           <span className="text-[10px] text-emerald-400 font-medium">
                             {bot.isMain ? 'Running' : 'Running Isolated'}
@@ -345,20 +349,20 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                           type="button"
                           disabled={lifecycleBusy !== null}
                           onClick={() => handleBotLifecycle(bot, 'start')}
-                          className="py-1.5 px-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-[10px] font-semibold flex items-center justify-center gap-1 transition-all cursor-pointer disabled:opacity-50"
+                          className="min-w-0 py-1.5 px-1 min-[360px]:px-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-[9.5px] min-[360px]:text-[10px] font-semibold flex items-center justify-center gap-1 transition-all cursor-pointer disabled:opacity-50"
                         >
-                          {lifecycleBusy === `${bot.id}:start` ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
-                          <span>Start</span>
+                          {lifecycleBusy === `${bot.id}:start` ? <Loader2 className="w-3 h-3 animate-spin shrink-0" /> : <Play className="w-3 h-3 shrink-0" />}
+                          <span className="truncate">Start</span>
                         </button>
                       ) : (
                         <button
                           type="button"
                           disabled={lifecycleBusy !== null}
                           onClick={() => handleBotLifecycle(bot, 'stop')}
-                          className="py-1.5 px-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[10px] font-semibold flex items-center justify-center gap-1 transition-all cursor-pointer disabled:opacity-50"
+                          className="min-w-0 py-1.5 px-1 min-[360px]:px-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 text-[9.5px] min-[360px]:text-[10px] font-semibold flex items-center justify-center gap-1 transition-all cursor-pointer disabled:opacity-50"
                         >
-                          {lifecycleBusy === `${bot.id}:stop` ? <Loader2 className="w-3 h-3 animate-spin" /> : <Square className="w-3 h-3" />}
-                          <span>Stop</span>
+                          {lifecycleBusy === `${bot.id}:stop` ? <Loader2 className="w-3 h-3 animate-spin shrink-0" /> : <Square className="w-3 h-3 shrink-0" />}
+                          <span className="truncate">Stop</span>
                         </button>
                       )}
 
@@ -366,20 +370,20 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                         type="button"
                         disabled={lifecycleBusy !== null}
                         onClick={() => handleBotLifecycle(bot, 'restart')}
-                        className="py-1.5 px-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 text-[10px] font-semibold flex items-center justify-center gap-1 transition-all cursor-pointer disabled:opacity-50"
+                        className="min-w-0 py-1.5 px-1 min-[360px]:px-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 text-[9.5px] min-[360px]:text-[10px] font-semibold flex items-center justify-center gap-1 transition-all cursor-pointer disabled:opacity-50"
                       >
-                        {lifecycleBusy === `${bot.id}:restart` ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCcw className="w-3 h-3" />}
-                        <span>Restart</span>
+                        {lifecycleBusy === `${bot.id}:restart` ? <Loader2 className="w-3 h-3 animate-spin shrink-0" /> : <RotateCcw className="w-3 h-3 shrink-0" />}
+                        <span className="truncate">Restart</span>
                       </button>
 
                       <button
                         type="button"
                         disabled={lifecycleBusy !== null}
                         onClick={() => handleBotLifecycle(bot, 'clean-memory')}
-                        className="py-1.5 px-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[10px] font-semibold flex items-center justify-center gap-1 transition-all cursor-pointer disabled:opacity-50"
+                        className="min-w-0 py-1.5 px-1 min-[360px]:px-2 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[9.5px] min-[360px]:text-[10px] font-semibold flex items-center justify-center gap-1 transition-all cursor-pointer disabled:opacity-50"
                       >
-                        {lifecycleBusy === `${bot.id}:clean-memory` ? <Loader2 className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
-                        <span>Clean Mem</span>
+                        {lifecycleBusy === `${bot.id}:clean-memory` ? <Loader2 className="w-3 h-3 animate-spin shrink-0" /> : <Sparkles className="w-3 h-3 shrink-0" />}
+                        <span className="truncate">Clean Mem</span>
                       </button>
                     </div>
 
@@ -406,25 +410,25 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                             </button>
                           </div>
                           <div className="space-y-0.5 font-mono text-[10px] text-white/90">
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-white/50">URL:</span>
+                            <div className="flex items-center justify-between gap-2 min-w-0">
+                              <span className="text-white/50 shrink-0">URL:</span>
                               <a 
                                 href={fullUrl} 
                                 target="_blank" 
                                 rel="noreferrer"
-                                className="text-sky-300 hover:underline truncate select-all max-w-[210px]"
+                                className="text-sky-300 hover:underline min-w-0 flex-1 text-right truncate select-all"
                               >
                                 {fullUrl}
                               </a>
                             </div>
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-white/50">Bot ID:</span>
-                              <span className="text-red-300 font-bold select-all">{cleanBotId}</span>
+                            <div className="flex items-center justify-between gap-2 min-w-0">
+                              <span className="text-white/50 shrink-0">Bot ID:</span>
+                              <span className="text-red-300 font-bold select-all break-all text-right">{cleanBotId}</span>
                             </div>
                             {bot.adminPassword && (
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="text-white/50">Pass:</span>
-                                <span className="text-amber-300 font-bold select-all">{bot.adminPassword}</span>
+                              <div className="flex items-center justify-between gap-2 min-w-0">
+                                <span className="text-white/50 shrink-0">Pass:</span>
+                                <span className="text-amber-300 font-bold select-all break-all text-right">{bot.adminPassword}</span>
                               </div>
                             )}
                           </div>
@@ -587,4 +591,10 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
       </div>
     </div>
   );
+
+  if (typeof document !== 'undefined') {
+    return createPortal(modalContent, document.body);
+  }
+
+  return modalContent;
 };

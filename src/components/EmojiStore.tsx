@@ -190,7 +190,7 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
   return (
     <div className="space-y-4 pb-28">
       {/* Header bar */}
-      <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+      <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-zinc-800">
         <button
           onClick={onBack}
           className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white transition-colors cursor-pointer"
@@ -275,7 +275,7 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
 
       {/* Emoji Matrix */}
       <div className="glass-panel rounded-2xl p-3.5 border border-zinc-800/80">
-        <div className="grid grid-cols-6 sm:grid-cols-8 md:grid-cols-10 gap-2">
+        <div className="grid grid-cols-5 min-[360px]:grid-cols-6 sm:grid-cols-8 md:grid-cols-10 gap-1.5 sm:gap-2">
           {filteredEmojis.map((emoji, index) => (
             <button
               key={`${emoji}-${index}`}
@@ -306,7 +306,7 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
         </div>
 
         <div className="flex items-center gap-2">
-          <div className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-base text-white tracking-widest min-h-10 flex items-center overflow-x-auto">
+          <div className="flex-1 min-w-0 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-base text-white tracking-widest min-h-10 flex items-center overflow-x-auto">
             {collectedEmojis || <span className="text-zinc-500 text-xs tracking-normal">Tap emojis above to collect...</span>}
           </div>
 
@@ -323,7 +323,7 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
 
       {/* Floating Copy Toast */}
       {toastEmoji && (
-        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 bg-zinc-900/95 text-white border border-pink-500/40 shadow-2xl px-4 py-2 rounded-2xl flex items-center gap-2 text-xs font-semibold backdrop-blur-xl animate-in fade-in zoom-in-95 duration-150">
+        <div className="fixed bottom-[calc(5.75rem+env(safe-area-inset-bottom,0px))] left-1/2 -translate-x-1/2 z-50 max-w-[calc(100vw-2rem)] truncate bg-zinc-900/95 text-white border border-pink-500/40 shadow-2xl px-4 py-2 rounded-2xl flex items-center gap-2 text-xs font-semibold backdrop-blur-xl animate-in fade-in zoom-in-95 duration-150">
           <Check className="w-4 h-4 text-emerald-400" />
           <span>Copied:</span>
           <span className="text-base">{toastEmoji}</span>

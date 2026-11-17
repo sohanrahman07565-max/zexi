@@ -82,15 +82,15 @@ export const DynamicIslandHeader: React.FC<DynamicIslandHeaderProps> = ({
   };
 
   return (
-    <header className="sticky top-2 z-30 mb-3.5 flex justify-center shrink-0 pointer-events-none">
+    <header className="sticky top-[max(0.5rem,env(safe-area-inset-top))] z-30 mb-3.5 flex justify-center shrink-0 pointer-events-none">
       <div
         ref={islandRef}
         className={`glass pointer-events-auto overflow-hidden text-white transition-all duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] ${
           expanded
-            ? 'w-full rounded-[28px] px-3.5 py-3'
+            ? 'w-full rounded-[28px] px-3 sm:px-3.5 py-3'
             : morphPulse
-            ? 'w-[97%] scale-[1.012] rounded-[28px] px-3.5 py-2.5'
-            : 'w-full rounded-[28px] px-3.5 py-2.5'
+            ? 'w-[97%] scale-[1.012] rounded-[28px] px-3 sm:px-3.5 py-2.5'
+            : 'w-full rounded-[28px] px-3 sm:px-3.5 py-2.5'
         }`}
       >
         {/* Specular rim sheen sweep */}
@@ -248,14 +248,14 @@ export const DynamicIslandHeader: React.FC<DynamicIslandHeaderProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
               {onRefresh && (
                 <button
                   type="button"
                   onClick={handleRefreshClick}
-                  className="tap flex-1 px-2.5 py-2 rounded-xl bg-white/[0.08] hover:bg-white/[0.15] border border-white/15 text-white text-[11px] font-bold flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                  className="tap flex-1 min-w-[96px] px-2.5 py-2 rounded-xl bg-white/[0.08] hover:bg-white/[0.15] border border-white/15 text-white text-[11px] font-bold flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
                 >
-                  <RefreshCw className={`w-3 h-3 ${refreshing ? 'animate-spin' : ''}`} />
+                  <RefreshCw className={`w-3 h-3 shrink-0 ${refreshing ? 'animate-spin' : ''}`} />
                   <span>Sync Data</span>
                 </button>
               )}
@@ -266,9 +266,9 @@ export const DynamicIslandHeader: React.FC<DynamicIslandHeaderProps> = ({
                   setExpanded(false);
                   onNavigateMore();
                 }}
-                className="tap flex-1 px-2.5 py-2 rounded-xl bg-white/[0.08] hover:bg-white/[0.15] border border-white/15 text-white text-[11px] font-bold flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                className="tap flex-1 min-w-[96px] px-2.5 py-2 rounded-xl bg-white/[0.08] hover:bg-white/[0.15] border border-white/15 text-white text-[11px] font-bold flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
               >
-                <Settings className="w-3 h-3" />
+                <Settings className="w-3 h-3 shrink-0" />
                 <span>Controls</span>
               </button>
               {canSwitchBots && onOpenBotSwitcher && (
@@ -279,13 +279,13 @@ export const DynamicIslandHeader: React.FC<DynamicIslandHeaderProps> = ({
                     setExpanded(false);
                     onOpenBotSwitcher();
                   }}
-                  className="tap flex-1 px-2.5 py-2 rounded-xl border text-white text-[11px] font-bold flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                  className="tap flex-1 min-w-[96px] px-2.5 py-2 rounded-xl border text-white text-[11px] font-bold flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer"
                   style={{
                     background: 'color-mix(in srgb, var(--a) 22%, transparent)',
                     borderColor: 'color-mix(in srgb, var(--a) 55%, transparent)',
                   }}
                 >
-                  <Bot className="w-3 h-3" />
+                  <Bot className="w-3 h-3 shrink-0" />
                   <span>Switch Bot</span>
                 </button>
               )}

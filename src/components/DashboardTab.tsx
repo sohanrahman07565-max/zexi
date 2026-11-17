@@ -114,21 +114,21 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
         {/* Split Stats + Circular SVG Online Progress Ring */}
         <div
           onClick={() => setShowUsersModal(true)}
-          className="flex items-center justify-between gap-3 cursor-pointer"
+          className="flex items-center justify-between gap-2.5 sm:gap-3 cursor-pointer"
           title="Tap to inspect active and offline bot users"
         >
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <div className="lg-big">{animatedTotal.toLocaleString()}</div>
             <div className="text-[11px] font-bold uppercase tracking-wider text-white/60 mt-1.5">
               Total Users
             </div>
-            <div className="flex flex-wrap items-center gap-2 mt-2.5 tabular-nums">
-              <span className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-emerald-500/15 border border-emerald-400/35 text-[12.5px] font-bold text-emerald-300 shadow-[0_0_16px_rgba(52,211,153,0.16)]">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-[0_0_10px_#34d399] animate-pulse shrink-0" />
+            <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 mt-2.5 tabular-nums">
+              <span className="inline-flex items-center gap-1.5 sm:gap-2 px-2 sm:px-2.5 py-0.5 sm:py-1 rounded-full bg-emerald-500/15 border border-emerald-400/35 text-[11.5px] xs:text-[12.5px] font-bold text-emerald-300 shadow-[0_0_16px_rgba(52,211,153,0.16)]">
+                <span className="w-2 sm:w-2.5 h-2 sm:h-2.5 rounded-full bg-emerald-400 shadow-[0_0_10px_#34d399] animate-pulse shrink-0" />
                 <span>{animatedOnline.toLocaleString()} Online</span>
               </span>
-              <span className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-rose-500/15 border border-rose-400/35 text-[12.5px] font-bold text-rose-300 shadow-[0_0_16px_rgba(244,63,94,0.16)]">
-                <span className="w-2.5 h-2.5 rounded-full bg-rose-500 shadow-[0_0_10px_#f43f5e] shrink-0" />
+              <span className="inline-flex items-center gap-1.5 sm:gap-2 px-2 sm:px-2.5 py-0.5 sm:py-1 rounded-full bg-rose-500/15 border border-rose-400/35 text-[11.5px] xs:text-[12.5px] font-bold text-rose-300 shadow-[0_0_16px_rgba(244,63,94,0.16)]">
+                <span className="w-2 sm:w-2.5 h-2 sm:h-2.5 rounded-full bg-rose-500 shadow-[0_0_10px_#f43f5e] shrink-0" />
                 <span>{animatedOffline.toLocaleString()} Offline</span>
               </span>
             </div>
@@ -153,10 +153,10 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
               />
             </svg>
             <div className="absolute text-center pointer-events-none">
-              <b className="block text-[17px] font-extrabold text-white tabular-nums leading-tight">
+              <b className="block text-[14px] xs:text-[17px] font-extrabold text-white tabular-nums leading-tight">
                 {animatedPercent}%
               </b>
-              <span className="block text-[9.5px] font-bold uppercase tracking-wider text-white/60 mt-0.5">
+              <span className="block text-[8.5px] xs:text-[9.5px] font-bold uppercase tracking-wider text-white/60 mt-0.5">
                 Online
               </span>
             </div>
@@ -172,7 +172,7 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
       />
 
       {/* KPI 2x2 Grid */}
-      <div className="grid grid-cols-2 gap-2.5">
+      <div className="grid grid-cols-1 min-[300px]:grid-cols-2 gap-2.5">
         {/* Files */}
         <button
           type="button"
@@ -240,9 +240,9 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
           <div className="text-[24px] font-extrabold tracking-tight text-white tabular-nums leading-tight mt-0.5">
             {animatedTriggers}
           </div>
-          <div className="text-[11px] font-bold uppercase tracking-wider text-white/60 flex items-center justify-between w-full">
-            <span>Filters</span>
-            <span className="text-[10px] text-white/50">Manage →</span>
+          <div className="text-[11px] font-bold uppercase tracking-wider text-white/60 flex items-center justify-between gap-1 w-full min-w-0">
+            <span className="truncate">Filters</span>
+            <span className="text-[9.5px] xs:text-[10px] text-white/50 shrink-0 whitespace-nowrap">Manage →</span>
           </div>
         </button>
 
