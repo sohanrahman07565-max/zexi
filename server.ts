@@ -141,6 +141,7 @@ async function initBackgroundServices() {
 
 async function startServer() {
   const app = express();
+  app.set('trust proxy', 1);
   const httpServer = http.createServer(app);
   activeHttpServer = httpServer;
 
@@ -172,7 +173,7 @@ async function startServer() {
     }
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-bot-id, X-Requested-With, Cache-Control, Pragma');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-bot-id, x-tma-init-data, x-telegram-init-data, X-Requested-With, Cache-Control, Pragma');
     if (req.method === 'OPTIONS') {
       return res.status(204).end();
     }

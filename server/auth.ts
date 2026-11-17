@@ -32,8 +32,12 @@ export function verifySessionToken(signedToken: string): string | null {
 
   const secret = getSessionSecret();
   const expectedSig = crypto.createHmac('sha256', secret).update(rawToken).digest('hex');
-  
-  if (crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSig))) {
+
+  const sigBuf = Buffer.from(signature, 'utf8');
+  const expectedBuf = Buffer.from(expectedSig, 'utf8');
+  if (sigBuf.length !== expectedBuf.length) return null;
+
+  if (crypto.timingSafeEqual(sigBuf, expectedBuf)) {
     return rawToken;
   }
   return null;

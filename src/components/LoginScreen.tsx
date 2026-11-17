@@ -54,14 +54,22 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
     setLogoSrc(resolveLogo(design?.loginLogoUrl));
   }, [design?.loginLogoUrl]);
 
+  const [tmaAvailable, setTmaAvailable] = useState(false);
+
   useEffect(() => {
     try {
       if (typeof window !== 'undefined') {
         const params = new URLSearchParams(window.location.search);
-        const bid = params.get('bot_id') || params.get('botId');
+        const bid = (params.get('bot_id') || params.get('botId') || '').trim();
         if (bid) {
           setTargetBotId(bid);
           api.setActiveBotId(bid);
+        } else {
+          api.setActiveBotId('main');
+        }
+        const tgWebApp = (window as any).Telegram?.WebApp;
+        if (tgWebApp?.initData) {
+          setTmaAvailable(true);
         }
       }
     } catch {}
@@ -279,6 +287,35 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
       if (err.code !== 'auth/popup-closed-by-user' && err.code !== 'auth/cancelled-popup-request') {
         triggerEmailError('Access Denied');
       }
+      setLoading(false);
+      setIsSuccessExiting(false);
+    }
+  };
+
+  // One-tap Telegram Mini App authentication using Telegram.WebApp.initData
+  const handleTmaSignIn = async () => {
+    if (loading || isSuccessExiting) return;
+    const tmaInitData = typeof window !== 'undefined' ? String((window as any).Telegram?.WebApp?.initData || '').trim() : '';
+    if (!tmaInitData) {
+      triggerEmailError('Telegram Mini App session unavailable');
+      return;
+    }
+
+    setEmailError(null);
+    setPasswordError(null);
+    setLoading(true);
+    try { window.sessionStorage?.removeItem('tg_just_logged_out'); } catch {}
+
+    try {
+      const res = await api.tmaLogin(tmaInitData);
+      setIsSuccessExiting(true);
+      toast.success(`Welcome back, ${res.admin.name || 'Admin'}!`);
+      setTimeout(() => {
+        onSuccess(res.admin);
+      }, 450);
+    } catch (err: any) {
+      console.error('[TMA Sign-In] Error:', err);
+      triggerEmailError(err?.message || 'Access Denied');
       setLoading(false);
       setIsSuccessExiting(false);
     }
@@ -1035,7 +1072,34 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
             <span>SIGN IN</span>
           </button>
 
-          {(!targetBotId || targetBotId === 'main') && (
+          {tmaAvailable && (
+            <button
+              type="button"
+              onClick={handleTmaSignIn}
+              disabled={loading || isSuccessExiting}
+              style={{
+                width: '100%',
+                marginTop: '14px',
+                height: '46px',
+                borderRadius: '16px',
+                border: '1px solid rgba(96, 165, 250, 0.35)',
+                background: 'rgba(59, 130, 246, 0.14)',
+                color: '#bfdbfe',
+                fontSize: '12.5px',
+                fontWeight: 700,
+                letterSpacing: '0.06em',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px'
+              }}
+            >
+              <span>Continue with Telegram Account</span>
+            </button>
+          )}
+
+          {(!targetBotId || targetBotId === 'main') && !tmaAvailable && (
             <button
               className="zexi-login-google"
               type="button"

@@ -1,9 +1,10 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { storage, ItemRecord, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord, SharedStorageService } from './storage';
-import { hashPassword } from './auth';
+import { storage, ItemRecord, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord, SharedStorageService, AdminUser } from './storage';
+import { hashPassword, signSessionToken } from './auth';
 
 export const botTokenContext = new AsyncLocalStorage<string>();
 export const senderUsernameContext = new AsyncLocalStorage<string>();
@@ -1349,6 +1350,41 @@ export class TelegramService {
     return false;
   }
 
+  public static async isOwnerAdmin(fromId: string | number, fromUsername?: string): Promise<boolean> {
+    if (!fromId) return false;
+    const cleanId = String(fromId).trim();
+    const rawUname = (fromUsername || senderUsernameContext.getStore() || '').replace(/^@+/, '').trim().toLowerCase();
+
+    await storage.loadLatest(false);
+    const admins = await storage.getAdmins();
+    const settings = await storage.getSettings();
+    const mainStorage = StorageManager.getMainStorage();
+    const isMainBot = storage === mainStorage;
+
+    const rootAdminRaw = isMainBot
+      ? String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || settings.rootAdminId || '8153757163').trim()
+      : String(settings.rootAdminId || '').trim();
+    const rootIds = rootAdminRaw.split(',').map(s => s.trim().replace(/^@+/, '').toLowerCase()).filter(Boolean);
+
+    if (rootIds.includes(cleanId.toLowerCase()) || (rawUname && rootIds.includes(rawUname))) {
+      return true;
+    }
+
+    const ownerRecord = admins.find(a =>
+      a.enabled !== false &&
+      a.role === 'owner' &&
+      (
+        String(a.telegramId || '').trim() === cleanId ||
+        String(a.id || '').trim() === cleanId ||
+        (rawUname && (
+          String(a.username || '').replace(/^@+/, '').trim().toLowerCase() === rawUname ||
+          String(a.name || '').replace(/^@+/, '').trim().toLowerCase() === rawUname
+        ))
+      )
+    );
+    return Boolean(ownerRecord);
+  }
+
   private static async sendAdminHelpGuide(chatId: number | string, _fromId: string): Promise<void> {
     const mainStorage = StorageManager.getMainStorage();
     const isMainBot = storage === mainStorage;
@@ -1378,6 +1414,8 @@ export class TelegramService {
       `🔨 <b>MODERATION &amp; ACCESS CONTROL</b>`,
       `• <code>/ban &lt;id_or_@user&gt;</code> — Ban user (or reply <code>/ban</code> in group)`,
       `• <code>/unban &lt;id_or_@user&gt;</code> — Unban user &amp; clear warnings`,
+      `• <code>/grantadmin &lt;id_or_@user&gt; [full|editor|moderator]</code> — <i>(Owner)</i> Promote user to Admin &amp; issue token`,
+      `• <code>/revokeadmin &lt;id_or_@user&gt;</code> — <i>(Owner)</i> Revoke Admin permissions`,
       `• <code>/admins</code> — View admin count, root ID &amp; total bot users`,
       ``,
       `⚙️ <b>BOT CUSTOMIZATION &amp; PANEL LOGIN</b>`,
@@ -2535,6 +2573,7 @@ export class TelegramService {
     const isBroadcastCommand = /^\/broadcast(?:@\w+)?(?:\s+|$)/i.test(text);
     const isSettingsCommand = /^\/(?:settings|config|setfilter|addfilter|delfilter|delfile|delete|del|editthismessage)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isBotLifecycleCommand = /^\/(?:botstart|startbot|botstop|stopbot|botrestart|restartbot|botstatus|memclean|cleanmemory|clearcache)(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isGrantRevokeCommand = /^\/(?:grantadmin|promote|addadmin|revokeadmin|demote|removeadmin|deladmin)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isHelpCommand = /^\/help(?:@\w+)?(?:\s+|$)/i.test(text);
 
     const isAdminCommand =
@@ -2556,6 +2595,7 @@ export class TelegramService {
       isBroadcastCommand ||
       isSettingsCommand ||
       isBotLifecycleCommand ||
+      isGrantRevokeCommand ||
       isHelpCommand;
 
     if (isAdminCommand) {
@@ -2616,6 +2656,16 @@ export class TelegramService {
             await this.handleBotLifecycleCommand(fromId, fromId, text);
           },
           'Bot control result sent to your private messages.'
+        );
+        return;
+      }
+
+      if (isGrantRevokeCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleOwnerGrantRevokeCommand(fromId, fromId, text, message);
+          },
+          'Admin permission update sent to your private messages.'
         );
         return;
       }
@@ -4288,6 +4338,12 @@ export class TelegramService {
         return;
       }
       await this.handleBotLifecycleCommand(fromId, chatId, text);
+      return;
+    }
+
+    // 5d. Owner-Only Admin Promotion / Revocation Commands (/grantadmin, /promote, /addadmin, /revokeadmin, /demote)
+    if (/^\/(?:grantadmin|promote|addadmin|revokeadmin|demote|removeadmin|deladmin)(?:@\w+)?(?:\s+|$)/i.test(text)) {
+      await this.handleOwnerGrantRevokeCommand(fromId, chatId, text, message);
       return;
     }
 
@@ -9689,6 +9745,177 @@ export class TelegramService {
       }).catch(() => {});
       return;
     }
+  }
+
+  private static async handleOwnerGrantRevokeCommand(
+    fromId: string,
+    chatId: string | number,
+    text: string,
+    message?: any
+  ): Promise<void> {
+    const isOwner = await this.isOwnerAdmin(fromId, message?.from?.username);
+    if (!isOwner) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: '⛔ <b>Owner Access Required:</b> Only the primary Bot Owner can grant or revoke administrator permissions.',
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    const match = text.trim().match(/^\/(grantadmin|promote|addadmin|revokeadmin|demote|removeadmin|deladmin)(?:@\w+)?(?:\s+(.+))?$/i);
+    if (!match) return;
+
+    const cmd = match[1].toLowerCase();
+    const isGrant = cmd === 'grantadmin' || cmd === 'promote' || cmd === 'addadmin';
+    const rawArgs = (match[2] || '').trim().split(/\s+/).filter(Boolean);
+
+    let targetId = '';
+    let targetUsername = '';
+    let targetName = '';
+    let preset = 'editor';
+
+    if (message?.reply_to_message?.from) {
+      const repliedUser = message.reply_to_message.from;
+      targetId = String(repliedUser.id);
+      targetUsername = repliedUser.username ? String(repliedUser.username).replace(/^@+/, '') : '';
+      targetName = [repliedUser.first_name, repliedUser.last_name].filter(Boolean).join(' ').trim() || (targetUsername ? `@${targetUsername}` : `User ${targetId}`);
+      if (rawArgs[0] && ['full', 'editor', 'moderator'].includes(rawArgs[0].toLowerCase())) {
+        preset = rawArgs[0].toLowerCase();
+      }
+    } else if (rawArgs.length > 0) {
+      const targetQuery = rawArgs[0];
+      if (rawArgs[1] && ['full', 'editor', 'moderator'].includes(rawArgs[1].toLowerCase())) {
+        preset = rawArgs[1].toLowerCase();
+      }
+      const foundUser = await storage.findUserByIdOrUsername(targetQuery).catch(() => null);
+      if (foundUser) {
+        targetId = String(foundUser.id).trim();
+        targetUsername = foundUser.username ? String(foundUser.username).replace(/^@+/, '') : '';
+        targetName = [foundUser.firstName, foundUser.lastName].filter(Boolean).join(' ').trim() || (targetUsername ? `@${targetUsername}` : `User ${targetId}`);
+      } else {
+        targetId = targetQuery.replace(/^@+/, '').trim();
+        targetUsername = targetQuery.startsWith('@') ? targetId : '';
+        targetName = targetUsername ? `@${targetUsername}` : `Admin ${targetId}`;
+      }
+    }
+
+    if (!targetId) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: isGrant
+          ? `ℹ️ <b>Grant Admin Usage:</b>\n<code>/grantadmin &lt;user_id_or_@username&gt; [full|editor|moderator]</code>\nOr reply to a user's message with <code>/grantadmin [full|editor|moderator]</code>`
+          : `ℹ️ <b>Revoke Admin Usage:</b>\n<code>/revokeadmin &lt;user_id_or_@username&gt;</code>\nOr reply to a user's message with <code>/revokeadmin</code>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    const currentBotId = (storage as any)?.botId || 'main';
+
+    if (isGrant) {
+      const presetPerms = preset === 'full'
+        ? {
+            files_view: true, files_add: true, files_edit: true, files_delete: true,
+            links_view: true, links_add: true, links_edit: true, links_delete: true,
+            messages_view: true, messages_edit: true, admins_manage: false,
+            design_edit: true, settings_edit: true, cleanup_manage: true
+          }
+        : preset === 'moderator'
+        ? {
+            files_view: true, files_add: false, files_edit: false, files_delete: false,
+            links_view: true, links_add: false, links_edit: false, links_delete: false,
+            messages_view: true, messages_edit: false, admins_manage: false,
+            design_edit: false, settings_edit: false, cleanup_manage: true
+          }
+        : {
+            files_view: true, files_add: true, files_edit: true, files_delete: false,
+            links_view: true, links_add: true, links_edit: true, links_delete: false,
+            messages_view: true, messages_edit: true, admins_manage: false,
+            design_edit: false, settings_edit: false, cleanup_manage: false
+          };
+
+      const existingAdmin = await storage.getAdmin(targetId);
+      const generatedPassword = existingAdmin?.passwordHash ? undefined : `Zexi#${crypto.randomBytes(4).toString('hex')}`;
+      const passwordHash = existingAdmin?.passwordHash || await hashPassword(generatedPassword!);
+
+      const adminRecord: AdminUser = {
+        id: existingAdmin?.id || targetId,
+        telegramId: targetId,
+        name: targetName,
+        username: targetUsername || existingAdmin?.username,
+        role: existingAdmin?.role === 'owner' ? 'owner' : 'subadmin',
+        passwordHash,
+        permissions: presetPerms,
+        enabled: true,
+        createdAt: existingAdmin?.createdAt || new Date().toISOString(),
+        lastLoginAt: existingAdmin?.lastLoginAt
+      };
+
+      await storage.saveAdmin(adminRecord);
+      await storage.setBotUserAdmin(targetId, true).catch(() => {});
+
+      const rawToken = await storage.createSession(adminRecord.id, adminRecord.role, currentBotId);
+      const accessToken = signSessionToken(rawToken);
+      const grantedCount = Object.values(presetPerms).filter(Boolean).length;
+
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text:
+          `✅ <b>Administrator Granted</b>\n` +
+          `━━━━━━━━━━━━━━━━━━━━\n` +
+          `👤 <b>Admin:</b> ${this.escapeHtml(adminRecord.name)}\n` +
+          `🆔 <b>ID:</b> <code>${this.escapeHtml(adminRecord.telegramId)}</code>\n` +
+          (adminRecord.username ? `🔗 <b>Username:</b> @${this.escapeHtml(adminRecord.username)}\n` : '') +
+          `🛡️ <b>Preset:</b> <code>${this.escapeHtml(preset)}</code> (${grantedCount}/14 capabilities)\n` +
+          (generatedPassword ? `🔐 <b>Panel Password:</b> <code>${this.escapeHtml(generatedPassword)}</code>\n` : '') +
+          `🎫 <b>Session Access Token:</b>\n<code>${this.escapeHtml(accessToken)}</code>\n\n` +
+          `<i>This user can now authenticate seamlessly via Telegram Mini App or Web Panel.</i>`,
+        parse_mode: 'HTML'
+      });
+
+      if (/^\d+$/.test(targetId) && targetId !== fromId) {
+        this.callTelegramApi('sendMessage', {
+          chat_id: targetId,
+          text:
+            `🎉 <b>You Have Been Granted Administrator Access!</b>\n\n` +
+            `The Owner has promoted you to <b>Sub-Admin</b> (<code>${this.escapeHtml(preset)}</code>).\n` +
+            (generatedPassword ? `🔐 <b>Web Panel Password:</b> <code>${this.escapeHtml(generatedPassword)}</code>\n` : '') +
+            `Run <code>/help</code> to view your admin commands or open the Admin Panel Mini App.`,
+          parse_mode: 'HTML'
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    // Revoke admin permissions
+    const admins = await storage.getAdmins();
+    const cleanTarget = targetId.replace(/^@+/, '').toLowerCase();
+    const matched = admins.find(a =>
+      String(a.id).trim() === targetId ||
+      String(a.telegramId).trim() === targetId ||
+      (a.username && a.username.replace(/^@+/, '').toLowerCase() === cleanTarget)
+    );
+
+    if (matched && (matched.role === 'owner' || String(matched.id) === String(fromId) || String(matched.telegramId) === String(fromId))) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: '⛔ <b>Protected Account:</b> Cannot revoke Owner administrator permissions.',
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    if (matched) {
+      await storage.deleteAdmin(matched.id);
+    }
+    await storage.setBotUserAdmin(targetId, false).catch(() => {});
+
+    await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: `🗑️ <b>Administrator Revoked:</b> <code>${this.escapeHtml(matched?.name || targetName)}</code> (<code>${this.escapeHtml(targetId)}</code>) no longer has admin access.`,
+      parse_mode: 'HTML'
+    });
   }
 
   private static startPollingLoop(): void {

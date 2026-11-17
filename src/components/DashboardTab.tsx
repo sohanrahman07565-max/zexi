@@ -1,11 +1,12 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { ItemRecord, BotSettings, api } from '../lib/api';
+import { ItemRecord, BotSettings, AdminUser, api } from '../lib/api';
 import { FileText, Link2, Hash, Users, Sparkles, ArrowUpRight } from 'lucide-react';
 import { UsersModal } from './UsersModal';
 import { useCountUp } from '../hooks/useCountUp';
 
 interface DashboardTabProps {
   items: ItemRecord[];
+  currentUser?: AdminUser | null;
   adminsCount: number;
   trackedCount: number;
   totalUsers?: number;
@@ -18,6 +19,7 @@ interface DashboardTabProps {
 
 const DashboardTabComponent: React.FC<DashboardTabProps> = ({
   items,
+  currentUser,
   totalUsers = 0,
   onlineUsers = 0,
   offlineUsers = 0,
@@ -169,6 +171,8 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
         isOpen={showUsersModal}
         onClose={() => setShowUsersModal(false)}
         onUserUpdated={onRefresh}
+        currentUserRole={currentUser?.role}
+        currentUserTelegramId={currentUser?.telegramId}
       />
 
       {/* KPI 2x2 Grid */}

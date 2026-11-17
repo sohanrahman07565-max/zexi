@@ -6,26 +6,86 @@ import {
   Search,
   X,
   ShieldCheck,
+  ShieldOff,
   Ban,
   CheckCircle2,
   RefreshCw,
   AlertCircle,
-  Clock
+  Clock,
+  Key,
+  Copy,
+  Check
 } from 'lucide-react';
+import { ALL_PERMISSIONS } from './MoreTab';
 
 interface UsersModalProps {
   isOpen: boolean;
   onClose: () => void;
   onUserUpdated?: () => void;
+  currentUserRole?: 'owner' | 'subadmin';
+  currentUserTelegramId?: string;
 }
 
-export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserUpdated }) => {
+type AdminPreset = 'editor' | 'moderator' | 'full';
+
+const buildPresetPermissions = (preset: AdminPreset): Record<string, boolean> => {
+  const perms: Record<string, boolean> = {};
+  ALL_PERMISSIONS.forEach((p) => {
+    perms[p.key] = false;
+  });
+  if (preset === 'full') {
+    ALL_PERMISSIONS.forEach((p) => {
+      perms[p.key] = p.key !== 'admins_manage';
+    });
+    return perms;
+  }
+  if (preset === 'moderator') {
+    perms.files_view = true;
+    perms.links_view = true;
+    perms.messages_view = true;
+    perms.cleanup_manage = true;
+    return perms;
+  }
+  // 'editor'
+  perms.files_view = true;
+  perms.files_add = true;
+  perms.files_edit = true;
+  perms.links_view = true;
+  perms.links_add = true;
+  perms.links_edit = true;
+  perms.messages_view = true;
+  return perms;
+};
+
+export const UsersModal: React.FC<UsersModalProps> = ({
+  isOpen,
+  onClose,
+  onUserUpdated,
+  currentUserRole,
+  currentUserTelegramId,
+}) => {
   const [users, setUsers] = useState<BotUserRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [userTab, setUserTab] = useState<'active' | 'banned'>('active');
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+
+  // Owner Admin Grant state
+  const [grantingUser, setGrantingUser] = useState<BotUserRecord | null>(null);
+  const [grantPreset, setGrantPreset] = useState<AdminPreset>('editor');
+  const [grantPermissions, setGrantPermissions] = useState<Record<string, boolean>>(() => buildPresetPermissions('editor'));
+  const [grantPassword, setGrantPassword] = useState<string>('');
+  const [grantSubmitting, setGrantSubmitting] = useState<boolean>(false);
+  const [issuedCredentials, setIssuedCredentials] = useState<{
+    userId: string;
+    name: string;
+    accessToken: string;
+    generatedPassword?: string;
+  } | null>(null);
+  const [copiedField, setCopiedField] = useState<'token' | 'password' | null>(null);
+
+  const isOwner = currentUserRole === 'owner';
 
   const fetchUsers = async () => {
     try {
@@ -43,6 +103,8 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
   useEffect(() => {
     if (isOpen) {
       fetchUsers();
+      setGrantingUser(null);
+      setIssuedCredentials(null);
     }
   }, [isOpen]);
 
@@ -50,12 +112,16 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && isOpen) {
-        onClose();
+        if (grantingUser) {
+          setGrantingUser(null);
+        } else {
+          onClose();
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  }, [isOpen, onClose, grantingUser]);
 
   // Online status calculation: active within last 10 minutes
   const isUserOnline = (lastActiveAt?: string): boolean => {
@@ -74,6 +140,83 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
     if (hours < 24) return `Active ${hours}h ago`;
     const days = Math.floor(hours / 24);
     return `Active ${days}d ago`;
+  };
+
+  const copyText = async (value: string, field: 'token' | 'password') => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedField(field);
+      setTimeout(() => setCopiedField((prev) => (prev === field ? null : prev)), 2000);
+    } catch {}
+  };
+
+  const openGrantPanel = (user: BotUserRecord) => {
+    setFeedback(null);
+    setIssuedCredentials(null);
+    setGrantingUser(user);
+    setGrantPreset('editor');
+    setGrantPermissions(buildPresetPermissions('editor'));
+    setGrantPassword('');
+  };
+
+  const handleGrantAdminSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!grantingUser) return;
+    setGrantSubmitting(true);
+    setFeedback(null);
+    try {
+      const fullName = [grantingUser.firstName, grantingUser.lastName].filter(Boolean).join(' ').trim();
+      const displayName = fullName || grantingUser.username || `User ${grantingUser.id}`;
+      const res = await api.grantAdmin(grantingUser.id, {
+        name: displayName,
+        username: grantingUser.username,
+        password: grantPassword.trim() || undefined,
+        role: 'subadmin',
+        permissions: grantPermissions as any,
+      });
+
+      setUsers((prev) =>
+        prev.map((u) => (u.id === grantingUser.id ? { ...u, isAdmin: true, isBanned: false } : u))
+      );
+
+      setIssuedCredentials({
+        userId: grantingUser.id,
+        name: displayName,
+        accessToken: res.accessToken,
+        generatedPassword: res.generatedPassword,
+      });
+      setGrantingUser(null);
+      setFeedback({
+        type: 'success',
+        message: `${displayName} promoted to Sub-Admin with access token issued.`,
+      });
+      if (onUserUpdated) onUserUpdated();
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err.message || 'Failed to grant admin permissions' });
+    } finally {
+      setGrantSubmitting(false);
+    }
+  };
+
+  const handleRevokeAdmin = async (user: BotUserRecord) => {
+    if (!isOwner) return;
+    try {
+      setActionLoadingId(user.id);
+      setFeedback(null);
+      await api.revokeAdmin(user.id);
+      setUsers((prev) =>
+        prev.map((u) => (u.id === user.id ? { ...u, isAdmin: false } : u))
+      );
+      setFeedback({
+        type: 'success',
+        message: `Admin permissions revoked for user ${user.id}.`,
+      });
+      if (onUserUpdated) onUserUpdated();
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err.message || 'Failed to revoke admin permissions' });
+    } finally {
+      setActionLoadingId(null);
+    }
   };
 
   const handleToggleBan = async (user: BotUserRecord) => {
@@ -243,181 +386,381 @@ export const UsersModal: React.FC<UsersModalProps> = ({ isOpen, onClose, onUserU
           </div>
         )}
 
-        {/* Search Bar */}
-        <div className="shrink-0 p-3 sm:p-4 border-b border-white/10 bg-white/[0.02]">
-          <div className="relative">
-            <Search className="w-4 h-4 text-white/50 absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={userTab === 'banned' ? "Search banned users by Name, @username, or User ID..." : "Search active users by Name, @username, or User ID..."}
-              className="w-full pl-9 pr-8 py-2.5 rounded-xl bg-black/30 border border-white/15 text-white placeholder-white/40 text-xs focus:outline-none focus:border-white/40 transition-all"
-            />
-            {searchQuery && (
+        {/* Newly Issued Admin Credentials Banner */}
+        {issuedCredentials && (
+          <div className="shrink-0 p-3.5 border-b border-amber-500/30 bg-amber-500/10 space-y-2 text-xs">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 font-bold text-amber-300">
+                <Key className="w-4 h-4 shrink-0" />
+                <span>Admin Credentials Issued for {issuedCredentials.name}</span>
+              </div>
               <button
-                onClick={() => setSearchQuery('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-white/60 hover:text-white cursor-pointer"
+                type="button"
+                onClick={() => setIssuedCredentials(null)}
+                className="text-zinc-400 hover:text-white cursor-pointer"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
-            )}
-          </div>
-        </div>
-
-        {/* Users List Body (Scrollable Middle Area) */}
-        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-4 space-y-2.5 pb-4 sm:pb-5">
-          {loading && users.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 text-zinc-400">
-              <RefreshCw className="w-6 h-6 animate-spin text-red-500 mb-2" />
-              <p className="text-xs">Loading bot users...</p>
             </div>
-          ) : filteredUsers.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 text-center text-zinc-400">
-              {userTab === 'banned' ? (
-                <Ban className="w-8 h-8 text-red-500/50 mb-2" />
-              ) : (
-                <Users className="w-8 h-8 text-zinc-600 mb-2" />
-              )}
-              <p className="text-sm font-semibold text-zinc-300">
-                {searchQuery
-                  ? 'No matching users found'
-                  : userTab === 'banned'
-                    ? 'No banned users in the system'
-                    : 'No active users found'}
-              </p>
-              <p className="text-xs text-zinc-500 mt-1 max-w-xs">
-                {searchQuery
-                  ? 'Try searching with a different user ID, name, or username.'
-                  : userTab === 'banned'
-                    ? 'Users who reach 3 strikes or get manually restricted will appear here.'
-                    : 'Users are automatically captured and listed here when they interact with or request files from the bot.'}
-              </p>
-            </div>
-          ) : (
-            filteredUsers.map((user) => {
-              const online = isUserOnline(user.lastActiveAt);
-              const fullName = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
-              const displayName = fullName || user.username || `User ${user.id}`;
-              const isBanned = Boolean(user.isBanned);
-              const isAdmin = Boolean(user.isAdmin);
-              const isProcessing = actionLoadingId === user.id;
-
-              return (
-                <div
-                  key={user.id}
-                  className={`p-3 sm:p-3.5 rounded-2xl glass-water-card card-interactive transition-all flex items-center justify-between gap-2.5 sm:gap-3 ${
-                    isBanned
-                      ? 'border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.25)]'
-                      : isAdmin
-                      ? 'border-amber-500/40 shadow-[0_0_15px_rgba(245,158,11,0.15)]'
-                      : ''
-                  }`}
+            {issuedCredentials.generatedPassword && (
+              <div className="flex items-center justify-between gap-2 bg-black/40 border border-white/10 rounded-xl px-2.5 py-1.5">
+                <span className="font-mono text-[11px] text-white/90 truncate">
+                  Password: <strong>{issuedCredentials.generatedPassword}</strong>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => copyText(issuedCredentials.generatedPassword!, 'password')}
+                  className="px-2 py-0.5 rounded-lg bg-white/10 hover:bg-white/20 text-[10px] font-semibold text-white flex items-center gap-1 cursor-pointer shrink-0"
                 >
-                  {/* Left Side: Layout requirements */}
-                  {/* - Top line: User's Name */}
-                  {/* - Second line: User ID and Username (@username) */}
-                  {/* - Status Indicator: Online / Offline status badge */}
-                  <div className="min-w-0 flex-1">
-                    {/* Top line: User's Name & Role Tags */}
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-semibold text-white truncate">
-                        {displayName}
-                      </span>
+                  {copiedField === 'password' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                  <span>{copiedField === 'password' ? 'Copied' : 'Copy'}</span>
+                </button>
+              </div>
+            )}
+            <div className="flex items-center justify-between gap-2 bg-black/40 border border-white/10 rounded-xl px-2.5 py-1.5">
+              <span className="font-mono text-[11px] text-sky-300 truncate">
+                Token: {issuedCredentials.accessToken}
+              </span>
+              <button
+                type="button"
+                onClick={() => copyText(issuedCredentials.accessToken, 'token')}
+                className="px-2 py-0.5 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-[10px] font-semibold text-sky-200 flex items-center gap-1 cursor-pointer shrink-0"
+              >
+                {copiedField === 'token' ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                <span>{copiedField === 'token' ? 'Copied' : 'Copy'}</span>
+              </button>
+            </div>
+          </div>
+        )}
 
-                      {/* Admin Tag */}
-                      {isAdmin && (
-                        <span className="px-2 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] font-semibold flex items-center gap-1">
-                          <ShieldCheck className="w-3 h-3" />
-                          Admin
-                        </span>
-                      )}
+        {/* Owner Grant Admin Panel */}
+        {grantingUser ? (
+          <form onSubmit={handleGrantAdminSubmit} className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 space-y-3.5">
+            <div className="flex items-center justify-between gap-2 pb-2 border-b border-white/10">
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-amber-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4" />
+                  <span>Grant Admin Access</span>
+                </div>
+                <p className="text-[11px] text-zinc-400 truncate mt-0.5">
+                  Promoting {[grantingUser.firstName, grantingUser.lastName].filter(Boolean).join(' ') || grantingUser.username || grantingUser.id} (ID: {grantingUser.id})
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setGrantingUser(null)}
+                className="px-2.5 py-1 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-300 cursor-pointer"
+              >
+                Back
+              </button>
+            </div>
 
-                      {/* Banned Badge */}
-                      {isBanned && (
-                        <span className="px-2 py-0.5 rounded-md bg-red-500/15 border border-red-500/30 text-red-400 text-[10px] font-semibold flex items-center gap-1">
-                          <Ban className="w-3 h-3" />
-                          Banned
-                        </span>
-                      )}
-                    </div>
+            {/* Quick Presets */}
+            <div>
+              <label className="text-[11px] font-semibold text-zinc-300 block mb-1.5">Permission Preset</label>
+              <div className="grid grid-cols-3 gap-1.5">
+                {([
+                  { id: 'editor', label: 'Editor' },
+                  { id: 'moderator', label: 'Moderator' },
+                  { id: 'full', label: 'Full Sub-Admin' },
+                ] as { id: AdminPreset; label: string }[]).map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => {
+                      setGrantPreset(preset.id);
+                      setGrantPermissions(buildPresetPermissions(preset.id));
+                    }}
+                    className={`py-1.5 px-2 rounded-xl border text-xs font-semibold cursor-pointer transition-all ${
+                      grantPreset === preset.id
+                        ? 'bg-amber-500/20 border-amber-400 text-amber-200'
+                        : 'bg-black/30 border-white/10 text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            </div>
 
-                    {/* Second line: User ID and Username (@username) */}
-                    <div className="flex items-center flex-wrap gap-x-2 gap-y-0.5 text-xs text-zinc-400 mt-0.5 font-mono">
-                      <span className="text-zinc-300">ID: {user.id}</span>
-                      <span>·</span>
-                      <span className="text-red-400 font-sans truncate max-w-full">
-                        {user.username ? (user.username.startsWith('@') ? user.username : `@${user.username}`) : 'No @username'}
-                      </span>
-                    </div>
+            {/* Optional Custom Password */}
+            <div>
+              <label className="text-[11px] font-semibold text-zinc-300 block mb-1">
+                Password <span className="text-zinc-500 font-normal">(optional — leave blank to auto-generate)</span>
+              </label>
+              <input
+                type="text"
+                value={grantPassword}
+                onChange={(e) => setGrantPassword(e.target.value)}
+                placeholder="Min 6 characters or leave blank"
+                className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/15 text-xs text-white placeholder-white/35 focus:outline-none focus:border-amber-400"
+              />
+            </div>
 
-                    {/* Status Indicator: Online / Offline status badge */}
-                    <div className="flex items-center flex-wrap gap-1.5 sm:gap-2 mt-2">
-                      <span
-                        className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${
-                          online
-                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
-                            : 'bg-zinc-800/80 text-zinc-400 border-zinc-700/60'
-                        }`}
-                      >
-                        <span
-                          className={`w-1.5 h-1.5 rounded-full ${
-                            online ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'
-                          }`}
-                        />
-                        <span>{online ? 'Online' : 'Offline'}</span>
-                      </span>
-
-                      <span className="text-[11px] text-zinc-500 flex items-center gap-1">
-                        <Clock className="w-3 h-3 text-zinc-600 shrink-0" />
-                        <span>{formatRelativeTime(user.lastActiveAt)}</span>
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Right Side: Action Control */}
-                  {/* - Place a "Ban" / "Unban" toggle button on the right side of each user row */}
-                  {/* - Important Constraint: Admins must NEVER be bannable (disabled or hidden for Admin accounts) */}
-                  <div className="shrink-0 pl-0 sm:pl-2">
-                    {isAdmin ? (
-                      <div
-                        title="Administrators cannot be banned"
-                        className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 text-xs font-medium flex items-center gap-1.5 cursor-not-allowed select-none opacity-80"
-                      >
-                        <ShieldCheck className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                        <span>Protected</span>
+            {/* Granular Permissions */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-semibold text-zinc-300">Capabilities</span>
+                <span className="text-[10px] text-zinc-400 font-mono">
+                  {ALL_PERMISSIONS.filter((p) => grantPermissions[p.key]).length} / {ALL_PERMISSIONS.length} enabled
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-48 overflow-y-auto pr-1">
+                {ALL_PERMISSIONS.map((p) => {
+                  const checked = Boolean(grantPermissions[p.key]);
+                  return (
+                    <label
+                      key={p.key}
+                      className={`p-2 rounded-xl border flex items-start gap-2 cursor-pointer text-xs transition-colors ${
+                        checked
+                          ? 'bg-amber-500/10 border-amber-400/40 text-white'
+                          : 'bg-black/30 border-white/10 text-zinc-400 hover:bg-white/5'
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(e) =>
+                          setGrantPermissions((prev) => ({ ...prev, [p.key]: e.target.checked }))
+                        }
+                        className="mt-0.5 rounded accent-amber-400 cursor-pointer shrink-0"
+                      />
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-semibold leading-tight">{p.label}</div>
+                        <div className="text-[10px] text-zinc-500 leading-tight mt-0.5">{p.category}</div>
                       </div>
-                    ) : (
-                      <button
-                        onClick={() => handleToggleBan(user)}
-                        disabled={isProcessing}
-                        className={`px-2.5 sm:px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 disabled:opacity-50 ${
-                          isBanned
-                            ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-600/30'
-                            : 'bg-red-600 hover:bg-red-500 text-white shadow-md shadow-red-600/30'
-                        }`}
-                      >
-                        {isProcessing ? (
-                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        ) : isBanned ? (
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-2 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => setGrantingUser(null)}
+                className="flex-1 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={grantSubmitting}
+                className="flex-1 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {grantSubmitting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <ShieldCheck className="w-3.5 h-3.5" />}
+                <span>{grantSubmitting ? 'Granting...' : 'Grant Admin Access'}</span>
+              </button>
+            </div>
+          </form>
+        ) : (
+          <>
+            {/* Search Bar */}
+            <div className="shrink-0 p-3 sm:p-4 border-b border-white/10 bg-white/[0.02]">
+              <div className="relative">
+                <Search className="w-4 h-4 text-white/50 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder={userTab === 'banned' ? "Search banned users by Name, @username, or User ID..." : "Search active users by Name, @username, or User ID..."}
+                  className="w-full pl-9 pr-8 py-2.5 rounded-xl bg-black/30 border border-white/15 text-white placeholder-white/40 text-xs focus:outline-none focus:border-white/40 transition-all"
+                />
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-white/60 hover:text-white cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Users List Body (Scrollable Middle Area) */}
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-4 space-y-2.5 pb-4 sm:pb-5">
+              {loading && users.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-zinc-400">
+                  <RefreshCw className="w-6 h-6 animate-spin text-red-500 mb-2" />
+                  <p className="text-xs">Loading bot users...</p>
+                </div>
+              ) : filteredUsers.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center text-zinc-400">
+                  {userTab === 'banned' ? (
+                    <Ban className="w-8 h-8 text-red-500/50 mb-2" />
+                  ) : (
+                    <Users className="w-8 h-8 text-zinc-600 mb-2" />
+                  )}
+                  <p className="text-sm font-semibold text-zinc-300">
+                    {searchQuery
+                      ? 'No matching users found'
+                      : userTab === 'banned'
+                        ? 'No banned users in the system'
+                        : 'No active users found'}
+                  </p>
+                  <p className="text-xs text-zinc-500 mt-1 max-w-xs">
+                    {searchQuery
+                      ? 'Try searching with a different user ID, name, or username.'
+                      : userTab === 'banned'
+                        ? 'Users who reach 3 strikes or get manually restricted will appear here.'
+                        : 'Users are automatically captured and listed here when they interact with or request files from the bot.'}
+                  </p>
+                </div>
+              ) : (
+                filteredUsers.map((user) => {
+                  const online = isUserOnline(user.lastActiveAt);
+                  const fullName = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
+                  const displayName = fullName || user.username || `User ${user.id}`;
+                  const isBanned = Boolean(user.isBanned);
+                  const isAdmin = Boolean(user.isAdmin);
+                  const isSelfOwner = Boolean(currentUserTelegramId && String(user.id) === String(currentUserTelegramId));
+                  const isProcessing = actionLoadingId === user.id;
+
+                  return (
+                    <div
+                      key={user.id}
+                      className={`p-3 sm:p-3.5 rounded-2xl glass-water-card card-interactive transition-all flex items-center justify-between gap-2.5 sm:gap-3 ${
+                        isBanned
+                          ? 'border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.25)]'
+                          : isAdmin
+                          ? 'border-amber-500/40 shadow-[0_0_15px_rgba(245,158,11,0.15)]'
+                          : ''
+                      }`}
+                    >
+                      {/* Left Side */}
+                      <div className="min-w-0 flex-1">
+                        {/* Top line: User's Name & Role Tags */}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-semibold text-white truncate">
+                            {displayName}
+                          </span>
+
+                          {/* Admin Tag */}
+                          {isAdmin && (
+                            <span className="px-2 py-0.5 rounded-md bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[10px] font-semibold flex items-center gap-1">
+                              <ShieldCheck className="w-3 h-3" />
+                              {isSelfOwner ? 'Owner' : 'Admin'}
+                            </span>
+                          )}
+
+                          {/* Banned Badge */}
+                          {isBanned && (
+                            <span className="px-2 py-0.5 rounded-md bg-red-500/15 border border-red-500/30 text-red-400 text-[10px] font-semibold flex items-center gap-1">
+                              <Ban className="w-3 h-3" />
+                              Banned
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Second line: User ID and Username (@username) */}
+                        <div className="flex items-center flex-wrap gap-x-2 gap-y-0.5 text-xs text-zinc-400 mt-0.5 font-mono">
+                          <span className="text-zinc-300">ID: {user.id}</span>
+                          <span>·</span>
+                          <span className="text-red-400 font-sans truncate max-w-full">
+                            {user.username ? (user.username.startsWith('@') ? user.username : `@${user.username}`) : 'No @username'}
+                          </span>
+                        </div>
+
+                        {/* Status Indicator */}
+                        <div className="flex items-center flex-wrap gap-1.5 sm:gap-2 mt-2">
+                          <span
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${
+                              online
+                                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25'
+                                : 'bg-zinc-800/80 text-zinc-400 border-zinc-700/60'
+                            }`}
+                          >
+                            <span
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                online ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'
+                              }`}
+                            />
+                            <span>{online ? 'Online' : 'Offline'}</span>
+                          </span>
+
+                          <span className="text-[11px] text-zinc-500 flex items-center gap-1">
+                            <Clock className="w-3 h-3 text-zinc-600 shrink-0" />
+                            <span>{formatRelativeTime(user.lastActiveAt)}</span>
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Right Side: Action Controls */}
+                      <div className="shrink-0 pl-0 sm:pl-2 flex flex-col sm:flex-row items-end sm:items-center gap-1.5">
+                        {isAdmin ? (
                           <>
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                            <span>Unban</span>
+                            <div
+                              title="Administrators cannot be banned"
+                              className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 text-xs font-medium flex items-center gap-1.5 cursor-not-allowed select-none opacity-80"
+                            >
+                              <ShieldCheck className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                              <span>Protected</span>
+                            </div>
+                            {isOwner && !isSelfOwner && (
+                              <button
+                                type="button"
+                                onClick={() => handleRevokeAdmin(user)}
+                                disabled={isProcessing}
+                                title="Revoke Admin Access"
+                                className="px-2.5 py-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/35 text-rose-300 text-xs font-semibold flex items-center gap-1 cursor-pointer active:scale-95 disabled:opacity-50"
+                              >
+                                {isProcessing ? (
+                                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                ) : (
+                                  <>
+                                    <ShieldOff className="w-3.5 h-3.5" />
+                                    <span>Revoke</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
                           </>
                         ) : (
                           <>
-                            <Ban className="w-3.5 h-3.5" />
-                            <span>Ban</span>
+                            {isOwner && !isBanned && (
+                              <button
+                                type="button"
+                                onClick={() => openGrantPanel(user)}
+                                title="Promote this user to Sub-Admin"
+                                className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/40 text-amber-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer active:scale-95 transition-all"
+                              >
+                                <ShieldCheck className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+                                <span>Make Admin</span>
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleToggleBan(user)}
+                              disabled={isProcessing}
+                              className={`px-2.5 sm:px-3.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 disabled:opacity-50 ${
+                                isBanned
+                                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-600/30'
+                                  : 'bg-red-600 hover:bg-red-500 text-white shadow-md shadow-red-600/30'
+                              }`}
+                            >
+                              {isProcessing ? (
+                                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              ) : isBanned ? (
+                                <>
+                                  <CheckCircle2 className="w-3.5 h-3.5" />
+                                  <span>Unban</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Ban className="w-3.5 h-3.5" />
+                                  <span>Ban</span>
+                                </>
+                              )}
+                            </button>
                           </>
                         )}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </>
+        )}
 
         {/* Modal Footer (Pinned at bottom) */}
         <div className="shrink-0 p-3 sm:p-4 border-t border-white/10 bg-white/[0.02] flex items-center justify-end text-xs">

@@ -6,7 +6,7 @@ import {
   FileText, Link2, Plus, Search, Edit2, Trash2, 
   Sparkles, Check, X, ArrowRight, ArrowLeft, Globe, Smartphone,
   Copy, Share2, Upload, AlertTriangle, Paperclip, Loader2,
-  Clock, Calendar, Video, Music, MessageSquare
+  Clock, Calendar, Video, Music, MessageSquare, ChevronDown
 } from 'lucide-react';
 
 interface FilesTabProps {
@@ -37,6 +37,11 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
 }) => {
   const [filter, setFilter] = useState<'all' | 'file' | 'link' | 'temporary' | 'permanent' | 'text'>('all');
   const [search, setSearch] = useState('');
+  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
+
+  const toggleExpand = (id: string) => {
+    setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  };
 
   // Modals state
   const [modalMode, setModalMode] = useState<'none' | 'add' | 'edit'>('none');
@@ -679,8 +684,8 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
         </button>
       </div>
 
-      {/* Items List */}
-      <div className="space-y-3">
+      {/* Items List (Accordion Collapsed by Default: Type Icon + Name Only) */}
+      <div className="space-y-2.5">
         {filteredItems.length === 0 ? (
           <div className="glass-panel rounded-2xl p-8 text-center border border-zinc-800 text-zinc-400 text-xs">
             No matching items found.
@@ -694,17 +699,27 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
               : `${item.type === 'file' ? 'f_' : 'l_'}${item.id}`;
             const deepLink = `https://t.me/${cleanBot}?start=${payload}`;
             const isCopied = copiedLinkItemId === item.id;
+            const isExpanded = Boolean(expandedIds[item.id]);
 
             return (
               <div
                 key={item.id}
-                className="glass-panel rounded-2xl p-4 border border-zinc-800/80 hover:border-zinc-700/80 transition-all space-y-3 shadow-md"
+                className={`glass-panel rounded-2xl border transition-all shadow-md ${
+                  isExpanded
+                    ? 'p-4 border-zinc-700/80'
+                    : 'px-3.5 py-2.5 border-zinc-800/80 hover:border-zinc-700/80'
+                }`}
               >
-                {/* Header Row */}
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-start gap-3 min-w-0">
+                {/* Minimalist Collapsed Header Row: Type Logo + Name + Expand Indicator */}
+                <button
+                  type="button"
+                  onClick={() => toggleExpand(item.id)}
+                  aria-expanded={isExpanded}
+                  className="w-full flex items-center justify-between gap-3 text-left cursor-pointer group"
+                >
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
                     <div
-                      className="lg-tile w-10 h-10 rounded-xl mt-0.5"
+                      className="lg-tile w-9 h-9 rounded-xl shrink-0"
                       style={{
                         background: item.isTextOnly
                           ? 'color-mix(in srgb, #c084fc 22%, rgba(255,255,255,.06))'
@@ -719,18 +734,34 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                       } as React.CSSProperties}
                     >
                       {item.isTextOnly ? (
-                        <MessageSquare className="w-5 h-5 text-purple-300" />
+                        <MessageSquare className="w-4 h-4 text-purple-300" />
                       ) : item.type === 'file' ? (
-                        <FileText className="w-5 h-5 text-sky-300" />
+                        <FileText className="w-4 h-4 text-sky-300" />
                       ) : (
-                        <Link2 className="w-5 h-5 text-indigo-300" />
+                        <Link2 className="w-4 h-4 text-indigo-300" />
                       )}
                     </div>
-                    <div className="min-w-0">
-                      <div className="text-sm font-bold text-white truncate">{item.name}</div>
-                      
+                    <div className="text-sm font-bold text-white truncate min-w-0 flex-1">
+                      {item.name}
+                    </div>
+                  </div>
+                  <ChevronDown
+                    className={`w-4 h-4 text-white/50 group-hover:text-white/85 shrink-0 transition-transform duration-300 ${
+                      isExpanded ? 'rotate-180' : ''
+                    }`}
+                  />
+                </button>
+
+                {/* Accordion Body: Revealed smoothly only when expanded */}
+                <div
+                  className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out ${
+                    isExpanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0 pointer-events-none'
+                  }`}
+                >
+                  <div className="overflow-hidden">
+                    <div className="pt-3 space-y-3">
                       {/* Typographic metadata */}
-                      <div className="flex items-center gap-1.5 text-xs text-white/65 mt-1 flex-wrap">
+                      <div className="flex items-center gap-1.5 text-xs text-white/65 flex-wrap">
                         <button
                           type="button"
                           onClick={(e) => {
@@ -768,123 +799,123 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                           </>
                         )}
                       </div>
-                    </div>
-                  </div>
-                </div>
 
-                {/* Content details snippet */}
-                {item.type === 'file' && (
-                  <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80 text-xs text-zinc-300 space-y-1.5">
-                    <div className="flex items-center justify-between gap-2 min-w-0 text-[11px] text-zinc-400">
-                      <span className="min-w-0 flex-1 truncate">{item.isTextOnly ? 'Delivery: Only Text (No File Attachment)' : `File: ${item.fileName || 'Telegram Media'}`}</span>
-                      <span className="font-mono text-[10px] bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800 text-zinc-400 shrink-0">
-                        ID: {item.id}
-                      </span>
-                    </div>
+                      {/* Content details snippet */}
+                      {item.type === 'file' && (
+                        <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80 text-xs text-zinc-300 space-y-1.5">
+                          <div className="flex items-center justify-between gap-2 min-w-0 text-[11px] text-zinc-400">
+                            <span className="min-w-0 flex-1 truncate">{item.isTextOnly ? 'Delivery: Only Text (No File Attachment)' : `File: ${item.fileName || 'Telegram Media'}`}</span>
+                            <span className="font-mono text-[10px] bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800 text-zinc-400 shrink-0">
+                              ID: {item.id}
+                            </span>
+                          </div>
 
-                    {/* Retention Status Badge */}
-                    <div className="flex items-center gap-2 pt-0.5">
-                      {item.retentionType === 'temporary' ? (
-                        (() => {
-                          const expiresMs = item.expiresAt ? new Date(item.expiresAt).getTime() : 0;
-                          const remainingMs = expiresMs - Date.now();
-                          const remainingDays = Math.max(0, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
-                          const isExpired = remainingMs <= 0;
+                          {/* Retention Status Badge */}
+                          <div className="flex items-center gap-2 pt-0.5">
+                            {item.retentionType === 'temporary' ? (
+                              (() => {
+                                const expiresMs = item.expiresAt ? new Date(item.expiresAt).getTime() : 0;
+                                const remainingMs = expiresMs - Date.now();
+                                const remainingDays = Math.max(0, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
+                                const isExpired = remainingMs <= 0;
 
-                          return (
-                            <div className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[11px] font-medium border ${
-                              isExpired 
-                                ? 'bg-rose-500/10 text-rose-300 border-rose-500/30' 
-                                : 'bg-amber-500/10 text-amber-300 border-amber-500/30'
-                            }`}>
-                              <Clock className="w-3.5 h-3.5 text-amber-400" />
-                              <span>
-                                {isExpired ? 'Expired (Auto-delete queued)' : `Temporary (${remainingDays}d left)`}
-                              </span>
-                            </div>
-                          );
-                        })()
-                      ) : (
-                        <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[11px] font-medium bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
-                          <span className="text-xs">♾️</span>
-                          <span>Permanent</span>
+                                return (
+                                  <div className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[11px] font-medium border ${
+                                    isExpired 
+                                      ? 'bg-rose-500/10 text-rose-300 border-rose-500/30' 
+                                      : 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                                  }`}>
+                                    <Clock className="w-3.5 h-3.5 text-amber-400" />
+                                    <span>
+                                      {isExpired ? 'Expired (Auto-delete queued)' : `Temporary (${remainingDays}d left)`}
+                                    </span>
+                                  </div>
+                                );
+                              })()
+                            ) : (
+                              <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-lg text-[11px] font-medium bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
+                                <span className="text-xs">♾️</span>
+                                <span>Permanent</span>
+                              </div>
+                            )}
+                          </div>
+
+                          {(item.caption || item.replyMessage) && (
+                            <div className="text-zinc-300 italic pt-0.5 text-[11px] break-words">"{item.caption || item.replyMessage}"</div>
+                          )}
                         </div>
                       )}
-                    </div>
 
-                    {(item.caption || item.replyMessage) && (
-                      <div className="text-zinc-300 italic pt-0.5 text-[11px] break-words">"{item.caption || item.replyMessage}"</div>
-                    )}
+                      {item.type === 'link' && (
+                        <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80 text-xs text-zinc-300 space-y-1.5">
+                          <div className="flex items-center justify-between gap-2 min-w-0 text-[11px] text-zinc-400">
+                            <span className="min-w-0 flex-1 truncate text-zinc-300 font-mono">{item.url}</span>
+                            <span className="font-mono text-[10px] bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800 text-zinc-400 shrink-0">
+                              ID: {item.id}
+                            </span>
+                          </div>
+                          {(item.replyMessage || item.caption) && (
+                            <div className="text-zinc-300 italic text-[11px] break-words">"{item.replyMessage || item.caption}"</div>
+                          )}
+                          <div className="flex items-center justify-between flex-wrap gap-1.5 text-[11px]">
+                            <span className="text-indigo-400 font-medium">
+                              {item.openMode === 'webapp' ? '📱 Telegram Mini App' : '🌐 Normal Browser'}
+                            </span>
+                            <span className="text-zinc-400 min-w-0 break-words">
+                              Button: <strong className="text-white">{item.buttonText || 'Open Link'}</strong>
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* INLINE QUICK ACTIONS ON STORED FILES/LINKS LIST */}
+                      <div className="pt-2.5 border-t border-white/10 grid grid-cols-3 gap-1.5 sm:gap-2">
+                        {/* Quick Option 1: Edit */}
+                        <button
+                          type="button"
+                          onClick={() => openEditModal(item)}
+                          className="tap min-w-0 py-2 px-1.5 min-[360px]:px-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-white/90 hover:text-white border border-white/10 hover:border-white/25 text-[11px] min-[360px]:text-xs font-semibold flex items-center justify-center gap-1 min-[360px]:gap-1.5 cursor-pointer"
+                        >
+                          <Edit2 className="w-3.5 h-3.5 text-[#7c9cff] shrink-0" />
+                          <span className="truncate">Edit</span>
+                        </button>
+
+                        {/* Quick Option 2: Delete */}
+                        <button
+                          type="button"
+                          onClick={() => setDeleteConfirmId(item.id)}
+                          className="tap min-w-0 py-2 px-1.5 min-[360px]:px-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-200 hover:text-rose-100 border border-rose-400/20 hover:border-rose-400/35 text-[11px] min-[360px]:text-xs font-semibold flex items-center justify-center gap-1 min-[360px]:gap-1.5 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                          <span className="truncate">Delete</span>
+                        </button>
+
+                        {/* Quick Option 3: Generated Link */}
+                        <button
+                          type="button"
+                          onClick={() => copyDeepLink(item.id, deepLink)}
+                          title={deepLink}
+                          className={`tap min-w-0 py-2 px-1.5 min-[360px]:px-2 rounded-xl border text-[11px] min-[360px]:text-xs font-semibold flex items-center justify-center gap-1 min-[360px]:gap-1.5 cursor-pointer truncate ${
+                            isCopied
+                              ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40'
+                              : 'bg-[#7c9cff]/15 hover:bg-[#7c9cff]/25 text-[#c7d4ff] border-[#7c9cff]/30'
+                          }`}
+                        >
+                          {isCopied ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                              <span className="truncate">Copied!</span>
+                            </>
+                          ) : (
+                            <>
+                              <Share2 className="w-3.5 h-3.5 text-[#7c9cff] shrink-0" />
+                              <span className="truncate">Generated Link</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
                   </div>
-                )}
-
-                {item.type === 'link' && (
-                  <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80 text-xs text-zinc-300 space-y-1.5">
-                    <div className="flex items-center justify-between gap-2 min-w-0 text-[11px] text-zinc-400">
-                      <span className="min-w-0 flex-1 truncate text-zinc-300 font-mono">{item.url}</span>
-                      <span className="font-mono text-[10px] bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800 text-zinc-400 shrink-0">
-                        ID: {item.id}
-                      </span>
-                    </div>
-                    {(item.replyMessage || item.caption) && (
-                      <div className="text-zinc-300 italic text-[11px] break-words">"{item.replyMessage || item.caption}"</div>
-                    )}
-                    <div className="flex items-center justify-between flex-wrap gap-1.5 text-[11px]">
-                      <span className="text-indigo-400 font-medium">
-                        {item.openMode === 'webapp' ? '📱 Telegram Mini App' : '🌐 Normal Browser'}
-                      </span>
-                      <span className="text-zinc-400 min-w-0 break-words">
-                        Button: <strong className="text-white">{item.buttonText || 'Open Link'}</strong>
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                {/* INLINE QUICK ACTIONS ON STORED FILES/LINKS LIST */}
-                <div className="pt-2.5 border-t border-white/10 grid grid-cols-3 gap-1.5 sm:gap-2">
-                  {/* Quick Option 1: Edit */}
-                  <button
-                    type="button"
-                    onClick={() => openEditModal(item)}
-                    className="tap min-w-0 py-2 px-1.5 min-[360px]:px-2 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] text-white/90 hover:text-white border border-white/10 hover:border-white/25 text-[11px] min-[360px]:text-xs font-semibold flex items-center justify-center gap-1 min-[360px]:gap-1.5 cursor-pointer"
-                  >
-                    <Edit2 className="w-3.5 h-3.5 text-[#7c9cff] shrink-0" />
-                    <span className="truncate">Edit</span>
-                  </button>
-
-                  {/* Quick Option 2: Delete */}
-                  <button
-                    type="button"
-                    onClick={() => setDeleteConfirmId(item.id)}
-                    className="tap min-w-0 py-2 px-1.5 min-[360px]:px-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-200 hover:text-rose-100 border border-rose-400/20 hover:border-rose-400/35 text-[11px] min-[360px]:text-xs font-semibold flex items-center justify-center gap-1 min-[360px]:gap-1.5 cursor-pointer"
-                  >
-                    <Trash2 className="w-3.5 h-3.5 text-rose-400 shrink-0" />
-                    <span className="truncate">Delete</span>
-                  </button>
-
-                  {/* Quick Option 3: Generated Link */}
-                  <button
-                    type="button"
-                    onClick={() => copyDeepLink(item.id, deepLink)}
-                    title={deepLink}
-                    className={`tap min-w-0 py-2 px-1.5 min-[360px]:px-2 rounded-xl border text-[11px] min-[360px]:text-xs font-semibold flex items-center justify-center gap-1 min-[360px]:gap-1.5 cursor-pointer truncate ${
-                      isCopied
-                        ? 'bg-emerald-500/20 text-emerald-200 border-emerald-400/40'
-                        : 'bg-[#7c9cff]/15 hover:bg-[#7c9cff]/25 text-[#c7d4ff] border-[#7c9cff]/30'
-                    }`}
-                  >
-                    {isCopied ? (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                        <span className="truncate">Copied!</span>
-                      </>
-                    ) : (
-                      <>
-                        <Share2 className="w-3.5 h-3.5 text-[#7c9cff] shrink-0" />
-                        <span className="truncate">Generated Link</span>
-                      </>
-                    )}
-                  </button>
                 </div>
               </div>
             );

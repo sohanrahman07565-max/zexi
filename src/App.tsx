@@ -105,9 +105,17 @@ export default function App() {
 
   const initApp = async () => {
     try {
+      const tgWebApp = typeof window !== 'undefined' ? (window as any).Telegram?.WebApp : undefined;
+      try {
+        tgWebApp?.ready?.();
+        tgWebApp?.expand?.();
+      } catch {}
+
       const urlBotId = getUrlBotId();
       if (urlBotId) {
         api.setActiveBotId(urlBotId);
+      } else if (!api.getToken()) {
+        api.setActiveBotId('main');
       }
 
       // Check for auth_token in URL query param (returned by Telegram OAuth callback)
@@ -131,22 +139,39 @@ export default function App() {
         if ((activeSessBot !== 'main' && (!urlBotId || urlBotId !== activeSessBot)) ||
             (urlBotId && urlBotId !== 'main' && activeSessBot !== urlBotId)) {
           api.clearToken();
-          const publicDesign = await api.getLoginDesign().catch(() => null);
-          if (publicDesign) {
-            setDesign((prev) => ({ ...prev, ...publicDesign }));
-          }
+        } else {
+          setSessionBotId(activeSessBot);
+          setCurrentUser(meData.admin);
+          await refreshAllData();
           return;
         }
+      }
 
-        setSessionBotId(activeSessBot);
-        setCurrentUser(meData.admin);
-        await refreshAllData();
-      } else {
-        // Load public login design
-        const publicDesign = await api.getLoginDesign().catch(() => null);
-        if (publicDesign) {
-          setDesign((prev) => ({ ...prev, ...publicDesign }));
+      // 2. Seamless Telegram Mini App (TMA) authentication using signed WebApp.initData
+      let justLoggedOut = false;
+      try {
+        justLoggedOut = window.sessionStorage?.getItem('tg_just_logged_out') === '1';
+      } catch {}
+
+      const tmaInitData = tgWebApp?.initData ? String(tgWebApp.initData).trim() : '';
+      if (tmaInitData && !justLoggedOut) {
+        try {
+          const tmaRes = await api.tmaLogin(tmaInitData);
+          if (tmaRes?.admin) {
+            setSessionBotId(tmaRes.botId || tmaRes.admin.botId || 'main');
+            setCurrentUser(tmaRes.admin);
+            await refreshAllData();
+            return;
+          }
+        } catch (tmaErr) {
+          console.warn('[TMA Auth] Auto-login declined or failed:', tmaErr);
         }
+      }
+
+      // 3. Fallback to Login screen design
+      const publicDesign = await api.getLoginDesign().catch(() => null);
+      if (publicDesign) {
+        setDesign((prev) => ({ ...prev, ...publicDesign }));
       }
     } catch (err) {
       console.error('Failed to initialize session:', err);
@@ -509,6 +534,7 @@ export default function App() {
           <div className={currentTab === 'dashboard' ? 'block animate-tab-fade-in' : 'hidden'}>
             <DashboardTab
               items={items}
+              currentUser={currentUser}
               adminsCount={adminsCount}
               trackedCount={trackedCount}
               totalUsers={totalUsers}

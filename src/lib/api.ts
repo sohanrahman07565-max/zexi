@@ -254,6 +254,11 @@ export function getActiveBotId(): string {
     try { window.sessionStorage?.setItem(BOT_ID_KEY, urlBotId); } catch {}
     return urlBotId;
   }
+  const hasToken = Boolean(getStoredToken());
+  if (!hasToken) {
+    memoryBotIdFallback = 'main';
+    return 'main';
+  }
   try {
     const stored = window.localStorage?.getItem(BOT_ID_KEY) || window.sessionStorage?.getItem(BOT_ID_KEY);
     if (stored) {
@@ -402,6 +407,30 @@ export const api = {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Telegram authentication failed');
+    if (data.token) {
+      storeToken(data.token);
+    }
+    if (data.botId) {
+      setActiveBotId(data.botId);
+    }
+    return data;
+  },
+
+  async tmaLogin(initData: string): Promise<{ success: boolean; admin: AdminUser; token?: string; botId?: string; error?: string }> {
+    const urlBotId = getUrlBotId();
+    const res = await authFetch('/api/auth/tma', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-tma-init-data': initData
+      },
+      body: JSON.stringify({
+        initData,
+        ...(urlBotId ? { bot_id: urlBotId } : {})
+      })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Telegram Mini App authentication failed');
     if (data.token) {
       storeToken(data.token);
     }
@@ -607,6 +636,44 @@ export const api = {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to delete admin');
+    return data;
+  },
+
+  async generateAdminToken(id: string): Promise<{ success: boolean; accessToken: string; botId: string }> {
+    const res = await authFetch(`/api/admins/${encodeURIComponent(id)}/token`, {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to generate access token');
+    return data;
+  },
+
+  async grantAdmin(
+    userId: string,
+    payload: {
+      name?: string;
+      username?: string;
+      password?: string;
+      role?: 'owner' | 'subadmin';
+      permissions?: Partial<AdminUser['permissions']>;
+    }
+  ): Promise<{ success: boolean; admin: AdminUser; accessToken: string; generatedPassword?: string }> {
+    const res = await authFetch(`/api/users/${encodeURIComponent(userId)}/grant-admin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to grant admin permissions');
+    return data;
+  },
+
+  async revokeAdmin(userId: string): Promise<{ success: boolean; message?: string }> {
+    const res = await authFetch(`/api/users/${encodeURIComponent(userId)}/revoke-admin`, {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to revoke admin permissions');
     return data;
   },
 

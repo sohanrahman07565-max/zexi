@@ -9,7 +9,7 @@ import {
   ChevronRight, Edit2, Check, RefreshCw, Plus, Minus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi,
   Megaphone, Image as ImageIcon, Video as VideoIcon, Music, Mic, Pin, Paperclip, Loader2, Radio,
   Flag, Ban, CheckCircle, ShieldAlert, ExternalLink, ShieldCheck,
-  Copy, Upload, Bot, VolumeX, Play, Square, RotateCcw
+  Copy, Upload, Bot, VolumeX, Play, Square, RotateCcw, Key
 } from 'lucide-react';
 import { EmojiStore } from './EmojiStore';
 
@@ -91,6 +91,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [fraudRulesList, setFraudRulesList] = useState<FraudKeywordRule[]>([]);
   const [fraudRulesLoading, setFraudRulesLoading] = useState<boolean>(false);
   const [showAddFraudRule, setShowAddFraudRule] = useState<boolean>(false);
+  const [editingFraudRule, setEditingFraudRule] = useState<FraudKeywordRule | null>(null);
   const [newFraudKeyword, setNewFraudKeyword] = useState<string>('');
   const [newFraudMatchType, setNewFraudMatchType] = useState<'contains' | 'exact' | 'regex'>('contains');
   const [newFraudAction, setNewFraudAction] = useState<'delete_and_warn' | 'delete' | 'warn' | 'mute' | 'ban' | 'reply_only'>('delete_and_warn');
@@ -282,6 +283,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [showAddAdmin, setShowAddAdmin] = useState(false);
   const [editingAdmin, setEditingAdmin] = useState<any | null>(null);
   const [savingAdmin, setSavingAdmin] = useState(false);
+  const [mintedAdminToken, setMintedAdminToken] = useState<{ adminId: string; name: string; token: string } | null>(null);
+  const [mintingTokenId, setMintingTokenId] = useState<string | null>(null);
+  const [botUsersForAdmin, setBotUsersForAdmin] = useState<any[]>([]);
   const [editAdminForm, setEditAdminForm] = useState<{
     name: string;
     password: string;
@@ -499,12 +503,34 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const loadAdmins = async () => {
     setAdminsLoading(true);
     try {
-      const data = await api.getAdmins();
+      const [data, botUsers] = await Promise.all([
+        api.getAdmins(),
+        api.getUsers().catch(() => [])
+      ]);
       setAdminsList(data);
+      setBotUsersForAdmin(Array.isArray(botUsers) ? botUsers : []);
     } catch (err: any) {
       console.error(err);
     } finally {
       setAdminsLoading(false);
+    }
+  };
+
+  const handleGenerateAdminToken = async (adm: any) => {
+    setMintingTokenId(adm.id);
+    try {
+      const res = await api.generateAdminToken(adm.id);
+      setMintedAdminToken({ adminId: adm.id, name: adm.name, token: res.accessToken });
+      try {
+        await navigator.clipboard.writeText(res.accessToken);
+        toast.success(`Access token minted & copied for ${adm.name}`);
+      } catch {
+        toast.success(`Access token minted for ${adm.name}`);
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to generate access token');
+    } finally {
+      setMintingTokenId(null);
     }
   };
 
@@ -621,6 +647,53 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     }
   };
 
+  const resetFraudForm = () => {
+    setEditingFraudRule(null);
+    setNewFraudKeyword('');
+    setNewFraudMatchType('contains');
+    setNewFraudAction('delete_and_warn');
+    setNewFraudDuration('30m');
+    setNewFraudDurationUnit('minutes');
+    setNewFraudDurationValue(30);
+    setNewFraudMaxWarnings(3);
+    setNewFraudWarningText('');
+    setNewFraudMediaUrl('');
+    setNewFraudVideoFile(null);
+    setNewFraudVideoName('');
+    setNewFraudMediaType('text');
+    if (fraudVideoInputRef.current) fraudVideoInputRef.current.value = '';
+  };
+
+  const startEditFraudRule = (rule: FraudKeywordRule) => {
+    setEditingFraudRule(rule);
+    setNewFraudKeyword(rule.keyword || '');
+    setNewFraudMatchType(rule.matchType || 'contains');
+    setNewFraudAction(rule.action || 'delete_and_warn');
+    const dur = rule.duration || '30m';
+    setNewFraudDuration(dur);
+    if (dur === 'permanent') {
+      setNewFraudDurationUnit('permanent');
+      setNewFraudDurationValue(30);
+    } else if (dur.endsWith('h')) {
+      setNewFraudDurationUnit('hours');
+      setNewFraudDurationValue(Math.max(1, parseInt(dur, 10) || 1));
+    } else if (dur.endsWith('d')) {
+      setNewFraudDurationUnit('days');
+      setNewFraudDurationValue(Math.max(1, parseInt(dur, 10) || 1));
+    } else {
+      setNewFraudDurationUnit('minutes');
+      setNewFraudDurationValue(Math.max(1, parseInt(dur, 10) || 30));
+    }
+    setNewFraudMaxWarnings(rule.maxWarnings || 3);
+    setNewFraudWarningText(rule.warningText || rule.customMessage || '');
+    setNewFraudMediaUrl(rule.mediaUrl || '');
+    setNewFraudMediaType((rule.mediaType && rule.mediaType !== 'none' ? rule.mediaType : 'text') as any);
+    setNewFraudVideoFile(null);
+    setNewFraudVideoName('');
+    if (fraudVideoInputRef.current) fraudVideoInputRef.current.value = '';
+    setShowAddFraudRule(true);
+  };
+
   const handleCreateFraudRule = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!newFraudKeyword.trim()) {
@@ -644,31 +717,38 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         finalMediaType = 'video';
       }
 
-      await api.createFraudRule({
-        keyword: newFraudKeyword.trim(),
-        matchType: newFraudMatchType,
-        action: newFraudAction,
-        duration: (newFraudAction === 'mute' || newFraudAction === 'ban') ? newFraudDuration : undefined,
-        maxWarnings: newFraudMaxWarnings,
-        warningText: newFraudWarningText.trim() || undefined,
-        mediaUrl: finalMediaUrl || undefined,
-        mediaType: finalMediaType !== 'text' ? (finalMediaType as any) : undefined,
-        enabled: true
-      });
-      toast.success(`Rule for "${newFraudKeyword.trim()}" created!`);
-      setNewFraudKeyword('');
-      setNewFraudWarningText('');
-      setNewFraudMediaUrl('');
-      setNewFraudVideoFile(null);
-      setNewFraudVideoName('');
-      setNewFraudMediaType('text');
-      setNewFraudMaxWarnings(3);
-      setNewFraudDuration('permanent');
-      if (fraudVideoInputRef.current) fraudVideoInputRef.current.value = '';
+      if (editingFraudRule) {
+        await api.updateFraudRule(editingFraudRule.id, {
+          keyword: newFraudKeyword.trim(),
+          matchType: newFraudMatchType,
+          action: newFraudAction,
+          duration: (newFraudAction === 'mute' || newFraudAction === 'ban') ? newFraudDuration : undefined,
+          maxWarnings: newFraudMaxWarnings,
+          warningText: newFraudWarningText.trim(),
+          mediaUrl: finalMediaUrl,
+          mediaType: finalMediaType !== 'text' ? (finalMediaType as any) : 'text',
+        });
+        toast.success(`Rule for "${newFraudKeyword.trim()}" updated!`);
+      } else {
+        await api.createFraudRule({
+          keyword: newFraudKeyword.trim(),
+          matchType: newFraudMatchType,
+          action: newFraudAction,
+          duration: (newFraudAction === 'mute' || newFraudAction === 'ban') ? newFraudDuration : undefined,
+          maxWarnings: newFraudMaxWarnings,
+          warningText: newFraudWarningText.trim() || undefined,
+          mediaUrl: finalMediaUrl || undefined,
+          mediaType: finalMediaType !== 'text' ? (finalMediaType as any) : undefined,
+          enabled: true
+        });
+        toast.success(`Rule for "${newFraudKeyword.trim()}" created!`);
+      }
+
+      resetFraudForm();
       setShowAddFraudRule(false);
       await loadFraudRules();
     } catch (err: any) {
-      toast.error(err.message || 'Failed to create rule');
+      toast.error(err.message || (editingFraudRule ? 'Failed to update rule' : 'Failed to create rule'));
     } finally {
       setSavingFraudRule(false);
     }
@@ -1815,9 +1895,41 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         <div className="p-3.5 rounded-2xl bg-zinc-900/80 border border-zinc-800 text-xs text-zinc-300 flex items-start gap-2.5">
           <Shield className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
           <div className="text-[11px] leading-relaxed text-zinc-400">
-            <span className="font-semibold text-zinc-200">Owner Access Control:</span> As the Owner/Master Admin, you have full authority to grant or revoke any of the 14 granular capabilities for each sub-admin, toggle account access, or reset passwords.
+            <span className="font-semibold text-zinc-200">Owner Access Control:</span> As the Owner/Master Admin, you have full authority to grant or revoke any of the 14 granular capabilities for each sub-admin, issue signed session tokens, toggle account access, or reset passwords.
           </div>
         </div>
+
+        {/* Newly Minted Access Token Display */}
+        {mintedAdminToken && (
+          <div className="p-3.5 rounded-2xl bg-sky-500/10 border border-sky-500/35 text-xs space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 font-bold text-sky-300">
+                <Key className="w-4 h-4 shrink-0" />
+                <span>Session Access Token for {mintedAdminToken.name}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMintedAdminToken(null)}
+                className="text-zinc-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            <div className="flex items-center justify-between gap-2 bg-black/50 border border-white/10 rounded-xl px-2.5 py-2">
+              <code className="font-mono text-[11px] text-sky-200 truncate">{mintedAdminToken.token}</code>
+              <button
+                type="button"
+                onClick={() => {
+                  navigator.clipboard.writeText(mintedAdminToken.token).then(() => toast.success('Token copied!')).catch(() => {});
+                }}
+                className="px-2.5 py-1 rounded-lg bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 text-[10px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+              >
+                <Copy className="w-3 h-3" />
+                <span>Copy</span>
+              </button>
+            </div>
+          </div>
+        )}
 
         {adminsLoading ? (
           <div className="p-8 text-center text-xs text-zinc-500 flex flex-col items-center justify-center gap-2">
@@ -1873,6 +1985,21 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
                     {currentUser.role === 'owner' && !isOwner && (
                       <div className="flex items-center gap-1.5 shrink-0">
+                        {/* Generate Signed Session Access Token */}
+                        <button
+                          type="button"
+                          onClick={() => handleGenerateAdminToken(adm)}
+                          disabled={!isEnabled || mintingTokenId === adm.id}
+                          title="Issue signed session access token"
+                          className="p-1.5 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 cursor-pointer transition-colors disabled:opacity-40"
+                        >
+                          {mintingTokenId === adm.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Key className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+
                         {/* Toggle enabled/disabled */}
                         <button
                           type="button"
@@ -1972,6 +2099,41 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               </div>
 
               <form onSubmit={handleCreateAdmin} className="space-y-4">
+                {botUsersForAdmin.filter((u) => !u.isAdmin && !u.isBanned).length > 0 && (
+                  <div>
+                    <label className="block text-xs font-semibold text-zinc-300 mb-1">
+                      Quick Select Bot User <span className="text-zinc-500 font-normal">(optional)</span>
+                    </label>
+                    <select
+                      value=""
+                      onChange={(e) => {
+                        const selected = botUsersForAdmin.find((u) => String(u.id) === e.target.value);
+                        if (selected) {
+                          const display = [selected.firstName, selected.lastName].filter(Boolean).join(' ').trim() || selected.username || `User ${selected.id}`;
+                          setNewAdminData((prev) => ({
+                            ...prev,
+                            name: display,
+                            telegramId: String(selected.id),
+                          }));
+                        }
+                      }}
+                      className="w-full bg-[#101018] border border-zinc-700 rounded-xl p-2.5 text-xs text-white focus:outline-none focus:border-sky-500"
+                    >
+                      <option value="">-- Pick a tracked Telegram user --</option>
+                      {botUsersForAdmin
+                        .filter((u) => !u.isAdmin && !u.isBanned)
+                        .map((u) => {
+                          const label = [u.firstName, u.lastName].filter(Boolean).join(' ').trim() || u.username || u.id;
+                          return (
+                            <option key={u.id} value={u.id}>
+                              {label} {u.username ? `(@${u.username.replace(/^@/, '')})` : ''} — ID: {u.id}
+                            </option>
+                          );
+                        })}
+                    </select>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
                     <label className="block text-xs font-semibold text-zinc-300 mb-1">Display Name</label>
@@ -4080,7 +4242,15 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             ← Back to More
           </button>
           <button
-            onClick={() => setShowAddFraudRule(!showAddFraudRule)}
+            onClick={() => {
+              if (showAddFraudRule) {
+                resetFraudForm();
+                setShowAddFraudRule(false);
+              } else {
+                resetFraudForm();
+                setShowAddFraudRule(true);
+              }
+            }}
             className="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm shrink-0"
           >
             <Plus className="w-3.5 h-3.5" />
@@ -4099,18 +4269,23 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </p>
         </div>
 
-        {/* Add Rule Form */}
+        {/* Add / Edit Rule Form */}
         {showAddFraudRule && (
           <form
             onSubmit={handleCreateFraudRule}
             className="p-4 rounded-2xl glass-panel border border-amber-500/40 bg-zinc-900/95 space-y-3 shadow-xl"
           >
             <div className="flex items-center justify-between gap-2">
-              <h3 className="text-xs font-bold text-white uppercase tracking-wider">Add Restricted Keyword Rule</h3>
+              <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+                {editingFraudRule ? 'Edit Restricted Keyword Rule' : 'Add Restricted Keyword Rule'}
+              </h3>
               <button
                 type="button"
-                onClick={() => setShowAddFraudRule(false)}
-                className="text-zinc-500 hover:text-zinc-300 shrink-0"
+                onClick={() => {
+                  resetFraudForm();
+                  setShowAddFraudRule(false);
+                }}
+                className="text-zinc-500 hover:text-zinc-300 shrink-0 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -4392,7 +4567,10 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
               <button
                 type="button"
-                onClick={() => setShowAddFraudRule(false)}
+                onClick={() => {
+                  resetFraudForm();
+                  setShowAddFraudRule(false);
+                }}
                 className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-medium cursor-pointer"
               >
                 Cancel
@@ -4403,7 +4581,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 className="px-4 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
               >
                 {savingFraudRule && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                <span>Save Keyword Rule</span>
+                <span>{editingFraudRule ? 'Update Rule' : 'Save Keyword Rule'}</span>
               </button>
             </div>
           </form>
@@ -4472,7 +4650,15 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => startEditFraudRule(rule)}
+                      className="p-1.5 rounded-lg text-sky-300 bg-sky-500/15 hover:bg-sky-500/25 border border-sky-500/30 cursor-pointer transition-colors"
+                      title="Edit Rule"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
                     <button
                       onClick={() => handleToggleFraudRule(rule)}
                       className={`text-[10px] font-bold px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${

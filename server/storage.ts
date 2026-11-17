@@ -3379,6 +3379,37 @@ export class SharedStorageService {
     return user;
   }
 
+  public async setBotUserAdmin(userId: string | number, isAdmin: boolean): Promise<BotUserRecord | null> {
+    if (!userId) return null;
+    const cleanId = String(userId).trim();
+    const cleanUsername = cleanId.replace(/^@+/, '').toLowerCase();
+    await this.loadLatest(true);
+    if (!this.db.botUsers) {
+      this.db.botUsers = {};
+    }
+
+    const matchingKeys = Object.keys(this.db.botUsers).filter(k => {
+      const u = this.db.botUsers![k];
+      return k === cleanId ||
+        k.replace(/^@+/, '').toLowerCase() === cleanUsername ||
+        String(u.id).trim() === cleanId ||
+        (u.username && u.username.replace(/^@+/, '').toLowerCase() === cleanUsername);
+    });
+
+    if (matchingKeys.length === 0) {
+      return null;
+    }
+
+    let updatedUser: BotUserRecord | null = null;
+    for (const k of matchingKeys) {
+      this.db.botUsers[k].isAdmin = Boolean(isAdmin);
+      updatedUser = this.db.botUsers[k];
+    }
+
+    await this.persist();
+    return updatedUser;
+  }
+
   // =========================================================================
   // BACKUP SERVER & LIVE MIRROR REPLICATION SYSTEM
   // =========================================================================
