@@ -191,22 +191,23 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
     <div className="space-y-4 pb-28">
       {/* Header bar */}
       <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-zinc-800">
-        <button
-          onClick={onBack}
-          className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-white transition-colors cursor-pointer"
-        >
-          <ChevronLeft className="w-4 h-4" />
-          <span>Back to Menu</span>
-        </button>
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-bold text-white flex items-center gap-1.5">
-            <Sparkles className="w-4 h-4 text-pink-400" />
-            <span>Emoji Store</span>
-          </span>
-          <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 font-semibold border border-pink-500/30">
-            {allEmojis.length}+ Emojis
+        <div className="flex items-center gap-2 min-w-0">
+          <button
+            type="button"
+            onClick={onBack}
+            aria-label="Back to More"
+            className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white transition-colors cursor-pointer shrink-0"
+          >
+            <ChevronLeft className="w-4 h-4" />
+          </button>
+          <span className="text-sm font-bold text-white flex items-center gap-1.5 truncate">
+            <Sparkles className="w-4 h-4 text-pink-400 shrink-0" />
+            <span className="truncate">Emoji Store</span>
           </span>
         </div>
+        <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 font-semibold border border-pink-500/30 shrink-0">
+          {allEmojis.length}+ Emojis
+        </span>
       </div>
 
       {/* Description banner */}

@@ -65,39 +65,73 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
   const [dragIndex, setDragIndex] = useState<number | null>(null);
 
   const containerRef = useRef<HTMLElement>(null);
-  const dragStartRef = useRef<{ startX: number; initialIndex: number; hasMoved: boolean } | null>(null);
+  const dragStartRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    initialIndex: number;
+    targetTabId: string | null;
+    hasMoved: boolean;
+    captured: boolean;
+  } | null>(null);
+  const lastTapSwitchAtRef = useRef<number>(0);
 
   const currentVisualIndex = isDragging && dragIndex !== null ? dragIndex : safeIndex;
   const highlightedIndex = Math.max(0, Math.min(tabCount - 1, Math.round(currentVisualIndex)));
+
+  const resolveTabFromPoint = useCallback(
+    (clientX: number, target?: EventTarget | null): string | null => {
+      if (target instanceof Element) {
+        const btn = target.closest<HTMLElement>('[data-tab-id]');
+        const id = btn?.getAttribute('data-tab-id');
+        if (id) return id;
+      }
+      if (!containerRef.current) return null;
+      const rect = containerRef.current.getBoundingClientRect();
+      const innerWidth = Math.max(1, rect.width - 12);
+      const relX = Math.max(0, Math.min(innerWidth - 1, clientX - rect.left - 6));
+      const idx = Math.max(0, Math.min(tabCount - 1, Math.floor((relX / innerWidth) * tabCount)));
+      return tabs[idx]?.id || null;
+    },
+    [tabCount, tabs]
+  );
 
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLElement>) => {
       if (e.button !== 0 && e.pointerType === 'mouse') return;
       if (!containerRef.current) return;
 
-      try {
-        e.currentTarget.setPointerCapture(e.pointerId);
-      } catch {}
-
+      const targetTabId = resolveTabFromPoint(e.clientX, e.target);
       dragStartRef.current = {
+        pointerId: e.pointerId,
         startX: e.clientX,
+        startY: e.clientY,
         initialIndex: safeIndex,
+        targetTabId,
         hasMoved: false,
+        captured: false,
       };
     },
-    [safeIndex]
+    [safeIndex, resolveTabFromPoint]
   );
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<HTMLElement>) => {
-      if (!dragStartRef.current || !containerRef.current) return;
+      const drag = dragStartRef.current;
+      if (!drag || drag.pointerId !== e.pointerId || !containerRef.current) return;
 
-      const deltaX = e.clientX - dragStartRef.current.startX;
+      const deltaX = e.clientX - drag.startX;
+      const deltaY = e.clientY - drag.startY;
 
-      if (!dragStartRef.current.hasMoved) {
-        if (Math.abs(deltaX) > 6) {
-          dragStartRef.current.hasMoved = true;
+      if (!drag.hasMoved) {
+        // Ignore minor touch micro-jitter; only engage sliding drag once horizontal intent is clear
+        if (Math.abs(deltaX) > 8 && Math.abs(deltaX) >= Math.abs(deltaY)) {
+          drag.hasMoved = true;
           setIsDragging(true);
+          try {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            drag.captured = true;
+          } catch {}
         } else {
           return;
         }
@@ -106,7 +140,7 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
       const rect = containerRef.current.getBoundingClientRect();
       const innerWidth = Math.max(1, rect.width - 12);
       const tabWidth = innerWidth / tabCount;
-      const rawIndex = dragStartRef.current.initialIndex + deltaX / tabWidth;
+      const rawIndex = drag.initialIndex + deltaX / tabWidth;
       const clampedIndex = Math.max(-0.1, Math.min(tabCount - 1 + 0.1, rawIndex));
       setDragIndex(clampedIndex);
     },
@@ -115,15 +149,21 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
 
   const handlePointerUp = useCallback(
     (e: React.PointerEvent<HTMLElement>) => {
-      if (!dragStartRef.current) return;
-      const hadMoved = dragStartRef.current.hasMoved;
+      const drag = dragStartRef.current;
+      if (!drag || drag.pointerId !== e.pointerId) return;
+
+      const hadMoved = drag.hasMoved;
+      const targetTabId = drag.targetTabId;
+      const wasCaptured = drag.captured;
       const finalDragIndex = dragIndex;
 
-      try {
-        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-          e.currentTarget.releasePointerCapture(e.pointerId);
-        }
-      } catch {}
+      if (wasCaptured) {
+        try {
+          if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+            e.currentTarget.releasePointerCapture(e.pointerId);
+          }
+        } catch {}
+      }
 
       dragStartRef.current = null;
       setIsDragging(false);
@@ -133,14 +173,31 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
         const targetIndex = Math.max(0, Math.min(tabCount - 1, Math.round(finalDragIndex)));
         const targetTab = tabs[targetIndex];
         if (targetTab && targetTab.id !== currentTab) {
+          lastTapSwitchAtRef.current = Date.now();
           onSelectTab(targetTab.id);
         }
+        return;
+      }
+
+      // Simple tap / click without horizontal drag -> switch tab immediately
+      const tappedId = resolveTabFromPoint(e.clientX, e.target) || targetTabId;
+      if (tappedId && tappedId !== currentTab) {
+        lastTapSwitchAtRef.current = Date.now();
+        onSelectTab(tappedId);
       }
     },
-    [dragIndex, tabCount, tabs, currentTab, onSelectTab]
+    [dragIndex, tabCount, tabs, currentTab, onSelectTab, resolveTabFromPoint]
   );
 
-  const handlePointerCancel = useCallback(() => {
+  const handlePointerCancel = useCallback((e: React.PointerEvent<HTMLElement>) => {
+    const drag = dragStartRef.current;
+    if (drag?.captured) {
+      try {
+        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+          e.currentTarget.releasePointerCapture(e.pointerId);
+        }
+      } catch {}
+    }
     dragStartRef.current = null;
     setIsDragging(false);
     setDragIndex(null);
@@ -175,8 +232,9 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
             <button
               key={tab.id}
               type="button"
+              data-tab-id={tab.id}
               onClick={() => {
-                if (dragStartRef.current?.hasMoved) return;
+                if (Date.now() - lastTapSwitchAtRef.current < 350) return;
                 if (tab.id !== currentTab) {
                   onSelectTab(tab.id);
                 }

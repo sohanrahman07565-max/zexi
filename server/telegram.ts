@@ -1250,8 +1250,14 @@ export class TelegramService {
     }
   }
 
-  // In-memory cache for group admin statuses: `${chatId}:${userId}` -> { isAdmin: boolean, expiresAt: number }
+  // In-memory cache for group admin statuses: `${botScope}:${chatId}:${userId}` -> { isAdmin: boolean, expiresAt: number }
   private static groupAdminCache: Map<string, { isAdmin: boolean; expiresAt: number }> = new Map();
+
+  private static isMainBotContext(): boolean {
+    const mainStorage = StorageManager.getMainStorage();
+    const activeBotId = String((storage as any)?.botId || 'main').trim() || 'main';
+    return storage === mainStorage && activeBotId === 'main';
+  }
 
   public static async isGroupAdminOrCreator(chatId: string | number, userId: string | number): Promise<boolean> {
     if (!chatId || !userId) return false;
@@ -1262,29 +1268,61 @@ export class TelegramService {
     const isBotAdmin = await this.isAuthorizedAdmin(cleanUserId);
     if (isBotAdmin) return true;
 
-    // 2. Check local in-memory cache (valid for 60 seconds)
-    const cacheKey = `${cleanChatId}:${cleanUserId}`;
+    // 2. Check local in-memory cache scoped per bot
+    const botScope = String((storage as any)?.botId || 'main').trim() || 'main';
+    const cacheKey = `${botScope}:${cleanChatId}:${cleanUserId}`;
     const now = Date.now();
     const cached = this.groupAdminCache.get(cacheKey);
     if (cached && cached.expiresAt > now) {
       return cached.isAdmin;
     }
 
+    const numericChatId = /^-?\d+$/.test(cleanChatId) ? Number(cleanChatId) : cleanChatId;
+    const numericUserId = Number(cleanUserId) || cleanUserId;
+
     // 3. Query Telegram getChatMember
     try {
       const res = await this.callTelegramApi('getChatMember', {
-        chat_id: /^-?\d+$/.test(cleanChatId) ? Number(cleanChatId) : cleanChatId,
-        user_id: Number(cleanUserId) || cleanUserId
+        chat_id: numericChatId,
+        user_id: numericUserId
       });
 
       if (res && res.ok && res.result) {
         const status = String(res.result.status || '').toLowerCase();
         const isAdmin = status === 'administrator' || status === 'creator';
-        this.groupAdminCache.set(cacheKey, { isAdmin, expiresAt: now + 60000 });
+        this.groupAdminCache.set(cacheKey, {
+          isAdmin,
+          expiresAt: now + (isAdmin ? 60000 : 10000)
+        });
         return isAdmin;
       }
     } catch (err: any) {
       console.warn(`[Telegram] Error querying getChatMember for admin check in chat ${cleanChatId}:`, err?.message || err);
+    }
+
+    // 4. Fallback: Query Telegram getChatAdministrators so verified group admins are never missed
+    try {
+      const adminsRes = await this.callTelegramApi('getChatAdministrators', {
+        chat_id: numericChatId
+      });
+      if (adminsRes && adminsRes.ok && Array.isArray(adminsRes.result)) {
+        let matched = false;
+        for (const member of adminsRes.result) {
+          const memberId = String(member?.user?.id || '').trim();
+          if (memberId) {
+            this.groupAdminCache.set(`${botScope}:${cleanChatId}:${memberId}`, {
+              isAdmin: true,
+              expiresAt: now + 60000
+            });
+            if (memberId === cleanUserId) {
+              matched = true;
+            }
+          }
+        }
+        return matched;
+      }
+    } catch (err: any) {
+      console.warn(`[Telegram] Fallback getChatAdministrators error for chat ${cleanChatId}:`, err?.message || err);
     }
 
     return false;
@@ -1397,7 +1435,8 @@ export class TelegramService {
       `━━━━━━━━━━━━━━━━━━━━`,
       `📁 <b>CONTENT &amp; FILE MANAGEMENT</b>`,
       `• <code>/add</code> — Start interactive wizard to add Files, Links, or Text`,
-      `• <code>/cancel</code> — Cancel active setup wizard (/add, /clone, /setchannel)`,
+      `• <code>/allfiles</code> — Browse &amp; copy links for stored files/links`,
+      `• <code>/cancel</code> — Cancel active setup wizard (${isMainBot ? '/add, /clone, /setchannel' : '/add, /setchannel'})`,
       `• <code>/editthismessage</code> — Reply to a bot message to edit its template`,
       `• <code>/cleanup</code> — Remove tracked old bot messages (24h+)`,
       ``,
@@ -1412,6 +1451,7 @@ export class TelegramService {
       `• <code>/allowedchats</code> — View whitelisted chats &amp; guard status`,
       ``,
       `🔨 <b>MODERATION &amp; ACCESS CONTROL</b>`,
+      `• <code>/linkdelete [on|off]</code> — Toggle unauthorized link deletion in groups`,
       `• <code>/ban &lt;id_or_@user&gt;</code> — Ban user (or reply <code>/ban</code> in group)`,
       `• <code>/unban &lt;id_or_@user&gt;</code> — Unban user &amp; clear warnings`,
       `• <code>/grantadmin &lt;id_or_@user&gt; [full|editor|moderator]</code> — <i>(Owner)</i> Promote user to Admin &amp; issue token`,
@@ -1425,7 +1465,7 @@ export class TelegramService {
       `• <code>/webcode</code> — Generate 10-minute Web Panel login code`,
       `• <code>/setpassword &lt;password&gt;</code> — Set/change Web Panel password`,
       `• <code>/broadcast</code> · <code>/settings</code> — Panel broadcast &amp; filter guide`,
-      `• <code>/clone &lt;bot_token&gt;</code> — Clone an isolated bot instance`,
+      ...(isMainBot ? [`• <code>/clone &lt;bot_token&gt;</code> — Clone an isolated bot instance`] : []),
       ``,
       `🤖 <b>BOT LIFECYCLE &amp; MEMORY CONTROL</b>`,
       `• <code>/botstatus</code> — Check live polling status &amp; RAM usage`,
@@ -1436,7 +1476,6 @@ export class TelegramService {
       ``,
       `👥 <b>PUBLIC GROUP COMMANDS (ALL USERS)</b>`,
       `• <code>/u &lt;uid&gt;</code> or <code>/uid &lt;uid&gt;</code> — Free Fire profile &amp; Guild checker`,
-      `• <code>/allfile</code> — Browse &amp; copy links for stored files/links`,
       `• <code>/filters</code> — List public <code>#hashtag</code> keywords`,
       `• <code>/translate &lt;bd|ind|eng&gt;</code> — Translate text or replied messages`,
       `• <code>/report &lt;@user_or_id&gt; &lt;reason&gt;</code> — Report a user to admins`,
@@ -2393,7 +2432,7 @@ export class TelegramService {
 
     // 5. Authorized administrator & Telegram group admin/creator check
     if (fromId) {
-      const isSystemAdmin = await this.isAuthorizedAdmin(fromId);
+      const isSystemAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
       if (isSystemAdmin) {
         return true;
       }
@@ -2416,14 +2455,17 @@ export class TelegramService {
 
     // =========================================================================
     // ADVANCED ANTI-SPAM & LINK/FORWARD PROTECTION SYSTEM
-    // 1. Whitelist Channel Posts / Allow Official Broadcasts & Admins
-    // 2. Block User Links & Forwards
+    // 1. Whitelist Channel Posts / Allow Official Broadcasts & Verified Group Admins
+    // 2. Delete Unauthorized Links only when Link Delete is ON; Block Forwards only when Anti-Forward is ON
     // 3. 3-Strike Warning & Auto-Ban System
     // =========================================================================
     const isOfficial = await this.isOfficialOrAdminMessage(message, fromId);
+    const groupSettings = await storage.getSettings();
+    const shouldBlockLinks = Boolean(groupSettings.linkDeleteEnabled);
+    const shouldBlockForwards = Boolean(groupSettings.antiForwardEnabled);
 
-    if (!isOfficial) {
-      const isForwarded = Boolean(
+    if (!isOfficial && (shouldBlockLinks || shouldBlockForwards)) {
+      const isForwarded = shouldBlockForwards && Boolean(
         message.forward_origin || 
         message.forward_from || 
         message.forward_from_chat || 
@@ -2431,15 +2473,18 @@ export class TelegramService {
         message.forward_date
       );
 
-      const hasLinkEntity = (message.entities || []).some(
-        (e: any) => e.type === 'url' || e.type === 'text_link'
-      ) || (message.caption_entities || []).some(
-        (e: any) => e.type === 'url' || e.type === 'text_link'
-      );
-      const linkRegex = /(?:https?:\/\/|www\.|t\.me\/|telegram\.me\/)[^\s]+/i;
-      const domainRegex = /\b[a-zA-Z0-9-]+\.(?:com|org|net|io|me|co|app|xyz|site|online|top|info|biz|ru|cn|in|de|uk|us|ca)\b/i;
-      const combinedText = `${text || ''} ${message.caption || ''}`;
-      const containsLink = hasLinkEntity || linkRegex.test(combinedText) || domainRegex.test(combinedText);
+      let containsLink = false;
+      if (shouldBlockLinks) {
+        const hasLinkEntity = (message.entities || []).some(
+          (e: any) => e.type === 'url' || e.type === 'text_link'
+        ) || (message.caption_entities || []).some(
+          (e: any) => e.type === 'url' || e.type === 'text_link'
+        );
+        const linkRegex = /(?:https?:\/\/|www\.|t\.me\/|telegram\.me\/)[^\s]+/i;
+        const domainRegex = /\b[a-zA-Z0-9-]+\.(?:com|org|net|io|me|co|app|xyz|site|online|top|info|biz|ru|cn|in|de|uk|us|ca)\b/i;
+        const combinedText = `${text || ''} ${message.caption || ''}`;
+        containsLink = hasLinkEntity || linkRegex.test(combinedText) || domainRegex.test(combinedText);
+      }
 
       if (isForwarded || containsLink) {
         // Instantly delete the offending message
@@ -2523,9 +2568,21 @@ export class TelegramService {
 
     if (!text && !message.document && !message.photo && !message.video && !message.audio) return;
 
-    // 0. Check /allfile or /allfiles command immediately so built-in file list never gets blocked by active wizards or word filters
+    // 0. Check /allfile or /allfiles command (STRICTLY ADMIN-ONLY)
     const earlyAllFileCmd = this.parseAllFileCommand(text);
     if (earlyAllFileCmd.matched) {
+      const isBotAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isBotAdmin) {
+        if (!isOfficial && message.message_id) {
+          await this.deleteUserMessage(message.chat.id, message.message_id);
+        }
+        await this.sendAutoDeletingNotice(
+          message.chat.id,
+          '🔒 <i>The /allfiles command is restricted to authorized administrators only.</i>',
+          4000
+        );
+        return;
+      }
       await this.handleFilesListCommand(
         fromId,
         message.chat.id,
@@ -2571,6 +2628,7 @@ export class TelegramService {
     const isAllowedChatsCommand = /^\/(?:allowedchats|whitelistedchats)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isCloneCommand = /^\/clone(?:@\w+)?(?:\s+|$)/i.test(text);
     const isBroadcastCommand = /^\/broadcast(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isLinkDeleteCommand = /^\/linkdelete(?:@\w+)?(?:\s+|$)/i.test(text);
     const isSettingsCommand = /^\/(?:settings|config|setfilter|addfilter|delfilter|delfile|delete|del|editthismessage)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isBotLifecycleCommand = /^\/(?:botstart|startbot|botstop|stopbot|botrestart|restartbot|botstatus|memclean|cleanmemory|clearcache)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isGrantRevokeCommand = /^\/(?:grantadmin|promote|addadmin|revokeadmin|demote|removeadmin|deladmin)(?:@\w+)?(?:\s+|$)/i.test(text);
@@ -2593,6 +2651,7 @@ export class TelegramService {
       isAllowedChatsCommand ||
       isCloneCommand ||
       isBroadcastCommand ||
+      isLinkDeleteCommand ||
       isSettingsCommand ||
       isBotLifecycleCommand ||
       isGrantRevokeCommand ||
@@ -2601,8 +2660,8 @@ export class TelegramService {
     if (isAdminCommand) {
       const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
 
-      // Immediately delete the admin command message from the group so group chat remains clean and tokens never leak
-      if (message.message_id) {
+      // Admin Protection Rule: Never delete messages sent by verified group admins or official accounts
+      if (!isOfficial && message.message_id) {
         await this.deleteUserMessage(message.chat.id, message.message_id);
       }
 
@@ -2613,6 +2672,12 @@ export class TelegramService {
           await this.sendAutoDeletingNotice(
             message.chat.id,
             '🔒 <i>The /help command is restricted to bot administrators only.</i>',
+            4000
+          );
+        } else if (isCloneCommand) {
+          await this.sendAutoDeletingNotice(
+            message.chat.id,
+            '🔒 <i>The /clone command is restricted to authorized administrators only.</i>',
             4000
           );
         }
@@ -2680,7 +2745,25 @@ export class TelegramService {
         return;
       }
 
+      if (isLinkDeleteCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleLinkDeleteToggleCommand(fromId, text);
+          },
+          'Link Delete setting updated in your private messages.'
+        );
+        return;
+      }
+
       if (isCloneCommand) {
+        if (!this.isMainBotContext()) {
+          await this.sendAutoDeletingNotice(
+            message.chat.id,
+            '⛔ <i>The /clone command is disabled inside cloned bot instances and only works on the main primary bot.</i>',
+            5000
+          );
+          return;
+        }
         const groupCloneMatch = text.match(/^\/clone(?:@\w+)?(?:\s+(.+))?$/i);
         const tokenArg = groupCloneMatch?.[1]?.trim();
         await executeWithPrivateDelivery(
@@ -2958,13 +3041,17 @@ export class TelegramService {
     // MODERATION, BAN/UNBAN, REPORT & ANTI-FRAUD IN GROUPS
     // =========================================================================
 
-    // Pending /clone owner assignment reply in group chat (legacy fallback if session opened in group)
+    // Pending /clone owner assignment reply in group chat (main primary bot & authorized admin only)
     const pendingGroupClone = activeCloneSessions.get(fromId);
     if (pendingGroupClone && pendingGroupClone.chatId === String(message.chat.id) && (text || message.reply_to_message?.from) && !text.startsWith('/')) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
-      if (isAdmin) {
-        await this.completeInteractiveClone(message.chat.id, fromId, pendingGroupClone, text, message, true);
-        return;
+      if (!this.isMainBotContext()) {
+        activeCloneSessions.delete(fromId);
+      } else {
+        const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+        if (isAdmin) {
+          await this.completeInteractiveClone(message.chat.id, fromId, pendingGroupClone, text, message, true);
+          return;
+        }
       }
     }
 
@@ -2973,7 +3060,7 @@ export class TelegramService {
     if (banMatch) {
       const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
       if (!isAdmin) {
-        if (message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
+        if (!isOfficial && message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
         return;
       }
       let targetId = '';
@@ -3016,7 +3103,7 @@ export class TelegramService {
           text: `OK Boss. ${userDisplay} has been successfully banned.`,
           reply_to_message_id: message.message_id
         });
-        if (message.message_id) {
+        if (!isOfficial && message.message_id) {
           setTimeout(() => {
             TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
           }, 3000);
@@ -3030,7 +3117,7 @@ export class TelegramService {
     if (unbanMatch) {
       const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
       if (!isAdmin) {
-        if (message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
+        if (!isOfficial && message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
         return;
       }
       let targetId = '';
@@ -3078,7 +3165,7 @@ export class TelegramService {
           parse_mode: 'HTML',
           reply_to_message_id: message.message_id
         });
-        if (message.message_id) {
+        if (!isOfficial && message.message_id) {
           setTimeout(() => {
             TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
           }, 3000);
@@ -3130,7 +3217,7 @@ export class TelegramService {
       }
 
       if (!targetUser) {
-        if (message.message_id) {
+        if (!isOfficial && message.message_id) {
           await this.deleteUserMessage(message.chat.id, message.message_id);
         }
         await this.sendAutoDeletingNotice(
@@ -3206,8 +3293,8 @@ export class TelegramService {
         }
       }
 
-      // Delete the /report command message from the group
-      if (message.message_id) {
+      // Delete the /report command message from the group only for non-admin members
+      if (!isOfficial && message.message_id) {
         await this.deleteUserMessage(message.chat.id, message.message_id);
       }
       // Send auto-deleting confirmation notice
@@ -3220,14 +3307,11 @@ export class TelegramService {
     }
 
 
-    // 4. Fraud Protection & Custom Word Filter Rules
+    // 4. Fraud Protection & Custom Word Filter Rules (Strictly exempt verified group admins & official channels)
     const fraudRules = await storage.getFraudRules();
     const activeFraudRules = fraudRules.filter(r => r.enabled);
     if (activeFraudRules.length > 0) {
-      const isSystemAdmin = await this.isAuthorizedAdmin(fromId);
-      const isGroupAdmin = message.chat?.id ? await this.isGroupAdminOrCreator(message.chat.id, fromId) : false;
-      const isAdmin = isSystemAdmin || isGroupAdmin;
-      if (!isAdmin) {
+      if (!isOfficial) {
         const lowerText = text.toLowerCase();
         for (const rule of activeFraudRules) {
           let matched = false;
@@ -3895,7 +3979,7 @@ export class TelegramService {
       return;
     }
 
-    // Admin /clone command in private chat: /clone <bot_token> (Step 1: verify token & prompt for new owner)
+    // Admin /clone command in private chat: /clone <bot_token> (Main primary bot & authorized admins only)
     const cloneMatch = text.match(/^\/clone(?:@\w+)?(?:\s+(.+))?$/i);
     if (cloneMatch) {
       const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
@@ -3903,6 +3987,14 @@ export class TelegramService {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
           text: '⛔ <i>Access Denied. Only authorized administrators can clone bots.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      if (!this.isMainBotContext()) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <b>Command Disabled:</b> The <code>/clone</code> command is completely disabled inside cloned bot instances and only works on the main primary bot.',
           parse_mode: 'HTML'
         });
         return;
@@ -4175,9 +4267,18 @@ export class TelegramService {
       return;
     }
 
-    // 2c. File listing command (/allfile, /allfiles — defaults to Page 1 with zero arguments required)
+    // 2c. File listing command (/allfile, /allfiles — STRICTLY ADMIN-ONLY)
     const allFileCmd = this.parseAllFileCommand(text);
     if (allFileCmd.matched) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <b>Access Denied:</b> The <code>/allfiles</code> command is restricted to authorized administrators only.',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
       await this.handleFilesListCommand(
         fromId,
         chatId,
@@ -4341,6 +4442,21 @@ export class TelegramService {
       return;
     }
 
+    // 5c-bis. Link Delete On/Off Command (/linkdelete [on|off]) in Private DM
+    if (/^\/linkdelete(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <i>Access Denied. Only authorized administrators can configure Link Delete.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      await this.handleLinkDeleteToggleCommand(chatId, text);
+      return;
+    }
+
     // 5d. Owner-Only Admin Promotion / Revocation Commands (/grantadmin, /promote, /addadmin, /revokeadmin, /demote)
     if (/^\/(?:grantadmin|promote|addadmin|revokeadmin|demote|removeadmin|deladmin)(?:@\w+)?(?:\s+|$)/i.test(text)) {
       await this.handleOwnerGrantRevokeCommand(fromId, chatId, text, message);
@@ -4384,11 +4500,15 @@ export class TelegramService {
       return;
     }
 
-    // 7a. Check if user is completing an interactive /clone owner assignment
+    // 7a. Check if user is completing an interactive /clone owner assignment (Main bot & authorized admin only)
     const pendingClone = activeCloneSessions.get(fromId);
     if (pendingClone && !text.startsWith('/')) {
-      await this.completeInteractiveClone(chatId, fromId, pendingClone, text, message, false);
-      return;
+      if (!this.isMainBotContext() || !(await this.isAuthorizedAdmin(fromId, message.from?.username))) {
+        activeCloneSessions.delete(fromId);
+      } else {
+        await this.completeInteractiveClone(chatId, fromId, pendingClone, text, message, false);
+        return;
+      }
     }
 
     // 7b. Check if user is inside an interactive /add session
@@ -6750,6 +6870,39 @@ export class TelegramService {
     return { text, deepLink, primaryKeyboard, fallbackKeyboard };
   }
 
+  private static async handleLinkDeleteToggleCommand(chatId: number | string, text: string): Promise<void> {
+    const arg = text.replace(/^\/linkdelete(?:@\w+)?/i, '').trim().toLowerCase();
+    const current = await storage.getSettings();
+    let nextValue = Boolean(current.linkDeleteEnabled);
+
+    if (arg === 'on' || arg === 'enable' || arg === 'true' || arg === '1') {
+      nextValue = true;
+    } else if (arg === 'off' || arg === 'disable' || arg === 'false' || arg === '0') {
+      nextValue = false;
+    } else if (!arg || arg === 'toggle') {
+      nextValue = !nextValue;
+    } else {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text:
+          `🔗 <b>Link Delete Setting</b>\n\n` +
+          `• Current Status: <b>${nextValue ? '🟢 ON (Deleting unauthorized links)' : '⚪ OFF (Links permitted)'}</b>\n\n` +
+          `Usage: <code>/linkdelete on</code> or <code>/linkdelete off</code>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    await storage.updateSettings({ linkDeleteEnabled: nextValue });
+    await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: nextValue
+        ? `🔗 <b>Link Delete is now ON</b>\n\nUnauthorized links sent by non-admin members in groups/chats will be automatically detected and deleted. Group administrators remain strictly protected.`
+        : `🔗 <b>Link Delete is now OFF</b>\n\nLinks sent in groups/chats are permitted to remain in the chat.`,
+      parse_mode: 'HTML'
+    });
+  }
+
   private static async handleFilesListCommand(
     _fromId: string,
     chatId: number | string,
@@ -6760,6 +6913,14 @@ export class TelegramService {
     threadId?: number
   ): Promise<void> {
     try {
+      if (_fromId && !(await this.isAuthorizedAdmin(_fromId))) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <b>Access Denied:</b> The <code>/allfiles</code> command is restricted to authorized administrators only.',
+          parse_mode: 'HTML'
+        }).catch(() => {});
+        return;
+      }
       // Ensure database cache is initialized (0.01ms no-op when already warm in memory)
       await storage.loadLatest(false);
       if (storage.getItemsFast().length === 0) {
@@ -8506,8 +8667,17 @@ export class TelegramService {
       return;
     }
 
-    // INTERACTIVE FILE LISTING & LINK COPYING CALLBACKS (/allfile, /allfiles)
+    // INTERACTIVE FILE LISTING & LINK COPYING CALLBACKS (/allfile, /allfiles - ADMIN ONLY)
     if (data && (data.startsWith('fl_p:') || data.startsWith('fl_v:') || data.startsWith('fl_copy:') || data === 'fl_close' || data === 'fl_noop')) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, cb.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: '⛔ Access Denied: File list retrieval is restricted to administrators only.',
+          show_alert: true
+        }).catch(() => {});
+        return;
+      }
       const msgId = cb.message?.message_id;
       const threadId = cb.message?.message_thread_id;
       const isGroupChat = cb.message?.chat?.type === 'group' || cb.message?.chat?.type === 'supergroup';

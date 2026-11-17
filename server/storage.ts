@@ -176,6 +176,7 @@ export interface BotSettings {
   requiredChannels?: ForceSubChannel[];
   autoApproveJoinRequests?: boolean;
   antiForwardEnabled?: boolean;
+  linkDeleteEnabled?: boolean;
   chatWhitelistEnabled?: boolean;
   allowedChats?: AllowedChatEntry[];
   botStopped?: boolean;
@@ -530,6 +531,7 @@ export const DEFAULT_SETTINGS: BotSettings = {
   forceSubEnabled: false,
   autoApproveJoinRequests: true,
   antiForwardEnabled: false,
+  linkDeleteEnabled: false,
   requiredChannels: [],
   chatWhitelistEnabled: false,
   allowedChats: [],
@@ -1258,6 +1260,7 @@ export class SharedStorageService {
         forceSubEnabled: loadedData.settings?.forceSubEnabled ?? false,
         autoApproveJoinRequests: loadedData.settings?.autoApproveJoinRequests ?? true,
         antiForwardEnabled: loadedData.settings?.antiForwardEnabled ?? false,
+        linkDeleteEnabled: loadedData.settings?.linkDeleteEnabled ?? false,
         requiredChannels: Array.isArray(loadedData.settings?.requiredChannels) ? loadedData.settings.requiredChannels : [],
         chatWhitelistEnabled: loadedData.settings?.chatWhitelistEnabled ?? false,
         allowedChats: Array.isArray(loadedData.settings?.allowedChats) ? loadedData.settings.allowedChats : []
@@ -2299,6 +2302,9 @@ export class SharedStorageService {
     if (this.db.settings.antiForwardEnabled === undefined) {
       this.db.settings.antiForwardEnabled = false;
     }
+    if (this.db.settings.linkDeleteEnabled === undefined) {
+      this.db.settings.linkDeleteEnabled = false;
+    }
     if (!Array.isArray(this.db.settings.requiredChannels)) {
       this.db.settings.requiredChannels = [];
     }
@@ -2318,6 +2324,7 @@ export class SharedStorageService {
       ...settings,
       forceSubEnabled: settings.forceSubEnabled !== undefined ? Boolean(settings.forceSubEnabled) : (this.db.settings.forceSubEnabled ?? false),
       antiForwardEnabled: settings.antiForwardEnabled !== undefined ? Boolean(settings.antiForwardEnabled) : (this.db.settings.antiForwardEnabled ?? false),
+      linkDeleteEnabled: settings.linkDeleteEnabled !== undefined ? Boolean(settings.linkDeleteEnabled) : (this.db.settings.linkDeleteEnabled ?? false),
       requiredChannels: settings.requiredChannels !== undefined && Array.isArray(settings.requiredChannels) 
         ? settings.requiredChannels 
         : (Array.isArray(this.db.settings.requiredChannels) ? this.db.settings.requiredChannels : []),

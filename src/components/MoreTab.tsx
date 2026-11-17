@@ -9,7 +9,7 @@ import {
   ChevronRight, Edit2, Check, RefreshCw, Plus, Minus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi,
   Megaphone, Image as ImageIcon, Video as VideoIcon, Music, Mic, Pin, Paperclip, Loader2, Radio,
   Flag, Ban, CheckCircle, ShieldAlert, ExternalLink, ShieldCheck,
-  Copy, Upload, Bot, VolumeX, Play, Square, RotateCcw, Key
+  Copy, Upload, Bot, VolumeX, Play, Square, RotateCcw, Key, Link2
 } from 'lucide-react';
 import { EmojiStore } from './EmojiStore';
 
@@ -40,6 +40,8 @@ interface MoreTabProps {
   onOpenBotSwitcher?: () => void;
 }
 
+type MoreSubView = 'menu' | 'templates' | 'admins' | 'cleanup' | 'settings' | 'webhook' | 'broadcast' | 'emoji' | 'reports' | 'fraud' | 'whitelist';
+
 export const MoreTab: React.FC<MoreTabProps> = ({
   currentUser,
   templates,
@@ -49,7 +51,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   onLogout,
   onOpenBotSwitcher
 }) => {
-  const [subView, setSubView] = useState<'menu' | 'templates' | 'admins' | 'cleanup' | 'settings' | 'webhook' | 'broadcast' | 'emoji' | 'reports' | 'fraud' | 'whitelist'>('menu');
+  const [subView, setSubView] = useState<MoreSubView>('menu');
 
   // Chat Whitelist / Ignore state
   const [chatWhitelistEnabled, setChatWhitelistEnabled] = useState<boolean>(Boolean(settings?.chatWhitelistEnabled));
@@ -432,6 +434,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     maintenanceNotice: settings?.maintenanceNotice || '',
     forceSubEnabled: settings?.forceSubEnabled ?? false,
     antiForwardEnabled: settings?.antiForwardEnabled ?? false,
+    linkDeleteEnabled: settings?.linkDeleteEnabled ?? false,
     requiredChannels: settings?.requiredChannels || [],
     adminNewPassword: ''
   });
@@ -466,6 +469,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         maintenanceNotice: settings.maintenanceNotice || '',
         forceSubEnabled: settings.forceSubEnabled ?? false,
         antiForwardEnabled: settings.antiForwardEnabled ?? false,
+        linkDeleteEnabled: settings.linkDeleteEnabled ?? false,
         autoApproveJoinRequests: settings.autoApproveJoinRequests ?? true,
         requiredChannels: Array.isArray(settings.requiredChannels) ? settings.requiredChannels : []
       }));
@@ -1290,6 +1294,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         ...botSettings,
         forceSubEnabled: Boolean(botSettings.forceSubEnabled),
         antiForwardEnabled: Boolean(botSettings.antiForwardEnabled),
+        linkDeleteEnabled: Boolean(botSettings.linkDeleteEnabled),
         autoApproveJoinRequests: botSettings.autoApproveJoinRequests !== false,
         requiredChannels: Array.isArray(botSettings.requiredChannels) ? botSettings.requiredChannels : []
       };
@@ -1300,6 +1305,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           ...res.settings,
           forceSubEnabled: res.settings.forceSubEnabled ?? false,
           antiForwardEnabled: res.settings.antiForwardEnabled ?? false,
+          linkDeleteEnabled: res.settings.linkDeleteEnabled ?? false,
           autoApproveJoinRequests: res.settings.autoApproveJoinRequests ?? true,
           requiredChannels: Array.isArray(res.settings.requiredChannels) ? res.settings.requiredChannels : []
         }));
@@ -1833,6 +1839,17 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     );
   }
 
+  const renderSubViewBackButton = (targetView: MoreSubView = 'menu', label: string = 'Back to More') => (
+    <button
+      type="button"
+      onClick={() => setSubView(targetView)}
+      aria-label={label}
+      className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white transition-colors cursor-pointer shrink-0"
+    >
+      <ChevronRight className="w-4 h-4 rotate-180" />
+    </button>
+  );
+
   // -------------------------------------------------------------
   // SUB-VIEW: EMOJI STORE
   // -------------------------------------------------------------
@@ -1850,13 +1867,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     return (
       <div className="space-y-4 pb-28">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <button
-            onClick={() => setSubView('menu')}
-            className="text-xs text-red-400 hover:text-sky-300 font-medium cursor-pointer"
-          >
-            ← Back to More
-          </button>
-          <span className="text-xs text-zinc-400">Live Bot Messages</span>
+          <div className="flex items-center gap-2 min-w-0">
+            {renderSubViewBackButton('menu', 'Back to More')}
+            <h2 className="text-base font-bold text-white truncate">Message Templates</h2>
+          </div>
+          <span className="text-xs text-zinc-400 shrink-0">Live Bot Messages</span>
         </div>
 
         {/* Featured: Start Message Template (/start) */}
@@ -1964,12 +1979,10 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     return (
       <div className="space-y-4 pb-28">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <button
-            onClick={() => setSubView('menu')}
-            className="text-xs text-red-400 hover:text-sky-300 font-medium cursor-pointer"
-          >
-            ← Back to More
-          </button>
+          <div className="flex items-center gap-2 min-w-0">
+            {renderSubViewBackButton('menu', 'Back to More')}
+            <h2 className="text-base font-bold text-white truncate">Sub-Admins</h2>
+          </div>
           {currentUser.role === 'owner' && (
             <button
               onClick={() => setShowAddAdmin(true)}
@@ -2549,14 +2562,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   if (subView === 'cleanup') {
     return (
       <div className="space-y-4 pb-28">
-        <div className="flex items-center justify-between">
-          <button
-            onClick={() => setSubView('menu')}
-            className="text-xs text-red-400 hover:text-sky-300 font-medium cursor-pointer"
-          >
-            ← Back to More
-          </button>
-          <span className="text-xs text-zinc-400">Persistent Cleanup</span>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            {renderSubViewBackButton('menu', 'Back to More')}
+            <h2 className="text-base font-bold text-white truncate">Message Cleanup</h2>
+          </div>
+          <span className="text-xs text-zinc-400 shrink-0">Persistent Cleanup</span>
         </div>
 
         <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-3">
@@ -2784,14 +2795,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   if (subView === 'settings') {
     return (
       <div className="space-y-4 pb-28">
-        <div className="flex items-center justify-between">
-          <button
-            onClick={() => setSubView('menu')}
-            className="text-xs text-red-400 hover:text-sky-300 font-medium cursor-pointer"
-          >
-            ← Back to More
-          </button>
-          <span className="text-xs text-zinc-400">Bot Settings</span>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            {renderSubViewBackButton('menu', 'Back to More')}
+            <h2 className="text-base font-bold text-white truncate">Bot Settings</h2>
+          </div>
+          <span className="text-xs text-zinc-400 shrink-0">Runtime &amp; Controls</span>
         </div>
 
         {botStatusMsg && (
@@ -3132,6 +3141,54 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     className="sr-only peer"
                   />
                   <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-violet-500"></div>
+                </label>
+              </div>
+            </div>
+
+            {/* Link Delete (On/Off) Toggle */}
+            <div className="p-3.5 rounded-2xl bg-gradient-to-br from-rose-950/25 via-zinc-900/80 to-zinc-950/90 border border-rose-500/30 space-y-3">
+              <div className="flex items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+                    <Link2 className="w-4 h-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                      <span>Link Delete (On/Off)</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                        botSettings.linkDeleteEnabled 
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' 
+                          : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                      }`}>
+                        {botSettings.linkDeleteEnabled ? 'ON (DELETING LINKS)' : 'OFF'}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-zinc-400 mt-0.5">
+                      Automatically detect and delete unauthorized links from non-admin members in groups/chats. Turn OFF to permit links.
+                    </p>
+                  </div>
+                </div>
+
+                <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(botSettings.linkDeleteEnabled)}
+                    onChange={async (e) => {
+                      const nextEnabled = e.target.checked;
+                      const prevEnabled = Boolean(botSettings.linkDeleteEnabled);
+                      setBotSettings((prev: any) => ({ ...prev, linkDeleteEnabled: nextEnabled }));
+                      try {
+                        await api.updateSettings({ linkDeleteEnabled: nextEnabled });
+                        onRefreshSettings();
+                        toast.success(nextEnabled ? 'Link Delete turned ON' : 'Link Delete turned OFF');
+                      } catch (err: any) {
+                        setBotSettings((prev: any) => ({ ...prev, linkDeleteEnabled: prevEnabled }));
+                        toast.error(err?.message || 'Failed to update Link Delete setting');
+                      }
+                    }}
+                    className="sr-only peer"
+                  />
+                  <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-rose-500"></div>
                 </label>
               </div>
             </div>
@@ -3574,14 +3631,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   if (subView === 'webhook') {
     return (
       <div className="space-y-4 pb-28">
-        <div className="flex items-center justify-between">
-          <button
-            onClick={() => setSubView('menu')}
-            className="text-xs text-red-400 hover:text-sky-300 font-medium cursor-pointer"
-          >
-            ← Back to More
-          </button>
-          <span className="text-xs text-zinc-400">Webhook Setup</span>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            {renderSubViewBackButton('menu', 'Back to More')}
+            <h2 className="text-base font-bold text-white truncate">Webhook Setup</h2>
+          </div>
+          <span className="text-xs text-zinc-400 shrink-0">Endpoint Config</span>
         </div>
 
         {webhookStatusMsg && (
@@ -3665,13 +3720,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       <div className="space-y-4 pb-28">
         {/* Navigation Bar */}
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <button
-            onClick={() => setSubView('settings')}
-            className="text-xs text-red-400 hover:text-sky-300 font-medium flex items-center gap-1 cursor-pointer transition-colors"
-          >
-            <span>← Back to Settings</span>
-          </button>
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-[11px] text-emerald-300 font-semibold">
+          <div className="flex items-center gap-2 min-w-0">
+            {renderSubViewBackButton('menu', 'Back to More')}
+            <h2 className="text-base font-bold text-white truncate">Broadcast</h2>
+          </div>
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-[11px] text-emerald-300 font-semibold shrink-0">
             <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
             <span>{broadcastUsersCount} Reachable Users</span>
           </div>
@@ -4114,18 +4167,16 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
     return (
       <div className="space-y-4 pb-28">
-        <div className="flex items-center justify-between">
-          <button
-            onClick={() => setSubView('menu')}
-            className="text-xs text-red-400 hover:text-sky-300 font-medium cursor-pointer"
-          >
-            ← Back to More
-          </button>
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            {renderSubViewBackButton('menu', 'Back to More')}
+            <h2 className="text-base font-bold text-white truncate">User Reports</h2>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={loadReports}
               disabled={reportsLoading}
-              className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs flex items-center gap-1 cursor-pointer"
+              className="px-2.5 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white text-xs font-medium flex items-center gap-1.5 cursor-pointer"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${reportsLoading ? 'animate-spin' : ''}`} />
               <span>Refresh</span>
@@ -4325,12 +4376,10 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     return (
       <div className="space-y-4 pb-28">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <button
-            onClick={() => setSubView('menu')}
-            className="text-xs text-red-400 hover:text-sky-300 font-medium cursor-pointer"
-          >
-            ← Back to More
-          </button>
+          <div className="flex items-center gap-2 min-w-0">
+            {renderSubViewBackButton('menu', 'Back to More')}
+            <h2 className="text-base font-bold text-white truncate">Fraud Filter</h2>
+          </div>
           <button
             onClick={() => {
               if (showAddFraudRule) {
@@ -4875,12 +4924,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         {/* Header */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0 flex-1">
-            <button
-              onClick={() => setSubView('menu')}
-              className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white cursor-pointer shrink-0"
-            >
-              <ChevronRight className="w-4 h-4 rotate-180" />
-            </button>
+            {renderSubViewBackButton('menu', 'Back to More')}
             <div className="min-w-0">
               <h2 className="text-base font-bold text-white flex items-center gap-1.5 truncate">
                 <VolumeX className="w-4 h-4 text-cyan-400 shrink-0" />

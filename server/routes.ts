@@ -2498,6 +2498,8 @@ apiRouter.get('/settings', authenticate, async (_req: Request, res: Response) =>
     ...settings,
     botToken: token,
     botUsername,
+    antiForwardEnabled: settings.antiForwardEnabled ?? false,
+    linkDeleteEnabled: settings.linkDeleteEnabled ?? false,
     forceSubEnabled: settings.forceSubEnabled ?? false,
     requiredChannels: Array.isArray(settings.requiredChannels) ? settings.requiredChannels : [],
     chatWhitelistEnabled: settings.chatWhitelistEnabled ?? false,
@@ -2542,6 +2544,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
   if (forceSubEnabled !== undefined) updates.forceSubEnabled = Boolean(forceSubEnabled);
   if (req.body.autoApproveJoinRequests !== undefined) updates.autoApproveJoinRequests = Boolean(req.body.autoApproveJoinRequests);
   if (req.body.antiForwardEnabled !== undefined) updates.antiForwardEnabled = Boolean(req.body.antiForwardEnabled);
+  if (req.body.linkDeleteEnabled !== undefined) updates.linkDeleteEnabled = Boolean(req.body.linkDeleteEnabled);
   if (req.body.chatWhitelistEnabled !== undefined) updates.chatWhitelistEnabled = Boolean(req.body.chatWhitelistEnabled);
   if (requiredChannels !== undefined) {
     if (Array.isArray(requiredChannels)) {
@@ -2581,6 +2584,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
     settings: {
       ...newSettings,
       antiForwardEnabled: newSettings.antiForwardEnabled ?? false,
+      linkDeleteEnabled: newSettings.linkDeleteEnabled ?? false,
       forceSubEnabled: newSettings.forceSubEnabled ?? false,
       autoApproveJoinRequests: newSettings.autoApproveJoinRequests ?? true,
       requiredChannels: Array.isArray(newSettings.requiredChannels) ? newSettings.requiredChannels : [],

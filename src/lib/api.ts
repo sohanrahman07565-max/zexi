@@ -150,6 +150,7 @@ export interface BotSettings {
   requiredChannels?: ForceSubChannel[];
   autoApproveJoinRequests?: boolean;
   antiForwardEnabled?: boolean;
+  linkDeleteEnabled?: boolean;
   chatWhitelistEnabled?: boolean;
   allowedChats?: AllowedChatEntry[];
   botStopped?: boolean;
