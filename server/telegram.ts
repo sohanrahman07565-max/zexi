@@ -4444,19 +4444,20 @@ export class TelegramService {
     let rawLang = '';
     let inlineText = '';
 
-    // Method A: `tran bd`, `tran ind`, `tran eng` (also supports optional inline text)
-    const methodAMatch = trimmed.match(/^tran(?:slate)?\s+(bd|bn|bangla|bengali|ind|hi|hindi|eng|en|english)(?:\s+([\s\S]+))?$/i);
+    // Method A: `tran bd`, `translate eng`, `tr bn` (also supports optional inline text)
+    const methodAMatch = trimmed.match(/^(?:tran(?:slate)?|tr)\s+(bd|bn|bangla|bengali|ind|hi|hindi|eng|en|english)(?:\s+([\s\S]+))?$/i);
     if (methodAMatch) {
       rawLang = methodAMatch[1].toLowerCase();
       inlineText = (methodAMatch[2] || '').trim();
     } else {
-      // Method B: `/translate bd|ind|eng`, `/bd`, `/ind`, `/eng` (including @botusername suffix)
-      const methodBCmdMatch = trimmed.match(/^\/translate(?:@\w+)?\s+(bd|bn|bangla|bengali|ind|hi|hindi|eng|en|english)(?:\s+([\s\S]+))?$/i);
+      // Method B: `/translate bd|ind|eng`, `/tran bd|ind|eng` (including @botusername suffix)
+      const methodBCmdMatch = trimmed.match(/^\/(?:translate|tran)(?:@\w+)?\s+(bd|bn|bangla|bengali|ind|hi|hindi|eng|en|english)(?:\s+([\s\S]+))?$/i);
       if (methodBCmdMatch) {
         rawLang = methodBCmdMatch[1].toLowerCase();
         inlineText = (methodBCmdMatch[2] || '').trim();
       } else {
-        const methodBShortMatch = trimmed.match(/^\/(bd|ind|eng)(?:@\w+)?(?:\s+([\s\S]+))?$/i);
+        // Method C: `/bd`, `/bn`, `/ind`, `/hi`, `/eng`, `/en`, `/bangla`, `/bengali`, `/hindi`, `/english`
+        const methodBShortMatch = trimmed.match(/^\/(bd|bn|bangla|bengali|ind|hi|hindi|eng|en|english)(?:@\w+)?(?:\s+([\s\S]+))?$/i);
         if (methodBShortMatch) {
           rawLang = methodBShortMatch[1].toLowerCase();
           inlineText = (methodBShortMatch[2] || '').trim();
@@ -4481,6 +4482,252 @@ export class TelegramService {
 
   private static translationCache = new Map<string, { text: string; expiresAt: number }>();
 
+  // Unambiguous Romanized Bengali (Banglish) vocabulary for instant zero-false-positive detection
+  private static readonly BANGLISH_CORE_WORDS = new Set<string>([
+    'tumi', 'ami', 'apni', 'tui', 'tomar', 'amar', 'apnar', 'tor', 'amader', 'tomader', 'apnader',
+    'amake', 'tomake', 'apnake', 'toke', 'oke', 'take', 'kake', 'amra', 'tomra', 'apnara', 'ora', 'tara',
+    'kemon', 'kmn', 'acho', 'achi', 'achen', 'ache', 'achho', 'achhi', 'achhe', 'achhen', 'aso', 'asi', 'asen',
+    'bhalo', 'valo', 'vlo', 'bhalobashi', 'valobashi', 'valobasi', 'kharap', 'sundor', 'onek', 'ektu', 'ekta', 'akta',
+    'duita', 'tinta', 'charte', 'kothay', 'kothai', 'kotha', 'keno', 'kno', 'kobe', 'kemne', 'kivabe', 'kibhabe',
+    'korcho', 'korchi', 'korbo', 'korben', 'korte', 'korle', 'korlen', 'korlam', 'kortesi', 'kortese', 'korche',
+    'korso', 'korsi', 'korse', 'korsen', 'korecho', 'korechi', 'koreche', 'korechen', 'koro',
+    'hobe', 'hochhe', 'hocche', 'hoise', 'hoice', 'hoilo', 'hoyeche', 'hoy', 'hoye', 'hobena',
+    'jabo', 'jachhi', 'jacchi', 'jaitesi', 'jaitese', 'jao', 'jabe', 'jaben', 'jabona', 'gelam', 'geche', 'gese', 'gelo',
+    'asho', 'ashbo', 'asbo', 'ashchi', 'aschi', 'ashtesi', 'ashtese', 'aslam', 'ashe', 'ashbe',
+    'ekhon', 'ekhn', 'akhn', 'akhon', 'ekhono', 'akhono', 'tokhon', 'jokhon', 'kokhon',
+    'ajke', 'kalke', 'khabo', 'khacho', 'khacchi', 'khaisi', 'khao', 'khete', 'khabar', 'khabona', 'bhat', 'vat',
+    'lagbe', 'lagbena', 'lage', 'bujhlam', 'bujhchi', 'bujho', 'bujhte', 'bujhina',
+    'janina', 'jano', 'jani', 'obostha', 'obosta', 'khobor', 'shokal', 'bikel', 'sondha',
+    'taka', 'poisha', 'kichu', 'kisu', 'kichhu', 'nai', 'noi', 'chilo', 'chilam', 'chile', 'chilen',
+    'dorkar', 'shob', 'shobai', 'sobai', 'shomoy', 'somoy', 'barite', 'ghore', 'desh', 'bangla', 'bangladesh',
+    'naki', 'ebong', 'kintu', 'jodi', 'tahole', 'tarpor', 'ekhane', 'okhane', 'sekhane', 'shekhane',
+    'sheta', 'seta', 'eta', 'ota', 'jeta', 'shei', 'bhaiya', 'vaiya', 'dada', 'apu',
+    'parbo', 'parchi', 'parina', 'parbona', 'paro', 'paren', 'parbe',
+    'dekhbo', 'dekhchi', 'dekho', 'dekhen', 'dekhsi', 'dekhlam', 'dekhechi',
+    'bolo', 'bolcho', 'bolchi', 'bolbo', 'bolben', 'bolsi', 'bollam', 'bolechi',
+    'shuno', 'suno', 'shuncho', 'shunchi', 'dilam', 'dao', 'dibo', 'disi', 'dise', 'diyechi',
+    'nilam', 'nibo', 'nisi', 'nise', 'niyechi', 'pabo', 'pailam', 'paisi', 'paisen', 'peyechi',
+    'shotti', 'sotti', 'mittha', 'bhul', 'vul', 'thakbo', 'thako', 'thakbe', 'thakbena',
+    'brishti', 'bristi', 'khela', 'ghumabo', 'bondhu', 'jonno', 'jonyo', 'theke', 'shathe', 'asole', 'ekdom'
+  ]);
+
+  // Distinct Romanized Hindi (Hinglish) markers
+  private static readonly HINGLISH_CORE_WORDS = new Set<string>([
+    'kaise', 'kaisa', 'kaisi', 'kya', 'haal', 'hain', 'hoon', 'hun', 'tum', 'tumhara', 'tumhari',
+    'mera', 'meri', 'tera', 'teri', 'karna', 'raha', 'rahi', 'rahe', 'nahi', 'nhi',
+    'achha', 'accha', 'bahut', 'bohot', 'yaar', 'abhi', 'kahan', 'kidhar', 'kyun', 'kyu',
+    'kaun', 'kitna', 'batao', 'samjhe', 'samjha', 'pyar', 'duniya', 'paise', 'matlab'
+  ]);
+
+  // Normalize frequent BD chat shorthands into clearer phonetic Banglish for accurate transliteration
+  private static readonly BANGLISH_SHORTHAND_MAP: Record<string, string> = {
+    kmn: 'kemon',
+    vlo: 'bhalo',
+    valo: 'bhalo',
+    valobashi: 'bhalobashi',
+    valobasi: 'bhalobashi',
+    ekhn: 'ekhon',
+    akhn: 'ekhon',
+    akhon: 'ekhon',
+    ekhono: 'ekhono',
+    akhono: 'ekhono',
+    kisu: 'kichu',
+    kichhu: 'kichu',
+    hoise: 'hoyeche',
+    hoice: 'hoyeche',
+    hoilo: 'holo',
+    disi: 'diyechi',
+    dise: 'diyeche',
+    nisi: 'niyechi',
+    nise: 'niyeche',
+    asi: 'achi',
+    aso: 'acho',
+    asen: 'achen',
+    kortesi: 'korchi',
+    kortese: 'korche',
+    jaitesi: 'jachhi',
+    jaitese: 'jachhe',
+    ashtesi: 'aschhi',
+    ashtese: 'aschhe',
+    ashbo: 'asbo',
+    vai: 'bhai',
+    vaiya: 'bhaiya',
+    vul: 'bhul',
+    vat: 'bhat',
+    vabe: 'bhabe',
+    kivabe: 'kibhabe',
+    kn: 'keno',
+    kno: 'keno',
+    gese: 'geche',
+    paisi: 'peyechi',
+    paisen: 'peyechhen',
+    khaisi: 'kheyechi',
+    bolsi: 'bolechi',
+    dekhsi: 'dekhechi',
+    korso: 'korecho',
+    korsen: 'korechen',
+    korsi: 'korechi',
+    korse: 'koreche',
+    parina: 'pari na',
+    parbona: 'parbo na',
+    janina: 'jani na',
+    bujhina: 'bujhi na',
+    khabona: 'khabo na',
+    jabona: 'jabo na',
+    korbona: 'korbo na',
+    hobena: 'hobe na',
+    lagbena: 'lagbe na',
+    thakbena: 'thakbe na'
+  };
+
+  private static detectPhoneticIndic(text: string): {
+    isBanglish: boolean;
+    isHinglish: boolean;
+    hasBengaliScript: boolean;
+    hasDevanagariScript: boolean;
+    hasLatin: boolean;
+  } {
+    const hasBengaliScript = /[\u0980-\u09FF]/.test(text);
+    const hasDevanagariScript = /[\u0900-\u097F]/.test(text);
+    const stripped = text
+      .replace(/https?:\/\/\S+/gi, ' ')
+      .replace(/@\w+/g, ' ')
+      .replace(/#\w+/g, ' ');
+    const hasLatin = /[a-zA-Z]/.test(stripped);
+    if (!hasLatin) {
+      return { isBanglish: false, isHinglish: false, hasBengaliScript, hasDevanagariScript, hasLatin };
+    }
+
+    const words = stripped.toLowerCase().match(/[a-z]+/g) || [];
+    let banglishHits = 0;
+    let hinglishHits = 0;
+
+    for (const w of words) {
+      if (this.BANGLISH_CORE_WORDS.has(w)) {
+        banglishHits += 2;
+      } else if (w === 'vai' || w === 'mon' || w === 'thik') {
+        banglishHits += 1;
+      } else if (/(?:tesi|tese|chhi|chho|chhe)$/.test(w) && w.length >= 5) {
+        banglishHits += 2;
+      }
+      if (this.HINGLISH_CORE_WORDS.has(w)) {
+        hinglishHits += 2;
+      }
+    }
+
+    // Also detect classic Bengali negation clause "<verb> na" (e.g. "jabo na", "khai na", "kori na")
+    if (/\b(?:jabo|khabo|korbo|parbo|bolbo|dekhbo|ashbo|thakbo|hobe|lagbe|pari|jani|bujhi|kori|khai|jai|bol|dekh)\s+na\b/i.test(stripped)) {
+      banglishHits += 2;
+    }
+
+    const isBanglish = !hasBengaliScript && !hasDevanagariScript && banglishHits >= 2 && banglishHits > hinglishHits;
+    const isHinglish = !hasBengaliScript && !hasDevanagariScript && !isBanglish && hinglishHits >= 2;
+
+    return { isBanglish, isHinglish, hasBengaliScript, hasDevanagariScript, hasLatin };
+  }
+
+  private static normalizeBanglishShorthand(text: string): string {
+    // Protect URLs, @mentions, and #hashtags while normalizing casual Banglish words
+    const tokens = text.split(/(https?:\/\/\S+|@\w+|#\w+)/gi);
+    return tokens
+      .map((seg, idx) => {
+        if (idx % 2 === 1) return seg;
+        return seg.replace(/\b[a-zA-Z]+\b/g, (word) => {
+          const replacement = this.BANGLISH_SHORTHAND_MAP[word.toLowerCase()];
+          return replacement || word;
+        });
+      })
+      .join('');
+  }
+
+  private static async requestGoogleInputTools(text: string, itc: 'bn-t-i0-und' | 'hi-t-i0-und'): Promise<string | null> {
+    const clean = text.trim();
+    if (!clean) return text;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6000);
+    try {
+      const url = `https://inputtools.google.com/request?text=${encodeURIComponent(clean)}&itc=${itc}&num=1&cp=0&cs=1&ie=utf-8&oe=utf-8`;
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'application/json'
+        },
+        signal: controller.signal
+      });
+      if (!res.ok) return null;
+      const data: any = await res.json();
+      if (data?.[0] !== 'SUCCESS' || !Array.isArray(data?.[1])) return null;
+      const converted = data[1]
+        .map((item: any) => {
+          const candidate = Array.isArray(item?.[1]) && typeof item[1][0] === 'string' ? item[1][0] : '';
+          return candidate || (typeof item?.[0] === 'string' ? item[0] : '');
+        })
+        .join(' ')
+        .trim();
+      return converted || null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private static async transliteratePhoneticText(text: string, itc: 'bn-t-i0-und' | 'hi-t-i0-und'): Promise<string | null> {
+    const lines = text.split('\n');
+    const convertedLines: string[] = [];
+    let anyConverted = false;
+
+    for (const line of lines) {
+      if (!line.trim() || !/[a-zA-Z]/.test(line)) {
+        convertedLines.push(line);
+        continue;
+      }
+
+      // Split around URLs, @mentions, #hashtags, and non-Latin punctuation so formatting stays intact
+      const parts = line.split(/(https?:\/\/\S+|@\w+|#\w+|[^a-zA-Z\s]+)/gi);
+      const outParts: string[] = [];
+
+      for (const part of parts) {
+        if (!part) continue;
+        if (/^(?:https?:\/\/\S+|@\w+|#\w+)$/i.test(part) || !/[a-zA-Z]/.test(part)) {
+          outParts.push(part);
+          continue;
+        }
+        const leadWs = part.match(/^\s*/)?.[0] || '';
+        const trailWs = part.match(/\s*$/)?.[0] || '';
+        const core = part.trim();
+        if (!core) {
+          outParts.push(part);
+          continue;
+        }
+
+        const subChunks = this.splitTextChunks(core, 280);
+        const convertedChunks: string[] = [];
+        for (const sub of subChunks) {
+          const conv = await this.requestGoogleInputTools(sub, itc);
+          if (conv && conv !== sub) {
+            anyConverted = true;
+            convertedChunks.push(conv);
+          } else {
+            convertedChunks.push(sub);
+          }
+        }
+        outParts.push(leadWs + convertedChunks.join(' ') + trailWs);
+      }
+
+      convertedLines.push(outParts.join(''));
+    }
+
+    return anyConverted ? convertedLines.join('\n') : null;
+  }
+
+  private static isVirtuallyUnchanged(input: string, output: string): boolean {
+    const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9\u0980-\u09FF\u0900-\u097F]+/g, '');
+    const a = norm(input);
+    const b = norm(output);
+    return Boolean(a && b && a === b);
+  }
+
   private static splitTextChunks(text: string, maxLen: number): string[] {
     if (text.length <= maxLen) return [text];
     const chunks: string[] = [];
@@ -4503,8 +4750,9 @@ export class TelegramService {
   private static async translateWithGoogleClient(
     chunk: string,
     targetCode: 'bn' | 'hi' | 'en',
-    client: 'at' | 'it' | 'gtx'
-  ): Promise<{ ok: boolean; text?: string; retryable?: boolean; status?: number }> {
+    client: 'at' | 'it' | 'gtx',
+    sourceLang: string = 'auto'
+  ): Promise<{ ok: boolean; text?: string; detectedLang?: string; retryable?: boolean; status?: number }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
     try {
@@ -4513,7 +4761,7 @@ export class TelegramService {
           ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
           : 'GoogleTranslate/6.29.59279 (Linux; U; Android 11; Pixel 5)';
       const url = `https://translate.googleapis.com/translate_a/single?client=${client}&dt=t`;
-      const body = new URLSearchParams({ sl: 'auto', tl: targetCode, q: chunk }).toString();
+      const body = new URLSearchParams({ sl: sourceLang, tl: targetCode, q: chunk }).toString();
       const res = await fetch(url, {
         method: 'POST',
         headers: {
@@ -4533,7 +4781,8 @@ export class TelegramService {
           .map((seg: any) => (Array.isArray(seg) && typeof seg[0] === 'string' ? seg[0] : ''))
           .join('')
           .trim();
-        if (joined) return { ok: true, text: joined };
+        const detectedLang = typeof data[2] === 'string' ? data[2].toLowerCase() : undefined;
+        if (joined) return { ok: true, text: joined, detectedLang };
       }
       return { ok: false, retryable: false, status: res.status };
     } catch (err: any) {
@@ -4543,16 +4792,72 @@ export class TelegramService {
     }
   }
 
+  private static async translateWithGooglePipeline(
+    text: string,
+    targetCode: 'bn' | 'hi' | 'en',
+    sourceLang: string = 'auto'
+  ): Promise<{ text: string; detectedLang?: string } | null> {
+    const lines = text.split('\n');
+    const outLines: string[] = [];
+    let firstDetectedLang: string | undefined;
+
+    for (const line of lines) {
+      if (!line.trim()) {
+        outLines.push('');
+        continue;
+      }
+
+      const googleChunks = this.splitTextChunks(line, 4000);
+      const translatedChunks: string[] = [];
+
+      for (const chunk of googleChunks) {
+        const clients: Array<'at' | 'it' | 'gtx'> = ['at', 'it', 'gtx'];
+        let chunkResult: { text: string; detectedLang?: string } | null = null;
+
+        for (let i = 0; i < clients.length; i++) {
+          const client = clients[i];
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const res = await this.translateWithGoogleClient(chunk, targetCode, client, sourceLang);
+            if (res.ok && res.text) {
+              chunkResult = { text: res.text, detectedLang: res.detectedLang };
+              break;
+            }
+            if (!res.retryable) break;
+            if (attempt === 0) {
+              const backoffMs = 200 * Math.pow(2, i) + Math.floor(Math.random() * 120);
+              await new Promise((r) => setTimeout(r, backoffMs));
+            }
+          }
+          if (chunkResult) break;
+        }
+
+        if (!chunkResult) {
+          return null;
+        }
+        if (!firstDetectedLang && chunkResult.detectedLang) {
+          firstDetectedLang = chunkResult.detectedLang;
+        }
+        translatedChunks.push(chunkResult.text);
+      }
+
+      outLines.push(translatedChunks.join(' '));
+    }
+
+    const joined = outLines.join('\n').trim();
+    return joined ? { text: joined, detectedLang: firstDetectedLang } : null;
+  }
+
   private static async translateWithMyMemoryChunk(
     chunk: string,
-    targetCode: 'bn' | 'hi' | 'en'
+    targetCode: 'bn' | 'hi' | 'en',
+    sourceLang: string = 'autodetect'
   ): Promise<string | null> {
     const maxRetries = 2;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 8000);
       try {
-        const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(chunk)}&langpair=autodetect|${encodeURIComponent(targetCode)}`;
+        const url = `https://api.mymemory.translated.net/get?q=${encodeURIComponent(chunk)}&langpair=${encodeURIComponent(sourceLang)}|${encodeURIComponent(targetCode)}`;
         const res = await fetch(url, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -4609,7 +4914,7 @@ export class TelegramService {
     const cleanText = sourceText.trim();
     if (!cleanText) return null;
 
-    const cacheKey = `${targetCode}:${cleanText}`;
+    const cacheKey = `v2:${targetCode}:${cleanText}`;
     const cached = this.translationCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       return cached.text;
@@ -4624,42 +4929,72 @@ export class TelegramService {
       return val;
     };
 
+    const phoneticInfo = this.detectPhoneticIndic(cleanText);
+    let workingText = cleanText;
+    let effectiveSourceLang: string = 'auto';
+    let transliteratedLocally = false;
+
+    // 1. Pre-detect phonetic Bengali written in English letters (Banglish)
+    if (phoneticInfo.isBanglish) {
+      const normalized = this.normalizeBanglishShorthand(cleanText);
+      const transliteratedBn = await this.transliteratePhoneticText(normalized, 'bn-t-i0-und');
+      if (transliteratedBn && /[\u0980-\u09FF]/.test(transliteratedBn)) {
+        if (targetCode === 'bn') {
+          return rememberResult(transliteratedBn);
+        }
+        workingText = transliteratedBn;
+        effectiveSourceLang = 'bn';
+        transliteratedLocally = true;
+      }
+    }
+
     // Tier 1: Google Translate POST with client rotation (at -> it -> gtx) + exponential backoff
     try {
-      const googleChunks = this.splitTextChunks(cleanText, 4000);
-      const translatedChunks: string[] = [];
-      let allGoogleSucceeded = true;
-
-      for (const chunk of googleChunks) {
-        const clients: Array<'at' | 'it' | 'gtx'> = ['at', 'it', 'gtx'];
-        let chunkResult: string | null = null;
-
-        for (let i = 0; i < clients.length; i++) {
-          const client = clients[i];
-          for (let attempt = 0; attempt < 2; attempt++) {
-            const res = await this.translateWithGoogleClient(chunk, targetCode, client);
-            if (res.ok && res.text) {
-              chunkResult = res.text;
-              break;
+      const primaryResult = await this.translateWithGooglePipeline(workingText, targetCode, effectiveSourceLang);
+      if (primaryResult?.text) {
+        // Safety net: if source was Latin-script Banglish/Hinglish not caught by lexicon,
+        // Google often detects 'bn'/'hi' while echoing the original Latin words unchanged.
+        if (
+          !transliteratedLocally &&
+          phoneticInfo.hasLatin &&
+          !phoneticInfo.hasBengaliScript &&
+          !phoneticInfo.hasDevanagariScript &&
+          this.isVirtuallyUnchanged(cleanText, primaryResult.text)
+        ) {
+          if (primaryResult.detectedLang === 'bn') {
+            const normalized = this.normalizeBanglishShorthand(cleanText);
+            const fallbackBn = await this.transliteratePhoneticText(normalized, 'bn-t-i0-und');
+            if (fallbackBn && /[\u0980-\u09FF]/.test(fallbackBn)) {
+              if (targetCode === 'bn') {
+                return rememberResult(fallbackBn);
+              }
+              const retranslated = await this.translateWithGooglePipeline(fallbackBn, targetCode, 'bn');
+              if (retranslated?.text) {
+                return rememberResult(retranslated.text);
+              }
+              workingText = fallbackBn;
+              effectiveSourceLang = 'bn';
             }
-            if (!res.retryable) break;
-            if (attempt === 0) {
-              const backoffMs = 200 * Math.pow(2, i) + Math.floor(Math.random() * 120);
-              await new Promise((r) => setTimeout(r, backoffMs));
+          } else if (primaryResult.detectedLang === 'hi' || phoneticInfo.isHinglish) {
+            const fallbackHi = await this.transliteratePhoneticText(cleanText, 'hi-t-i0-und');
+            if (fallbackHi && /[\u0900-\u097F]/.test(fallbackHi)) {
+              if (targetCode === 'hi') {
+                return rememberResult(fallbackHi);
+              }
+              const retranslated = await this.translateWithGooglePipeline(fallbackHi, targetCode, 'hi');
+              if (retranslated?.text) {
+                return rememberResult(retranslated.text);
+              }
+              workingText = fallbackHi;
+              effectiveSourceLang = 'hi';
             }
           }
-          if (chunkResult) break;
         }
 
-        if (!chunkResult) {
-          allGoogleSucceeded = false;
-          break;
+        // Only return primaryResult if we didn't fall through after upgrading workingText
+        if (effectiveSourceLang === 'auto' || transliteratedLocally) {
+          return rememberResult(primaryResult.text);
         }
-        translatedChunks.push(chunkResult);
-      }
-
-      if (allGoogleSucceeded && translatedChunks.length > 0) {
-        return rememberResult(translatedChunks.join('\n'));
       }
     } catch (err: any) {
       console.warn('[Translate] Google pipeline notice:', err?.message || err);
@@ -4667,12 +5002,13 @@ export class TelegramService {
 
     // Tier 2: Chunked MyMemory API fallback (up to 450 chars per chunk)
     try {
-      const mmChunks = this.splitTextChunks(cleanText, 450);
+      const mmSourceLang = effectiveSourceLang === 'auto' ? 'autodetect' : effectiveSourceLang;
+      const mmChunks = this.splitTextChunks(workingText, 450);
       const translatedChunks: string[] = [];
       let allMmSucceeded = true;
 
       for (const chunk of mmChunks) {
-        const translatedChunk = await this.translateWithMyMemoryChunk(chunk, targetCode);
+        const translatedChunk = await this.translateWithMyMemoryChunk(chunk, targetCode, mmSourceLang);
         if (!translatedChunk) {
           allMmSucceeded = false;
           break;
@@ -4698,7 +5034,7 @@ export class TelegramService {
     if (!chatId) return true;
 
     const replied = message.reply_to_message;
-    const targetSourceText = (replied?.text || replied?.caption || parsed.inlineText || '').trim();
+    const targetSourceText = (parsed.inlineText || replied?.text || replied?.caption || '').trim();
 
     if (!targetSourceText) {
       await this.callTelegramApi('sendMessage', {
@@ -4727,7 +5063,7 @@ export class TelegramService {
 
     await this.callTelegramApi('sendMessage', {
       chat_id: chatId,
-      text: `🌐 <b>Translated (${parsed.label}):</b>\n\n${this.escapeHtml(translated)}`,
+      text: this.escapeHtml(translated),
       parse_mode: 'HTML',
       reply_to_message_id: replied?.message_id || message.message_id,
       ...(isGroup && message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})

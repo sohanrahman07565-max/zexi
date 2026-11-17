@@ -345,6 +345,7 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
         telegramId: clonedAuth.adminUser.telegramId,
         name: clonedAuth.adminUser.name,
         username: clonedAuth.adminUser.username,
+        photoUrl: clonedAuth.adminUser.photoUrl,
         role: clonedAuth.adminUser.role,
         botId: clonedAuth.clonedBot.id,
         permissions: clonedAuth.adminUser.permissions
@@ -509,6 +510,7 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
       telegramId: matchedAdmin.telegramId,
       name: matchedAdmin.name,
       username: matchedAdmin.username,
+      photoUrl: matchedAdmin.photoUrl,
       role: matchedAdmin.role,
       botId: 'main',
       permissions: matchedAdmin.permissions
@@ -764,6 +766,8 @@ apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
       id: admin.id,
       telegramId: admin.telegramId,
       name: admin.name,
+      username: admin.username,
+      photoUrl: admin.photoUrl,
       role: admin.role,
       botId: 'main',
       permissions: admin.permissions
@@ -855,11 +859,116 @@ apiRouter.get('/auth/me', authenticate, async (req: Request, res: Response) => {
       telegramId: admin.telegramId,
       name: admin.name,
       username: admin.username,
+      photoUrl: admin.photoUrl,
       role: admin.role,
       botId: sessionBotId,
       permissions: admin.permissions
     }
   });
+});
+
+// In-memory short cache for Telegram user profile photos (avoids repeated Bot API round-trips)
+const avatarCache = new Map<string, { buffer: Buffer | null; contentType: string; expiresAt: number }>();
+
+// GET /api/auth/avatar (Securely proxies current admin's Telegram profile photo without leaking bot token)
+apiRouter.get('/auth/avatar', authenticate, async (req: Request, res: Response) => {
+  const admin = (req as any).admin as AdminUser;
+  const sessionBotId = (req as any).sessionBotId || 'main';
+  const tgId = String(admin.telegramId || '').trim();
+  const cacheKey = `${sessionBotId}:${tgId || admin.id}`;
+  const now = Date.now();
+  const cached = avatarCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    if (!cached.buffer) {
+      return res.status(204).end();
+    }
+    res.setHeader('Content-Type', cached.contentType);
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    return res.send(cached.buffer);
+  }
+
+  // 1. Try Telegram Bot API getUserProfilePhotos when numeric Telegram user ID is available
+  if (/^\d+$/.test(tgId)) {
+    const candidateTokens: string[] = [];
+    const activeToken = await TelegramService.getBotToken().catch(() => '');
+    if (activeToken) candidateTokens.push(activeToken);
+
+    const mainStorage = StorageManager.getMainStorage();
+    const mainSettings = await mainStorage.getSettings().catch(() => null);
+    const mainEnvToken = (
+      process.env.BOT_TOKEN ||
+      process.env.TELEGRAM_BOT_TOKEN ||
+      process.env.TG_BOT_TOKEN ||
+      mainSettings?.botToken ||
+      ''
+    ).trim();
+    if (mainEnvToken && !candidateTokens.includes(mainEnvToken)) {
+      candidateTokens.push(mainEnvToken);
+    }
+
+    for (const token of candidateTokens) {
+      try {
+        const photosRes = await TelegramService.callTelegramApi(
+          'getUserProfilePhotos',
+          { user_id: Number(tgId), limit: 1 },
+          token
+        );
+        const sizes = photosRes?.ok && Array.isArray(photosRes?.result?.photos) ? photosRes.result.photos[0] : null;
+        if (Array.isArray(sizes) && sizes.length > 0) {
+          const chosen = sizes[Math.min(1, sizes.length - 1)] || sizes[0];
+          if (chosen?.file_id) {
+            const fileRes = await TelegramService.callTelegramApi('getFile', { file_id: chosen.file_id }, token);
+            const filePath = fileRes?.ok ? fileRes?.result?.file_path : null;
+            if (filePath) {
+              const controller = new AbortController();
+              const timer = setTimeout(() => controller.abort(), 8000);
+              try {
+                const imgRes = await fetch(`https://api.telegram.org/file/bot${token}/${filePath}`, {
+                  signal: controller.signal
+                });
+                if (imgRes.ok) {
+                  const buf = Buffer.from(await imgRes.arrayBuffer());
+                  if (buf.length > 0) {
+                    const contentType = imgRes.headers.get('content-type') || 'image/jpeg';
+                    avatarCache.set(cacheKey, { buffer: buf, contentType, expiresAt: now + 5 * 60 * 1000 });
+                    res.setHeader('Content-Type', contentType);
+                    res.setHeader('Cache-Control', 'private, max-age=300');
+                    return res.send(buf);
+                  }
+                }
+              } finally {
+                clearTimeout(timer);
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+  }
+
+  // 2. Fallback: fetch stored Telegram photoUrl server-side if present
+  if (admin.photoUrl && /^https:\/\//i.test(admin.photoUrl)) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6000);
+    try {
+      const imgRes = await fetch(admin.photoUrl, { signal: controller.signal });
+      const contentType = imgRes.headers.get('content-type') || '';
+      if (imgRes.ok && contentType.startsWith('image/')) {
+        const buf = Buffer.from(await imgRes.arrayBuffer());
+        if (buf.length > 0) {
+          avatarCache.set(cacheKey, { buffer: buf, contentType, expiresAt: now + 5 * 60 * 1000 });
+          res.setHeader('Content-Type', contentType);
+          res.setHeader('Cache-Control', 'private, max-age=300');
+          return res.send(buf);
+        }
+      }
+    } catch {} finally {
+      clearTimeout(timer);
+    }
+  }
+
+  avatarCache.set(cacheKey, { buffer: null, contentType: '', expiresAt: now + 2 * 60 * 1000 });
+  return res.status(204).end();
 });
 
 // POST /api/auth/forgot-password (Validates WebCode from /webcode command)
@@ -1188,6 +1297,14 @@ async function verifyAndAuthorizeTelegramUser(
     return { ok: false, error: 'Access Denied: Your administrator account has been disabled.', statusCode: 403 };
   }
 
+  const incomingPhotoUrl = typeof tgUser.photo_url === 'string' && /^https?:\/\//i.test(tgUser.photo_url.trim())
+    ? tgUser.photo_url.trim()
+    : '';
+  if (incomingPhotoUrl && admin.photoUrl !== incomingPhotoUrl) {
+    admin.photoUrl = incomingPhotoUrl;
+    await activeStorage.saveAdmin(admin).catch(() => {});
+  }
+
   return { ok: true, admin, botId: resolvedBotId, storage: activeStorage };
 }
 
@@ -1250,6 +1367,7 @@ apiRouter.post('/auth/telegram-login', async (req: Request, res: Response) => {
       telegramId: admin.telegramId,
       name: admin.name,
       username: admin.username,
+      photoUrl: admin.photoUrl,
       role: admin.role,
       botId: 'main',
       permissions: admin.permissions
@@ -1374,6 +1492,7 @@ apiRouter.post('/auth/tma', async (req: Request, res: Response) => {
       telegramId: admin.telegramId,
       name: admin.name,
       username: admin.username,
+      photoUrl: admin.photoUrl,
       role: admin.role,
       botId: verifiedBotId,
       permissions: admin.permissions

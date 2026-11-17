@@ -6,6 +6,7 @@ export interface AdminUser {
   telegramId: string;
   name: string;
   username?: string;
+  photoUrl?: string;
   role: 'owner' | 'subadmin';
   botId?: string;
   enabled?: boolean;
@@ -351,6 +352,20 @@ export const api = {
       const res = await authFetch('/api/auth/me');
       if (!res.ok) return null;
       return await res.json();
+    } catch {
+      return null;
+    }
+  },
+
+  async getAuthAvatarBlobUrl(): Promise<string | null> {
+    try {
+      const res = await authFetch('/api/auth/avatar');
+      if (res.status !== 200) return null;
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.startsWith('image/')) return null;
+      const blob = await res.blob();
+      if (!blob || blob.size === 0) return null;
+      return URL.createObjectURL(blob);
     } catch {
       return null;
     }

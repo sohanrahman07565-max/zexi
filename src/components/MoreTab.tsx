@@ -115,6 +115,84 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [gestureFeedback, setGestureFeedback] = useState(false);
   const [showAdminDetailsPopup, setShowAdminDetailsPopup] = useState(false);
 
+  // Dynamic Telegram Profile Photo resolution (WebApp initData / session photoUrl / Bot API proxy -> SVG User fallback)
+  const [ownerAvatarSrc, setOwnerAvatarSrc] = useState<string | null>(null);
+  const [ownerAvatarError, setOwnerAvatarError] = useState<boolean>(false);
+  const avatarBlobUrlRef = useRef<string | null>(null);
+  const triedProxyAvatarRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const revokePreviousBlob = () => {
+      if (avatarBlobUrlRef.current) {
+        try { URL.revokeObjectURL(avatarBlobUrlRef.current); } catch {}
+        avatarBlobUrlRef.current = null;
+      }
+    };
+
+    revokePreviousBlob();
+    triedProxyAvatarRef.current = false;
+    setOwnerAvatarError(false);
+
+    const tgWebAppUser =
+      typeof window !== 'undefined' ? (window as any).Telegram?.WebApp?.initDataUnsafe?.user : undefined;
+    const tgIdMatches =
+      !tgWebAppUser?.id ||
+      !currentUser.telegramId ||
+      !/^\d+$/.test(String(currentUser.telegramId)) ||
+      String(tgWebAppUser.id) === String(currentUser.telegramId);
+    const directPhotoUrl =
+      (tgIdMatches && typeof tgWebAppUser?.photo_url === 'string' && tgWebAppUser.photo_url.trim()) ||
+      (typeof currentUser.photoUrl === 'string' && currentUser.photoUrl.trim()) ||
+      '';
+
+    if (directPhotoUrl) {
+      setOwnerAvatarSrc(directPhotoUrl);
+    } else if (/^\d+$/.test(String(currentUser.telegramId || '').trim())) {
+      setOwnerAvatarSrc(null);
+      triedProxyAvatarRef.current = true;
+      api.getAuthAvatarBlobUrl().then((blobUrl) => {
+        if (cancelled) {
+          if (blobUrl) {
+            try { URL.revokeObjectURL(blobUrl); } catch {}
+          }
+          return;
+        }
+        if (blobUrl) {
+          avatarBlobUrlRef.current = blobUrl;
+          setOwnerAvatarSrc(blobUrl);
+        }
+      }).catch(() => {});
+    } else {
+      setOwnerAvatarSrc(null);
+    }
+
+    return () => {
+      cancelled = true;
+      revokePreviousBlob();
+    };
+  }, [currentUser.id, currentUser.telegramId, currentUser.photoUrl]);
+
+  const handleOwnerAvatarError = () => {
+    if (!triedProxyAvatarRef.current && /^\d+$/.test(String(currentUser.telegramId || '').trim())) {
+      triedProxyAvatarRef.current = true;
+      api.getAuthAvatarBlobUrl().then((blobUrl) => {
+        if (blobUrl) {
+          if (avatarBlobUrlRef.current) {
+            try { URL.revokeObjectURL(avatarBlobUrlRef.current); } catch {}
+          }
+          avatarBlobUrlRef.current = blobUrl;
+          setOwnerAvatarSrc(blobUrl);
+          setOwnerAvatarError(false);
+        } else {
+          setOwnerAvatarError(true);
+        }
+      }).catch(() => setOwnerAvatarError(true));
+    } else {
+      setOwnerAvatarError(true);
+    }
+  };
+
   const handleHeaderSecretTap = () => {
     const now = Date.now();
     // Reset if more than 2 seconds between taps
@@ -1407,18 +1485,30 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           }`}
         >
           <div className="flex items-center gap-3 sm:gap-3.5 min-w-0 flex-1">
-            {/* Official Telegram Logo Avatar */}
-            <div className="w-11 h-11 shrink-0 rounded-full overflow-hidden flex items-center justify-center shadow-[0_6px_16px_rgba(34,158,217,0.35)] bg-[#229ED9]">
-              <svg viewBox="0 0 48 48" className="w-full h-full" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <circle cx="24" cy="24" r="24" fill="url(#tg_more_card_grad)" />
-                <path fillRule="evenodd" clipRule="evenodd" d="M10.2 23.3C18.6 19.6 24.2 17.1 27.1 15.9C35.2 12.5 36.9 11.9 38 11.9C38.2 11.9 38.8 12 39.2 12.3C39.5 12.6 39.6 13 39.6 13.3C39.6 13.6 39.6 14.2 39.5 14.9L34.3 39.5C33.9 41.3 32.8 41.8 31.3 40.9L23.4 35.1L19.6 38.8C19.2 39.2 18.8 39.6 18 39.6L18.6 31.1L34.1 17.1C34.8 16.5 33.9 16.1 33 16.7L13.8 28.8L5.6 26.2C3.8 25.6 3.8 24.4 6 23.5L10.2 23.3Z" fill="white" />
-                <defs>
-                  <linearGradient id="tg_more_card_grad" x1="24" y1="0" x2="24" y2="48" gradientUnits="userSpaceOnUse">
-                    <stop stopColor="#2AABEE" />
-                    <stop offset="1" stopColor="#229ED9" />
-                  </linearGradient>
-                </defs>
-              </svg>
+            {/* Dynamic Telegram Profile Photo with Minimalist User Account SVG Fallback */}
+            <div className="w-11 h-11 shrink-0 rounded-full overflow-hidden flex items-center justify-center bg-white/10 border border-white/20 text-white/85 shadow-[0_6px_16px_rgba(0,0,0,0.28)]">
+              {ownerAvatarSrc && !ownerAvatarError ? (
+                <img
+                  src={ownerAvatarSrc}
+                  alt={currentUser.name || 'Admin'}
+                  onError={handleOwnerAvatarError}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <svg
+                  viewBox="0 0 24 24"
+                  className="w-5 h-5 text-white/80"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M20 21a8 8 0 0 0-16 0" />
+                  <circle cx="12" cy="8" r="4" />
+                </svg>
+              )}
             </div>
             <div className="min-w-0">
               <div className="text-sm font-bold text-white truncate">

@@ -35,6 +35,7 @@ export interface AdminUser {
   telegramId: string;
   name: string;
   username?: string;
+  photoUrl?: string;
   role: AdminRole;
   passwordHash: string;
   permissions: AdminPermissions;

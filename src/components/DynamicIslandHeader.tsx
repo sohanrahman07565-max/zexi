@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, RefreshCw, Settings, Bot, ChevronDown, Sparkles } from 'lucide-react';
+import { Send, RefreshCw, Settings, Bot, ChevronDown } from 'lucide-react';
 import { AdminUser, DesignConfig } from '../lib/api';
 
 interface DynamicIslandHeaderProps {
@@ -197,13 +197,8 @@ export const DynamicIslandHeader: React.FC<DynamicIslandHeaderProps> = ({
             </div>
           </div>
 
-          {/* Right: Live Item Count Pill + Owner/Admin Badge */}
+          {/* Right: Owner/Admin Badge */}
           <div className="flex items-center gap-1.5 shrink-0">
-            <span className="hidden xs:inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-white/8 border border-white/15 text-[10.5px] font-bold text-white/85 tabular-nums whitespace-nowrap shrink-0">
-              <Sparkles className="w-2.5 h-2.5" style={{ color: activeAccent }} />
-              {totalItems}
-            </span>
-
             <button
               type="button"
               onClick={(e) => {
