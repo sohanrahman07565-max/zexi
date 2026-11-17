@@ -3582,11 +3582,13 @@ export class SharedStorageService {
   // Distributed Token Lock across all servers (Render, Dev, Preview) keyed by SHA-256 token hash
   public async tryClaimTokenLock(
     botToken: string,
-    metadata: { instanceId: string; host: string; pid: number; botId: string; env: string },
-    ttlMs: number = 22000
+    metadata: { instanceId: string; host: string; pid: number; botId: string; env: string; isPrimary?: boolean },
+    ttlMs: number = 22000,
+    options?: { forceReset?: boolean; isStartupBoot?: boolean }
   ): Promise<{
     acquired: boolean;
-    conflict?: { instanceId: string; host: string; pid: number; botId: string; env: string; heartbeat: number };
+    overwrote?: { instanceId: string; env?: string; host?: string; botId?: string };
+    conflict?: { instanceId: string; host: string; pid: number; botId: string; env: string; isPrimary?: boolean; heartbeat: number };
   }> {
     if (!botToken || !botToken.trim()) {
       return { acquired: false };
@@ -3602,15 +3604,43 @@ export class SharedStorageService {
         existing = await res.json();
       }
 
-      const activeOther =
+      const callerIsPrimary = Boolean(metadata.isPrimary || String(metadata.env || '').startsWith('render('));
+      const existingIsPrimary = Boolean(existing?.isPrimary || String(existing?.env || '').startsWith('render('));
+      const sameHostSameBot = Boolean(
+        existing &&
+        existing.host &&
+        metadata.host &&
+        existing.host === metadata.host &&
+        existing.botId === metadata.botId
+      );
+
+      const isDifferentAliveInstance = Boolean(
         existing &&
         existing.instanceId &&
         existing.instanceId !== metadata.instanceId &&
-        (now - Number(existing.heartbeat || 0)) < ttlMs;
+        (now - Number(existing.heartbeat || 0)) < ttlMs
+      );
 
-      if (activeOther) {
+      const canResetExisting = Boolean(
+        options?.forceReset ||
+        (callerIsPrimary && !existingIsPrimary) ||
+        sameHostSameBot ||
+        (options?.isStartupBoot && existing?.botId === metadata.botId && callerIsPrimary)
+      );
+
+      if (isDifferentAliveInstance && !canResetExisting) {
         return { acquired: false, conflict: existing };
       }
+
+      const overwrote =
+        isDifferentAliveInstance && canResetExisting
+          ? {
+              instanceId: String(existing.instanceId || ''),
+              env: existing.env,
+              host: existing.host,
+              botId: existing.botId
+            }
+          : undefined;
 
       const claimPayload = {
         ...metadata,
@@ -3625,19 +3655,26 @@ export class SharedStorageService {
         body: JSON.stringify(claimPayload)
       });
 
-      // Read-after-write check to resolve near-simultaneous startup races across hosts
-      if (!existing || existing.instanceId !== metadata.instanceId) {
+      // Read-after-write check to resolve near-simultaneous startup races across external hosts
+      if (!options?.forceReset && (!existing || existing.instanceId !== metadata.instanceId)) {
         await new Promise((r) => setTimeout(r, 40));
         const verifyRes = await fetch(url).catch(() => null);
         if (verifyRes && verifyRes.ok) {
           const verified = await verifyRes.json().catch(() => null);
-          if (verified && verified.instanceId && verified.instanceId !== metadata.instanceId && (Date.now() - Number(verified.heartbeat || 0)) < ttlMs) {
+          const verifiedIsPrimary = Boolean(verified?.isPrimary || String(verified?.env || '').startsWith('render('));
+          if (
+            verified &&
+            verified.instanceId &&
+            verified.instanceId !== metadata.instanceId &&
+            (Date.now() - Number(verified.heartbeat || 0)) < ttlMs &&
+            !(callerIsPrimary && !verifiedIsPrimary)
+          ) {
             return { acquired: false, conflict: verified };
           }
         }
       }
 
-      return { acquired: true };
+      return { acquired: true, overwrote };
     } catch {
       // Fallback to local OS lockfile & Telegram 409 check if RTDB is unreachable
       return { acquired: true };
@@ -3665,7 +3702,11 @@ export class SharedStorageService {
   }
 
   // Distributed Leader Election for Telegram Polling across multi-instance environments
-  public async tryClaimPollingLeader(instanceId: string, ttlMs: number = 10000): Promise<{ isLeader: boolean; currentLeader: string }> {
+  public async tryClaimPollingLeader(
+    instanceId: string,
+    ttlMs: number = 10000,
+    options?: { forceReset?: boolean; isPrimary?: boolean }
+  ): Promise<{ isLeader: boolean; currentLeader: string }> {
     try {
       const token = await this.getFirebaseAuthToken();
       const url = this.getRtdbUrl('/bot_leader', token);
@@ -3676,7 +3717,17 @@ export class SharedStorageService {
         leader = await res.json();
       }
 
-      const hasActiveOtherLeader = leader && leader.instanceId && leader.instanceId !== instanceId && (now - Number(leader.heartbeat || 0)) < ttlMs;
+      const leaderIsPrimary = Boolean(leader?.isPrimary);
+      const callerIsPrimary = Boolean(options?.isPrimary);
+
+      const hasActiveOtherLeader = Boolean(
+        !options?.forceReset &&
+        leader &&
+        leader.instanceId &&
+        leader.instanceId !== instanceId &&
+        (now - Number(leader.heartbeat || 0)) < ttlMs &&
+        !(callerIsPrimary && !leaderIsPrimary)
+      );
 
       if (hasActiveOtherLeader) {
         return { isLeader: false, currentLeader: leader.instanceId };
@@ -3685,6 +3736,7 @@ export class SharedStorageService {
       // Claim or renew leader role
       const claimPayload = {
         instanceId,
+        isPrimary: callerIsPrimary,
         heartbeat: now,
         updatedAt: new Date().toISOString()
       };
