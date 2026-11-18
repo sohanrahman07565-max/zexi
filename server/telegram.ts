@@ -8,6 +8,7 @@ import { hashPassword, signSessionToken } from './auth';
 import { PostBotEngine } from './postBot';
 
 export const botTokenContext = new AsyncLocalStorage<string>();
+export const botIdContext = new AsyncLocalStorage<string>();
 export const senderUsernameContext = new AsyncLocalStorage<string>();
 
 interface CloneSession {
@@ -1121,17 +1122,26 @@ export class TelegramService {
   public static async handleUpdate(update: any, tokenOverride?: string, botId: string = 'main'): Promise<void> {
     if (!update) return;
 
+    const canonicalBotId = String(botId || 'main').trim() || 'main';
+
     // Hard lifecycle guard: halt all processing immediately for deleted or stopped bots
-    if (botId !== 'main') {
-      if (TelegramBotManager.isBotDeleted(botId) || TelegramBotManager.isBotStopped(botId)) {
+    if (canonicalBotId !== 'main') {
+      if (TelegramBotManager.isBotDeleted(canonicalBotId) || TelegramBotManager.isBotStopped(canonicalBotId)) {
         return;
       }
     } else if (TelegramService.isManuallyStopped()) {
       return;
     }
 
-    if (tokenOverride && !botTokenContext.getStore()) {
-      return botTokenContext.run(tokenOverride, () => this.handleUpdate(update, undefined, botId));
+    const expectedStorage = StorageManager.getStorage(canonicalBotId);
+    if (storageContext.getStore() !== expectedStorage) {
+      return storageContext.run(expectedStorage, () => this.handleUpdate(update, tokenOverride, canonicalBotId));
+    }
+    if (botIdContext.getStore() !== canonicalBotId) {
+      return botIdContext.run(canonicalBotId, () => this.handleUpdate(update, tokenOverride, canonicalBotId));
+    }
+    if (tokenOverride && botTokenContext.getStore() !== tokenOverride) {
+      return botTokenContext.run(tokenOverride, () => this.handleUpdate(update, undefined, canonicalBotId));
     }
 
     // Strict multi-instance atomic deduplication: prevents duplicate execution and double replies (0ms instant)
@@ -1336,8 +1346,9 @@ export class TelegramService {
 
   private static isMainBotContext(): boolean {
     const mainStorage = StorageManager.getMainStorage();
-    const activeBotId = String((storage as any)?.botId || 'main').trim() || 'main';
-    return storage === mainStorage && activeBotId === 'main';
+    const currentStorage = storageContext.getStore() || mainStorage;
+    const activeBotId = String(botIdContext.getStore() || currentStorage?.botId || (storage as any)?.botId || 'main').trim() || 'main';
+    return currentStorage === mainStorage && activeBotId === 'main';
   }
 
   public static async isGroupAdminOrCreator(chatId: string | number, userId: string | number): Promise<boolean> {
@@ -1420,8 +1431,7 @@ export class TelegramService {
     await storage.loadLatest(false);
     const admins = await storage.getAdmins();
     const settings = await storage.getSettings();
-    const mainStorage = StorageManager.getMainStorage();
-    const isMainBot = storage === mainStorage;
+    const isMainBot = this.isMainBotContext();
 
     const rootAdminId = isMainBot
       ? String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || settings.rootAdminId || '8153757163').trim()
@@ -1477,8 +1487,7 @@ export class TelegramService {
     await storage.loadLatest(false);
     const admins = await storage.getAdmins();
     const settings = await storage.getSettings();
-    const mainStorage = StorageManager.getMainStorage();
-    const isMainBot = storage === mainStorage;
+    const isMainBot = this.isMainBotContext();
 
     const rootAdminRaw = isMainBot
       ? String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || settings.rootAdminId || '8153757163').trim()
@@ -1505,8 +1514,7 @@ export class TelegramService {
   }
 
   private static async sendAdminHelpGuide(chatId: number | string, _fromId: string): Promise<void> {
-    const mainStorage = StorageManager.getMainStorage();
-    const isMainBot = storage === mainStorage;
+    const isMainBot = this.isMainBotContext();
     const botUsername = await this.getBotUsername();
     const botLabel = botUsername ? `@${botUsername.replace(/^@/, '')}` : (isMainBot ? 'Main Bot' : 'Cloned Bot');
 
@@ -7701,8 +7709,7 @@ export class TelegramService {
     await storage.loadLatest(true);
     const settings = await storage.getSettings();
     const admin = await storage.getAdmin(fromId);
-    const mainStorage = StorageManager.getMainStorage();
-    const isMainBot = storage === mainStorage;
+    const isMainBot = this.isMainBotContext();
     const rootAdminId = isMainBot
       ? String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || settings.rootAdminId || '8153757163').trim()
       : String(settings.rootAdminId || '').trim();
@@ -9021,6 +9028,14 @@ export class TelegramService {
 
     // SELECT BOT MODE DURING INTERACTIVE CLONE WIZARD
     if (data && data.startsWith('clone_mode:')) {
+      if (!this.isMainBotContext()) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Cloning is only available on the main primary bot.',
+          show_alert: true
+        });
+        return;
+      }
       const parts = data.split(':');
       const targetAdminId = parts[1]?.trim() || fromId;
       const chosenMode: BotOperationalMode = parts[2] === 'post_bot' ? 'post_bot' : 'file_bot';
