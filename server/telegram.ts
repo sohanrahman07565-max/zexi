@@ -1030,6 +1030,55 @@ export class TelegramService {
       .replace(/>/g, '&gt;');
   }
 
+  public static formatCode(value: string | number | undefined | null): string {
+    return `<code>${this.escapeHtml(String(value ?? ''))}</code>`;
+  }
+
+  public static formatBold(value: string | number | undefined | null): string {
+    return `<b>${this.escapeHtml(String(value ?? ''))}</b>`;
+  }
+
+  public static formatItalic(value: string | number | undefined | null): string {
+    return `<i>${this.escapeHtml(String(value ?? ''))}</i>`;
+  }
+
+  public static formatHeader(title: string, icon?: string): string {
+    return `${icon ? `${icon} ` : ''}<b>${this.escapeHtml(title)}</b>`;
+  }
+
+  public static formatField(
+    label: string,
+    value: string | number | undefined | null,
+    options?: { icon?: string; code?: boolean; rawHtmlValue?: boolean }
+  ): string {
+    const valStr = String(value ?? '');
+    const formattedValue = options?.rawHtmlValue
+      ? valStr
+      : options?.code !== false
+      ? `<code>${this.escapeHtml(valStr)}</code>`
+      : this.escapeHtml(valStr);
+    return `• ${options?.icon ? `${options.icon} ` : ''}<b>${this.escapeHtml(label)}:</b> ${formattedValue}`;
+  }
+
+  public static formatNotice(icon: string, title: string, body?: string): string {
+    return `${icon} <b>${this.escapeHtml(title)}</b>${body ? `\n<i>${this.escapeHtml(body)}</i>` : ''}`;
+  }
+
+  public static formatUserIdentity(name?: string, username?: string, id?: string | number): string {
+    const cleanName = (name || '').trim();
+    const cleanUsername = (username || '').replace(/^@+/, '').trim();
+    const cleanId = id !== undefined && id !== null ? String(id).trim() : '';
+    const primary = cleanName ? `<code>${this.escapeHtml(cleanName)}</code>` : (cleanUsername ? `<code>@${this.escapeHtml(cleanUsername)}</code>` : '<code>User</code>');
+    const extras: string[] = [];
+    if (cleanUsername && (!cleanName || cleanName.replace(/^@+/, '').toLowerCase() !== cleanUsername.toLowerCase())) {
+      extras.push(`@${this.escapeHtml(cleanUsername)}`);
+    }
+    if (cleanId) {
+      extras.push(`<b>ID:</b> <code>${this.escapeHtml(cleanId)}</code>`);
+    }
+    return extras.length > 0 ? `${primary} (${extras.join(' | ')})` : primary;
+  }
+
   // Dynamically resolve placeholders inside Maintenance Notice:
   // Supports Telegram Username (@username, {username}), User ID ({user_id}, {id}), Bot Name ({bot_name}, {bot}), and Name ({name}, {user_name})
   public static resolveMaintenanceNotice(
@@ -1038,7 +1087,7 @@ export class TelegramService {
     fromId: string,
     botUsername: string
   ): string {
-    if (!template) return '⚠️ Bot is currently under maintenance. Please try again later.';
+    if (!template) return '⚠️ <b>Maintenance Notice</b>\n<i>Bot is currently under maintenance. Please try again later.</i>';
 
     const rawUsername = userPayload?.username?.replace(/^@+/, '').trim() || '';
     const userMention = rawUsername ? `@${rawUsername}` : (userPayload?.firstName || 'User');
@@ -1117,9 +1166,9 @@ export class TelegramService {
       if (targetChat && targetChat.id !== undefined && targetChat.type !== 'private') {
         const isAllowed = await storage.isChatWhitelisted(targetChat.id, targetChat.type);
         if (!isAllowed) {
-          // Never drop incoming chat_join_request updates when Force Sub is active or chat matches a Force Sub channel
-          let allowForceSubJoinRequest = false;
-          if (update.chat_join_request) {
+          // Never drop incoming chat_join_request or chat_member updates when Force Sub is active or chat matches a Force Sub channel
+          let allowForceSubEvent = false;
+          if (update.chat_join_request || update.chat_member) {
             const s = await storage.getSettings().catch(() => null);
             const targetIdStr = String(targetChat.id || '').trim();
             const targetUname = String(targetChat.username || '').replace(/^@+/, '').toLowerCase().trim();
@@ -1128,9 +1177,9 @@ export class TelegramService {
               const cUname = String(ch.username || '').replace(/^@+/, '').toLowerCase().trim();
               return cId === targetIdStr || (targetUname && (cUname === targetUname || cId.replace(/^@+/, '').toLowerCase() === targetUname));
             });
-            allowForceSubJoinRequest = Boolean(s?.forceSubEnabled || inRequired);
+            allowForceSubEvent = Boolean(s?.forceSubEnabled || inRequired);
           }
-          if (!allowForceSubJoinRequest) {
+          if (!allowForceSubEvent) {
             // Strict silent ignore: zero replies, zero auto-detection, zero force-sub prompts, even for admins
             return;
           }
@@ -1167,6 +1216,11 @@ export class TelegramService {
         await this.handleChatJoinRequest(update.chat_join_request);
         return;
       }
+      // Handle real-time channel/group member status updates (leaves, kicks, approvals)
+      if (update.chat_member) {
+        await this.handleChatMemberUpdate(update.chat_member);
+        return;
+      }
 
       // Ban Enforcement: check if user is restricted by administrator
       if (fromId) {
@@ -1184,7 +1238,7 @@ export class TelegramService {
           if (update.message?.chat?.type === 'private') {
             await this.callTelegramApi('sendMessage', {
               chat_id: update.message.chat.id,
-              text: '⛔ <b>Access Restricted</b>\n\nYour Telegram account has been banned from using this bot by an administrator.',
+              text: `⛔ <b>Access Restricted</b>\n\n<i>Your Telegram account (<code>${this.escapeHtml(fromId)}</code>) has been banned from using this bot by an administrator.</i>`,
               parse_mode: 'HTML'
             });
           }
@@ -1663,12 +1717,83 @@ export class TelegramService {
     });
   }
 
+  public static clearCachedPendingJoinRequest(
+    botScopeId: string,
+    channel: Partial<ForceSubChannel> | string,
+    userId: string | number,
+    userUsername?: string,
+    resolvedChatId?: string
+  ): void {
+    const scope = String(botScopeId || 'main').trim() || 'main';
+    const map = this.pendingJoinRequestCache.get(scope);
+    if (!map || map.size === 0) return;
+
+    const cleanUserId = String(userId || '').trim();
+    const cleanUserUname = String(userUsername || '').replace(/^@+/, '').toLowerCase().trim();
+    const chObj = typeof channel === 'string' ? { chatId: channel, id: channel, username: undefined } : channel;
+    const candidateChats = [
+      String(chObj.chatId || '').trim(),
+      resolvedChatId ? String(resolvedChatId).trim() : '',
+      String(chObj.id || '').trim()
+    ].filter(Boolean);
+    const strippedCandidates = candidateChats.map(c => c.replace(/^-100/, '').replace(/^-/, '').replace(/^@+/, '').toLowerCase());
+    const cleanChanUname = String(chObj.username || '').replace(/^@+/, '').toLowerCase().trim();
+
+    for (const [k, entry] of Array.from(map.entries())) {
+      const userMatch =
+        (cleanUserId && entry.userId === cleanUserId) ||
+        (cleanUserUname && entry.userUsername && entry.userUsername === cleanUserUname);
+      if (!userMatch) continue;
+
+      const entryChatStripped = entry.chatId.replace(/^-100/, '').replace(/^-/, '').replace(/^@+/, '').toLowerCase();
+      const chatMatch =
+        candidateChats.includes(entry.chatId) ||
+        strippedCandidates.includes(entryChatStripped) ||
+        (entry.chatUsername && (strippedCandidates.includes(entry.chatUsername) || (cleanChanUname && entry.chatUsername === cleanChanUname)));
+      if (chatMatch) {
+        map.delete(k);
+      }
+    }
+  }
+
+  public static async handleChatMemberUpdate(chatMember: any): Promise<void> {
+    if (!chatMember || !chatMember.chat) return;
+    const chat = chatMember.chat;
+    const memberInfo = chatMember.new_chat_member;
+    const memberUser = memberInfo?.user || chatMember.from;
+    if (!memberUser?.id) return;
+
+    const chatId = String(chat.id || '').trim();
+    const chatUsername = chat.username ? `@${String(chat.username).replace(/^@+/, '')}` : undefined;
+    const userId = String(memberUser.id).trim();
+    const userUsername = memberUser.username ? String(memberUser.username).replace(/^@+/, '') : undefined;
+    const newStatus = String(memberInfo?.status || '').trim();
+    const botScopeId = String((storage as any)?.botId || 'main').trim() || 'main';
+
+    this.invalidateForceSubCache(userId);
+
+    if (newStatus === 'left' || newStatus === 'kicked') {
+      this.clearCachedPendingJoinRequest(botScopeId, { chatId, username: chatUsername }, userId, userUsername, chatId);
+      await storage.invalidateJoinRequest(chatId, userId, undefined, chatUsername, userUsername).catch(() => false);
+      console.info(`[ForceSub] ChatMember ${newStatus} in ${chatId} for user ${userId}; cleared cached verification.`);
+    } else if (
+      newStatus === 'member' ||
+      newStatus === 'administrator' ||
+      newStatus === 'creator' ||
+      (newStatus === 'restricted' && memberInfo?.is_member !== false)
+    ) {
+      this.clearCachedPendingJoinRequest(botScopeId, { chatId, username: chatUsername }, userId, userUsername, chatId);
+      await storage.updateJoinRequestStatus(chatId, userId, 'approved').catch(() => null);
+    }
+  }
+
   private static hasCachedPendingJoinRequest(
     botScopeId: string,
     channel: ForceSubChannel,
     userId: string,
     userUsername?: string,
-    resolvedChatId?: string
+    resolvedChatId?: string,
+    maxAgeMs?: number
   ): boolean {
     const scope = String(botScopeId || 'main').trim() || 'main';
     const map = this.pendingJoinRequestCache.get(scope);
@@ -1683,8 +1808,9 @@ export class TelegramService {
     ].filter(Boolean);
     const strippedCandidates = candidateChats.map(c => c.replace(/^-100/, '').replace(/^-/, '').replace(/^@+/, '').toLowerCase());
     const cleanChanUname = String(channel.username || '').replace(/^@+/, '').toLowerCase().trim();
+    const now = Date.now();
 
-    for (const entry of map.values()) {
+    for (const [key, entry] of Array.from(map.entries())) {
       const userMatch =
         (cleanUserId && entry.userId === cleanUserId) ||
         (cleanUserUname && entry.userUsername && entry.userUsername === cleanUserUname);
@@ -1695,7 +1821,13 @@ export class TelegramService {
         candidateChats.includes(entry.chatId) ||
         strippedCandidates.includes(entryChatStripped) ||
         (entry.chatUsername && (strippedCandidates.includes(entry.chatUsername) || (cleanChanUname && entry.chatUsername === cleanChanUname)));
-      if (chatMatch) return true;
+      if (chatMatch) {
+        if (maxAgeMs && now - entry.createdAt > maxAgeMs) {
+          map.delete(key);
+          continue;
+        }
+        return true;
+      }
     }
     return false;
   }
@@ -2008,16 +2140,16 @@ export class TelegramService {
     await storage.updateSettings({ forceSubEnabled: true });
 
     const responseText = 
-      `✅ <b>Private Channel Connected Successfully via Forward!</b>\n\n` +
-      `📢 <b>Channel Name:</b> <b>${this.escapeHtml(channelRecord.name)}</b>\n` +
-      `🆔 <b>Chat ID:</b> <code>${channelRecord.chatId}</code>\n` +
-      `🏷️ <b>Type:</b> <code>${channelRecord.type || 'channel'}</code>\n` +
-      (channelRecord.inviteLink ? `🔗 <b>Invite Link:</b> ${channelRecord.inviteLink}\n` : '') +
+      `✅ <b>Private Channel Connected via Forward</b>\n\n` +
+      `• 📢 <b>Channel Name:</b> <code>${this.escapeHtml(channelRecord.name)}</code>\n` +
+      `• 🆔 <b>Chat ID:</b> <code>${this.escapeHtml(channelRecord.chatId)}</code>\n` +
+      `• 🏷️ <b>Type:</b> <code>${this.escapeHtml(channelRecord.type || 'channel')}</code>\n` +
+      (channelRecord.inviteLink ? `• 🔗 <b>Invite Link:</b> <code>${this.escapeHtml(channelRecord.inviteLink)}</code>\n` : '') +
       (isAdminInChat
-        ? `👑 <b>Bot Status:</b> Administrator (Active & Verified) ✅\n`
-        : `⚠️ <b>Important Note:</b> Please ensure you add this bot as an <b>Administrator</b> in this channel with invite permissions so force-subscription checks and member auto-approvals succeed.\n`
+        ? `• 👑 <b>Bot Status:</b> <code>Administrator (Active &amp; Verified)</code> ✅\n`
+        : `\n⚠️ <b>Important Note:</b> Please add this bot as an <b>Administrator</b> in this channel with invite permissions so force-subscription checks and auto-approvals succeed.\n`
       ) +
-      `\n✨ <i>Added to Force Sub channels with toggle ON. You can manage or toggle it anytime from the Admin Panel or with <code>/disconnect ${channelRecord.chatId}</code>.</i>`;
+      `\n✨ <i>Added to Force Sub channels with toggle ON. Manage anytime in the Admin Panel or run <code>/disconnect ${this.escapeHtml(channelRecord.chatId)}</code>.</i>`;
 
     if (statusMsg?.result?.message_id) {
       try {
@@ -2049,7 +2181,8 @@ export class TelegramService {
     if (!isAdmin) {
       await this.callTelegramApi('sendMessage', {
         chat_id: replyChatId,
-        text: '⛔ You are not authorized to use admin commands.'
+        text: '⛔ <b>Access Denied</b>\n<i>You are not authorized to use admin commands.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -2145,12 +2278,12 @@ export class TelegramService {
 
     await this.callTelegramApi('sendMessage', {
       chat_id: replyChatId,
-      text: `✅ <b>Channel Successfully Connected!</b>\n\n` +
-            `📢 <b>Name:</b> ${this.escapeHtml(channelRecord.name)}\n` +
-            `🆔 <b>Chat ID:</b> <code>${channelRecord.chatId}</code>\n` +
-            `🏷️ <b>Type:</b> <code>${channelRecord.type || 'channel'}</code>\n` +
-            (channelRecord.inviteLink ? `🔗 <b>Invite Link:</b> ${channelRecord.inviteLink}\n` : '') +
-            `\n✨ <i>Added to Force Sub channels with toggle ON. You can manage or delete it anytime from the Admin Panel or with <code>/disconnect ${channelRecord.chatId}</code>.</i>`,
+      text: `✅ <b>Channel Connected!</b>\n\n` +
+            `• 📢 <b>Name:</b> <code>${this.escapeHtml(channelRecord.name)}</code>\n` +
+            `• 🆔 <b>Chat ID:</b> <code>${this.escapeHtml(channelRecord.chatId)}</code>\n` +
+            `• 🏷️ <b>Type:</b> <code>${this.escapeHtml(channelRecord.type || 'channel')}</code>\n` +
+            (channelRecord.inviteLink ? `• 🔗 <b>Invite Link:</b> <code>${this.escapeHtml(channelRecord.inviteLink)}</code>\n` : '') +
+            `\n✨ <i>Added to Force Sub channels with toggle ON. Manage anytime in the Admin Panel or run <code>/disconnect ${this.escapeHtml(channelRecord.chatId)}</code>.</i>`,
       parse_mode: 'HTML'
     });
   }
@@ -2166,7 +2299,8 @@ export class TelegramService {
     if (!isAdmin) {
       await this.callTelegramApi('sendMessage', {
         chat_id: replyChatId,
-        text: '⛔ You are not authorized to use admin commands.'
+        text: '⛔ <b>Access Denied</b>\n<i>You are not authorized to use admin commands.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -2233,7 +2367,8 @@ export class TelegramService {
 
   public static async checkUserForceSub(
     userId: string | number,
-    username?: string
+    username?: string,
+    options?: { forceFresh?: boolean; allowCache?: boolean }
   ): Promise<{ allJoined: boolean; unjoinedChannels: ForceSubChannel[]; mode?: 'auto_join' | 'request_only' }> {
     try {
       const settings = await storage.getSettings();
@@ -2254,9 +2389,11 @@ export class TelegramService {
 
       const botScopeId = (storage as any)?.botId || 'main';
       const cacheKey = `${botScopeId}_${forceJoinMode}_${cleanUserId}`;
-      const cached = this.forceSubCache.get(cacheKey);
-      if (cached && cached.allJoined && Date.now() < cached.expiresAt) {
-        return { allJoined: true, unjoinedChannels: [], mode: forceJoinMode };
+      if (options?.allowCache && !options?.forceFresh) {
+        const cached = this.forceSubCache.get(cacheKey);
+        if (cached && cached.allJoined && Date.now() < cached.expiresAt) {
+          return { allJoined: true, unjoinedChannels: [], mode: forceJoinMode };
+        }
       }
 
       let effectiveUsername = String(username || '').replace(/^@+/, '').toLowerCase().trim();
@@ -2277,7 +2414,7 @@ export class TelegramService {
 
       const numericUserId = Number(cleanUserId) || cleanUserId;
 
-      // Parallelize channel membership / join-request checks for near-zero latency
+      // Parallelize live channel membership / pending join-request verification (never rely solely on stale cache)
       const checks = await Promise.all(activeChannels.map(async (channel) => {
         let rawChatId = (channel.chatId || '').trim();
         if (!rawChatId) return null;
@@ -2292,23 +2429,41 @@ export class TelegramService {
 
         const targetChat = /^-?\d+$/.test(rawChatId) ? Number(rawChatId) : rawChatId;
         let isMember = false;
+        let memberStatus = '';
 
-        // 1. Direct channel membership check (creator, admin, member, or non-banned restricted)
+        // 1. Live channel membership query via Telegram getChatMember
         try {
           const res = await this.callTelegramApi('getChatMember', {
             chat_id: targetChat,
             user_id: numericUserId
           });
           if (res && res.ok && res.result) {
-            const status = res.result.status;
-            isMember = status === 'creator' || status === 'administrator' || status === 'member' || (status === 'restricted' && res.result.is_member !== false);
+            memberStatus = String(res.result.status || '').trim();
+            isMember =
+              memberStatus === 'creator' ||
+              memberStatus === 'administrator' ||
+              memberStatus === 'member' ||
+              (memberStatus === 'restricted' && res.result.is_member !== false);
           }
         } catch (err: any) {
           console.warn(`[ForceSub] Error querying getChatMember for ${cleanUserId} in ${targetChat}:`, err?.message);
         }
 
-        // 2. Request Only Mode: check pending join requests list (memory cache + persistent storage) by user ID or @username
-        if (!isMember && forceJoinMode === 'request_only') {
+        // If user is banned/removed ('kicked'), purge all cached/stored verification immediately and fail
+        if (memberStatus === 'kicked') {
+          this.clearCachedPendingJoinRequest(String(botScopeId), channel, cleanUserId, effectiveUsername, String(targetChat));
+          await storage.invalidateJoinRequest(
+            String(targetChat),
+            cleanUserId,
+            channel.id,
+            channel.username || (typeof targetChat === 'string' && targetChat.startsWith('@') ? targetChat : undefined),
+            effectiveUsername
+          ).catch(() => false);
+          return channel;
+        }
+
+        // 2. Live fallback handling when user is not currently a channel member
+        if (!isMember) {
           let resolvedChatId = String(targetChat);
           let resolvedUsername = channel.username;
           if (typeof targetChat === 'string' && targetChat.startsWith('@')) {
@@ -2323,49 +2478,79 @@ export class TelegramService {
             } catch {}
           }
 
-          const hasCachedReq = this.hasCachedPendingJoinRequest(
-            String(botScopeId),
-            channel,
-            String(cleanUserId),
-            effectiveUsername,
-            resolvedChatId
-          );
-          if (hasCachedReq) {
-            isMember = true;
-          } else {
-            const hasJoinRequest = await storage.isJoinRequestApprovedOrPending(
+          if (forceJoinMode === 'request_only') {
+            const chanUsername = resolvedUsername || (typeof targetChat === 'string' && targetChat.startsWith('@') ? targetChat : undefined);
+            const storedRecord = await storage.findJoinRequestRecord(
               resolvedChatId || String(targetChat),
-              String(cleanUserId),
+              cleanUserId,
               channel.id,
-              resolvedUsername || (typeof targetChat === 'string' && targetChat.startsWith('@') ? targetChat : undefined),
+              chanUsername,
               effectiveUsername
             );
-            if (hasJoinRequest) {
-              isMember = true;
+
+            if (storedRecord) {
+              if (storedRecord.status === 'pending') {
+                isMember = true;
+              } else {
+                // If status was 'approved' but live getChatMember said 'left', they left the channel after approval!
+                // If status was 'rejected', their request was dismissed/declined!
+                this.clearCachedPendingJoinRequest(String(botScopeId), channel, cleanUserId, effectiveUsername, resolvedChatId);
+                await storage.invalidateJoinRequest(
+                  resolvedChatId || String(targetChat),
+                  cleanUserId,
+                  channel.id,
+                  chanUsername,
+                  effectiveUsername
+                ).catch(() => false);
+                isMember = false;
+              }
+            } else {
+              // No record in persistent storage: only accept an immediate in-flight chat_join_request within 10s while DB persists
+              const hasFreshInFlight = this.hasCachedPendingJoinRequest(
+                String(botScopeId),
+                channel,
+                cleanUserId,
+                effectiveUsername,
+                resolvedChatId,
+                10000
+              );
+              isMember = hasFreshInFlight;
+            }
+          } else if (forceJoinMode === 'auto_join') {
+            // Live getChatMember confirmed user is NOT a member (e.g. 'left')
+            // Only approve if an active pending join request exists right now and Telegram approves it live
+            if (settings.autoApproveJoinRequests !== false) {
+              try {
+                const approveRes = await this.callTelegramApi('approveChatJoinRequest', {
+                  chat_id: targetChat,
+                  user_id: numericUserId
+                });
+                if (approveRes && approveRes.ok) {
+                  isMember = true;
+                  storage.recordJoinRequest({
+                    chatId: resolvedChatId || String(targetChat),
+                    chatUsername: resolvedUsername,
+                    chatTitle: channel.name,
+                    userId: cleanUserId,
+                    userUsername: effectiveUsername || undefined,
+                    status: 'approved'
+                  }).catch(() => {});
+                }
+              } catch {}
+            }
+
+            if (!isMember) {
+              // Invalidate any stale approved/pending record since live getChatMember confirmed they are not in the channel
+              this.clearCachedPendingJoinRequest(String(botScopeId), channel, cleanUserId, effectiveUsername, resolvedChatId);
+              await storage.invalidateJoinRequest(
+                resolvedChatId || String(targetChat),
+                cleanUserId,
+                channel.id,
+                resolvedUsername || (typeof targetChat === 'string' && targetChat.startsWith('@') ? targetChat : undefined),
+                effectiveUsername
+              ).catch(() => false);
             }
           }
-        } else if (!isMember && forceJoinMode === 'auto_join' && settings.autoApproveJoinRequests !== false) {
-          // Auto Join Mode with smart auto-approval fallback if a pending request awaits Telegram approval
-          try {
-            const approveRes = await this.callTelegramApi('approveChatJoinRequest', {
-              chat_id: targetChat,
-              user_id: numericUserId
-            });
-            if (approveRes && (
-              approveRes.ok || 
-              approveRes.description?.includes('USER_ALREADY_PARTICIPANT') ||
-              approveRes.description?.includes('ALREADY_PARTICIPANT')
-            )) {
-              isMember = true;
-              storage.recordJoinRequest({
-                chatId: String(targetChat),
-                chatTitle: channel.name,
-                userId: String(cleanUserId),
-                userUsername: effectiveUsername || undefined,
-                status: 'approved'
-              }).catch(() => {});
-            }
-          } catch {}
         }
 
         return isMember ? null : channel;
@@ -2380,6 +2565,8 @@ export class TelegramService {
 
       if (result.allJoined) {
         this.forceSubCache.set(cacheKey, { ...result, expiresAt: Date.now() + 15000 });
+      } else {
+        this.invalidateForceSubCache(cleanUserId);
       }
       return result;
     } catch (err: any) {
@@ -2441,7 +2628,7 @@ export class TelegramService {
         }
       }
       channelButtons.push({
-        text: isRequestOnly ? `📩 Request ${ch.name}` : `📢 ${ch.name}`,
+        text: `Join Channel ${i + 1}`,
         url: channelUrl,
         style: 'primary'
       });
@@ -2463,7 +2650,7 @@ export class TelegramService {
 
     // Dynamic unjoined channels enumeration for {channel_list} placeholder
     const channelNames = unjoinedChannels
-      .map((c, i) => `  🔹 ${i + 1}. <b>${c.name}</b>`)
+      .map((c, i) => `  🔹 <b>Channel ${i + 1}:</b> <code>${this.escapeHtml(c.name)}</code>`)
       .join('\n');
 
     // Load Editable Message Template from storage (Requirement 2)
@@ -2471,22 +2658,32 @@ export class TelegramService {
     const template = templates['FORCESUB_PROMPT'];
     const botName = await this.getBotUsername();
 
-    const defaultAutoJoinPrompt =
+    const legacyAutoJoinPrompt =
       `🔒 <b>Channel Membership Required</b>\n\n` +
       `To use this bot and access your requested content, please subscribe to our official channel(s) below:\n\n` +
       `{channel_list}\n\n` +
       `👇 <i>Tap the button(s) above to join, then press <b>Verify / Try Again</b> below.</i>`;
 
+    const defaultAutoJoinPrompt =
+      `🔒 <b>Channel Membership Required</b>\n\n` +
+      `To use <code>{bot_name}</code> and access your requested content, please join our official channel(s) below:\n\n` +
+      `{channel_list}\n\n` +
+      `👇 <i>Tap the channel buttons below to join, then press <b>Verify / Try Again</b>.</i>`;
+
     const defaultRequestOnlyPrompt =
       `🔒 <b>Join Request Required</b>\n\n` +
-      `To use this bot and access your requested content, please send a join request to our official channel(s) below first:\n\n` +
+      `To use <code>{bot_name}</code> and access your requested content, please send a join request to our official channel(s) below first:\n\n` +
       `{channel_list}\n\n` +
-      `👇 <i>Tap the button(s) above to send your join request, then press <b>Verify / Try Again</b> below.</i>`;
+      `👇 <i>Tap the channel buttons below to send your join request, then press <b>Verify / Try Again</b>.</i>`;
 
-    const isUsingDefaultTemplate = !template?.content || template.content.trim() === defaultAutoJoinPrompt.trim();
-    let promptText = isRequestOnly && isUsingDefaultTemplate
-      ? defaultRequestOnlyPrompt
-      : (template?.content || defaultAutoJoinPrompt);
+    const trimmedTemplate = template?.content?.trim() || '';
+    const isUsingDefaultTemplate =
+      !trimmedTemplate ||
+      trimmedTemplate === defaultAutoJoinPrompt.trim() ||
+      trimmedTemplate === legacyAutoJoinPrompt.trim();
+    let promptText = isUsingDefaultTemplate
+      ? (isRequestOnly ? defaultRequestOnlyPrompt : defaultAutoJoinPrompt)
+      : trimmedTemplate;
 
     let userMention = '';
     let userDisplayName = '';
@@ -2518,17 +2715,20 @@ export class TelegramService {
     }
 
     // Dynamic real name: prioritize user's actual real name (e.g. "Sohan"), then username, then ID
-    const realUserName = userDisplayName || userMention || `User`;
-    const dynamicUserName = realUserName;
+    const realUserName = userDisplayName || userMention || 'User';
+    const safeUserName = this.escapeHtml(realUserName);
+    const safeUserMention = this.escapeHtml(userMention || realUserName);
+    const safeUserId = this.escapeHtml(userId);
+    const safeBotMention = this.escapeHtml(`@${botName.replace(/^@/, '')}`);
 
     promptText = promptText
       .replace(/\{channel_list\}/gi, channelNames)
-      .replace(/\{user_name\}|\{@?username\}|\{name\}|\{user\}|\{first_name\}/gi, realUserName)
-      .replace(/\{user_id\}|\{userid\}|\{id\}/gi, userId)
-      .replace(/\{bot_name\}|\{botname\}|\{bot\}/gi, `@${botName.replace(/^@/, '')}`)
-      .replace(/(^|\s)@username\b/gi, `$1${userMention || realUserName}`)
-      .replace(/Hey Friend/gi, `Hey ${realUserName}`)
-      .replace(/\bFriend\b/gi, realUserName);
+      .replace(/\{user_name\}|\{@?username\}|\{name\}|\{user\}|\{first_name\}/gi, safeUserName)
+      .replace(/\{user_id\}|\{userid\}|\{id\}/gi, safeUserId)
+      .replace(/\{bot_name\}|\{botname\}|\{bot\}/gi, safeBotMention)
+      .replace(/(^|\s)@username\b/gi, `$1${safeUserMention}`)
+      .replace(/Hey Friend/gi, `Hey ${safeUserName}`)
+      .replace(/\bFriend\b/gi, safeUserName);
 
     if (messageIdToEdit) {
       try {
@@ -2695,7 +2895,7 @@ export class TelegramService {
           const firstName = (userObj.first_name || '').trim();
           const lastName = (userObj.last_name || '').trim();
           const realName = (firstName + (lastName ? ' ' + lastName : '')).trim() || userObj.username || 'User';
-          const userMention = userObj.username ? `@${userObj.username}` : `<b>${this.escapeHtml(realName)}</b>`;
+          const userMention = userObj.username ? `<code>@${this.escapeHtml(userObj.username)}</code>` : `<code>${this.escapeHtml(realName)}</code>`;
 
           const violationType = (containsLink && isForwarded)
             ? 'links and forwarded messages'
@@ -2705,9 +2905,9 @@ export class TelegramService {
 
           if (warningCount === 1) {
             // 1st violation: Warning 1/3
-            const warningText = `⚠️ <b>Strike [1/3] Warning</b> | ${userMention}\n\n` +
-              `🚫 Sharing ${violationType} is strictly prohibited in this group.\n` +
-              `📌 <i>Your message has been deleted. You have 2 warnings remaining before an automatic ban.</i>`;
+            const warningText = `⚠️ <b>Strike [<code>1/3</code>] Warning</b> | ${userMention}\n\n` +
+              `🚫 <b>Violation:</b> Sharing <code>${violationType}</code> is strictly prohibited in this group.\n` +
+              `📌 <i>Your message has been deleted. You have <code>2</code> warnings remaining before an automatic ban.</i>`;
             await this.callTelegramApi('sendMessage', {
               chat_id: message.chat.id,
               text: warningText,
@@ -2715,9 +2915,9 @@ export class TelegramService {
             });
           } else if (warningCount === 2) {
             // 2nd violation: Warning 2/3 (Final warning)
-            const warningText = `⚠️ <b>Strike [2/3] Warning — FINAL WARNING</b> | ${userMention}\n\n` +
-              `🚫 Sharing ${violationType} is prohibited!\n` +
-              `🚨 <b>CRITICAL:</b> You have 1 warning remaining. Your NEXT violation will result in an IMMEDIATE AUTO-BAN!`;
+            const warningText = `⚠️ <b>Strike [<code>2/3</code>] Warning — FINAL WARNING</b> | ${userMention}\n\n` +
+              `🚫 <b>Violation:</b> Sharing <code>${violationType}</code> is prohibited!\n` +
+              `🚨 <b>CRITICAL:</b> You have <code>1</code> warning remaining. Your NEXT violation will result in an <b>IMMEDIATE AUTO-BAN</b>!`;
             await this.callTelegramApi('sendMessage', {
               chat_id: message.chat.id,
               text: warningText,
@@ -2740,14 +2940,14 @@ export class TelegramService {
             // Dynamic customizable Ban Notice template (supports {name}, {username}, {user_id}, {strikes})
             const templates = await storage.getTemplates();
             const banTemplate = templates.BAN_NOTICE?.content ||
-              '🚫 <b>USER AUTO-BANNED (Strike {strikes}/{strikes})</b>\n\n👤 <b>User:</b> {name} (@{username} | ID: <code>{user_id}</code>)\n⚠️ <b>Reason:</b> Exceeded maximum {strikes}-strike warnings for unauthorized links / external forward spam.';
+              '🚫 <b>USER AUTO-BANNED (Strike <code>{strikes}/{strikes}</code>)</b>\n\n👤 <b>User:</b> <code>{name}</code> (@{username} | <b>ID:</b> <code>{user_id}</code>)\n⚠️ <b>Reason:</b> Exceeded maximum <code>{strikes}</code>-strike warnings for unauthorized links / external forward spam.';
 
             const cleanUsername = userObj.username ? userObj.username.replace(/^@+/, '') : '';
             const banNotice = banTemplate
               .replace(/{name}/g, TelegramService.escapeHtml(realName))
               .replace(/{user_name}/g, TelegramService.escapeHtml(realName))
               .replace(/{username}/g, cleanUsername ? TelegramService.escapeHtml(cleanUsername) : 'N/A')
-              .replace(/{user_id}/g, String(fromId))
+              .replace(/{user_id}/g, TelegramService.escapeHtml(String(fromId)))
               .replace(/{strikes}/g, '3');
 
             await this.callTelegramApi('sendMessage', {
@@ -2773,7 +2973,7 @@ export class TelegramService {
         }
         await this.sendAutoDeletingNotice(
           message.chat.id,
-          '🔒 <i>The /allfiles command is restricted to authorized administrators only.</i>',
+          '🔒 <b>Access Restricted:</b> <i>The <code>/allfiles</code> command is restricted to authorized administrators only.</i>',
           4000
         );
         return;
@@ -2866,13 +3066,13 @@ export class TelegramService {
         if (isHelpCommand) {
           await this.sendAutoDeletingNotice(
             message.chat.id,
-            '🔒 <i>The /help command is restricted to bot administrators only.</i>',
+            '🔒 <b>Access Restricted:</b> <i>The <code>/help</code> command is restricted to bot administrators only.</i>',
             4000
           );
         } else if (isCloneCommand) {
           await this.sendAutoDeletingNotice(
             message.chat.id,
-            '🔒 <i>The /clone command is restricted to authorized administrators only.</i>',
+            '🔒 <b>Access Restricted:</b> <i>The <code>/clone</code> command is restricted to authorized administrators only.</i>',
             4000
           );
         }
@@ -2898,7 +3098,7 @@ export class TelegramService {
           // If the bot cannot DM the user (never sent /start), send an auto-deleting notice with a direct link
           await this.sendAutoDeletingNotice(
             message.chat.id,
-            `⚠️ <b>Admin Privacy:</b> Please start the bot in private chat to receive admin commands.`,
+            `⚠️ <b>Admin Privacy Notice</b>\n<i>Please start the bot in private chat to receive admin commands.</i>`,
             6000,
             undefined,
             {
@@ -2954,7 +3154,7 @@ export class TelegramService {
         if (!this.isMainBotContext()) {
           await this.sendAutoDeletingNotice(
             message.chat.id,
-            '⛔ <i>The /clone command is disabled inside cloned bot instances and only works on the main primary bot.</i>',
+            '⛔ <b>Command Disabled:</b> <i>The <code>/clone</code> command is disabled inside cloned bot instances and only works on the main primary bot.</i>',
             5000
           );
           return;
@@ -2966,7 +3166,7 @@ export class TelegramService {
             if (!tokenArg) {
               await this.callTelegramApi('sendMessage', {
                 chat_id: fromId,
-                text: `ℹ️ <b>How to Clone Telegram Bot:</b>\n\n1. Open @BotFather on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>You will then be asked to assign the official Owner User ID or @username for the cloned bot.</i>`,
+                text: `ℹ️ <b>How to Clone Telegram Bot</b>\n\n1. Open <code>@BotFather</code> on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>You will then select the Bot Mode and assign the official Owner User ID or @username.</i>`,
                 parse_mode: 'HTML'
               });
               return;
@@ -2975,8 +3175,8 @@ export class TelegramService {
             const check = await TelegramBotManager.validateCloneToken(tokenArg);
             if (!check.ok || !check.info) {
               const errText = check.error === 'Already this bot is already running.'
-                ? '❌ <b>Already this bot is already running.</b>'
-                : `❌ <b>Failed to Clone Bot:</b> ${check.error || 'Invalid token'}`;
+                ? '❌ <b>Already Running:</b> <i>This bot instance is already active.</i>'
+                : `❌ <b>Failed to Clone Bot:</b>\n<code>${this.escapeHtml(check.error || 'Invalid token')}</code>`;
               await this.callTelegramApi('sendMessage', {
                 chat_id: fromId,
                 text: errText,
@@ -2997,10 +3197,10 @@ export class TelegramService {
             const promptRes = await this.callTelegramApi('sendMessage', {
               chat_id: fromId,
               text:
-                `🤖 <b>Bot Token Verified:</b> @${check.info.username || check.info.first_name}\n\n` +
+                `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(check.info.username || check.info.first_name || 'Bot')}</code>\n\n` +
                 `⚙️ <b>Choose Bot Mode for this clone:</b>\n\n` +
-                `• <b>📁 File Bot</b> — Standard file delivery, filters &amp; indexing mode\n` +
-                `• <b>📝 Post Bot</b> — Channel post maker, inline buttons &amp; post editing mode`,
+                `• 📁 <b>File Bot</b> — Standard file delivery, filters &amp; indexing mode\n` +
+                `• 📝 <b>Post Bot</b> — Channel post maker, inline buttons &amp; post editing mode`,
               parse_mode: 'HTML',
               reply_markup: {
                 inline_keyboard: [
@@ -3030,7 +3230,7 @@ export class TelegramService {
               text:
                 `📢 <b>Broadcast &amp; Mass Messaging</b>\n\n` +
                 `For rich media formatting, targeted delivery &amp; delivery analytics, please use the <b>Broadcast</b> tool inside the Web Admin Panel.\n\n` +
-                `💡 Tip: Run <code>/webcode</code> to generate a quick login code or check <code>/admins</code> for total user reach.`,
+                `💡 <i>Tip: Run <code>/webcode</code> to generate a quick login code or check <code>/admins</code> for total user reach.</i>`,
               parse_mode: 'HTML'
             });
           },
@@ -3045,7 +3245,7 @@ export class TelegramService {
             if (/^\/editthismessage/i.test(text)) {
               await this.callTelegramApi('sendMessage', {
                 chat_id: fromId,
-                text: 'ℹ️ Reply directly to a bot message in this private chat with <code>/editthismessage</code> to edit its template.',
+                text: 'ℹ️ <b>Template Editor</b>\n<i>Reply directly to a bot message in this private chat with <code>/editthismessage</code> to edit its template.</i>',
                 parse_mode: 'HTML'
               });
               return;
@@ -3054,14 +3254,14 @@ export class TelegramService {
               chat_id: fromId,
               text:
                 `⚙️ <b>Bot Settings &amp; Filter Configuration</b>\n\n` +
-                `• Use <code>/add</code> here to add files, links, or keyword filters.\n` +
-                `• Use <code>/connect</code> / <code>/disconnect</code> for Force Subscribe channels.\n` +
-                `• Use <code>/allowchat</code> / <code>/ignorechat</code> for group whitelist settings.\n` +
-                `• Use <code>/webcode</code> to sign in to the Web Admin Panel for full Settings, Design &amp; Fraud Filter controls.`,
+                `• Add files, links, or triggers: <code>/add</code>\n` +
+                `• Force Subscribe channels: <code>/connect</code> / <code>/disconnect</code>\n` +
+                `• Group whitelist guard: <code>/allowchat</code> / <code>/ignorechat</code>\n` +
+                `• Full Settings, Design &amp; Fraud Filter controls: Open the Web Admin Panel (run <code>/webcode</code> for login code).`,
               parse_mode: 'HTML'
             });
           },
-          'Settings & filter guide sent to your private messages.'
+          'Settings &amp; filter guide sent to your private messages.'
         );
         return;
       }
@@ -3071,7 +3271,7 @@ export class TelegramService {
           async () => {
             await this.handleAddCommand(fromId, fromId, message, text);
           },
-          `Admin setup wizard opened in your private messages (@${message.from?.username || message.from?.first_name || 'Admin'}).`
+          `Admin setup wizard opened in your private messages (<code>${this.escapeHtml(message.from?.username ? `@${message.from.username}` : (message.from?.first_name || 'Admin'))}</code>).`
         );
         return;
       }
@@ -3085,7 +3285,7 @@ export class TelegramService {
             activeEditSessions.delete(fromId);
             activeCloneSessions.delete(fromId);
             const templates = await storage.getTemplates();
-            const cancelMsg = templates.CANCEL_MESSAGE?.content || '❌ Operation cancelled.';
+            const cancelMsg = templates.CANCEL_MESSAGE?.content || '❌ <b>Operation Cancelled</b>\n<i>Current action has been aborted.</i>';
             if (addSession?.lastPromptMessageId) {
               try {
                 await this.callTelegramApi('editMessageText', {
@@ -3097,7 +3297,7 @@ export class TelegramService {
                 return;
               } catch {}
             }
-            await this.callTelegramApi('sendMessage', { chat_id: fromId, text: cancelMsg });
+            await this.callTelegramApi('sendMessage', { chat_id: fromId, text: cancelMsg, parse_mode: 'HTML' });
           },
           'Operation cancelled in your private messages.'
         );
@@ -3168,7 +3368,7 @@ export class TelegramService {
             }
             await this.callTelegramApi('sendMessage', {
               chat_id: fromId,
-              text: `🧹 <b>Cleanup Complete</b>\n\nCleaned up ${deletedCount} old tracked messages.`,
+              text: `🧹 <b>Cleanup Complete</b>\n\n• <b>Removed Messages:</b> <code>${deletedCount}</code>`,
               parse_mode: 'HTML'
             });
           },
@@ -3184,7 +3384,11 @@ export class TelegramService {
             const settings = await storage.getSettings();
             const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163');
             const totalUsers = await storage.getTotalUserCount();
-            const msg = `🛡️ <b>Administrators (${admins.length})</b>\nRoot ID: <code>${rootAdminId}</code>\nTotal Bot Users: <b>${totalUsers}</b>`;
+            const msg =
+              `🛡️ <b>Administrators Overview</b>\n\n` +
+              `• 👮 <b>Total Admins:</b> <code>${admins.length}</code>\n` +
+              `• 🆔 <b>Root ID:</b> <code>${this.escapeHtml(rootAdminId)}</code>\n` +
+              `• 👥 <b>Total Bot Users:</b> <code>${totalUsers}</code>`;
             await this.callTelegramApi('sendMessage', { chat_id: fromId, text: msg, parse_mode: 'HTML' });
           },
           'Admin list sent to your private messages.'
@@ -3303,10 +3507,11 @@ export class TelegramService {
         }
         await storage.setBotUserBanned(targetId, true);
 
-        const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+        const userIdentity = this.formatUserIdentity(targetName, targetUsername, targetId);
         await this.callTelegramApi('sendMessage', {
           chat_id: message.chat.id,
-          text: `OK Boss. ${userDisplay} has been successfully banned.`,
+          text: `🚫 <b>User Banned</b>\n\n• 👤 <b>User:</b> ${userIdentity}\n<i>Access revoked by administrator.</i>`,
+          parse_mode: 'HTML',
           reply_to_message_id: message.message_id
         });
         if (!isOfficial && message.message_id) {
@@ -3364,10 +3569,10 @@ export class TelegramService {
         await storage.resetUserFraudWarning(message.chat.id, targetId);
         TelegramService.unbanUserInConnectedChats(targetId).catch(() => {});
 
-        const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+        const userIdentity = this.formatUserIdentity(targetName, targetUsername, targetId);
         await this.callTelegramApi('sendMessage', {
           chat_id: message.chat.id,
-          text: `✅ <b>OK Boss. ${userDisplay} has been successfully unbanned.</b>`,
+          text: `✅ <b>User Unbanned</b>\n\n• 👤 <b>User:</b> ${userIdentity}\n<i>Warnings cleared and access restored.</i>`,
           parse_mode: 'HTML',
           reply_to_message_id: message.message_id
         });
@@ -3380,7 +3585,7 @@ export class TelegramService {
       } else {
         await this.callTelegramApi('sendMessage', {
           chat_id: message.chat.id,
-          text: `ℹ️ <b>How to Unban:</b>\nReply to any user's message with <code>/unban</code>, or type <code>/unban &lt;user_id_or_username&gt;</code>.`,
+          text: `ℹ️ <b>How to Unban</b>\nReply to any user's message with <code>/unban</code>, or run <code>/unban &lt;user_id_or_username&gt;</code>.`,
           parse_mode: 'HTML',
           reply_to_message_id: message.message_id
         });
@@ -3428,7 +3633,7 @@ export class TelegramService {
         }
         await this.sendAutoDeletingNotice(
           message.chat.id,
-          'ℹ️ <b>How to Report:</b> Reply to the message you want to report with <code>/report &lt;reason&gt;</code>, or send <code>/report &lt;@username_or_id&gt; &lt;reason&gt;</code>.',
+          'ℹ️ <b>How to Report</b>\nReply to the message you want to report with <code>/report &lt;reason&gt;</code>, or send <code>/report &lt;@username_or_id&gt; &lt;reason&gt;</code>.',
           6000
         );
         return;
@@ -3470,11 +3675,10 @@ export class TelegramService {
 
       const adminReportMsg = 
         `🚨 <b>New User Report Filed</b>\n\n` +
-        `👤 <b>Reported User:</b> ${targetUserName} (${targetUserUsername ? '@' + targetUserUsername : `ID: <code>${targetUserId}</code>`})\n` +
-        `🆔 <b>User ID:</b> <code>${targetUserId}</code>\n` +
-        `📢 <b>Reported By:</b> ${reporter.first_name || 'User'} (${reporter.username ? '@' + reporter.username : `ID: <code>${reporter.id}</code>`})\n` +
-        `👥 <b>Chat / Source:</b> ${message.chat.title || 'Group'} (<code>${message.chat.id}</code>)\n` +
-        `📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>\n` +
+        `• 👤 <b>Reported User:</b> ${this.formatUserIdentity(targetUserName, targetUserUsername, targetUserId)}\n` +
+        `• 📢 <b>Reported By:</b> ${this.formatUserIdentity(reporter.first_name || 'User', reporter.username, reporter.id)}\n` +
+        `• 👥 <b>Chat / Source:</b> <code>${this.escapeHtml(message.chat.title || 'Group')}</code> (<code>${this.escapeHtml(String(message.chat.id))}</code>)\n` +
+        `• 📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>\n` +
         `💬 <b>Content Snippet:</b>\n<blockquote>${this.escapeHtml(reportedContent.slice(0, 300))}</blockquote>`;
 
       const keyboard = {
@@ -3637,19 +3841,19 @@ export class TelegramService {
               const customMsgRaw = (rule.customMessage || rule.warningText || '').trim();
               const templates = await storage.getTemplates();
               const defaultTpl = isReplyOnly
-                ? (hasMedia ? '' : '💬 Hello {user_name}, please check this regarding <code>{keyword}</code>.')
+                ? (hasMedia ? '' : '💬 Hello <code>{user_name}</code>, please check this regarding <code>{keyword}</code>.')
                 : (templates.FRAUD_KEYWORD_DEFAULT_REPLY?.content ||
-                  '⚠️ <b>Warning ({warning_count}/{max_warnings}):</b> Prohibited content detected.\nUser: {user_name} (ID: <code>{user_id}</code>)\nAction taken: {action}');
+                  '⚠️ <b>Warning (<code>{warning_count}/{max_warnings}</code>):</b> Prohibited content detected.\n• 👤 <b>User:</b> <code>{user_name}</code> (<b>ID:</b> <code>{user_id}</code>)\n• 🛡️ <b>Action:</b> <code>{action}</code>');
 
               const rawMessage = customMsgRaw || defaultTpl;
               const formattedReply = rawMessage
                 .replace(/\{user_name\}/g, this.escapeHtml(message.from?.first_name || 'User'))
-                .replace(/\{user_id\}/g, fromId)
+                .replace(/\{user_id\}/g, this.escapeHtml(fromId))
                 .replace(/\{keyword\}/g, this.escapeHtml(rule.keyword))
                 .replace(/\{warning_count\}/g, String(currentWarnings))
                 .replace(/\{max_warnings\}/g, String(maxWarnings))
-                .replace(/\{action\}/g, actionDescription)
-                .replace(/\{duration\}/g, duration);
+                .replace(/\{action\}/g, this.escapeHtml(actionDescription))
+                .replace(/\{duration\}/g, this.escapeHtml(duration));
 
               // Quote-reply directly to the user's message whenever it wasn't deleted (e.g. reply_only or warn)
               const quoteReplyId = !shouldDeleteMessage && message.message_id ? Number(message.message_id) : undefined;
@@ -3745,17 +3949,17 @@ export class TelegramService {
     if (matchedItem.type === 'file') {
       const isTextOnly = Boolean(matchedItem.isTextOnly || matchedItem.fileEnabled === false);
       const template = isTextOnly
-        ? { content: "👇 Tap below — I'll send the message privately." }
-        : (templates.GROUP_FILE_REPLY || { content: "👇 Tap below — I'll send your file privately." });
+        ? { content: "💬 <b>Message Ready for Delivery</b>\n<i>Tap the button below to view your message in private DM.</i>" }
+        : (templates.GROUP_FILE_REPLY || { content: "📦 <b>File Ready for Delivery</b>\n<i>Tap the button below to receive your file in private DM.</i>" });
       const buttonTemplate = isTextOnly
         ? { content: '💬 View Message Privately' }
         : (templates.GET_FILE_BUTTON || { content: '🔒 Get File Privately' });
 
       const replyText = template.content
-        .replace('{user_name}', userName)
-        .replace('{user_id}', userId)
-        .replace('{trigger}', text)
-        .replace('{file_name}', matchedItem.fileName || matchedItem.name);
+        .replace('{user_name}', this.escapeHtml(userName))
+        .replace('{user_id}', this.escapeHtml(userId))
+        .replace('{trigger}', this.escapeHtml(text))
+        .replace('{file_name}', this.escapeHtml(matchedItem.fileName || matchedItem.name));
 
       const cleanBotUsername = botUsername.replace(/^@/, '');
       const payload = getItemPayload(matchedItem);
@@ -3776,14 +3980,14 @@ export class TelegramService {
         await this.trackAndLimitMessage(message.chat.id, res.result.message_id);
       }
     } else if (matchedItem.type === 'link') {
-      const template = templates.GROUP_LINK_REPLY || { content: "👇 Tap below — I'll send the link privately." };
+      const template = templates.GROUP_LINK_REPLY || { content: "🔗 <b>Link Ready for Delivery</b>\n<i>Tap the button below to open your link in private DM.</i>" };
       const buttonTemplate = templates.GET_LINK_BUTTON || { content: '🔗 Open Privately' };
 
       const replyText = template.content
-        .replace('{user_name}', userName)
-        .replace('{user_id}', userId)
-        .replace('{trigger}', text)
-        .replace('{title}', matchedItem.name);
+        .replace('{user_name}', this.escapeHtml(userName))
+        .replace('{user_id}', this.escapeHtml(userId))
+        .replace('{trigger}', this.escapeHtml(text))
+        .replace('{title}', this.escapeHtml(matchedItem.name));
 
       const cleanBotUsername = botUsername.replace(/^@/, '');
       const payload = getItemPayload(matchedItem);
@@ -3877,7 +4081,7 @@ export class TelegramService {
   ): Promise<void> {
     const templates = await storage.getTemplates();
     const startTemplate = templates.START_MESSAGE;
-    let startMsg = startTemplate?.content || "👋 <b>Welcome {user_name}!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> {bot_name}\n\n✨ <i>Send any configured trigger hashtag in your group or here to receive your files privately!</i>";
+    let startMsg = startTemplate?.content || "👋 <b>Welcome, <code>{user_name}</code>!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> <code>{bot_name}</code>\n\n✨ <i>Send any configured trigger hashtag in your group or here to receive your files privately.</i>";
     
     // Comprehensive Username & Name variables
     const cleanUsername = message?.from?.username ? `@${message.from.username.replace(/^@+/, '')}` : '';
@@ -3885,21 +4089,25 @@ export class TelegramService {
     const userMention = cleanUsername || userDisplayName;
     const botUsername = await this.getBotUsername();
     const formattedBotName = botUsername ? `@${botUsername.replace(/^@/, '')}` : 'the bot';
+    const safeUserDisplayName = this.escapeHtml(userDisplayName);
+    const safeUserMention = this.escapeHtml(userMention);
+    const safeFromId = this.escapeHtml(String(fromId));
+    const safeBotName = this.escapeHtml(formattedBotName);
 
     // Replace all variations of @username, username, user_name, user_id, bot_name
     startMsg = startMsg
-      .replace(/@?\{@?username\}/gi, userMention)
-      .replace(/@username\b/gi, userMention)
-      .replace(/\{user_name\}/gi, userDisplayName)
-      .replace(/\{name\}/gi, userDisplayName)
-      .replace(/\{user\}/gi, userDisplayName)
-      .replace(/\{user_id\}/gi, String(fromId))
-      .replace(/\{userId\}/gi, String(fromId))
-      .replace(/\{id\}/gi, String(fromId))
-      .replace(/@?\{@?bot_name\}/gi, formattedBotName)
-      .replace(/@?\{@?bot_username\}/gi, formattedBotName)
-      .replace(/Hey Friend/gi, `Hey ${userDisplayName}`)
-      .replace(/\bFriend\b/gi, userDisplayName)
+      .replace(/@?\{@?username\}/gi, safeUserMention)
+      .replace(/@username\b/gi, safeUserMention)
+      .replace(/\{user_name\}/gi, safeUserDisplayName)
+      .replace(/\{name\}/gi, safeUserDisplayName)
+      .replace(/\{user\}/gi, safeUserDisplayName)
+      .replace(/\{user_id\}/gi, safeFromId)
+      .replace(/\{userId\}/gi, safeFromId)
+      .replace(/\{id\}/gi, safeFromId)
+      .replace(/@?\{@?bot_name\}/gi, safeBotName)
+      .replace(/@?\{@?bot_username\}/gi, safeBotName)
+      .replace(/Hey Friend/gi, `Hey ${safeUserDisplayName}`)
+      .replace(/\bFriend\b/gi, safeUserDisplayName)
       .replace(/@@([a-zA-Z0-9_]+)/g, '@$1'); // Avoid double @@
 
     const mediaType = startTemplate?.mediaType || 'none';
@@ -4032,9 +4240,9 @@ export class TelegramService {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
         text:
-          `✅ <b>Mode Selected:</b> ${modeLabel}\n\n` +
-          `👤 <b>Now reply with the Telegram User ID or Username of the new Owner for this cloned bot.</b>\n\n` +
-          `<i>Example:</i> <code>123456789</code> or <code>@username</code>`,
+          `✅ <b>Mode Selected:</b> <code>${this.escapeHtml(modeLabel)}</code>\n\n` +
+          `👤 <b>Assign Clone Owner</b>\n<i>Reply with the Telegram User ID or Username of the new Owner for this cloned bot.</i>\n\n` +
+          `• <b>Examples:</b> <code>123456789</code> or <code>@username</code>`,
         parse_mode: 'HTML',
         reply_markup: {
           inline_keyboard: [[{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]]
@@ -4067,7 +4275,7 @@ export class TelegramService {
     }
 
     if (!ownerId && !ownerUsername) {
-      const invalidMsg = `⚠️ <b>Invalid Owner format.</b>\n\nPlease reply with a valid <b>Telegram User ID</b> (e.g. <code>123456789</code>) or <b>Username</b> (e.g. <code>@username</code>).\n\n<i>Send /cancel to abort.</i>`;
+      const invalidMsg = `⚠️ <b>Invalid Owner Format</b>\n\nPlease reply with a valid <b>Telegram User ID</b> (e.g. <code>123456789</code>) or <b>Username</b> (e.g. <code>@username</code>).\n\n<i>Send <code>/cancel</code> to abort.</i>`;
       if (isGroup) {
         await this.sendAutoDeletingNotice(chatId, invalidMsg, 8000, message?.message_id);
       } else {
@@ -4088,7 +4296,7 @@ export class TelegramService {
 
     const statusNotice = await this.callTelegramApi('sendMessage', {
       chat_id: chatId,
-      text: `⏳ <i>Finalizing clone for @${session.botInfo.username || session.botInfo.first_name} and assigning Owner...</i>`,
+      text: `⏳ <b>Finalizing Bot Clone...</b>\n<i>Configuring <code>@${this.escapeHtml(session.botInfo.username || session.botInfo.first_name || 'Bot')}</code> and assigning Owner.</i>`,
       parse_mode: 'HTML'
     });
 
@@ -4106,8 +4314,8 @@ export class TelegramService {
 
     if (!result.success || !result.bot) {
       const errorMsg = result.error === 'Already this bot is already running.'
-        ? '❌ <b>Already this bot is already running.</b>'
-        : `❌ <b>Failed to Clone Bot:</b>\n${result.error || 'Unknown error occurred.'}`;
+        ? '❌ <b>Already Running:</b> <i>This bot instance is already active.</i>'
+        : `❌ <b>Failed to Clone Bot</b>\n<code>${this.escapeHtml(result.error || 'Unknown error occurred.')}</code>`;
       if (isGroup) {
         await this.sendAutoDeletingNotice(chatId, errorMsg, 8000);
       } else {
@@ -4122,22 +4330,23 @@ export class TelegramService {
 
     const bot = result.bot;
     const ownerDisplay = bot.ownerUsername && bot.ownerId && bot.ownerId !== bot.ownerUsername
-      ? `@${bot.ownerUsername} (<code>${bot.ownerId}</code>)`
-      : (bot.ownerUsername ? `@${bot.ownerUsername}` : `<code>${bot.ownerId || fromId}</code>`);
+      ? `<code>@${this.escapeHtml(bot.ownerUsername)}</code> (<code>${this.escapeHtml(bot.ownerId)}</code>)`
+      : (bot.ownerUsername ? `<code>@${this.escapeHtml(bot.ownerUsername)}</code>` : `<code>${this.escapeHtml(bot.ownerId || fromId)}</code>`);
     const modeDisplay = (bot.botMode || selectedMode) === 'post_bot' ? '📝 Post Bot' : '📁 File Bot';
 
     const cleanBotId = String(bot.id).replace(/^clone_/i, '').replace(/[:_-]/g, '');
     const successText =
-      `✅ <b>Telegram Bot Successfully Cloned!</b>\n\n` +
-      `🤖 <b>Bot Name:</b> ${bot.name}\n` +
-      `🔗 <b>Bot Username:</b> @${bot.username}\n` +
-      `⚙️ <b>Mode:</b> ${modeDisplay}\n` +
-      `👑 <b>Official Owner:</b> ${ownerDisplay}\n` +
-      `📡 <b>Status:</b> 🟢 Active &amp; Polling\n\n` +
+      `✅ <b>Telegram Bot Successfully Cloned</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `• 🤖 <b>Bot Name:</b> <code>${this.escapeHtml(bot.name)}</code>\n` +
+      `• 🔗 <b>Bot Username:</b> <code>@${this.escapeHtml(bot.username)}</code>\n` +
+      `• ⚙️ <b>Mode:</b> <code>${this.escapeHtml(modeDisplay)}</code>\n` +
+      `• 👑 <b>Official Owner:</b> ${ownerDisplay}\n` +
+      `• 📡 <b>Status:</b> <code>Active &amp; Polling</code> 🟢\n\n` +
       `🔐 <b>Sub-Admin Panel Credentials</b>\n` +
-      `🌐 <b>Panel URL:</b> ${bot.panelUrl}\n` +
-      `🆔 <b>Bot ID:</b> <code>${cleanBotId}</code>\n` +
-      `🔑 <b>Password:</b> <code>${bot.adminPassword}</code>\n\n` +
+      `• 🌐 <b>Panel URL:</b> <code>${this.escapeHtml(bot.panelUrl || 'N/A')}</code>\n` +
+      `• 🆔 <b>Bot ID:</b> <code>${this.escapeHtml(cleanBotId)}</code>\n` +
+      `• 🔑 <b>Password:</b> <code>${this.escapeHtml(bot.adminPassword || 'N/A')}</code>\n\n` +
       `<i>The assigned Owner can log in to the web panel using the Bot ID and Password above.</i>`;
 
     if (isGroup) {
@@ -4155,7 +4364,7 @@ export class TelegramService {
       if (dmRes?.ok) {
         await this.sendAutoDeletingNotice(
           chatId,
-          `✅ <b>Bot @${bot.username} cloned!</b> Owner: ${ownerDisplay}. Panel credentials sent to your private DM.`,
+          `✅ <b>Bot Cloned:</b> <code>@${this.escapeHtml(bot.username)}</code>\n• <b>Owner:</b> ${ownerDisplay}\n<i>Panel credentials sent to your private DM.</i>`,
           7000
         );
       } else {
@@ -4194,7 +4403,8 @@ export class TelegramService {
       activeEditSessions.delete(fromId);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `✅ Template for "${editSession.templateKey}" updated successfully!`
+        text: `✅ <b>Template Updated</b>\n\n• <b>Template:</b> <code>${this.escapeHtml(editSession.templateKey)}</code>\n<i>Saved successfully and now active.</i>`,
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -4204,8 +4414,8 @@ export class TelegramService {
     if (startMatch) {
       const rawPayload = startMatch[1]?.trim();
 
-      // Mandatory Channel Join (Force Sub) Check
-      const forceCheck = await this.checkUserForceSub(fromId, message?.from?.username);
+      // Mandatory Channel Join (Force Sub) live check
+      const forceCheck = await this.checkUserForceSub(fromId, message?.from?.username, { forceFresh: true });
       if (!forceCheck.allJoined) {
         await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, rawPayload || 'start', undefined, message?.from);
         return;
@@ -4227,7 +4437,7 @@ export class TelegramService {
       if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: '⛔ <b>Access Denied:</b> The <code>/help</code> command is restricted to authorized administrators only.',
+          text: '⛔ <b>Access Denied</b>\n<i>The <code>/help</code> command is restricted to authorized administrators only.</i>',
           parse_mode: 'HTML'
         });
         return;
@@ -4243,7 +4453,7 @@ export class TelegramService {
       if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: '⛔ <i>Access Denied. Only authorized administrators can clone bots.</i>',
+          text: '⛔ <b>Access Denied</b>\n<i>Only authorized administrators can clone bots.</i>',
           parse_mode: 'HTML'
         });
         return;
@@ -4251,7 +4461,7 @@ export class TelegramService {
       if (!this.isMainBotContext()) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: '⛔ <b>Command Disabled:</b> The <code>/clone</code> command is completely disabled inside cloned bot instances and only works on the main primary bot.',
+          text: '⛔ <b>Command Disabled</b>\n<i>The <code>/clone</code> command is completely disabled inside cloned bot instances and only works on the main primary bot.</i>',
           parse_mode: 'HTML'
         });
         return;
@@ -4261,7 +4471,7 @@ export class TelegramService {
       if (!tokenArg) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: `ℹ️ <b>How to Clone Telegram Bot:</b>\n\n1. Open @BotFather on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>You will then be asked to assign the official Owner User ID or @username for the cloned bot.</i>`,
+          text: `ℹ️ <b>How to Clone Telegram Bot</b>\n\n1. Open <code>@BotFather</code> on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>You will then select the Bot Mode and assign the official Owner User ID or @username.</i>`,
           parse_mode: 'HTML'
         });
         return;
@@ -4270,8 +4480,8 @@ export class TelegramService {
       const check = await TelegramBotManager.validateCloneToken(tokenArg);
       if (!check.ok || !check.info) {
         const errorMsg = check.error === 'Already this bot is already running.'
-          ? '❌ <b>Already this bot is already running.</b>'
-          : `❌ <b>Failed to Clone Bot:</b>\n${check.error || 'Invalid bot token or failed to verify with Telegram.'}`;
+          ? '❌ <b>Already Running:</b> <i>This bot instance is already active.</i>'
+          : `❌ <b>Failed to Clone Bot</b>\n<code>${this.escapeHtml(check.error || 'Invalid bot token or failed to verify with Telegram.')}</code>`;
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
           text: errorMsg,
@@ -4292,10 +4502,10 @@ export class TelegramService {
       const promptRes = await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
         text:
-          `🤖 <b>Bot Token Verified:</b> @${check.info.username || check.info.first_name}\n\n` +
+          `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(check.info.username || check.info.first_name || 'Bot')}</code>\n\n` +
           `⚙️ <b>Choose Bot Mode for this clone:</b>\n\n` +
-          `• <b>📁 File Bot</b> — Standard file delivery, filters &amp; indexing mode\n` +
-          `• <b>📝 Post Bot</b> — Channel post maker, inline buttons &amp; post editing mode`,
+          `• 📁 <b>File Bot</b> — Standard file delivery, filters &amp; indexing mode\n` +
+          `• 📝 <b>Post Bot</b> — Channel post maker, inline buttons &amp; post editing mode`,
         parse_mode: 'HTML',
         reply_markup: {
           inline_keyboard: [
@@ -4321,7 +4531,7 @@ export class TelegramService {
       if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: '⛔ <i>Access Denied. Only authorized administrators can use /ban.</i>',
+          text: '⛔ <b>Access Denied</b>\n<i>Only authorized administrators can use <code>/ban</code>.</i>',
           parse_mode: 'HTML'
         });
         return;
@@ -4329,7 +4539,7 @@ export class TelegramService {
       if (!privBanMatch[1]?.trim()) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: `ℹ️ <b>How to Ban:</b>\nType <code>/ban &lt;user_id_or_username&gt;</code>`,
+          text: `ℹ️ <b>How to Ban</b>\nSend <code>/ban &lt;user_id_or_username&gt;</code>`,
           parse_mode: 'HTML'
         });
         return;
@@ -4340,10 +4550,11 @@ export class TelegramService {
       const targetName = found ? (found.firstName || found.username || 'User') : query;
       const targetUsername = found?.username ? `@${found.username.replace(/^@/, '')}` : (query.startsWith('@') ? query : '');
       await storage.setBotUserBanned(targetId, true);
-      const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+      const userIdentity = this.formatUserIdentity(targetName, targetUsername, targetId);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `OK Boss. ${userDisplay} has been successfully banned.`
+        text: `🚫 <b>User Banned</b>\n\n• 👤 <b>User:</b> ${userIdentity}\n<i>Access revoked by administrator.</i>`,
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -4355,7 +4566,7 @@ export class TelegramService {
       if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: '⛔ <i>Access Denied. Only authorized administrators can use /unban.</i>',
+          text: '⛔ <b>Access Denied</b>\n<i>Only authorized administrators can use <code>/unban</code>.</i>',
           parse_mode: 'HTML'
         });
         return;
@@ -4364,7 +4575,7 @@ export class TelegramService {
       if (!query) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: `ℹ️ <b>How to Unban:</b>\nType <code>/unban &lt;user_id_or_username&gt;</code>\nExample: <code>/unban 123456789</code> or <code>/unban @john_doe</code>`,
+          text: `ℹ️ <b>How to Unban</b>\nType <code>/unban &lt;user_id_or_username&gt;</code>\n<b>Example:</b> <code>/unban 123456789</code> or <code>/unban @john_doe</code>`,
           parse_mode: 'HTML'
         });
         return;
@@ -4380,10 +4591,10 @@ export class TelegramService {
       await storage.resetUserFraudWarning(targetId);
       TelegramService.unbanUserInConnectedChats(targetId).catch(() => {});
 
-      const userDisplay = targetUsername ? `${targetName} (${targetUsername})` : targetName;
+      const userIdentity = this.formatUserIdentity(targetName, targetUsername, targetId);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `✅ <b>OK Boss. ${userDisplay} has been successfully unbanned.</b>`,
+        text: `✅ <b>User Unbanned</b>\n\n• 👤 <b>User:</b> ${userIdentity}\n<i>Warnings cleared and access restored.</i>`,
         parse_mode: 'HTML'
       });
       return;
@@ -4396,7 +4607,7 @@ export class TelegramService {
       if (!query) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: `ℹ️ <b>How to Report:</b>\nSend <code>/report &lt;@username_or_id&gt; &lt;reason&gt;</code>\nExample: <code>/report @spammer Violating community rules</code>`,
+          text: `ℹ️ <b>How to Report</b>\nSend <code>/report &lt;@username_or_id&gt; &lt;reason&gt;</code>\n<b>Example:</b> <code>/report @spammer Violating community rules</code>`,
           parse_mode: 'HTML'
         });
         return;
@@ -4441,11 +4652,10 @@ export class TelegramService {
 
       const adminReportMsg = 
         `🚨 <b>New User Report Filed (DM)</b>\n\n` +
-        `👤 <b>Reported User:</b> ${targetUserName} (${targetUserUsername ? '@' + targetUserUsername : `ID: <code>${targetUserId}</code>`})\n` +
-        `🆔 <b>User ID:</b> <code>${targetUserId}</code>\n` +
-        `📢 <b>Reported By:</b> ${reporter.first_name || 'User'} (${reporter.username ? '@' + reporter.username : `ID: <code>${reporter.id}</code>`})\n` +
-        `💬 <b>Direct Message Report</b>\n` +
-        `📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>`;
+        `• 👤 <b>Reported User:</b> ${this.formatUserIdentity(targetUserName, targetUserUsername, targetUserId)}\n` +
+        `• 📢 <b>Reported By:</b> ${this.formatUserIdentity(reporter.first_name || 'User', reporter.username, reporter.id)}\n` +
+        `• 💬 <b>Source:</b> <code>Direct Message</code>\n` +
+        `• 📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>`;
 
       const keyboard = {
         inline_keyboard: [
@@ -4471,7 +4681,7 @@ export class TelegramService {
 
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '✅ <i>Report received and forwarded to administrators for review.</i>',
+        text: '✅ <b>Report Submitted</b>\n<i>Your report has been forwarded to administrators for review.</i>',
         parse_mode: 'HTML'
       });
       return;
@@ -4542,7 +4752,7 @@ export class TelegramService {
       if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: '⛔ <b>Access Denied:</b> The <code>/allfiles</code> command is restricted to authorized administrators only.',
+          text: '⛔ <b>Access Denied</b>\n<i>The <code>/allfiles</code> command is restricted to authorized administrators only.</i>',
           parse_mode: 'HTML'
         });
         return;
@@ -4606,7 +4816,7 @@ export class TelegramService {
       if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: '⛔ <i>Access Denied. Only authorized administrators can use /cleanup.</i>',
+          text: '⛔ <b>Access Denied</b>\n<i>Only authorized administrators can use <code>/cleanup</code>.</i>',
           parse_mode: 'HTML'
         });
         return;
@@ -4622,7 +4832,7 @@ export class TelegramService {
       }
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `🧹 <b>Cleanup Complete</b>\n\nCleaned up ${deletedCount} old tracked messages.`,
+        text: `🧹 <b>Cleanup Complete</b>\n\n• <b>Removed Messages:</b> <code>${deletedCount}</code>`,
         parse_mode: 'HTML'
       });
       return;
@@ -4633,7 +4843,7 @@ export class TelegramService {
       if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: '⛔ <i>Access Denied. Only authorized administrators can view admin stats.</i>',
+          text: '⛔ <b>Access Denied</b>\n<i>Only authorized administrators can view admin stats.</i>',
           parse_mode: 'HTML'
         });
         return;
@@ -4644,7 +4854,11 @@ export class TelegramService {
       const totalUsers = await storage.getTotalUserCount();
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `🛡️ <b>Administrators (${admins.length})</b>\nRoot ID: <code>${rootAdminId}</code>\nTotal Bot Users: <b>${totalUsers}</b>`,
+        text:
+          `🛡️ <b>Administrators Overview</b>\n\n` +
+          `• 👮 <b>Total Admins:</b> <code>${admins.length}</code>\n` +
+          `• 🆔 <b>Root ID:</b> <code>${this.escapeHtml(rootAdminId)}</code>\n` +
+          `• 👥 <b>Total Bot Users:</b> <code>${totalUsers}</code>`,
         parse_mode: 'HTML'
       });
       return;
@@ -4655,7 +4869,7 @@ export class TelegramService {
       if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: '⛔ <i>Access Denied. Broadcasting is restricted to authorized administrators only.</i>',
+          text: '⛔ <b>Access Denied</b>\n<i>Broadcasting is restricted to authorized administrators only.</i>',
           parse_mode: 'HTML'
         });
         return;
@@ -4665,7 +4879,7 @@ export class TelegramService {
         text:
           `📢 <b>Broadcast &amp; Mass Messaging</b>\n\n` +
           `Use the <b>Broadcast</b> feature inside the Web Admin Panel to send rich announcements, media, and targeted messages to all bot users.\n\n` +
-          `💡 Run <code>/webcode</code> to generate a login verification code.`,
+          `💡 <i>Run <code>/webcode</code> to generate a login verification code.</i>`,
         parse_mode: 'HTML'
       });
       return;
@@ -4676,7 +4890,7 @@ export class TelegramService {
       if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: '⛔ <i>Access Denied. Configuration commands are restricted to authorized administrators only.</i>',
+          text: '⛔ <b>Access Denied</b>\n<i>Configuration commands are restricted to authorized administrators only.</i>',
           parse_mode: 'HTML'
         });
         return;
@@ -4689,7 +4903,7 @@ export class TelegramService {
           `• Manage Force Sub channels: <code>/connect</code> / <code>/disconnect</code>\n` +
           `• Manage Chat Whitelist: <code>/allowchat</code> / <code>/ignorechat</code>\n` +
           `• Full Settings, Filter Rules &amp; File Deletion: Open the Web Admin Panel (run <code>/webcode</code> for login code).\n\n` +
-          `Send <code>/help</code> to view the complete admin command guide.`,
+          `<i>Send <code>/help</code> to view the complete admin command guide.</i>`,
         parse_mode: 'HTML'
       });
       return;
@@ -4701,7 +4915,7 @@ export class TelegramService {
       if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: '⛔ <i>Access Denied. Bot lifecycle and memory commands are restricted to authorized administrators only.</i>',
+          text: '⛔ <b>Access Denied</b>\n<i>Bot lifecycle and memory commands are restricted to authorized administrators only.</i>',
           parse_mode: 'HTML'
         });
         return;
@@ -4716,7 +4930,7 @@ export class TelegramService {
       if (!isAdmin) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: '⛔ <i>Access Denied. Only authorized administrators can configure Link Delete.</i>',
+          text: '⛔ <b>Access Denied</b>\n<i>Only authorized administrators can configure Link Delete.</i>',
           parse_mode: 'HTML'
         });
         return;
@@ -4750,7 +4964,7 @@ export class TelegramService {
       await this.deleteUserMessage(chatId, message?.message_id);
 
       const templates = await storage.getTemplates();
-      const cancelMsg = templates.CANCEL_MESSAGE?.content || '❌ Operation cancelled.';
+      const cancelMsg = templates.CANCEL_MESSAGE?.content || '❌ <b>Operation Cancelled</b>\n<i>Current action has been aborted.</i>';
 
       if (addSession?.lastPromptMessageId) {
         try {
@@ -4764,7 +4978,7 @@ export class TelegramService {
         } catch {}
       }
 
-      await this.callTelegramApi('sendMessage', { chat_id: chatId, text: cancelMsg });
+      await this.callTelegramApi('sendMessage', { chat_id: chatId, text: cancelMsg, parse_mode: 'HTML' });
       return;
     }
 
@@ -4798,20 +5012,20 @@ export class TelegramService {
       if (matchedItem) {
         const payload = getItemPayload(matchedItem);
 
-        // Check Force Sub
-        const forceCheck = await this.checkUserForceSub(fromId, message?.from?.username);
+        // Live Force Sub Check
+        const forceCheck = await this.checkUserForceSub(fromId, message?.from?.username, { forceFresh: true });
         if (!forceCheck.allJoined) {
           await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, payload, undefined, message?.from);
           return;
         }
 
-        await this.handleDeepLinkDelivery(chatId, payload);
+        await this.handleDeepLinkDelivery(chatId, payload, { skipForceSubCheck: true });
         return;
       }
     }
 
-    // Check Force Sub on any other direct user interactions in private chat
-    const generalForceCheck = await this.checkUserForceSub(fromId, message?.from?.username);
+    // Live Force Sub check on any other direct user interactions in private chat
+    const generalForceCheck = await this.checkUserForceSub(fromId, message?.from?.username, { forceFresh: true });
     if (!generalForceCheck.allJoined) {
       await this.sendForceSubPrompt(chatId, generalForceCheck.unjoinedChannels, 'start', undefined, message?.from);
       return;
@@ -5481,9 +5695,9 @@ export class TelegramService {
       return;
     }
 
-    // Mandatory Channel Join (Force Sub) Check (skipped when just verified by /start caller)
+    // Mandatory Channel Join (Force Sub) live check (skipped when just verified by /start or forcesub_verify caller)
     if (!options?.skipForceSubCheck) {
-      const forceCheck = await this.checkUserForceSub(chatId);
+      const forceCheck = await this.checkUserForceSub(chatId, undefined, { forceFresh: true });
       if (!forceCheck.allJoined) {
         await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, rawPayload);
         return;
@@ -5512,7 +5726,8 @@ export class TelegramService {
       console.warn('[Telegram] Item not found or inactive for payload:', cleanPayload);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '❌ Requested item not found or is no longer active.'
+        text: '❌ <b>Item Not Found</b>\n<i>The requested file or link is no longer active.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -5541,12 +5756,13 @@ export class TelegramService {
       }).catch(() => {});
     }
 
-    // Immediately send "⏳ Delivering your file..." notice and capture its promise for cleanup in finally
+    // Immediately send "⏳ Preparing Delivery..." notice and capture its promise for cleanup in finally
     const deliveringMsgPromise =
       item.type === 'file' && !isTextOnlyItem && !options?.messageIdToEdit
         ? this.callTelegramApi('sendMessage', {
             chat_id: chatId,
-            text: '⏳ Delivering your file...'
+            text: '⏳ <b>Preparing Delivery...</b>\n<i>Fetching your requested file, please wait a moment.</i>',
+            parse_mode: 'HTML'
           }).catch(() => null)
         : null;
 
@@ -5865,11 +6081,12 @@ export class TelegramService {
           const errorDetail = res?.description || (isLocalIdentifier && !uploadedFile ? 'Uploaded file data is not stored or has expired' : 'File identifier could not be verified by Telegram');
           await this.callTelegramApi('sendMessage', {
             chat_id: chatId,
-            text: `⚠️ Could not deliver "${item.fileName || item.name}".\n\nTelegram notice: ${errorDetail}.\nTip: Re-upload this file in the Admin Panel.`
+            text: `⚠️ <b>Delivery Failed</b>\n\n• 📁 <b>File:</b> <code>${this.escapeHtml(item.fileName || item.name || 'File')}</code>\n• ℹ️ <b>Notice:</b> <code>${this.escapeHtml(errorDetail)}</code>\n\n💡 <i>Tip: Re-upload this file in the Admin Panel.</i>`,
+            parse_mode: 'HTML'
           });
         }
       } else if (item.type === 'link') {
-        const messageText = item.replyMessage || `🔗 ${item.name}`;
+        const messageText = item.replyMessage || `🔗 <b>${this.escapeHtml(item.name)}</b>`;
         const buttonText = (item.buttonText && item.buttonText.trim()) || (item.openMode === 'webapp' ? '📱 Launch App' : '🌐 Open Link');
 
         const isHttps = /^https:\/\//i.test(item.url || '');
@@ -5985,7 +6202,7 @@ export class TelegramService {
     item: ItemRecord,
     messageIdToEdit?: number
   ): Promise<void> {
-    const defaultText = `🎬 <b>Setup Video & Resource Menu</b>\n\n📦 <b>${item.name}</b>\n\nChoose an option below to watch the setup tutorial or access your ${item.type === 'file' ? 'file' : 'link'}:`;
+    const defaultText = `🎬 <b>Setup Video &amp; Resource Menu</b>\n\n• 📦 <b>Item:</b> <code>${this.escapeHtml(item.name)}</code>\n\n<i>Choose an option below to watch the setup tutorial or access your ${item.type === 'file' ? 'file' : 'link'}:</i>`;
     const text = item.setupVideoMessage?.trim() || defaultText;
     const keyboard = {
       inline_keyboard: [
@@ -6034,12 +6251,14 @@ export class TelegramService {
     };
 
     if (!item.setupVideoUrl) {
+      const noVidText = `⚠️ <b>No Setup Video</b>\n<i>No setup video configured for <code>${this.escapeHtml(item.name)}</code>.</i>`;
       if (messageIdToEdit) {
         try {
           const editRes = await this.callTelegramApi('editMessageText', {
             chat_id: chatId,
             message_id: messageIdToEdit,
-            text: `⚠️ No setup video configured for "${item.name}".`,
+            text: noVidText,
+            parse_mode: 'HTML',
             reply_markup: backKeyboard
           });
           if (editRes && editRes.ok) return;
@@ -6047,13 +6266,14 @@ export class TelegramService {
       }
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `⚠️ No setup video configured for "${item.name}".`,
+        text: noVidText,
+        parse_mode: 'HTML',
         reply_markup: backKeyboard
       });
       return;
     }
 
-    const caption = `🎬 <b>Setup Video:</b> ${item.name}`;
+    const caption = `🎬 <b>Setup Video:</b> <code>${this.escapeHtml(item.name)}</code>`;
 
     // 1. If we already have a cached permanent Telegram file_id for this video, use it first
     const isRemoteFileId = (val?: string) => Boolean(
@@ -6159,7 +6379,7 @@ export class TelegramService {
       ...(videoButtonRow.length > 0 ? [videoButtonRow] : []),
       [{ text: '⬅️ Back', callback_data: `sv_menu_${item.id}`, style: 'primary' }]
     ];
-    const textMsg = `🎬 <b>Setup Video Tutorial</b>\n\n📦 <b>${item.name}</b>\n\n${item.setupVideoUrl}`;
+    const textMsg = `🎬 <b>Setup Video Tutorial</b>\n\n• 📦 <b>Item:</b> <code>${this.escapeHtml(item.name)}</code>\n• 🔗 <b>URL:</b> <code>${this.escapeHtml(item.setupVideoUrl)}</code>`;
 
     if (messageIdToEdit) {
       try {
@@ -6918,13 +7138,13 @@ export class TelegramService {
       formattedKeywords = uniqueTags.map((tag) => `<code>${tag}</code>`).join('\n');
     }
 
-    const defaultTpl = "📁 <b>Quick File Keywords</b>\nType any of these (in a group or here) and I'll DM you the file:\n\n{keywords}";
+    const defaultTpl = "📁 <b>Quick File Keywords</b>\n<i>Tap any trigger below to copy and send it to receive the file privately:</i>\n\n{keywords}";
     const tplContent = templates.FILTERS_MESSAGE?.content || defaultTpl;
 
     const formattedBotName = botUsername ? `@${botUsername.replace(/^@/, '')}` : 'Bot';
     const messageText = tplContent
       .replace(/\{keywords\}/g, formattedKeywords)
-      .replace(/\{bot_name\}/g, formattedBotName);
+      .replace(/\{bot_name\}/g, this.escapeHtml(formattedBotName));
 
     // User request: No inline buttons under filter keywords
     const params: any = {
@@ -7263,7 +7483,8 @@ export class TelegramService {
       console.error('[Telegram] /allfile command error:', err?.message || err);
       const errParams: any = {
         chat_id: chatId,
-        text: '❌ Unable to load the file list right now. Please try again in a moment.'
+        text: '❌ <b>Load Error</b>\n<i>Unable to load the file list right now. Please try again in a moment.</i>',
+        parse_mode: 'HTML'
       };
       if (replyToMessageId && !editMessageId) errParams.reply_to_message_id = replyToMessageId;
       if (threadId) errParams.message_thread_id = threadId;
@@ -7284,7 +7505,8 @@ export class TelegramService {
     if (!isAdmin) {
       await this.callTelegramApi('sendMessage', {
         chat_id: replyChatId,
-        text: '❌ Access denied. Only authorized administrators can manage the chat whitelist.'
+        text: '⛔ <b>Access Denied</b>\n<i>Only authorized administrators can manage the chat whitelist.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -7306,7 +7528,7 @@ export class TelegramService {
       await this.callTelegramApi('sendMessage', {
         chat_id: replyChatId,
         text:
-          `ℹ️ <b>Allow / Whitelist Chat Usage:</b>\n\n` +
+          `ℹ️ <b>Allow / Whitelist Chat Usage</b>\n\n` +
           `Send: <code>/allowchat &lt;chat_id&gt; [optional name]</code>\n` +
           `Example: <code>/allowchat -1001234567890 VIP Group</code>\n\n` +
           `<i>Note: Adding a chat ID automatically enables strict Whitelist mode so all unlisted groups/channels are silently ignored.</i>`,
@@ -7345,10 +7567,10 @@ export class TelegramService {
       chat_id: replyChatId,
       text:
         `✅ <b>Chat Added to Whitelist</b>\n\n` +
-        `• <b>Title:</b> ${this.escapeHtml(resolvedTitle || `Chat ${targetChatId}`)}\n` +
-        `• <b>Chat ID:</b> <code>${this.escapeHtml(targetChatId)}</code>\n` +
-        `• <b>Strict Whitelist Guard:</b> 🟢 Active\n` +
-        `• <b>Total Allowed Chats:</b> ${list.length}`,
+        `• 🏷️ <b>Title:</b> <code>${this.escapeHtml(resolvedTitle || `Chat ${targetChatId}`)}</code>\n` +
+        `• 🆔 <b>Chat ID:</b> <code>${this.escapeHtml(targetChatId)}</code>\n` +
+        `• 🛡️ <b>Strict Whitelist Guard:</b> <code>Active</code> 🟢\n` +
+        `• 📊 <b>Total Allowed Chats:</b> <code>${list.length}</code>`,
       parse_mode: 'HTML'
     });
   }
@@ -7363,7 +7585,8 @@ export class TelegramService {
     if (!isAdmin) {
       await this.callTelegramApi('sendMessage', {
         chat_id: replyChatId,
-        text: '❌ Access denied. Only authorized administrators can manage the chat whitelist.'
+        text: '⛔ <b>Access Denied</b>\n<i>Only authorized administrators can manage the chat whitelist.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -7375,7 +7598,7 @@ export class TelegramService {
       await this.callTelegramApi('sendMessage', {
         chat_id: replyChatId,
         text:
-          `ℹ️ <b>Ignore / Remove Chat Usage:</b>\n\n` +
+          `ℹ️ <b>Ignore / Remove Chat Usage</b>\n\n` +
           `Send: <code>/ignorechat &lt;chat_id&gt;</code>\n` +
           `Example: <code>/ignorechat -1001234567890</code>`,
         parse_mode: 'HTML'
@@ -7389,8 +7612,8 @@ export class TelegramService {
       chat_id: replyChatId,
       text:
         `🔇 <b>Chat Removed from Whitelist</b>\n\n` +
-        `• <b>Chat ID:</b> <code>${this.escapeHtml(targetChatId)}</code>\n` +
-        `• <b>Remaining Allowed Chats:</b> ${remainingList.length}\n\n` +
+        `• 🆔 <b>Chat ID:</b> <code>${this.escapeHtml(targetChatId)}</code>\n` +
+        `• 📊 <b>Remaining Allowed Chats:</b> <code>${remainingList.length}</code>\n\n` +
         `<i>When Strict Whitelist Guard is active, the bot will now completely ignore all activity in this chat.</i>`,
       parse_mode: 'HTML'
     });
@@ -7401,17 +7624,18 @@ export class TelegramService {
     if (!isAdmin) {
       await this.callTelegramApi('sendMessage', {
         chat_id: replyChatId,
-        text: '❌ Access denied.'
+        text: '⛔ <b>Access Denied</b>',
+        parse_mode: 'HTML'
       });
       return;
     }
 
     const settings = await storage.getSettings();
     const list = await storage.getAllowedChats();
-    const statusLabel = settings.chatWhitelistEnabled ? '🟢 ENABLED (Strict Ignore Active)' : '⚪ DISABLED (Allow All Chats)';
+    const statusLabel = settings.chatWhitelistEnabled ? '🟢 <code>ENABLED (Strict Ignore Active)</code>' : '⚪ <code>DISABLED (Allow All Chats)</code>';
 
     const lines = list.length > 0
-      ? list.map((c, idx) => `${idx + 1}. <b>${this.escapeHtml(c.title || 'Chat')}</b> — <code>${this.escapeHtml(c.id)}</code>`).join('\n')
+      ? list.map((c, idx) => `${idx + 1}. <code>${this.escapeHtml(c.title || 'Chat')}</code> — <code>${this.escapeHtml(c.id)}</code>`).join('\n')
       : '<i>No whitelisted chat IDs configured yet.</i>';
 
     await this.callTelegramApi('sendMessage', {
@@ -7419,7 +7643,7 @@ export class TelegramService {
       text:
         `🛡️ <b>Chat Whitelist Status</b>\n` +
         `• <b>Guard:</b> ${statusLabel}\n` +
-        `• <b>Whitelisted Chats (${list.length}):</b>\n\n` +
+        `• <b>Whitelisted Chats (<code>${list.length}</code>):</b>\n\n` +
         `${lines}\n\n` +
         `<i>Commands:</i>\n<code>/allowchat &lt;chat_id&gt; [name]</code>\n<code>/ignorechat &lt;chat_id&gt;</code>`,
       parse_mode: 'HTML'
@@ -7435,7 +7659,8 @@ export class TelegramService {
       console.warn('[Telegram] /webcode rejected: sender not authorized telegramId:', fromId);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '⛔ Access denied. You are not an authorized administrator.'
+        text: '⛔ <b>Access Denied</b>\n<i>You are not an authorized administrator.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -7444,18 +7669,20 @@ export class TelegramService {
       const code = await storage.createWebCode(fromId);
       console.info('[Telegram] /webcode generated successfully for telegramId:', fromId);
       const templates = await storage.getTemplates();
-      const tpl = templates.WEB_CODE_MESSAGE?.content || '🔐 Web Admin Verification Code\n\n{code}\n\nValid for 10 minutes.';
-      const reply = tpl.replace('{code}', code);
+      const tpl = templates.WEB_CODE_MESSAGE?.content || '🔐 <b>Web Admin Verification Code</b>\n\n<code>{code}</code>\n\n⏳ <i>Valid for 10 minutes. Tap the code above to copy.</i>';
+      const reply = tpl.replace('{code}', this.escapeHtml(code));
 
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: reply
+        text: reply,
+        parse_mode: 'HTML'
       });
     } catch (err: any) {
       console.error('[Telegram] Failed to generate/save webcode for telegramId:', fromId, err?.message);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '❌ Storage error generating verification code. Please try again.'
+        text: '❌ <b>Storage Error</b>\n<i>Failed to generate verification code. Please try again.</i>',
+        parse_mode: 'HTML'
       });
     }
   }
@@ -7466,7 +7693,8 @@ export class TelegramService {
       console.warn('[Telegram] /setpassword rejected: unauthorized sender telegramId:', fromId);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '⛔ Access denied. You must be an authorized admin to use /setpassword.'
+        text: '⛔ <b>Access Denied</b>\n<i>You must be an authorized admin to use <code>/setpassword</code>.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -7485,7 +7713,8 @@ export class TelegramService {
     if (parts.length < 2) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: 'ℹ️ Usage: /setpassword <new_password>'
+        text: 'ℹ️ <b>Usage</b>\n<code>/setpassword &lt;new_password&gt;</code>',
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -7494,7 +7723,8 @@ export class TelegramService {
     if (newPassword.length < 6) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '❌ Password must be at least 6 characters.'
+        text: '❌ <b>Invalid Password</b>\n<i>Password must be at least <code>6</code> characters long.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -7533,17 +7763,19 @@ export class TelegramService {
       console.error('[Telegram] Failed to save password for admin telegramId:', fromId);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '❌ Storage error: Failed to update password in persistent storage. Please try again.'
+        text: '❌ <b>Storage Error</b>\n<i>Failed to update password in persistent storage. Please try again.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
 
     console.info('[Telegram] /setpassword successfully updated and saved for admin telegramId:', fromId);
     const templates = await storage.getTemplates();
-    const tpl = templates.PASSWORD_UPDATED?.content || '✅ Password updated successfully. You can now log in to the web panel.';
+    const tpl = templates.PASSWORD_UPDATED?.content || '✅ <b>Password Updated</b>\n<i>Your Admin Panel password has been changed. You can now log in securely.</i>';
     await this.callTelegramApi('sendMessage', {
       chat_id: chatId,
-      text: tpl
+      text: tpl,
+      parse_mode: 'HTML'
     });
   }
 
@@ -7616,7 +7848,7 @@ export class TelegramService {
       }
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `⛔ Access Denied: You are not an authorized administrator.\nYour Telegram ID: <code>${fromId}</code>\nPlease ask an administrator to add your ID or sign in via web.`,
+        text: `⛔ <b>Access Denied</b>\n<i>You are not an authorized administrator.</i>\n• 🆔 <b>Your Telegram ID:</b> <code>${this.escapeHtml(fromId)}</code>\n<i>Ask an administrator to add your ID or sign in via web.</i>`,
         parse_mode: 'HTML'
       });
       return;
@@ -7645,7 +7877,7 @@ export class TelegramService {
 
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
-        `✅ <b>File Received:</b> <i>${media.fileName}</i>\n\n<b>Step 1/4: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+        `✅ <b>File Received:</b> <code>${this.escapeHtml(media.fileName)}</code>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
         {
           inline_keyboard: [
             [
@@ -7675,7 +7907,7 @@ export class TelegramService {
 
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
-        `✅ <b>Link Received:</b> <code>${urlMatch[0]}</code>\n\n<b>Step 1/7: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+        `✅ <b>Link Received:</b> <code>${this.escapeHtml(urlMatch[0])}</code>\n\n<b>Step 1/7: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
         {
           inline_keyboard: [
             [
@@ -7744,7 +7976,7 @@ export class TelegramService {
 
         const promptId = await TelegramService.sendOrEditSetupPrompt(
           chatId,
-          `✅ <b>File Received:</b> <i>${media.fileName}</i>\n\n<b>Step 1/4: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+          `✅ <b>File Received:</b> <code>${this.escapeHtml(media.fileName)}</code>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
           {
             inline_keyboard: [
               [
@@ -7771,7 +8003,7 @@ export class TelegramService {
 
         const promptId = await TelegramService.sendOrEditSetupPrompt(
           chatId,
-          `✅ <b>Link Received:</b> <code>${urlMatch[0]}</code>\n\n<b>Step 1/7: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+          `✅ <b>Link Received:</b> <code>${this.escapeHtml(urlMatch[0])}</code>\n\n<b>Step 1/7: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
           {
             inline_keyboard: [
               [
@@ -7801,7 +8033,7 @@ export class TelegramService {
 
         const promptId = await TelegramService.sendOrEditSetupPrompt(
           chatId,
-          `✅ <b>Text Response Received:</b>\n<i>${rawInput.slice(0, 100)}${rawInput.length > 100 ? '...' : ''}</i>\n\n<b>Step 1/4: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+          `✅ <b>Text Response Received:</b>\n<blockquote>${this.escapeHtml(rawInput.slice(0, 100))}${rawInput.length > 100 ? '...' : ''}</blockquote>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
           {
             inline_keyboard: [
               [
@@ -7854,7 +8086,7 @@ export class TelegramService {
 
         const promptId = await TelegramService.sendOrEditSetupPrompt(
           chatId,
-          `✅ <b>File Received:</b> <i>${media.fileName}</i>\n\n<b>Step 1/4: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+          `✅ <b>File Received:</b> <code>${this.escapeHtml(media.fileName)}</code>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
           {
             inline_keyboard: [
               [
@@ -7875,7 +8107,7 @@ export class TelegramService {
 
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
-        '❌ No file detected. Please send a Document, Photo, Video, or Audio, or type /cancel to abort.',
+        '❌ <b>No File Detected</b>\n<i>Please send a Document, Photo, Video, or Audio, or send <code>/cancel</code> to abort.</i>',
         {
           inline_keyboard: [
             [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
@@ -7899,7 +8131,7 @@ export class TelegramService {
 
         const promptId = await TelegramService.sendOrEditSetupPrompt(
           chatId,
-          `✅ <b>Link Received:</b> <code>${urlMatch[0]}</code>\n\n<b>Step 1/7: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+          `✅ <b>Link Received:</b> <code>${this.escapeHtml(urlMatch[0])}</code>\n\n<b>Step 1/7: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
           {
             inline_keyboard: [
               [
@@ -7920,7 +8152,7 @@ export class TelegramService {
 
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
-        '❌ Invalid URL. Please send a valid web link starting with https:// or http:// (or type /cancel):',
+        '❌ <b>Invalid URL</b>\n<i>Please send a valid web link starting with <code>https://</code> or <code>http://</code> (or send <code>/cancel</code>).</i>',
         {
           inline_keyboard: [
             [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
@@ -7946,7 +8178,7 @@ export class TelegramService {
 
         const promptId = await TelegramService.sendOrEditSetupPrompt(
           chatId,
-          `✅ <b>Text Response Received:</b>\n<i>${rawInput.slice(0, 100)}${rawInput.length > 100 ? '...' : ''}</i>\n\n<b>Step 1/4: Trigger Type Selection</b>\nChoose whether the trigger will be a Hashtag (#), Slash Command (/), or Normal Text:`,
+          `✅ <b>Text Response Received:</b>\n<blockquote>${this.escapeHtml(rawInput.slice(0, 100))}${rawInput.length > 100 ? '...' : ''}</blockquote>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
           {
             inline_keyboard: [
               [
@@ -8595,7 +8827,18 @@ export class TelegramService {
       ? `🎬 Enabled (${setupVideoType === 'url' ? 'URL Link' : 'Uploaded Video'})`
       : 'None (Direct Delivery)';
 
-    const successText = `✅ <b>Success! Your ${typeDesc} has been saved successfully.</b>\n\n📋 <b>Configuration Details:</b>\n• Type: <b>${typeDesc}</b>\n• Name: <b>${newItem.name}</b>\n• Trigger: <code>${primaryTrigger}</code> (${triggerType})\n• Public Filters: <b>${filterStatus}</b>\n• Delivery Mode: <b>${deliveryDesc}</b>\n• Retention: <b>${retentionDesc}</b>\n• Setup Video: <b>${setupVideoDesc}</b>\n\n🔗 <b>Direct Link:</b>\n${deepLink}\n\n💡 <i>Type <code>${primaryTrigger}</code> in any group or here to test delivery!</i>`;
+    const successText =
+      `✅ <b>Saved Successfully</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `• 🏷️ <b>Type:</b> <code>${this.escapeHtml(typeDesc)}</code>\n` +
+      `• 📦 <b>Name:</b> <code>${this.escapeHtml(newItem.name)}</code>\n` +
+      `• 🎯 <b>Trigger:</b> <code>${this.escapeHtml(primaryTrigger)}</code> (<code>${this.escapeHtml(triggerType)}</code>)\n` +
+      `• 📁 <b>Public Filters:</b> <code>${this.escapeHtml(filterStatus)}</code>\n` +
+      `• 📡 <b>Delivery Mode:</b> <code>${this.escapeHtml(deliveryDesc)}</code>\n` +
+      `• ⏳ <b>Retention:</b> <code>${this.escapeHtml(retentionDesc)}</code>\n` +
+      `• 🎬 <b>Setup Video:</b> <code>${this.escapeHtml(setupVideoDesc)}</code>\n\n` +
+      `🔗 <b>Direct Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
+      `💡 <i>Type <code>${this.escapeHtml(primaryTrigger)}</code> in any group or here to test delivery!</i>`;
 
     const successMarkup = {
       inline_keyboard: [
@@ -8813,10 +9056,10 @@ export class TelegramService {
           chat_id: chatId,
           message_id: cb.message.message_id,
           text:
-            `🤖 <b>Bot Token Verified:</b> @${session.botInfo?.username || session.botInfo?.first_name || 'Bot'}\n` +
-            `⚙️ <b>Selected Mode:</b> ${modeLabel}\n\n` +
-            `👤 <b>Please reply with the Telegram User ID or Username of the new Owner for this cloned bot.</b>\n\n` +
-            `<i>Example:</i> <code>123456789</code> or <code>@username</code>`,
+            `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(session.botInfo?.username || session.botInfo?.first_name || 'Bot')}</code>\n` +
+            `⚙️ <b>Selected Mode:</b> <code>${this.escapeHtml(modeLabel)}</code>\n\n` +
+            `👤 <b>Assign Clone Owner</b>\n<i>Reply with the Telegram User ID or Username of the new Owner for this cloned bot.</i>\n\n` +
+            `• <b>Examples:</b> <code>123456789</code> or <code>@username</code>`,
           parse_mode: 'HTML',
           reply_markup: {
             inline_keyboard: [[{ text: '❌ Cancel', callback_data: `clone_cancel:${targetAdminId}`, style: 'danger' }]]
@@ -8857,7 +9100,7 @@ export class TelegramService {
     if (data && data.startsWith('forcesub_verify:')) {
       const targetPayload = data.substring('forcesub_verify:'.length).trim() || 'start';
       this.invalidateForceSubCache(fromId);
-      const forceCheck = await this.checkUserForceSub(fromId, cb.from?.username);
+      const forceCheck = await this.checkUserForceSub(fromId, cb.from?.username, { forceFresh: true });
       const isRequestOnly = forceCheck.mode === 'request_only';
 
       if (!forceCheck.allJoined) {
@@ -8865,7 +9108,7 @@ export class TelegramService {
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
           text: isRequestOnly
-            ? 'Please send the join request to all required channel(s) first, then tap Verify.'
+            ? 'Please send a join request to the channel first.'
             : 'Please join all channels or groups to use this bot.',
           show_alert: true
         });
@@ -9171,14 +9414,18 @@ export class TelegramService {
           await this.callTelegramApi('editMessageText', {
             chat_id: chatId,
             message_id: msgId,
-            text: '❌ <b>Setup Cancelled.</b> Operation aborted.',
+            text: '❌ <b>Setup Cancelled</b>\n<i>Current operation has been aborted.</i>',
             parse_mode: 'HTML'
           });
           return;
         } catch {}
       }
       if (chatId) {
-        await this.callTelegramApi('sendMessage', { chat_id: chatId, text: '❌ Operation cancelled.' });
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '❌ <b>Operation Cancelled</b>\n<i>Current action has been aborted.</i>',
+          parse_mode: 'HTML'
+        });
       }
       return;
     }
@@ -9576,7 +9823,7 @@ export class TelegramService {
       if (chatId) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: `ℹ️ <b>How to Use This Bot:</b>\n\n• Type any file hashtag in your group or here to receive your file privately.\n• All files are delivered securely and privately in direct message.\n• Type <code>/filters</code> anytime to see the full list of available file hashtags.\n• To open public links, tap the button provided in group responses.`,
+          text: `ℹ️ <b>How to Use This Bot</b>\n\n• Type any file hashtag in your group or here to receive your file privately.\n• All files are delivered securely in direct message.\n• Run <code>/filters</code> anytime to view all available file hashtags.\n• Tap the inline button in group replies to open public links.`,
           parse_mode: 'HTML'
         });
       }
@@ -9589,14 +9836,18 @@ export class TelegramService {
       const item = await storage.getItem(itemId);
       if (!item) {
         if (chatId) {
-          await this.callTelegramApi('sendMessage', { chat_id: chatId, text: '❌ File not found.' });
+          await this.callTelegramApi('sendMessage', {
+            chat_id: chatId,
+            text: '❌ <b>File Not Found</b>\n<i>This item no longer exists in storage.</i>',
+            parse_mode: 'HTML'
+          });
         }
         return;
       }
       if (chatId) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: '🚀 Testing delivery: Sending file now...',
+          text: '🚀 <b>Testing Delivery...</b>\n<i>Dispatching item now.</i>',
           parse_mode: 'HTML'
         });
         const payload = getItemPayload(item);
@@ -9622,7 +9873,8 @@ export class TelegramService {
     if (!hasPermission) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '⛔ You are not authorized to edit message templates.'
+        text: '⛔ <b>Access Denied</b>\n<i>You are not authorized to edit message templates.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -9657,13 +9909,13 @@ export class TelegramService {
     if (!newContent && !detectedMediaUrl) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `ℹ️ <b>Start Message Configuration</b>\n\n<b>Current text:</b>\n${currentTemplate?.content || '(default)'}\n\n<b>Attached media:</b> ${currentTemplate?.mediaUrl ? `${currentTemplate.mediaType?.toUpperCase()} (active)` : 'None (text-only)'}\n\n<b>Usage:</b>\n• Send <code>/setstartmsg &lt;new message&gt;</code> to change text.\n• Reply to any Photo/Video with <code>/setstartmsg &lt;caption&gt;</code> to attach media!\n• Send <code>/setstartmedia &lt;url or file_id&gt;</code> to set media.\n• Send <code>/clearstartmedia</code> to remove media.\n\n<b>Placeholders:</b>\n• <code>{user_name}</code> - User's name\n• <code>{user_id}</code> - User's ID\n• <code>{bot_name}</code> - Bot username`,
+        text: `ℹ️ <b>Start Message Configuration</b>\n\n<b>Current text:</b>\n<blockquote>${currentTemplate?.content || '(default)'}</blockquote>\n\n• 🖼️ <b>Attached media:</b> <code>${currentTemplate?.mediaUrl ? `${currentTemplate.mediaType?.toUpperCase()} (active)` : 'None (text-only)'}</code>\n\n<b>Usage:</b>\n• Send <code>/setstartmsg &lt;new message&gt;</code> to change text.\n• Reply to any Photo/Video with <code>/setstartmsg &lt;caption&gt;</code> to attach media.\n• Send <code>/setstartmedia &lt;url or file_id&gt;</code> to set media.\n• Send <code>/clearstartmedia</code> to remove media.\n\n<b>Placeholders:</b>\n• <code>{user_name}</code> — User's name\n• <code>{user_id}</code> — User's ID\n• <code>{bot_name}</code> — Bot username`,
         parse_mode: 'HTML'
       });
       return;
     }
 
-    const finalContent = newContent || currentTemplate?.content || "👋 <b>Welcome {user_name}!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> {bot_name}";
+    const finalContent = newContent || currentTemplate?.content || "👋 <b>Welcome, <code>{user_name}</code>!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> <code>{bot_name}</code>";
     const extra: any = {};
     if (detectedMediaUrl) {
       extra.mediaType = detectedMediaType;
@@ -9673,7 +9925,7 @@ export class TelegramService {
     await storage.updateTemplate('START_MESSAGE', finalContent, extra);
     await this.callTelegramApi('sendMessage', {
       chat_id: chatId,
-      text: `✅ <b>Start Message Template Updated!</b>\n\n${detectedMediaUrl ? `📸 <i>Attached ${detectedMediaType?.toUpperCase()} to welcome message!</i>\n\n` : ''}<b>New Caption:</b>\n${finalContent}\n\nUsers who send <code>/start</code> will now receive this message with media!`,
+      text: `✅ <b>Start Message Template Updated</b>\n\n${detectedMediaUrl ? `📸 <i>Attached <code>${detectedMediaType?.toUpperCase()}</code> to welcome message!</i>\n\n` : ''}<b>New Caption:</b>\n${finalContent}\n\n<i>Users who send <code>/start</code> will now receive this message.</i>`,
       parse_mode: 'HTML'
     });
   }
@@ -9692,7 +9944,8 @@ export class TelegramService {
     if (!hasPermission) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '⛔ You are not authorized to edit message templates.'
+        text: '⛔ <b>Access Denied</b>\n<i>You are not authorized to edit message templates.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -9716,7 +9969,7 @@ export class TelegramService {
     if (!targetUrl) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '❌ Please provide a media URL or file ID, or reply to a photo/video message with <code>/setstartmedia</code>.\n\nExample:\n<code>/setstartmedia https://example.com/banner.jpg</code>',
+        text: '❌ <b>Missing Media</b>\n<i>Please provide a media URL or file ID, or reply to a photo/video with <code>/setstartmedia</code>.</i>\n\n<b>Example:</b>\n<code>/setstartmedia https://example.com/banner.jpg</code>',
         parse_mode: 'HTML'
       });
       return;
@@ -9727,7 +9980,7 @@ export class TelegramService {
     }
 
     const templates = await storage.getTemplates();
-    const currentContent = templates.START_MESSAGE?.content || "👋 <b>Welcome {user_name}!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> {bot_name}";
+    const currentContent = templates.START_MESSAGE?.content || "👋 <b>Welcome, <code>{user_name}</code>!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> <code>{bot_name}</code>";
 
     await storage.updateTemplate('START_MESSAGE', currentContent, {
       mediaType: targetType,
@@ -9736,7 +9989,7 @@ export class TelegramService {
 
     await this.callTelegramApi('sendMessage', {
       chat_id: chatId,
-      text: `✅ <b>Start Message Media Configured!</b>\n\n• Type: <b>${targetType.toUpperCase()}</b>\n• Media: <code>${targetUrl.slice(0, 50)}${targetUrl.length > 50 ? '...' : ''}</code>\n\nThe bot will now send this media above the welcome text when users start the bot.`,
+      text: `✅ <b>Start Message Media Configured</b>\n\n• 🏷️ <b>Type:</b> <code>${targetType.toUpperCase()}</code>\n• 🔗 <b>Media:</b> <code>${this.escapeHtml(targetUrl.slice(0, 50))}${targetUrl.length > 50 ? '...' : ''}</code>\n\n<i>This media will appear above the welcome text when users start the bot.</i>`,
       parse_mode: 'HTML'
     });
   }
@@ -9753,13 +10006,14 @@ export class TelegramService {
     if (!hasPermission) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '⛔ You are not authorized to edit message templates.'
+        text: '⛔ <b>Access Denied</b>\n<i>You are not authorized to edit message templates.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
 
     const templates = await storage.getTemplates();
-    const currentContent = templates.START_MESSAGE?.content || "👋 <b>Welcome {user_name}!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> {bot_name}";
+    const currentContent = templates.START_MESSAGE?.content || "👋 <b>Welcome, <code>{user_name}</code>!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> <code>{bot_name}</code>";
 
     await storage.updateTemplate('START_MESSAGE', currentContent, {
       mediaType: 'none',
@@ -9768,7 +10022,8 @@ export class TelegramService {
 
     await this.callTelegramApi('sendMessage', {
       chat_id: chatId,
-      text: '✅ Media attachment removed from Start Message. Welcome message is now text-only.'
+      text: '✅ <b>Start Media Removed</b>\n<i>The welcome message is now text-only.</i>',
+      parse_mode: 'HTML'
     });
   }
 
@@ -9787,7 +10042,8 @@ export class TelegramService {
     if (!hasPermission) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: '⛔ You are not authorized to edit message templates.'
+        text: '⛔ <b>Access Denied</b>\n<i>You are not authorized to edit message templates.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -9795,7 +10051,8 @@ export class TelegramService {
     if (!replyTo) {
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: 'ℹ️ Reply to any bot message with /editthismessage to edit its template or text.'
+        text: 'ℹ️ <b>Template Editor</b>\n<i>Reply to any bot message with <code>/editthismessage</code> to edit its template or text.</i>',
+        parse_mode: 'HTML'
       });
       return;
     }
@@ -9816,8 +10073,8 @@ export class TelegramService {
 
     await this.callTelegramApi('sendMessage', {
       chat_id: chatId,
-      text: `✏️ Editing template: *${templateKey}*\n\nCurrent text:\n"${replyTo.text || ''}"\n\nPlease send the new text for this template (or /cancel):`,
-      parse_mode: 'Markdown'
+      text: `✏️ <b>Editing Template:</b> <code>${this.escapeHtml(templateKey)}</code>\n\n<b>Current text:</b>\n<blockquote>${this.escapeHtml(replyTo.text || '')}</blockquote>\n\n<i>Send the new text for this template (or send <code>/cancel</code> to abort):</i>`,
+      parse_mode: 'HTML'
     });
   }
 
@@ -10491,10 +10748,10 @@ export class TelegramService {
         chat_id: chatId,
         text:
           `🧹 <b>Memory &amp; Cache Cleaned</b>\n\n` +
-          `🤖 <b>Scope:</b> <code>${this.escapeHtml(targetBotId)}</code>\n` +
-          `🗑️ <b>Runtime Caches Purged:</b> ${stats.clearedRuntimeEntries}\n` +
-          `📦 <b>Storage Cache Entries Cleared:</b> ${stats.clearedStorageEntries}\n` +
-          `📊 <b>Memory Usage:</b> ${stats.heapUsedMb} MB heap · ${stats.rssMb} MB RSS`,
+          `• 🤖 <b>Scope:</b> <code>${this.escapeHtml(targetBotId)}</code>\n` +
+          `• 🗑️ <b>Runtime Caches Purged:</b> <code>${stats.clearedRuntimeEntries}</code>\n` +
+          `• 📦 <b>Storage Cache Entries Cleared:</b> <code>${stats.clearedStorageEntries}</code>\n` +
+          `• 📊 <b>Memory Usage:</b> <code>${stats.heapUsedMb} MB</code> heap · <code>${stats.rssMb} MB</code> RSS`,
         parse_mode: 'HTML'
       });
       return;
@@ -10515,12 +10772,12 @@ export class TelegramService {
         text:
           `📊 <b>BOT RUNTIME STATUS</b>\n` +
           `━━━━━━━━━━━━━━━━━━━━\n` +
-          `🤖 <b>Bot ID:</b> <code>${this.escapeHtml(targetBotId)}</code>\n` +
-          `📡 <b>State:</b> ${isRunning ? '🟢 Running' : '🔴 Stopped'}\n` +
-          `📁 <b>Stored Items:</b> ${items.length}\n` +
-          (isMain ? `🧬 <b>Fleet Size:</b> ${allBots.length} bot(s)\n` : '') +
-          `🧠 <b>Memory:</b> ${heapMb} MB heap · ${rssMb} MB RSS\n` +
-          `⏱️ <b>Uptime:</b> ${Math.floor(process.uptime())}s`,
+          `• 🤖 <b>Bot ID:</b> <code>${this.escapeHtml(targetBotId)}</code>\n` +
+          `• 📡 <b>State:</b> ${isRunning ? '🟢 <code>Running</code>' : '🔴 <code>Stopped</code>'}\n` +
+          `• 📁 <b>Stored Items:</b> <code>${items.length}</code>\n` +
+          (isMain ? `• 🧬 <b>Fleet Size:</b> <code>${allBots.length} bot(s)</code>\n` : '') +
+          `• 🧠 <b>Memory:</b> <code>${heapMb} MB</code> heap · <code>${rssMb} MB</code> RSS\n` +
+          `• ⏱️ <b>Uptime:</b> <code>${Math.floor(process.uptime())}s</code>`,
         parse_mode: 'HTML'
       });
       return;

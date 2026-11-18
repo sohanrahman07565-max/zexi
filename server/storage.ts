@@ -367,7 +367,7 @@ export const DEFAULT_TEMPLATES: Record<string, MessageTemplate> = {
     key: 'START_MESSAGE',
     name: 'Start / Welcome Message',
     description: 'Welcome message sent to users when they send /start to the bot in private chat with optional Photo or Video attachment',
-    content: "👋 <b>Welcome {user_name}!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> {bot_name}\n\n✨ <i>Send any configured trigger hashtag in your group or here to receive your files privately!</i>",
+    content: "👋 <b>Welcome, <code>{user_name}</code>!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> <code>{bot_name}</code>\n\n✨ <i>Send any configured trigger hashtag in your group or here to receive your files privately.</i>",
     variables: ['user_name', 'user_id', 'bot_name'],
     mediaType: 'none',
     mediaUrl: ''
@@ -376,28 +376,28 @@ export const DEFAULT_TEMPLATES: Record<string, MessageTemplate> = {
     key: 'DELIVERY_STATUS_MESSAGE',
     name: 'Delivery Progress Status Message',
     description: 'Temporary status message displayed while delivering a file or link; automatically deleted after delivery completes',
-    content: '⏳ Delivering your file...',
+    content: '⏳ <b>Preparing Delivery...</b>\n<i>Fetching your requested file, please wait a moment.</i>',
     variables: ['user_name', 'name', 'type']
   },
   FILTERS_MESSAGE: {
     key: 'FILTERS_MESSAGE',
     name: 'Quick File Keywords (/filters)',
     description: 'Message sent when users or admins send /filters, /filter or #filters to view all one-tap copyable file triggers',
-    content: "📁 <b>Quick File Keywords</b>\nType any of these (in a group or here) and I'll DM you the file:\n\n{keywords}",
+    content: "📁 <b>Quick File Keywords</b>\n<i>Tap any trigger below to copy and send it to receive the file privately:</i>\n\n{keywords}",
     variables: ['keywords', 'bot_name']
   },
   GROUP_FILE_REPLY: {
     key: 'GROUP_FILE_REPLY',
     name: 'Group File Reply',
     description: 'Message sent in the group replying to the user requesting a file',
-    content: "👇 Tap below — I'll send your file privately.",
+    content: "📦 <b>File Ready for Delivery</b>\n<i>Tap the button below to receive your file in private DM.</i>",
     variables: ['user_name', 'user_id', 'trigger', 'file_name']
   },
   GROUP_LINK_REPLY: {
     key: 'GROUP_LINK_REPLY',
     name: 'Group Link Reply',
     description: 'Message sent in the group replying to the user requesting a link',
-    content: "👇 Tap below — I'll send the link privately.",
+    content: "🔗 <b>Link Ready for Delivery</b>\n<i>Tap the button below to open your link in private DM.</i>",
     variables: ['user_name', 'user_id', 'trigger', 'title']
   },
   GET_FILE_BUTTON: {
@@ -418,70 +418,70 @@ export const DEFAULT_TEMPLATES: Record<string, MessageTemplate> = {
     key: 'ADMIN_ADD_PROMPT',
     name: 'Admin Add Prompt',
     description: 'Message displayed when admin types /add in Telegram',
-    content: '📥 *Add File*\n\n*Step 1:* Please send the file you want to add:\n• Any document (APK, ZIP, PDF, etc.)\n• Photo\n• Video\n• Audio\n\n_(Type /cancel to abort)_',
+    content: '📥 <b>Add File</b>\n\n<b>Step 1:</b> Please send the file you want to add:\n• Any document (<code>APK</code>, <code>ZIP</code>, <code>PDF</code>, etc.)\n• Photo · Video · Audio\n\n<i>Send <code>/cancel</code> anytime to abort.</i>',
     variables: []
   },
   ADMIN_SAVE_SUCCESS: {
     key: 'ADMIN_SAVE_SUCCESS',
     name: 'Admin Save Success',
     description: 'Message sent when content is saved successfully',
-    content: '✅ Saved successfully! Trigger: {trigger}',
+    content: '✅ <b>Saved Successfully!</b>\n• <b>Trigger:</b> <code>{trigger}</code>',
     variables: ['trigger', 'type', 'name']
   },
   WEB_CODE_MESSAGE: {
     key: 'WEB_CODE_MESSAGE',
     name: 'Web Verification Code Message',
     description: 'Message sent when admin requests a WebCode for password reset',
-    content: '🔐 Web Admin Verification Code\n\n{code}\n\nValid for 10 minutes.',
+    content: '🔐 <b>Web Admin Verification Code</b>\n\n<code>{code}</code>\n\n⏳ <i>Valid for 10 minutes. Tap the code above to copy.</i>',
     variables: ['code']
   },
   PASSWORD_UPDATED: {
     key: 'PASSWORD_UPDATED',
     name: 'Password Updated',
     description: 'Message sent when password has been successfully updated',
-    content: '✅ Password updated successfully. You can now log in to the web panel.',
+    content: '✅ <b>Password Updated</b>\n<i>Your Admin Panel password has been changed. You can now log in securely.</i>',
     variables: []
   },
   CANCEL_MESSAGE: {
     key: 'CANCEL_MESSAGE',
     name: 'Operation Cancelled',
     description: 'Message sent when current interactive action is cancelled',
-    content: '❌ Operation cancelled.',
+    content: '❌ <b>Operation Cancelled</b>\n<i>Current action has been aborted.</i>',
     variables: []
   },
   FILE_AUTO_DELETE_NOTICE: {
     key: 'FILE_AUTO_DELETE_NOTICE',
     name: 'File Auto-Delete Notice',
     description: 'Notice message notifying users that delivered file is temporary and will auto-destruct',
-    content: '⏳ <i>Auto-Delete Notice: This file will automatically disappear in {timeout} minutes. Please save or forward it now!</i>',
+    content: '⏳ <b>Auto-Delete Notice</b>\n<i>This file will automatically disappear in <code>{timeout}</code> minutes. Please save or forward it now!</i>',
     variables: ['timeout', 'name']
   },
   ANTI_LINK_WARNING: {
     key: 'ANTI_LINK_WARNING',
     name: 'Anti-Link Group Warning',
     description: 'Warning message sent when a non-admin user posts an unauthorized link in group chat',
-    content: 'First Warning: Links are not allowed in this group. If you share a link again, you will be banned from the group.',
+    content: '⚠️ <b>First Warning</b>\n<i>Links are not allowed in this group. Sharing another link will result in a ban.</i>',
     variables: ['user_name', 'user_id']
   },
   BAN_NOTICE: {
     key: 'BAN_NOTICE',
     name: 'User Ban Notice',
     description: 'Notification sent when a user reaches 3 strikes (link/forward spam or fraud words) and is automatically banned',
-    content: '🚫 <b>USER AUTO-BANNED (Strike {strikes}/{strikes})</b>\n\n👤 <b>User:</b> {name} (@{username} | ID: <code>{user_id}</code>)\n⚠️ <b>Reason:</b> Exceeded maximum {strikes}-strike warnings for unauthorized links / external forward spam.',
+    content: '🚫 <b>USER AUTO-BANNED (Strike <code>{strikes}/{strikes}</code>)</b>\n\n👤 <b>User:</b> <code>{name}</code> (@{username} | <b>ID:</b> <code>{user_id}</code>)\n⚠️ <b>Reason:</b> Exceeded maximum <code>{strikes}</code>-strike warnings for unauthorized links / external forward spam.',
     variables: ['name', 'username', 'user_id', 'strikes']
   },
   FRAUD_KEYWORD_DEFAULT_REPLY: {
     key: 'FRAUD_KEYWORD_DEFAULT_REPLY',
     name: 'Restricted Word Auto-Reply / Warning',
     description: 'Auto-reply or warning sent when a user triggers a restricted keyword',
-    content: '⚠️ <b>Warning {user_name} ({warning_count}/{max_warnings}):</b> Prohibited content detected (<code>{keyword}</code>). If you continue, you will be restricted from this chat.',
+    content: '⚠️ <b>Warning <code>{user_name}</code> (<code>{warning_count}/{max_warnings}</code>):</b>\nProhibited content detected (<code>{keyword}</code>). <i>Continuing will result in a restriction from this chat.</i>',
     variables: ['user_name', 'user_id', 'keyword', 'warning_count', 'max_warnings', 'action']
   },
   FORCESUB_PROMPT: {
     key: 'FORCESUB_PROMPT',
     name: 'Force Sub / Mandatory Join Prompt',
     description: 'Main text displayed on the verification screen when a user has not joined all mandatory channels/groups',
-    content: "🔒 <b>Channel Membership Required</b>\n\nTo use this bot and access your requested content, please subscribe to our official channel(s) below:\n\n{channel_list}\n\n👇 <i>Tap the button(s) above to join, then press <b>Verify / Try Again</b> below.</i>",
+    content: "🔒 <b>Channel Membership Required</b>\n\nTo use <code>{bot_name}</code> and access your requested content, please join our official channel(s) below:\n\n{channel_list}\n\n👇 <i>Tap the channel buttons below to join, then press <b>Verify / Try Again</b>.</i>",
     variables: ['channel_list', 'user_name', 'user_id', 'bot_name']
   }
 };
@@ -577,6 +577,7 @@ export class SharedStorageService {
   private sortedActiveItemsNewestCache: ItemRecord[] | null = null;
   private sortedItemsChronoCache: ItemRecord[] | null = null;
   private cloudSyncTimer: NodeJS.Timeout | null = null;
+  private invalidatedJoinRequestIds = new Set<string>();
 
   constructor(public readonly botId: string = 'main') {
     this.db = {
@@ -1259,7 +1260,13 @@ export class SharedStorageService {
       linkWarnings: loadedData.linkWarnings || {},
       fraudWarnings: loadedData.fraudWarnings || {},
       detectedChannels: Array.isArray(loadedData.detectedChannels) ? loadedData.detectedChannels : [],
-      joinRequests: { ...(loadedData.joinRequests || {}), ...(this.db.joinRequests || {}) },
+      joinRequests: (() => {
+        const merged = { ...(loadedData.joinRequests || {}), ...(this.db.joinRequests || {}) };
+        for (const invId of this.invalidatedJoinRequestIds) {
+          delete merged[invId];
+        }
+        return merged;
+      })(),
       postBotPublishedPosts: { ...(loadedData.postBotPublishedPosts || {}), ...(this.db.postBotPublishedPosts || {}) },
       design: { ...DEFAULT_DESIGN, ...(loadedData.design || {}) },
       settings: {
@@ -2600,6 +2607,7 @@ export class SharedStorageService {
     }
 
     const id = `${cleanChatId}_${cleanUserId}`;
+    this.invalidatedJoinRequestIds.delete(id);
     const now = new Date().toISOString();
     const existing = this.db.joinRequests[id];
     const normalizedChatUsername = data.chatUsername
@@ -2616,8 +2624,8 @@ export class SharedStorageService {
       userUsername: data.userUsername || existing?.userUsername,
       status: data.status || existing?.status || 'pending',
       inviteLink: data.inviteLink || existing?.inviteLink,
-      createdAt: existing?.createdAt || now,
-      approvedAt: data.status === 'approved' ? (data.approvedAt || now) : existing?.approvedAt
+      createdAt: data.status === 'pending' ? now : (existing?.createdAt || now),
+      approvedAt: data.status === 'approved' ? (data.approvedAt || now) : (data.status === 'pending' ? undefined : existing?.approvedAt)
     };
 
     this.db.joinRequests[id] = record;
@@ -2625,27 +2633,25 @@ export class SharedStorageService {
     return record;
   }
 
-  public async isJoinRequestApprovedOrPending(
+  private getMatchingJoinRequestKeys(
     chatId: string | number,
     userId: string | number,
     channelId?: string,
     channelUsername?: string,
     userUsername?: string
-  ): Promise<boolean> {
-    await this.loadLatest(false);
-    if (!this.db.joinRequests) return false;
-
+  ): string[] {
+    if (!this.db.joinRequests) return [];
     const cleanUserId = String(userId || '').trim();
     const cleanUserUsername = String(userUsername || '').replace(/^@+/, '').toLowerCase().trim();
-    if (!cleanUserId && !cleanUserUsername) return false;
+    if (!cleanUserId && !cleanUserUsername) return [];
 
     const rawChat = String(chatId || '').trim();
-    // Normalize forms: e.g. -10012345, 12345, @username
     const strippedChat = rawChat.replace(/^-100/, '').replace(/^-/, '').replace(/^@/, '').toLowerCase();
     const cleanUsername = channelUsername ? channelUsername.replace(/^@/, '').toLowerCase().trim() : '';
 
-    const records = Object.values(this.db.joinRequests);
-    for (const req of records) {
+    const matchedKeys: string[] = [];
+    for (const [key, req] of Object.entries(this.db.joinRequests)) {
+      if (!req) continue;
       const reqUserId = String(req.userId || '').trim();
       const reqUserUsername = String(req.userUsername || '').replace(/^@+/, '').toLowerCase().trim();
       const matchesUser =
@@ -2657,7 +2663,6 @@ export class SharedStorageService {
       const strippedReqChat = reqChat.replace(/^-100/, '').replace(/^-/, '').replace(/^@/, '').toLowerCase();
       const reqChatUsername = String(req.chatUsername || '').replace(/^@+/, '').toLowerCase().trim();
 
-      // Check match by Chat ID, stripped ID, channelId, or Username
       const matchesChat =
         reqChat === rawChat ||
         (strippedChat && (strippedReqChat === strippedChat || (reqChatUsername && reqChatUsername === strippedChat))) ||
@@ -2670,12 +2675,73 @@ export class SharedStorageService {
         ));
 
       if (matchesChat) {
-        if (req.status === 'approved' || req.status === 'pending') {
-          return true;
-        }
+        matchedKeys.push(key);
       }
     }
+    return matchedKeys;
+  }
 
+  public async findJoinRequestRecord(
+    chatId: string | number,
+    userId: string | number,
+    channelId?: string,
+    channelUsername?: string,
+    userUsername?: string
+  ): Promise<JoinRequestRecord | null> {
+    await this.loadLatest(false);
+    const keys = this.getMatchingJoinRequestKeys(chatId, userId, channelId, channelUsername, userUsername);
+    if (keys.length === 0 || !this.db.joinRequests) return null;
+
+    let best: JoinRequestRecord | null = null;
+    for (const k of keys) {
+      const rec = this.db.joinRequests[k];
+      if (!rec) continue;
+      if (!best || new Date(rec.createdAt).getTime() >= new Date(best.createdAt).getTime()) {
+        best = rec;
+      }
+    }
+    return best;
+  }
+
+  public async invalidateJoinRequest(
+    chatId: string | number,
+    userId: string | number,
+    channelId?: string,
+    channelUsername?: string,
+    userUsername?: string
+  ): Promise<boolean> {
+    await this.loadLatest(false);
+    if (!this.db.joinRequests) return false;
+    const keys = this.getMatchingJoinRequestKeys(chatId, userId, channelId, channelUsername, userUsername);
+    if (keys.length === 0) return false;
+    for (const k of keys) {
+      delete this.db.joinRequests[k];
+      this.invalidatedJoinRequestIds.add(k);
+    }
+    await this.persist();
+    return true;
+  }
+
+  public async isJoinRequestApprovedOrPending(
+    chatId: string | number,
+    userId: string | number,
+    channelId?: string,
+    channelUsername?: string,
+    userUsername?: string,
+    options?: { pendingOnly?: boolean }
+  ): Promise<boolean> {
+    await this.loadLatest(false);
+    if (!this.db.joinRequests) return false;
+    const keys = this.getMatchingJoinRequestKeys(chatId, userId, channelId, channelUsername, userUsername);
+    for (const k of keys) {
+      const req = this.db.joinRequests[k];
+      if (!req) continue;
+      if (options?.pendingOnly) {
+        if (req.status === 'pending') return true;
+      } else {
+        if (req.status === 'approved' || req.status === 'pending') return true;
+      }
+    }
     return false;
   }
 

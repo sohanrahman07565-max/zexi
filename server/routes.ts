@@ -2765,10 +2765,39 @@ apiRouter.post('/settings/approve-join-request', authenticate, requirePermission
     });
 
     await storage.updateJoinRequestStatus(String(chatId), String(userId), 'approved');
+    const botScopeId = String((storage as any)?.botId || 'main').trim() || 'main';
+    TelegramService.clearCachedPendingJoinRequest(botScopeId, String(chatId), String(userId));
+    TelegramService.invalidateForceSubCache(String(userId));
 
     return res.json({ success: true, result: approveRes });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to approve join request' });
+  }
+});
+
+// POST /api/settings/decline-join-request - Dismiss/decline a pending join request and revoke verification
+apiRouter.post('/settings/decline-join-request', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const { chatId, userId } = req.body;
+    if (!chatId || !userId) {
+      return res.status(400).json({ error: 'chatId and userId are required' });
+    }
+    const cleanChatId = /^-?\d+$/.test(String(chatId)) ? Number(chatId) : String(chatId);
+    const cleanUserId = Number(userId) || userId;
+
+    const declineRes = await TelegramService.callTelegramApi('declineChatJoinRequest', {
+      chat_id: cleanChatId,
+      user_id: cleanUserId
+    }).catch(() => null);
+
+    const botScopeId = String((storage as any)?.botId || 'main').trim() || 'main';
+    TelegramService.clearCachedPendingJoinRequest(botScopeId, String(chatId), String(userId));
+    TelegramService.invalidateForceSubCache(String(userId));
+    await storage.invalidateJoinRequest(String(chatId), String(userId));
+
+    return res.json({ success: true, result: declineRes });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to decline join request' });
   }
 });
 
