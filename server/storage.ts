@@ -161,10 +161,14 @@ export interface AllowedChatEntry {
   addedBy?: string;
 }
 
+export type BotOperationalMode = 'file_bot' | 'post_bot';
+
 export interface BotSettings {
   botToken: string;
   botUsername: string;
   rootAdminId: string;
+  botMode?: BotOperationalMode;
+  postBotChannelId?: string;
   maxBotMessagesPerChat: number;
   dailyCleanupEnabled: boolean;
   cleanupAgeHours: number;
@@ -187,6 +191,7 @@ export interface BotSettings {
 export interface JoinRequestRecord {
   id: string; // `${chatId}_${userId}`
   chatId: string;
+  chatUsername?: string;
   chatTitle?: string;
   userId: string;
   userName?: string;
@@ -312,6 +317,7 @@ export interface ClonedBotRecord {
   name: string;
   username: string;
   status: 'active' | 'paused' | 'stopped';
+  botMode?: BotOperationalMode;
   createdAt: string;
   createdBy?: string;
   ownerId?: string;
@@ -344,6 +350,7 @@ export interface AppDatabase {
   fraudWarnings?: Record<string, number>;
   detectedChannels?: ForceSubChannel[];
   joinRequests?: Record<string, JoinRequestRecord>;
+  postBotPublishedPosts?: Record<string, any>;
   uploadedFilesIndex?: Record<string, {
     id: string;
     fileName: string;
@@ -523,6 +530,8 @@ export const DEFAULT_SETTINGS: BotSettings = {
   botToken: process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '',
   botUsername: '',
   rootAdminId: process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '',
+  botMode: 'file_bot',
+  postBotChannelId: '',
   maxBotMessagesPerChat: 10,
   dailyCleanupEnabled: true,
   cleanupAgeHours: 24,
@@ -588,6 +597,7 @@ export class SharedStorageService {
       fraudWarnings: {},
       detectedChannels: [],
       joinRequests: {},
+      postBotPublishedPosts: {},
       design: { ...DEFAULT_DESIGN },
       settings: { ...DEFAULT_SETTINGS },
       backupServer: { ...DEFAULT_BACKUP_SERVER_CONFIG }
@@ -898,6 +908,7 @@ export class SharedStorageService {
           fraudWarnings: this.db.fraudWarnings,
           detectedChannels: this.db.detectedChannels,
           joinRequests: this.db.joinRequests,
+          postBotPublishedPosts: this.db.postBotPublishedPosts || {},
           trackedMessages: this.db.trackedMessages,
           scheduledDeletions: this.db.scheduledDeletions,
           chatDeliveryMessages: this.db.chatDeliveryMessages,
@@ -1248,7 +1259,8 @@ export class SharedStorageService {
       linkWarnings: loadedData.linkWarnings || {},
       fraudWarnings: loadedData.fraudWarnings || {},
       detectedChannels: Array.isArray(loadedData.detectedChannels) ? loadedData.detectedChannels : [],
-      joinRequests: loadedData.joinRequests || {},
+      joinRequests: { ...(loadedData.joinRequests || {}), ...(this.db.joinRequests || {}) },
+      postBotPublishedPosts: { ...(loadedData.postBotPublishedPosts || {}), ...(this.db.postBotPublishedPosts || {}) },
       design: { ...DEFAULT_DESIGN, ...(loadedData.design || {}) },
       settings: {
         ...DEFAULT_SETTINGS,
@@ -1259,6 +1271,8 @@ export class SharedStorageService {
         rootAdminId: isMainBot
           ? (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || loadedData.settings?.rootAdminId || '')
           : (loadedData.settings?.rootAdminId || ''),
+        botMode: loadedData.settings?.botMode === 'post_bot' ? 'post_bot' : (this.db.settings?.botMode === 'post_bot' ? 'post_bot' : 'file_bot'),
+        postBotChannelId: loadedData.settings?.postBotChannelId || this.db.settings?.postBotChannelId || '',
         autoDeleteNoticeEnabled: loadedData.settings?.autoDeleteNoticeEnabled ?? false,
         forceSubEnabled: loadedData.settings?.forceSubEnabled ?? false,
         forceJoinMode: loadedData.settings?.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
@@ -2300,6 +2314,9 @@ export class SharedStorageService {
   // --- Settings ---
   public async getSettings(): Promise<BotSettings> {
     await this.loadLatest(false);
+    if (this.db.settings.botMode !== 'file_bot' && this.db.settings.botMode !== 'post_bot') {
+      this.db.settings.botMode = 'file_bot';
+    }
     if (this.db.settings.forceSubEnabled === undefined) {
       this.db.settings.forceSubEnabled = false;
     }
@@ -2330,9 +2347,14 @@ export class SharedStorageService {
       settings.forceJoinMode !== undefined
         ? (settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join')
         : (this.db.settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join');
+    const nextBotMode: BotOperationalMode =
+      settings.botMode !== undefined
+        ? (settings.botMode === 'post_bot' ? 'post_bot' : 'file_bot')
+        : (this.db.settings.botMode === 'post_bot' ? 'post_bot' : 'file_bot');
     this.db.settings = { 
       ...this.db.settings, 
       ...settings,
+      botMode: nextBotMode,
       forceSubEnabled: settings.forceSubEnabled !== undefined ? Boolean(settings.forceSubEnabled) : (this.db.settings.forceSubEnabled ?? false),
       forceJoinMode: nextForceJoinMode,
       antiForwardEnabled: settings.antiForwardEnabled !== undefined ? Boolean(settings.antiForwardEnabled) : (this.db.settings.antiForwardEnabled ?? false),
@@ -2558,6 +2580,7 @@ export class SharedStorageService {
   // --- Private Channel Join Requests & Auto-Approval ---
   public async recordJoinRequest(data: {
     chatId: string | number;
+    chatUsername?: string;
     userId: string | number;
     chatTitle?: string;
     userName?: string;
@@ -2566,7 +2589,7 @@ export class SharedStorageService {
     inviteLink?: string;
     approvedAt?: string;
   }): Promise<JoinRequestRecord> {
-    await this.loadLatest(true);
+    await this.loadLatest(false);
     if (!this.db.joinRequests) {
       this.db.joinRequests = {};
     }
@@ -2579,10 +2602,14 @@ export class SharedStorageService {
     const id = `${cleanChatId}_${cleanUserId}`;
     const now = new Date().toISOString();
     const existing = this.db.joinRequests[id];
+    const normalizedChatUsername = data.chatUsername
+      ? `@${String(data.chatUsername).replace(/^@+/, '').trim()}`
+      : existing?.chatUsername;
 
     const record: JoinRequestRecord = {
       id,
       chatId: cleanChatId,
+      ...(normalizedChatUsername ? { chatUsername: normalizedChatUsername } : {}),
       chatTitle: data.chatTitle || existing?.chatTitle || '',
       userId: cleanUserId,
       userName: data.userName || existing?.userName || '',
@@ -2615,7 +2642,7 @@ export class SharedStorageService {
     const rawChat = String(chatId || '').trim();
     // Normalize forms: e.g. -10012345, 12345, @username
     const strippedChat = rawChat.replace(/^-100/, '').replace(/^-/, '').replace(/^@/, '').toLowerCase();
-    const cleanUsername = channelUsername ? channelUsername.replace(/^@/, '').toLowerCase() : '';
+    const cleanUsername = channelUsername ? channelUsername.replace(/^@/, '').toLowerCase().trim() : '';
 
     const records = Object.values(this.db.joinRequests);
     for (const req of records) {
@@ -2628,13 +2655,15 @@ export class SharedStorageService {
 
       const reqChat = String(req.chatId).trim();
       const strippedReqChat = reqChat.replace(/^-100/, '').replace(/^-/, '').replace(/^@/, '').toLowerCase();
+      const reqChatUsername = String(req.chatUsername || '').replace(/^@+/, '').toLowerCase().trim();
 
       // Check match by Chat ID, stripped ID, channelId, or Username
-      const matchesChat = 
+      const matchesChat =
         reqChat === rawChat ||
-        (strippedChat && strippedReqChat === strippedChat) ||
+        (strippedChat && (strippedReqChat === strippedChat || (reqChatUsername && reqChatUsername === strippedChat))) ||
         (channelId && (req.id.startsWith(channelId) || reqChat === channelId)) ||
         (cleanUsername && (
+          reqChatUsername === cleanUsername ||
           reqChat.toLowerCase() === `@${cleanUsername}` ||
           reqChat.toLowerCase() === cleanUsername ||
           req.chatTitle?.toLowerCase() === cleanUsername
@@ -2648,6 +2677,21 @@ export class SharedStorageService {
     }
 
     return false;
+  }
+
+  // --- Post Bot Published Posts Persistence ---
+  public async getPostBotPublishedPosts(): Promise<Record<string, any>> {
+    await this.loadLatest(false);
+    return this.db.postBotPublishedPosts || {};
+  }
+
+  public async savePostBotPublishedPost(postId: string | number, postRecord: any): Promise<void> {
+    await this.loadLatest(false);
+    if (!this.db.postBotPublishedPosts) {
+      this.db.postBotPublishedPosts = {};
+    }
+    this.db.postBotPublishedPosts[String(postId)] = postRecord;
+    await this.persist();
   }
 
   public async getJoinRequests(): Promise<JoinRequestRecord[]> {

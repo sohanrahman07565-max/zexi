@@ -1,5 +1,6 @@
 export type TriggerType = 'hashtag' | 'slash' | 'normal';
 export type OpenMode = 'browser' | 'webapp';
+export type BotOperationalMode = 'file_bot' | 'post_bot';
 
 export interface AdminUser {
   id: string;
@@ -153,6 +154,7 @@ export interface BotSettings {
   autoApproveJoinRequests?: boolean;
   antiForwardEnabled?: boolean;
   linkDeleteEnabled?: boolean;
+  botMode?: BotOperationalMode;
   chatWhitelistEnabled?: boolean;
   allowedChats?: AllowedChatEntry[];
   botStopped?: boolean;
@@ -224,6 +226,7 @@ export interface BotInstance {
   username: string;
   isMain: boolean;
   status: 'active' | 'stopped';
+  botMode?: BotOperationalMode;
   filesCount: number;
   usersCount: number;
   createdAt?: string;
@@ -1104,19 +1107,31 @@ export const api = {
     return data.bots || [];
   },
 
-  async cloneBot(token: string, owner?: string): Promise<any> {
+  async cloneBot(token: string, owner?: string, botMode: BotOperationalMode = 'file_bot'): Promise<any> {
     const cleanOwner = owner?.trim();
     const res = await authFetch('/api/bots/clone', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         token: token.trim(),
+        botMode,
         ...(cleanOwner ? { owner: cleanOwner } : {})
       })
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to clone bot');
     return data.bot;
+  },
+
+  async changeBotMode(id: string, botMode: BotOperationalMode): Promise<{ ok: boolean; botId: string; botMode: BotOperationalMode; message: string }> {
+    const res = await authFetch(`/api/bots/${encodeURIComponent(id)}/mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ botMode })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to change bot mode');
+    return data;
   },
 
   async deleteClonedBot(id: string): Promise<boolean> {
