@@ -6,7 +6,8 @@ import {
   FileText, Link2, Plus, Search, Edit2, Trash2, 
   Sparkles, Check, X, ArrowRight, ArrowLeft, Globe, Smartphone,
   Copy, Share2, Upload, AlertTriangle, Paperclip, Loader2,
-  Clock, Calendar, Video, Music, MessageSquare, ChevronDown
+  Clock, Calendar, Video, Music, MessageSquare, ChevronDown,
+  Layers, Infinity as InfinityIcon
 } from 'lucide-react';
 
 interface FilesTabProps {
@@ -636,51 +637,57 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
       <div className="glass flex p-1 rounded-2xl text-xs flex-wrap gap-1">
         <button
           onClick={() => setFilter('all')}
-          className={`tap flex-1 min-w-[50px] py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
-            filter === 'all' ? 'bg-white/15 text-white border border-white/25 shadow-xs' : 'text-white/60 hover:text-white'
+          className={`tap flex-1 min-w-[56px] py-1.5 px-2 text-center font-semibold rounded-xl cursor-pointer inline-flex items-center justify-center gap-1.5 ${
+            filter === 'all' ? 'bg-white/15 text-white border border-white/25 shadow-xs' : 'text-white/60 hover:text-white border border-transparent'
           }`}
         >
-          All ({items.length})
+          <Layers className="w-3.5 h-3.5 shrink-0" />
+          <span>All ({items.length})</span>
         </button>
         <button
           onClick={() => setFilter('file')}
-          className={`tap flex-1 min-w-[50px] py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
-            filter === 'file' ? 'bg-sky-500/20 text-sky-200 border border-sky-400/35' : 'text-white/60 hover:text-white'
+          className={`tap flex-1 min-w-[60px] py-1.5 px-2 text-center font-semibold rounded-xl cursor-pointer inline-flex items-center justify-center gap-1.5 ${
+            filter === 'file' ? 'bg-white/15 text-white border border-white/25 shadow-xs' : 'text-white/60 hover:text-white border border-transparent'
           }`}
         >
-          Files ({items.filter((i) => i.type === 'file' && !i.isTextOnly).length})
+          <FileText className="w-3.5 h-3.5 shrink-0" />
+          <span>Files ({items.filter((i) => i.type === 'file' && !i.isTextOnly).length})</span>
         </button>
         <button
           onClick={() => setFilter('text')}
-          className={`tap flex-1 min-w-[50px] py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
-            filter === 'text' ? 'bg-purple-500/20 text-purple-200 border border-purple-400/35' : 'text-white/60 hover:text-white'
+          className={`tap flex-1 min-w-[60px] py-1.5 px-2 text-center font-semibold rounded-xl cursor-pointer inline-flex items-center justify-center gap-1.5 ${
+            filter === 'text' ? 'bg-white/15 text-white border border-white/25 shadow-xs' : 'text-white/60 hover:text-white border border-transparent'
           }`}
         >
-          💬 Text ({items.filter((i) => i.isTextOnly).length})
+          <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+          <span>Text ({items.filter((i) => i.isTextOnly).length})</span>
         </button>
         <button
           onClick={() => setFilter('temporary')}
-          className={`tap flex-1 min-w-[70px] py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
-            filter === 'temporary' ? 'bg-amber-500/20 text-amber-200 border border-amber-400/35' : 'text-white/60 hover:text-white'
+          className={`tap flex-1 min-w-[68px] py-1.5 px-2 text-center font-semibold rounded-xl cursor-pointer inline-flex items-center justify-center gap-1.5 ${
+            filter === 'temporary' ? 'bg-white/15 text-white border border-white/25 shadow-xs' : 'text-white/60 hover:text-white border border-transparent'
           }`}
         >
-          ⏳ Temp ({items.filter((i) => i.type === 'file' && i.retentionType === 'temporary').length})
+          <Clock className="w-3.5 h-3.5 shrink-0" />
+          <span>Temp ({items.filter((i) => i.type === 'file' && i.retentionType === 'temporary').length})</span>
         </button>
         <button
           onClick={() => setFilter('permanent')}
-          className={`tap flex-1 min-w-[70px] py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
-            filter === 'permanent' ? 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/35' : 'text-white/60 hover:text-white'
+          className={`tap flex-1 min-w-[68px] py-1.5 px-2 text-center font-semibold rounded-xl cursor-pointer inline-flex items-center justify-center gap-1.5 ${
+            filter === 'permanent' ? 'bg-white/15 text-white border border-white/25 shadow-xs' : 'text-white/60 hover:text-white border border-transparent'
           }`}
         >
-          ♾️ Perm ({items.filter((i) => i.type === 'file' && i.retentionType !== 'temporary').length})
+          <InfinityIcon className="w-3.5 h-3.5 shrink-0" />
+          <span>Perm ({items.filter((i) => i.type === 'file' && i.retentionType !== 'temporary').length})</span>
         </button>
         <button
           onClick={() => setFilter('link')}
-          className={`tap flex-1 min-w-[50px] py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
-            filter === 'link' ? 'bg-indigo-500/20 text-indigo-200 border border-indigo-400/35' : 'text-white/60 hover:text-white'
+          className={`tap flex-1 min-w-[60px] py-1.5 px-2 text-center font-semibold rounded-xl cursor-pointer inline-flex items-center justify-center gap-1.5 ${
+            filter === 'link' ? 'bg-white/15 text-white border border-white/25 shadow-xs' : 'text-white/60 hover:text-white border border-transparent'
           }`}
         >
-          Links ({items.filter((i) => i.type === 'link').length})
+          <Link2 className="w-3.5 h-3.5 shrink-0" />
+          <span>Links ({items.filter((i) => i.type === 'link').length})</span>
         </button>
       </div>
 

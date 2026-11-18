@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { 
-  Search, Copy, Check, Sparkles, X, ChevronLeft, 
+  Search, Copy, Check, Sparkles, X, ChevronRight, 
   Trash2, Layers, Flame, FileText, CheckCircle2, ArrowRight, Bot, Smile, ThumbsUp, Lock
 } from 'lucide-react';
 
@@ -196,9 +196,9 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
             type="button"
             onClick={onBack}
             aria-label="Back to More"
-            className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white transition-colors cursor-pointer shrink-0"
+            className="glass tap p-2 rounded-xl text-white/80 hover:text-white shrink-0"
           >
-            <ChevronLeft className="w-4 h-4" />
+            <ChevronRight className="w-4 h-4 rotate-180" />
           </button>
           <span className="text-sm font-bold text-white flex items-center gap-1.5 truncate">
             <Sparkles className="w-4 h-4 text-pink-400 shrink-0" />

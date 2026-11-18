@@ -2501,6 +2501,7 @@ apiRouter.get('/settings', authenticate, async (_req: Request, res: Response) =>
     antiForwardEnabled: settings.antiForwardEnabled ?? false,
     linkDeleteEnabled: settings.linkDeleteEnabled ?? false,
     forceSubEnabled: settings.forceSubEnabled ?? false,
+    forceJoinMode: settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
     requiredChannels: Array.isArray(settings.requiredChannels) ? settings.requiredChannels : [],
     chatWhitelistEnabled: settings.chatWhitelistEnabled ?? false,
     allowedChats: (Array.isArray(settings.allowedChats) ? settings.allowedChats : []).map((entry: any) => ({
@@ -2527,6 +2528,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
     deliveryTimeoutMinutes,
     autoDeleteNoticeEnabled,
     forceSubEnabled,
+    forceJoinMode,
     requiredChannels
   } = req.body;
   const updates: any = {};
@@ -2542,6 +2544,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
   if (req.body.maintenanceMode !== undefined) updates.maintenanceMode = Boolean(req.body.maintenanceMode);
   if (req.body.maintenanceNotice !== undefined) updates.maintenanceNotice = String(req.body.maintenanceNotice).trim();
   if (forceSubEnabled !== undefined) updates.forceSubEnabled = Boolean(forceSubEnabled);
+  if (forceJoinMode !== undefined) updates.forceJoinMode = forceJoinMode === 'request_only' ? 'request_only' : 'auto_join';
   if (req.body.autoApproveJoinRequests !== undefined) updates.autoApproveJoinRequests = Boolean(req.body.autoApproveJoinRequests);
   if (req.body.antiForwardEnabled !== undefined) updates.antiForwardEnabled = Boolean(req.body.antiForwardEnabled);
   if (req.body.linkDeleteEnabled !== undefined) updates.linkDeleteEnabled = Boolean(req.body.linkDeleteEnabled);
@@ -2554,6 +2557,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
           name: String(c.name || '').trim(),
           chatId: String(c.chatId || '').trim(),
           inviteLink: String(c.inviteLink || '').trim(),
+          ...(c.requestInviteLink ? { requestInviteLink: String(c.requestInviteLink).trim() } : {}),
           enabled: c.enabled !== false,
           isAutoDetected: Boolean(c.isAutoDetected),
           type: c.type || 'channel',
@@ -2579,6 +2583,14 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
 
   cachedBotInfoPayload = null;
   const newSettings = await storage.updateSettings(updates);
+  if (
+    forceSubEnabled !== undefined ||
+    forceJoinMode !== undefined ||
+    requiredChannels !== undefined ||
+    req.body.autoApproveJoinRequests !== undefined
+  ) {
+    TelegramService.invalidateForceSubCache();
+  }
   return res.json({ 
     success: true, 
     settings: {
@@ -2586,6 +2598,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
       antiForwardEnabled: newSettings.antiForwardEnabled ?? false,
       linkDeleteEnabled: newSettings.linkDeleteEnabled ?? false,
       forceSubEnabled: newSettings.forceSubEnabled ?? false,
+      forceJoinMode: newSettings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
       autoApproveJoinRequests: newSettings.autoApproveJoinRequests ?? true,
       requiredChannels: Array.isArray(newSettings.requiredChannels) ? newSettings.requiredChannels : [],
       chatWhitelistEnabled: newSettings.chatWhitelistEnabled ?? false,

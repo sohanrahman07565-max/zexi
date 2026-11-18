@@ -433,6 +433,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     maintenanceMode: settings?.maintenanceMode ?? false,
     maintenanceNotice: settings?.maintenanceNotice || '',
     forceSubEnabled: settings?.forceSubEnabled ?? false,
+    forceJoinMode: settings?.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
     antiForwardEnabled: settings?.antiForwardEnabled ?? false,
     linkDeleteEnabled: settings?.linkDeleteEnabled ?? false,
     requiredChannels: settings?.requiredChannels || [],
@@ -468,6 +469,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         maintenanceMode: settings.maintenanceMode ?? false,
         maintenanceNotice: settings.maintenanceNotice || '',
         forceSubEnabled: settings.forceSubEnabled ?? false,
+        forceJoinMode: settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
         antiForwardEnabled: settings.antiForwardEnabled ?? false,
         linkDeleteEnabled: settings.linkDeleteEnabled ?? false,
         autoApproveJoinRequests: settings.autoApproveJoinRequests ?? true,
@@ -1293,6 +1295,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       const payload = {
         ...botSettings,
         forceSubEnabled: Boolean(botSettings.forceSubEnabled),
+        forceJoinMode: botSettings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
         antiForwardEnabled: Boolean(botSettings.antiForwardEnabled),
         linkDeleteEnabled: Boolean(botSettings.linkDeleteEnabled),
         autoApproveJoinRequests: botSettings.autoApproveJoinRequests !== false,
@@ -1304,6 +1307,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           ...prev,
           ...res.settings,
           forceSubEnabled: res.settings.forceSubEnabled ?? false,
+          forceJoinMode: res.settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
           antiForwardEnabled: res.settings.antiForwardEnabled ?? false,
           linkDeleteEnabled: res.settings.linkDeleteEnabled ?? false,
           autoApproveJoinRequests: res.settings.autoApproveJoinRequests ?? true,
@@ -1844,7 +1848,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       type="button"
       onClick={() => setSubView(targetView)}
       aria-label={label}
-      className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white transition-colors cursor-pointer shrink-0"
+      className="glass tap p-2 rounded-xl text-white/80 hover:text-white shrink-0"
     >
       <ChevronRight className="w-4 h-4 rotate-180" />
     </button>
@@ -3253,6 +3257,82 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     </div>
                   </div>
 
+                  {/* Force Join Verification Mode Toggle: Auto Join vs Request Only */}
+                  <div className="p-3 rounded-xl bg-zinc-950/70 border border-indigo-500/30 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                          <span>Force Join Mode</span>
+                          <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                            {botSettings.forceJoinMode === 'request_only' ? 'REQUEST ONLY' : 'AUTO JOIN'}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-zinc-400 mt-0.5">
+                          {botSettings.forceJoinMode === 'request_only'
+                            ? 'Users send a join request to the channel; tapping Verify checks pending join requests by User ID / username.'
+                            : 'Traditional link-based checking; users must join the channel directly before verification succeeds.'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2">
+                      {([
+                        {
+                          id: 'auto_join' as const,
+                          title: 'Auto Join',
+                          desc: 'Direct channel membership check'
+                        },
+                        {
+                          id: 'request_only' as const,
+                          title: 'Request Only',
+                          desc: 'Verify pending join requests list'
+                        }
+                      ]).map((mode) => {
+                        const isSelected = (botSettings.forceJoinMode || 'auto_join') === mode.id;
+                        return (
+                          <button
+                            key={mode.id}
+                            type="button"
+                            onClick={async () => {
+                              const prevMode = botSettings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join';
+                              if (prevMode === mode.id) return;
+                              setBotSettings((prev: any) => ({ ...prev, forceJoinMode: mode.id }));
+                              try {
+                                await api.updateSettings({ forceJoinMode: mode.id });
+                                onRefreshSettings();
+                                toast.success(
+                                  mode.id === 'request_only'
+                                    ? 'Force Join Mode switched to Request Only'
+                                    : 'Force Join Mode switched to Auto Join'
+                                );
+                              } catch (err: any) {
+                                setBotSettings((prev: any) => ({ ...prev, forceJoinMode: prevMode }));
+                                toast.error(err?.message || 'Failed to update Force Join Mode');
+                              }
+                            }}
+                            className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                              isSelected
+                                ? 'bg-indigo-500/20 border-indigo-400/60 text-white shadow-sm'
+                                : 'bg-zinc-900/70 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-1.5">
+                              <span className="text-xs font-bold">{mode.title}</span>
+                              <span
+                                className={`w-2 h-2 rounded-full ${
+                                  isSelected ? 'bg-indigo-400 shadow-[0_0_8px_#818cf8]' : 'bg-zinc-700'
+                                }`}
+                              />
+                            </div>
+                            <div className="text-[10px] text-zinc-400 mt-0.5 leading-snug">
+                              {mode.desc}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
                   {/* Private Channels & Groups: Join Request & Auto-Approval Settings */}
                   <div className="p-3 rounded-xl bg-zinc-950/70 border border-emerald-500/30 space-y-2.5">
                     <div className="flex items-center justify-between gap-2.5">
@@ -3264,11 +3344,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                           <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
                             <span>Auto-Approve Join Requests</span>
                             <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                              SMART AUTO-APPROVAL
+                              {botSettings.forceJoinMode === 'request_only' ? 'PAUSED IN REQUEST ONLY' : 'SMART AUTO-APPROVAL'}
                             </span>
                           </div>
                           <p className="text-[10px] text-zinc-400 mt-0.5">
-                            Automatically accept join requests for private channels &amp; groups and verify user access instantly
+                            {botSettings.forceJoinMode === 'request_only'
+                              ? 'Requests stay pending in the channel list for instant verification while Request Only mode is active'
+                              : 'Automatically accept join requests for private channels & groups and verify user access instantly'}
                           </p>
                         </div>
                       </div>

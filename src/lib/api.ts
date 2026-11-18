@@ -114,6 +114,7 @@ export interface ForceSubChannel {
   name: string;
   chatId: string;
   inviteLink: string;
+  requestInviteLink?: string;
   enabled?: boolean;
   isAutoDetected?: boolean;
   type?: 'channel' | 'supergroup' | 'group';
@@ -147,6 +148,7 @@ export interface BotSettings {
   hasToken?: boolean;
   isConnected?: boolean;
   forceSubEnabled?: boolean;
+  forceJoinMode?: 'auto_join' | 'request_only';
   requiredChannels?: ForceSubChannel[];
   autoApproveJoinRequests?: boolean;
   antiForwardEnabled?: boolean;

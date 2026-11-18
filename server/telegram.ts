@@ -1655,9 +1655,13 @@ export class TelegramService {
       console.warn('[ForceSub] Error recording join request:', err?.message);
     }
 
-    // 4. Auto-Approve the Join Request if autoApproveJoinRequests !== false
+    this.invalidateForceSubCache(userId);
+
+    // 4. Auto-Approve Join Request ONLY in Auto Join mode when autoApproveJoinRequests !== false
+    // In Request Only mode, keep the join request in the pending list so the Verify button checks pending requests directly.
     const settings = await storage.getSettings();
-    const shouldAutoApprove = settings.autoApproveJoinRequests !== false;
+    const forceJoinMode = settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join';
+    const shouldAutoApprove = forceJoinMode !== 'request_only' && settings.autoApproveJoinRequests !== false;
 
     if (shouldAutoApprove) {
       try {
@@ -1795,36 +1799,45 @@ export class TelegramService {
   // Auto-generate or renew fresh invite links using Telegram API createChatInviteLink
   public static async generateOrRenewInviteLink(
     chatId: string | number,
-    channelName?: string
+    channelName?: string,
+    options?: { createsJoinRequest?: boolean }
   ): Promise<string | null> {
     const rawChat = String(chatId).trim();
     if (!rawChat) return null;
     const targetChat = /^-?\d+$/.test(rawChat) ? Number(rawChat) : (rawChat.startsWith('@') ? rawChat : `@${rawChat}`);
 
+    let createsJoinRequest = options?.createsJoinRequest;
+    if (createsJoinRequest === undefined) {
+      const settings = await storage.getSettings();
+      createsJoinRequest = settings.forceJoinMode === 'request_only';
+    }
+
     try {
       const createRes = await this.callTelegramApi('createChatInviteLink', {
         chat_id: targetChat,
-        name: `ForceSub - ${(channelName || 'AutoRenew').slice(0, 20)}`,
-        creates_join_request: false
+        name: `${createsJoinRequest ? 'Request' : 'ForceSub'} - ${(channelName || 'AutoRenew').slice(0, 20)}`,
+        creates_join_request: Boolean(createsJoinRequest)
       });
       if (createRes && createRes.ok && createRes.result?.invite_link) {
         const newLink = createRes.result.invite_link;
-        await storage.updateChannelInviteLink(rawChat, newLink);
+        await storage.updateChannelInviteLink(rawChat, newLink, Boolean(createsJoinRequest));
         return newLink;
       }
     } catch (err: any) {
       console.warn(`[Telegram] createChatInviteLink failed for ${rawChat}:`, err?.message || err);
     }
 
-    try {
-      const expRes = await this.callTelegramApi('exportChatInviteLink', { chat_id: targetChat });
-      if (expRes && expRes.ok && expRes.result) {
-        const newLink = expRes.result;
-        await storage.updateChannelInviteLink(rawChat, newLink);
-        return newLink;
+    if (!createsJoinRequest) {
+      try {
+        const expRes = await this.callTelegramApi('exportChatInviteLink', { chat_id: targetChat });
+        if (expRes && expRes.ok && expRes.result) {
+          const newLink = expRes.result;
+          await storage.updateChannelInviteLink(rawChat, newLink, false);
+          return newLink;
+        }
+      } catch (expErr: any) {
+        console.warn(`[Telegram] exportChatInviteLink failed for ${rawChat}:`, expErr?.message || expErr);
       }
-    } catch (expErr: any) {
-      console.warn(`[Telegram] exportChatInviteLink failed for ${rawChat}:`, expErr?.message || expErr);
     }
 
     return null;
@@ -2111,38 +2124,52 @@ export class TelegramService {
   }
 
   public static async checkUserForceSub(
-    userId: string | number
-  ): Promise<{ allJoined: boolean; unjoinedChannels: ForceSubChannel[] }> {
+    userId: string | number,
+    username?: string
+  ): Promise<{ allJoined: boolean; unjoinedChannels: ForceSubChannel[]; mode?: 'auto_join' | 'request_only' }> {
     try {
       const settings = await storage.getSettings();
+      const forceJoinMode: 'auto_join' | 'request_only' =
+        settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join';
+
       if (!settings.forceSubEnabled || !settings.requiredChannels || settings.requiredChannels.length === 0) {
-        return { allJoined: true, unjoinedChannels: [] };
+        return { allJoined: true, unjoinedChannels: [], mode: forceJoinMode };
       }
 
       const activeChannels = settings.requiredChannels.filter(c => c.enabled !== false);
       if (activeChannels.length === 0) {
-        return { allJoined: true, unjoinedChannels: [] };
+        return { allJoined: true, unjoinedChannels: [], mode: forceJoinMode };
       }
 
       const cleanUserId = String(userId).trim();
-      if (!cleanUserId) return { allJoined: true, unjoinedChannels: [] };
+      if (!cleanUserId) return { allJoined: true, unjoinedChannels: [], mode: forceJoinMode };
 
       const botScopeId = (storage as any)?.botId || 'main';
-      const cacheKey = `${botScopeId}_${cleanUserId}`;
+      const cacheKey = `${botScopeId}_${forceJoinMode}_${cleanUserId}`;
       const cached = this.forceSubCache.get(cacheKey);
       if (cached && cached.allJoined && Date.now() < cached.expiresAt) {
-        return { allJoined: true, unjoinedChannels: [] };
+        return { allJoined: true, unjoinedChannels: [], mode: forceJoinMode };
+      }
+
+      let effectiveUsername = String(username || '').replace(/^@+/, '').toLowerCase().trim();
+      if (!effectiveUsername) {
+        try {
+          const trackedUser = await storage.getUser(cleanUserId);
+          if (trackedUser?.username) {
+            effectiveUsername = String(trackedUser.username).replace(/^@+/, '').toLowerCase().trim();
+          }
+        } catch {}
       }
 
       // Exempt authorized administrators from force sub verification
-      const isAdmin = await this.isAuthorizedAdmin(cleanUserId);
+      const isAdmin = await this.isAuthorizedAdmin(cleanUserId, effectiveUsername);
       if (isAdmin) {
-        return { allJoined: true, unjoinedChannels: [] };
+        return { allJoined: true, unjoinedChannels: [], mode: forceJoinMode };
       }
 
       const numericUserId = Number(cleanUserId) || cleanUserId;
 
-      // Parallelize channel membership checks for near-zero latency
+      // Parallelize channel membership / join-request checks for near-zero latency
       const checks = await Promise.all(activeChannels.map(async (channel) => {
         let rawChatId = (channel.chatId || '').trim();
         if (!rawChatId) return null;
@@ -2158,6 +2185,7 @@ export class TelegramService {
         const targetChat = /^-?\d+$/.test(rawChatId) ? Number(rawChatId) : rawChatId;
         let isMember = false;
 
+        // 1. Direct channel membership check (creator, admin, member, or non-banned restricted)
         try {
           const res = await this.callTelegramApi('getChatMember', {
             chat_id: targetChat,
@@ -2171,36 +2199,40 @@ export class TelegramService {
           console.warn(`[ForceSub] Error querying getChatMember for ${cleanUserId} in ${targetChat}:`, err?.message);
         }
 
-        if (!isMember) {
+        // 2. Request Only Mode: check pending join requests list by user ID or @username
+        if (!isMember && forceJoinMode === 'request_only') {
           const hasJoinRequest = await storage.isJoinRequestApprovedOrPending(
             String(targetChat),
             String(cleanUserId),
             channel.id,
-            channel.username
+            channel.username,
+            effectiveUsername
           );
           if (hasJoinRequest) {
             isMember = true;
-          } else {
-            try {
-              const approveRes = await this.callTelegramApi('approveChatJoinRequest', {
-                chat_id: targetChat,
-                user_id: numericUserId
-              });
-              if (approveRes && (
-                approveRes.ok || 
-                approveRes.description?.includes('USER_ALREADY_PARTICIPANT') ||
-                approveRes.description?.includes('ALREADY_PARTICIPANT')
-              )) {
-                isMember = true;
-                storage.recordJoinRequest({
-                  chatId: String(targetChat),
-                  chatTitle: channel.name,
-                  userId: String(cleanUserId),
-                  status: 'approved'
-                }).catch(() => {});
-              }
-            } catch {}
           }
+        } else if (!isMember && forceJoinMode === 'auto_join' && settings.autoApproveJoinRequests !== false) {
+          // Auto Join Mode with smart auto-approval fallback if a pending request awaits Telegram approval
+          try {
+            const approveRes = await this.callTelegramApi('approveChatJoinRequest', {
+              chat_id: targetChat,
+              user_id: numericUserId
+            });
+            if (approveRes && (
+              approveRes.ok || 
+              approveRes.description?.includes('USER_ALREADY_PARTICIPANT') ||
+              approveRes.description?.includes('ALREADY_PARTICIPANT')
+            )) {
+              isMember = true;
+              storage.recordJoinRequest({
+                chatId: String(targetChat),
+                chatTitle: channel.name,
+                userId: String(cleanUserId),
+                userUsername: effectiveUsername || undefined,
+                status: 'approved'
+              }).catch(() => {});
+            }
+          } catch {}
         }
 
         return isMember ? null : channel;
@@ -2209,7 +2241,8 @@ export class TelegramService {
       const unjoined = checks.filter((c): c is ForceSubChannel => c !== null);
       const result = {
         allJoined: unjoined.length === 0,
-        unjoinedChannels: unjoined
+        unjoinedChannels: unjoined,
+        mode: forceJoinMode
       };
 
       if (result.allJoined) {
@@ -2218,7 +2251,7 @@ export class TelegramService {
       return result;
     } catch (err: any) {
       console.error('[ForceSub] Unexpected error in checkUserForceSub:', err);
-      return { allJoined: true, unjoinedChannels: [] };
+      return { allJoined: true, unjoinedChannels: [], mode: 'auto_join' };
     }
   }
 
@@ -2229,23 +2262,42 @@ export class TelegramService {
     messageIdToEdit?: number,
     userInfo?: { id?: string | number; firstName?: string; first_name?: string; lastName?: string; last_name?: string; username?: string; [key: string]: any }
   ): Promise<void> {
+    const settings = await storage.getSettings();
+    const isRequestOnly = settings.forceJoinMode === 'request_only';
     const keyboardRows: any[][] = [];
 
-    // Channel Join Buttons: Grid layout with 2 buttons per row
+    // Channel Join / Request Buttons: Grid layout with 2 buttons per row
     const channelButtons: any[] = [];
     for (let i = 0; i < unjoinedChannels.length; i++) {
       const ch = unjoinedChannels[i];
-      let channelUrl = ch.inviteLink ? ch.inviteLink.trim() : '';
+      let channelUrl = '';
 
-      // Auto-renew missing or expired invite link via Telegram API createChatInviteLink
-      if (!channelUrl && ch.chatId) {
-        try {
-          const freshLink = await this.generateOrRenewInviteLink(ch.chatId, ch.name);
-          if (freshLink) {
-            channelUrl = freshLink;
-            ch.inviteLink = freshLink;
-          }
-        } catch {}
+      if (isRequestOnly) {
+        channelUrl = ch.requestInviteLink ? ch.requestInviteLink.trim() : '';
+        if (!channelUrl && ch.chatId) {
+          try {
+            const reqLink = await this.generateOrRenewInviteLink(ch.chatId, ch.name, { createsJoinRequest: true });
+            if (reqLink) {
+              channelUrl = reqLink;
+              ch.requestInviteLink = reqLink;
+            }
+          } catch {}
+        }
+        if (!channelUrl && ch.inviteLink) {
+          channelUrl = ch.inviteLink.trim();
+        }
+      } else {
+        channelUrl = ch.inviteLink ? ch.inviteLink.trim() : '';
+        // Auto-renew missing or expired invite link via Telegram API createChatInviteLink
+        if (!channelUrl && ch.chatId) {
+          try {
+            const freshLink = await this.generateOrRenewInviteLink(ch.chatId, ch.name, { createsJoinRequest: false });
+            if (freshLink) {
+              channelUrl = freshLink;
+              ch.inviteLink = freshLink;
+            }
+          } catch {}
+        }
       }
 
       if (!channelUrl) {
@@ -2256,7 +2308,7 @@ export class TelegramService {
         }
       }
       channelButtons.push({
-        text: `📢 ${ch.name}`,
+        text: isRequestOnly ? `📩 Request ${ch.name}` : `📢 ${ch.name}`,
         url: channelUrl,
         style: 'primary'
       });
@@ -2286,12 +2338,22 @@ export class TelegramService {
     const template = templates['FORCESUB_PROMPT'];
     const botName = await this.getBotUsername();
 
-    let promptText = template?.content || (
+    const defaultAutoJoinPrompt =
       `🔒 <b>Channel Membership Required</b>\n\n` +
       `To use this bot and access your requested content, please subscribe to our official channel(s) below:\n\n` +
       `{channel_list}\n\n` +
-      `👇 <i>Tap the button(s) above to join, then press <b>Verify / Try Again</b> below.</i>`
-    );
+      `👇 <i>Tap the button(s) above to join, then press <b>Verify / Try Again</b> below.</i>`;
+
+    const defaultRequestOnlyPrompt =
+      `🔒 <b>Join Request Required</b>\n\n` +
+      `To use this bot and access your requested content, please send a join request to our official channel(s) below first:\n\n` +
+      `{channel_list}\n\n` +
+      `👇 <i>Tap the button(s) above to send your join request, then press <b>Verify / Try Again</b> below.</i>`;
+
+    const isUsingDefaultTemplate = !template?.content || template.content.trim() === defaultAutoJoinPrompt.trim();
+    let promptText = isRequestOnly && isUsingDefaultTemplate
+      ? defaultRequestOnlyPrompt
+      : (template?.content || defaultAutoJoinPrompt);
 
     let userMention = '';
     let userDisplayName = '';
@@ -3948,7 +4010,7 @@ export class TelegramService {
       const rawPayload = startMatch[1]?.trim();
 
       // Mandatory Channel Join (Force Sub) Check
-      const forceCheck = await this.checkUserForceSub(fromId);
+      const forceCheck = await this.checkUserForceSub(fromId, message?.from?.username);
       if (!forceCheck.allJoined) {
         await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, rawPayload || 'start', undefined, message?.from);
         return;
@@ -4531,7 +4593,7 @@ export class TelegramService {
         const payload = getItemPayload(matchedItem);
 
         // Check Force Sub
-        const forceCheck = await this.checkUserForceSub(fromId);
+        const forceCheck = await this.checkUserForceSub(fromId, message?.from?.username);
         if (!forceCheck.allJoined) {
           await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, payload, undefined, message?.from);
           return;
@@ -4543,7 +4605,7 @@ export class TelegramService {
     }
 
     // Check Force Sub on any other direct user interactions in private chat
-    const generalForceCheck = await this.checkUserForceSub(fromId);
+    const generalForceCheck = await this.checkUserForceSub(fromId, message?.from?.username);
     if (!generalForceCheck.allJoined) {
       await this.sendForceSubPrompt(chatId, generalForceCheck.unjoinedChannels, 'start', undefined, message?.from);
       return;
@@ -8538,13 +8600,16 @@ export class TelegramService {
     // MANDATORY FORCE SUB VERIFICATION CALLBACK
     if (data && data.startsWith('forcesub_verify:')) {
       const targetPayload = data.substring('forcesub_verify:'.length).trim() || 'start';
-      const forceCheck = await this.checkUserForceSub(fromId);
+      const forceCheck = await this.checkUserForceSub(fromId, cb.from?.username);
+      const isRequestOnly = forceCheck.mode === 'request_only';
 
       if (!forceCheck.allJoined) {
-        // Display Telegram pop-up alert: "Please join all channels or groups to use this bot."
+        // Display Telegram pop-up alert prompting user to join or send join request first
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
-          text: 'Please join all channels or groups to use this bot.',
+          text: isRequestOnly
+            ? 'Please send the join request to all required channel(s) first, then tap Verify.'
+            : 'Please join all channels or groups to use this bot.',
           show_alert: true
         });
         if (chatId && cb.message?.message_id) {
@@ -8553,10 +8618,12 @@ export class TelegramService {
         return;
       }
 
-      // User has joined all required channels!
+      // User has joined / sent join requests for all required channels!
       await this.callTelegramApi('answerCallbackQuery', {
         callback_query_id: cb.id,
-        text: '✅ Membership verified! Unlocking access...',
+        text: isRequestOnly
+          ? '✅ Join request verified! Unlocking access...'
+          : '✅ Membership verified! Unlocking access...',
         show_alert: false
       });
 

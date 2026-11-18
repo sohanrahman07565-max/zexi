@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { ItemRecord, BotSettings, AdminUser, api } from '../lib/api';
-import { FileText, Link2, Hash, Users, Sparkles, ArrowUpRight } from 'lucide-react';
+import { FileText, Link2, Hash, Users, Sparkles } from 'lucide-react';
 import { UsersModal } from './UsersModal';
 import { useCountUp } from '../hooks/useCountUp';
 
@@ -99,7 +99,6 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
           >
             <Users className="w-3.5 h-3.5 text-white/90" />
             <span>Bot Users</span>
-            <ArrowUpRight className="w-3.5 h-3.5 text-white/75" />
           </button>
 
           <button

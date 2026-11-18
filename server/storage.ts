@@ -144,6 +144,7 @@ export interface ForceSubChannel {
   name: string;
   chatId: string;
   inviteLink: string;
+  requestInviteLink?: string;
   enabled?: boolean;
   isAutoDetected?: boolean;
   type?: 'channel' | 'supergroup' | 'group';
@@ -173,6 +174,7 @@ export interface BotSettings {
   maintenanceMode?: boolean;
   maintenanceNotice?: string;
   forceSubEnabled?: boolean;
+  forceJoinMode?: 'auto_join' | 'request_only';
   requiredChannels?: ForceSubChannel[];
   autoApproveJoinRequests?: boolean;
   antiForwardEnabled?: boolean;
@@ -529,6 +531,7 @@ export const DEFAULT_SETTINGS: BotSettings = {
   autoDeleteNoticeEnabled: false,
   maintenanceMode: false,
   forceSubEnabled: false,
+  forceJoinMode: 'auto_join',
   autoApproveJoinRequests: true,
   antiForwardEnabled: false,
   linkDeleteEnabled: false,
@@ -1258,6 +1261,7 @@ export class SharedStorageService {
           : (loadedData.settings?.rootAdminId || ''),
         autoDeleteNoticeEnabled: loadedData.settings?.autoDeleteNoticeEnabled ?? false,
         forceSubEnabled: loadedData.settings?.forceSubEnabled ?? false,
+        forceJoinMode: loadedData.settings?.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
         autoApproveJoinRequests: loadedData.settings?.autoApproveJoinRequests ?? true,
         antiForwardEnabled: loadedData.settings?.antiForwardEnabled ?? false,
         linkDeleteEnabled: loadedData.settings?.linkDeleteEnabled ?? false,
@@ -2299,6 +2303,9 @@ export class SharedStorageService {
     if (this.db.settings.forceSubEnabled === undefined) {
       this.db.settings.forceSubEnabled = false;
     }
+    if (this.db.settings.forceJoinMode !== 'auto_join' && this.db.settings.forceJoinMode !== 'request_only') {
+      this.db.settings.forceJoinMode = 'auto_join';
+    }
     if (this.db.settings.antiForwardEnabled === undefined) {
       this.db.settings.antiForwardEnabled = false;
     }
@@ -2319,10 +2326,15 @@ export class SharedStorageService {
 
   public async updateSettings(settings: Partial<BotSettings>): Promise<BotSettings> {
     await this.loadLatest(true);
+    const nextForceJoinMode: 'auto_join' | 'request_only' =
+      settings.forceJoinMode !== undefined
+        ? (settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join')
+        : (this.db.settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join');
     this.db.settings = { 
       ...this.db.settings, 
       ...settings,
       forceSubEnabled: settings.forceSubEnabled !== undefined ? Boolean(settings.forceSubEnabled) : (this.db.settings.forceSubEnabled ?? false),
+      forceJoinMode: nextForceJoinMode,
       antiForwardEnabled: settings.antiForwardEnabled !== undefined ? Boolean(settings.antiForwardEnabled) : (this.db.settings.antiForwardEnabled ?? false),
       linkDeleteEnabled: settings.linkDeleteEnabled !== undefined ? Boolean(settings.linkDeleteEnabled) : (this.db.settings.linkDeleteEnabled ?? false),
       requiredChannels: settings.requiredChannels !== undefined && Array.isArray(settings.requiredChannels) 
@@ -2474,7 +2486,7 @@ export class SharedStorageService {
     return channelRecord;
   }
 
-  public async updateChannelInviteLink(chatId: string, inviteLink: string): Promise<boolean> {
+  public async updateChannelInviteLink(chatId: string, inviteLink: string, isRequestInviteLink: boolean = false): Promise<boolean> {
     if (!chatId || !inviteLink) return false;
     await this.loadLatest(true);
     let updated = false;
@@ -2483,7 +2495,11 @@ export class SharedStorageService {
     if (Array.isArray(this.db.settings?.requiredChannels)) {
       for (const ch of this.db.settings.requiredChannels) {
         if (String(ch.chatId).trim() === cleanId) {
-          ch.inviteLink = inviteLink;
+          if (isRequestInviteLink) {
+            ch.requestInviteLink = inviteLink;
+          } else {
+            ch.inviteLink = inviteLink;
+          }
           updated = true;
         }
       }
@@ -2491,7 +2507,11 @@ export class SharedStorageService {
     if (Array.isArray(this.db.detectedChannels)) {
       for (const ch of this.db.detectedChannels) {
         if (String(ch.chatId).trim() === cleanId) {
-          ch.inviteLink = inviteLink;
+          if (isRequestInviteLink) {
+            ch.requestInviteLink = inviteLink;
+          } else {
+            ch.inviteLink = inviteLink;
+          }
           updated = true;
         }
       }
@@ -2582,13 +2602,15 @@ export class SharedStorageService {
     chatId: string | number,
     userId: string | number,
     channelId?: string,
-    channelUsername?: string
+    channelUsername?: string,
+    userUsername?: string
   ): Promise<boolean> {
     await this.loadLatest(false);
     if (!this.db.joinRequests) return false;
 
     const cleanUserId = String(userId || '').trim();
-    if (!cleanUserId) return false;
+    const cleanUserUsername = String(userUsername || '').replace(/^@+/, '').toLowerCase().trim();
+    if (!cleanUserId && !cleanUserUsername) return false;
 
     const rawChat = String(chatId || '').trim();
     // Normalize forms: e.g. -10012345, 12345, @username
@@ -2597,7 +2619,12 @@ export class SharedStorageService {
 
     const records = Object.values(this.db.joinRequests);
     for (const req of records) {
-      if (String(req.userId).trim() !== cleanUserId) continue;
+      const reqUserId = String(req.userId || '').trim();
+      const reqUserUsername = String(req.userUsername || '').replace(/^@+/, '').toLowerCase().trim();
+      const matchesUser =
+        (cleanUserId && reqUserId === cleanUserId) ||
+        (cleanUserUsername && reqUserUsername && reqUserUsername === cleanUserUsername);
+      if (!matchesUser) continue;
 
       const reqChat = String(req.chatId).trim();
       const strippedReqChat = reqChat.replace(/^-100/, '').replace(/^-/, '').replace(/^@/, '').toLowerCase();
