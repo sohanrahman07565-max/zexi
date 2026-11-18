@@ -28,35 +28,35 @@ export const ToastContainer: React.FC = () => {
           <div
             key={item.id}
             role="alert"
-            className={`glass pointer-events-auto w-full rounded-[22px] p-3.5 sm:p-4 flex items-start gap-3 transition-all duration-300 ease-out animate-in slide-in-from-top-4 fade-in duration-300 ${
+            className={`lg-toast-card pointer-events-auto w-full rounded-[22px] p-3.5 sm:p-4 flex items-start gap-3 text-white animate-in slide-in-from-top-4 fade-in duration-300 ${
               isSuccess
-                ? 'text-emerald-200 border-emerald-400/35'
+                ? 'border-emerald-300/50'
                 : isError
-                ? 'text-rose-200 border-rose-400/40'
+                ? 'border-rose-300/55'
                 : isWarning
-                ? 'text-amber-200 border-amber-400/40'
-                : 'text-sky-200 border-sky-400/40'
+                ? 'border-amber-300/50'
+                : 'border-purple-200/45'
             }`}
           >
-            {/* Status Icon with ambient glow */}
+            {/* Status Icon with crisp contrast */}
             <div className="shrink-0 mt-0.5">
               {isSuccess && (
-                <div className="w-6 h-6 rounded-full bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-400 shadow-xs">
+                <div className="w-6 h-6 rounded-full bg-emerald-950/55 border border-emerald-300/50 flex items-center justify-center text-emerald-300 shadow-xs">
                   <CheckCircle2 className="w-4 h-4" />
                 </div>
               )}
               {isError && (
-                <div className="w-6 h-6 rounded-full bg-rose-500/20 border border-rose-400/40 flex items-center justify-center text-rose-400 shadow-xs">
+                <div className="w-6 h-6 rounded-full bg-rose-950/55 border border-rose-300/50 flex items-center justify-center text-rose-200 shadow-xs">
                   <AlertCircle className="w-4 h-4" />
                 </div>
               )}
               {isWarning && (
-                <div className="w-6 h-6 rounded-full bg-amber-500/20 border border-amber-400/40 flex items-center justify-center text-amber-400 shadow-xs">
+                <div className="w-6 h-6 rounded-full bg-amber-950/55 border border-amber-300/50 flex items-center justify-center text-amber-200 shadow-xs">
                   <AlertTriangle className="w-4 h-4" />
                 </div>
               )}
               {!isSuccess && !isError && !isWarning && (
-                <div className="w-6 h-6 rounded-full bg-blue-500/20 border border-blue-400/40 flex items-center justify-center text-blue-400 shadow-xs">
+                <div className="w-6 h-6 rounded-full bg-purple-950/55 border border-purple-200/50 flex items-center justify-center text-purple-100 shadow-xs">
                   <Info className="w-4 h-4" />
                 </div>
               )}
@@ -65,11 +65,11 @@ export const ToastContainer: React.FC = () => {
             {/* Content Text */}
             <div className="flex-1 min-w-0 pr-1">
               {item.title && (
-                <div className="text-xs font-bold text-white tracking-tight mb-0.5">
+                <div className="text-xs font-bold text-white tracking-tight mb-0.5 drop-shadow-xs">
                   {item.title}
                 </div>
               )}
-              <div className="text-xs font-medium leading-relaxed break-words">
+              <div className="text-xs font-medium text-white/95 leading-relaxed break-words drop-shadow-xs">
                 {item.message}
               </div>
             </div>
@@ -78,7 +78,7 @@ export const ToastContainer: React.FC = () => {
             <button
               type="button"
               onClick={() => toast.dismiss(item.id)}
-              className="p-1 rounded-lg text-zinc-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer shrink-0 -mr-1 -mt-1"
+              className="p-1 rounded-lg text-purple-100/80 hover:text-white hover:bg-white/15 transition-colors cursor-pointer shrink-0 -mr-1 -mt-1"
               aria-label="Dismiss notification"
             >
               <X className="w-4 h-4" />
