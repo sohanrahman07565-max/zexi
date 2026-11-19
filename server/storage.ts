@@ -161,7 +161,41 @@ export interface AllowedChatEntry {
   addedBy?: string;
 }
 
-export type BotOperationalMode = 'file_bot' | 'post_bot';
+export type BotOperationalMode = 'file_bot' | 'post_bot' | 'image_url_bot';
+
+export interface ImageUrlBotLinkRecord {
+  id: number;
+  imageId: string;
+  url: string;
+  ownerTelegramId: number;
+  caption: string | null;
+  category: string;
+  expiresAt: string | null;
+  fileSize: number | null;
+  createdAt: string;
+  isDeleted: boolean;
+}
+
+export interface ImageUrlBotStoreData {
+  nextLinkId: number;
+  users: Record<string, {
+    telegramId: number;
+    username: string | null;
+    firstName: string | null;
+    joinedAt: string;
+    lastActiveAt: string;
+  }>;
+  links: ImageUrlBotLinkRecord[];
+  userSettings: Record<string, {
+    defaultExpiry: string;
+    notifyExpiry: boolean;
+  }>;
+  sessions: Record<string, {
+    activeMessageId: number | null;
+    state: string;
+    tempData: Record<string, any>;
+  }>;
+}
 
 export interface BotSettings {
   botToken: string;
@@ -343,6 +377,7 @@ export interface AppDatabase {
   detectedChannels?: ForceSubChannel[];
   joinRequests?: Record<string, JoinRequestRecord>;
   postBotPublishedPosts?: Record<string, any>;
+  imageUrlBotData?: ImageUrlBotStoreData;
   uploadedFilesIndex?: Record<string, {
     id: string;
     fileName: string;
@@ -1248,6 +1283,7 @@ export class SharedStorageService {
         return merged;
       })(),
       postBotPublishedPosts: { ...(loadedData.postBotPublishedPosts || {}), ...(this.db.postBotPublishedPosts || {}) },
+      imageUrlBotData: loadedData.imageUrlBotData || this.db.imageUrlBotData,
       design: { ...DEFAULT_DESIGN, ...(loadedData.design || {}) },
       settings: {
         ...DEFAULT_SETTINGS,
@@ -1258,7 +1294,13 @@ export class SharedStorageService {
         rootAdminId: isMainBot
           ? (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || loadedData.settings?.rootAdminId || '')
           : (loadedData.settings?.rootAdminId || ''),
-        botMode: loadedData.settings?.botMode === 'post_bot' ? 'post_bot' : (this.db.settings?.botMode === 'post_bot' ? 'post_bot' : 'file_bot'),
+        botMode: (
+          loadedData.settings?.botMode === 'post_bot' || loadedData.settings?.botMode === 'image_url_bot'
+            ? loadedData.settings.botMode
+            : (this.db.settings?.botMode === 'post_bot' || this.db.settings?.botMode === 'image_url_bot'
+                ? this.db.settings.botMode
+                : 'file_bot')
+        ),
         postBotChannelId: loadedData.settings?.postBotChannelId || this.db.settings?.postBotChannelId || '',
         autoDeleteNoticeEnabled: loadedData.settings?.autoDeleteNoticeEnabled ?? false,
         forceSubEnabled: loadedData.settings?.forceSubEnabled ?? false,
@@ -2254,7 +2296,11 @@ export class SharedStorageService {
   // --- Settings ---
   public async getSettings(): Promise<BotSettings> {
     await this.loadLatest(false);
-    if (this.db.settings.botMode !== 'file_bot' && this.db.settings.botMode !== 'post_bot') {
+    if (
+      this.db.settings.botMode !== 'file_bot' &&
+      this.db.settings.botMode !== 'post_bot' &&
+      this.db.settings.botMode !== 'image_url_bot'
+    ) {
       this.db.settings.botMode = 'file_bot';
     }
     if (this.db.settings.forceSubEnabled === undefined) {
@@ -2287,10 +2333,12 @@ export class SharedStorageService {
       settings.forceJoinMode !== undefined
         ? (settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join')
         : (this.db.settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join');
+    const normalizeMode = (m: any): BotOperationalMode =>
+      m === 'post_bot' ? 'post_bot' : (m === 'image_url_bot' ? 'image_url_bot' : 'file_bot');
     const nextBotMode: BotOperationalMode =
       settings.botMode !== undefined
-        ? (settings.botMode === 'post_bot' ? 'post_bot' : 'file_bot')
-        : (this.db.settings.botMode === 'post_bot' ? 'post_bot' : 'file_bot');
+        ? normalizeMode(settings.botMode)
+        : normalizeMode(this.db.settings.botMode);
     this.db.settings = { 
       ...this.db.settings, 
       ...settings,
@@ -2690,6 +2738,18 @@ export class SharedStorageService {
       this.db.postBotPublishedPosts = {};
     }
     this.db.postBotPublishedPosts[String(postId)] = postRecord;
+    await this.persist();
+  }
+
+  // --- Image URL Bot Persistence ---
+  public async getImageUrlBotData(): Promise<ImageUrlBotStoreData | undefined> {
+    await this.loadLatest(false);
+    return this.db.imageUrlBotData;
+  }
+
+  public async saveImageUrlBotData(data: ImageUrlBotStoreData): Promise<void> {
+    await this.loadLatest(false);
+    this.db.imageUrlBotData = data;
     await this.persist();
   }
 

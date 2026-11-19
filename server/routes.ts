@@ -203,6 +203,13 @@ function getSessionCookieOptions(req: Request, maxAge: number = 12 * 60 * 60 * 1
 // AUTHENTICATION
 // ============================================================================
 
+type BotModeValue = 'file_bot' | 'post_bot' | 'image_url_bot';
+function normalizeBotMode(mode: any): BotModeValue {
+  if (mode === 'post_bot') return 'post_bot';
+  if (mode === 'image_url_bot') return 'image_url_bot';
+  return 'file_bot';
+}
+
 // Helper to look up cloned bot sub-admin credentials strictly scoped to requestedBotId
 async function findClonedBotAuth(cleanId: string, requestedBotId?: string): Promise<{
   clonedBot: ClonedBotRecord;
@@ -232,6 +239,11 @@ async function findClonedBotAuth(cleanId: string, requestedBotId?: string): Prom
   // Load the targeted cloned bot's isolated storage
   const botStorage = StorageManager.getStorage(target.id);
   await botStorage.loadLatest(false);
+  const targetSettings = await botStorage.getSettings().catch(() => null);
+  const effectiveMode = normalizeBotMode(targetSettings?.botMode || target.botMode);
+  if (effectiveMode === 'post_bot' || effectiveMode === 'image_url_bot') {
+    return null;
+  }
   const botAdmins = await botStorage.getAdmins();
 
   const rawNumericBotId = target.id.replace(/^clone_/, '').toLowerCase();
@@ -2742,7 +2754,7 @@ apiRouter.get('/settings', authenticate, async (_req: Request, res: Response) =>
     botUsername,
     antiForwardEnabled: settings.antiForwardEnabled ?? false,
     linkDeleteEnabled: settings.linkDeleteEnabled ?? false,
-    botMode: settings.botMode === 'post_bot' ? 'post_bot' : 'file_bot',
+    botMode: normalizeBotMode(settings.botMode),
     forceSubEnabled: settings.forceSubEnabled ?? false,
     forceJoinMode: settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
     requiredChannels: Array.isArray(settings.requiredChannels) ? settings.requiredChannels : [],
@@ -2792,7 +2804,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
   if (req.body.antiForwardEnabled !== undefined) updates.antiForwardEnabled = Boolean(req.body.antiForwardEnabled);
   if (req.body.linkDeleteEnabled !== undefined) updates.linkDeleteEnabled = Boolean(req.body.linkDeleteEnabled);
   if (req.body.chatWhitelistEnabled !== undefined) updates.chatWhitelistEnabled = Boolean(req.body.chatWhitelistEnabled);
-  if (req.body.botMode !== undefined) updates.botMode = req.body.botMode === 'post_bot' ? 'post_bot' : 'file_bot';
+  if (req.body.botMode !== undefined) updates.botMode = normalizeBotMode(req.body.botMode);
   if (requiredChannels !== undefined) {
     if (Array.isArray(requiredChannels)) {
       updates.requiredChannels = requiredChannels
@@ -2841,7 +2853,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
       ...newSettings,
       antiForwardEnabled: newSettings.antiForwardEnabled ?? false,
       linkDeleteEnabled: newSettings.linkDeleteEnabled ?? false,
-      botMode: newSettings.botMode === 'post_bot' ? 'post_bot' : 'file_bot',
+      botMode: normalizeBotMode(newSettings.botMode),
       forceSubEnabled: newSettings.forceSubEnabled ?? false,
       forceJoinMode: newSettings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
       autoApproveJoinRequests: newSettings.autoApproveJoinRequests ?? true,
@@ -3096,7 +3108,7 @@ apiRouter.post('/bots/clone', authenticate, requirePermission('settings_edit'), 
     if (!token || typeof token !== 'string' || !token.trim()) {
       return res.status(400).json({ error: 'Valid Telegram bot token is required' });
     }
-    const normalizedMode = botMode === 'post_bot' ? 'post_bot' : 'file_bot';
+    const normalizedMode = normalizeBotMode(botMode || 'post_bot');
 
     const admin = (req as any).admin;
     const createdBy = admin?.username || admin?.name || 'admin';
@@ -3258,7 +3270,7 @@ apiRouter.post('/bots/:id/clean-memory', authenticate, requirePermission('settin
   }
 });
 
-// POST & PATCH /api/bots/:id/mode - Dynamically switch bot operational mode ('file_bot' | 'post_bot')
+// POST & PATCH /api/bots/:id/mode - Dynamically switch bot operational mode ('file_bot' | 'post_bot' | 'image_url_bot')
 const handleBotModeChange = async (req: Request, res: Response) => {
   try {
     const targetId = String(req.params.id || '').trim() || 'main';
@@ -3266,15 +3278,20 @@ const handleBotModeChange = async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Not authorized to change mode for this bot instance.' });
     }
     const rawMode = String(req.body?.botMode || req.body?.mode || '').trim();
-    if (rawMode !== 'file_bot' && rawMode !== 'post_bot') {
-      return res.status(400).json({ error: 'Invalid botMode. Must be "file_bot" or "post_bot".' });
+    if (rawMode !== 'file_bot' && rawMode !== 'post_bot' && rawMode !== 'image_url_bot') {
+      return res.status(400).json({ error: 'Invalid botMode. Must be "file_bot", "post_bot", or "image_url_bot".' });
     }
     const result = await TelegramBotManager.setBotMode(targetId, rawMode);
     if (!result.ok) {
       return res.status(404).json({ error: result.error || 'Bot instance not found.' });
     }
     invalidateBotInfoCache(targetId);
-    const label = result.botMode === 'post_bot' ? 'Post Bot' : 'File Bot';
+    const label =
+      result.botMode === 'post_bot'
+        ? 'Post Bot'
+        : result.botMode === 'image_url_bot'
+          ? 'Image URL Bot'
+          : 'File Bot';
     return res.json({
       ok: true,
       botId: targetId,
@@ -3355,9 +3372,7 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
 
         const cStorage = StorageManager.getStorage(currentCloned.id);
         const cSettings = await cStorage.getSettings().catch(() => ({} as any));
-        const effectiveBotMode = (cSettings?.botMode === 'post_bot' || (!cSettings?.botMode && currentCloned.botMode === 'post_bot'))
-          ? 'post_bot'
-          : 'file_bot';
+        const effectiveBotMode = normalizeBotMode(cSettings?.botMode || currentCloned.botMode);
 
         const payload = {
           ok: true,
@@ -3470,7 +3485,7 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
     ok: isConnected,
     isMain: true,
     botId: 'main',
-    botMode: settings?.botMode === 'post_bot' ? 'post_bot' : 'file_bot',
+    botMode: normalizeBotMode(settings?.botMode),
     hasToken: Boolean(token),
     isConnected: isManuallyStopped ? false : isConnected,
     botStatus: isManuallyStopped ? 'stopped' : 'active',

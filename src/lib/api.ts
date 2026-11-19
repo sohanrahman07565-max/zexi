@@ -1,6 +1,6 @@
 export type TriggerType = 'hashtag' | 'slash' | 'normal';
 export type OpenMode = 'browser' | 'webapp';
-export type BotOperationalMode = 'file_bot' | 'post_bot';
+export type BotOperationalMode = 'file_bot' | 'post_bot' | 'image_url_bot';
 
 export interface AdminUser {
   id: string;
@@ -1232,7 +1232,7 @@ export const api = {
     return data.bots || [];
   },
 
-  async cloneBot(token: string, owner?: string, botMode: BotOperationalMode = 'file_bot'): Promise<any> {
+  async cloneBot(token: string, owner?: string, botMode: BotOperationalMode = 'post_bot'): Promise<any> {
     const cleanOwner = owner?.trim();
     const res = await authFetch('/api/bots/clone', {
       method: 'POST',

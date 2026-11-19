@@ -5,8 +5,14 @@ import { toast } from '../lib/toast';
 import { 
   Bot, Check, Plus, Trash2, ExternalLink, RefreshCw, Loader2, 
   X, Shield, Sparkles, AlertCircle, Copy, Play, Square, RotateCcw,
-  FolderOpen, FileEdit, ChevronDown, SlidersHorizontal
+  FolderOpen, FileEdit, Image as ImageIcon, ChevronDown, SlidersHorizontal
 } from 'lucide-react';
+
+function getModeLabel(mode?: BotOperationalMode): string {
+  if (mode === 'post_bot') return 'Post Bot';
+  if (mode === 'image_url_bot') return 'Image URL Bot';
+  return 'File Bot';
+}
 
 interface BotSwitcherModalProps {
   isOpen: boolean;
@@ -28,7 +34,6 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
   // Clone bot form state
   const [showCloneForm, setShowCloneForm] = useState<boolean>(false);
   const [tokenInput, setTokenInput] = useState<string>('');
-  const [ownerInput, setOwnerInput] = useState<string>('');
   const [cloneMode, setCloneMode] = useState<BotOperationalMode | null>(null);
   const [cloning, setCloning] = useState<boolean>(false);
   const [cloneError, setCloneError] = useState<string>('');
@@ -58,7 +63,6 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
       loadBots();
       setShowCloneForm(false);
       setTokenInput('');
-      setOwnerInput('');
       setCloneMode(null);
       setCloneError('');
       setDeleteConfirmId(null);
@@ -88,7 +92,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
       return;
     }
     if (!cloneMode) {
-      setCloneError('Please choose a Bot Mode (File Bot or Post Bot) before cloning.');
+      setCloneError('Please choose a Bot Mode (Post Bot or Image URL Bot) before cloning.');
       return;
     }
 
@@ -96,11 +100,10 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
     setCloneError('');
 
     try {
-      const newBot = await api.cloneBot(token, ownerInput.trim() || undefined, cloneMode);
-      const modeLabel = cloneMode === 'post_bot' ? 'Post Bot' : 'File Bot';
+      const newBot = await api.cloneBot(token, undefined, cloneMode);
+      const modeLabel = getModeLabel(cloneMode);
       toast.success(`Bot @${newBot.username || newBot.name} cloned & activated in ${modeLabel} mode!`);
       setTokenInput('');
-      setOwnerInput('');
       setCloneMode(null);
       setShowCloneForm(false);
       await loadBots();
@@ -151,7 +154,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
     setOpenModeMenuId(null);
     try {
       const res = await api.changeBotMode(bot.id, nextMode);
-      toast.success(res.message || `Switched to ${nextMode === 'post_bot' ? 'Post Bot' : 'File Bot'}`);
+      toast.success(res.message || `Switched to ${getModeLabel(nextMode)}`);
       setBots((prev) => prev.map((b) => (b.id === bot.id ? { ...b, botMode: nextMode } : b)));
       if (bot.id === activeBotId) {
         onBotSwitched(bot.id);
@@ -297,9 +300,11 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                               <span className={`text-[9px] px-1.5 py-0.2 rounded border font-semibold shrink-0 ${
                                 bot.botMode === 'post_bot'
                                   ? 'bg-violet-500/20 text-violet-300 border-violet-500/30'
-                                  : 'bg-sky-500/15 text-sky-300 border-sky-500/30'
+                                  : bot.botMode === 'image_url_bot'
+                                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+                                    : 'bg-sky-500/15 text-sky-300 border-sky-500/30'
                               }`}>
-                                {bot.botMode === 'post_bot' ? 'Post Bot' : 'File Bot'}
+                                {getModeLabel(bot.botMode)}
                               </span>
                             )}
                           </div>
@@ -451,10 +456,10 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                             Select Operational Mode
                           </span>
                           <span className="text-[10px] text-white/50">
-                            Current: {bot.botMode === 'post_bot' ? 'Post Bot' : 'File Bot'}
+                            Current: {getModeLabel(bot.botMode)}
                           </span>
                         </div>
-                        <div className="grid grid-cols-2 gap-1.5">
+                        <div className="grid grid-cols-3 gap-1.5">
                           <button
                             type="button"
                             disabled={lifecycleBusy !== null}
@@ -466,16 +471,16 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                             }`}
                           >
                             <div className="flex items-center justify-between gap-1">
-                              <span className="text-[11px] font-bold flex items-center gap-1">
+                              <span className="text-[10.5px] font-bold flex items-center gap-1 min-w-0">
                                 <FolderOpen className="w-3 h-3 text-sky-400 shrink-0" />
-                                <span>File Bot</span>
+                                <span className="truncate">File Bot</span>
                               </span>
                               {(bot.botMode || 'file_bot') === 'file_bot' && (
                                 <Check className="w-3 h-3 text-sky-400 shrink-0" />
                               )}
                             </div>
-                            <p className="text-[9.5px] text-white/55 mt-0.5 leading-tight">
-                              File delivery &amp; keyword filters
+                            <p className="text-[9px] text-white/55 mt-0.5 leading-tight">
+                              Files &amp; filters
                             </p>
                           </button>
 
@@ -490,24 +495,48 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                             }`}
                           >
                             <div className="flex items-center justify-between gap-1">
-                              <span className="text-[11px] font-bold flex items-center gap-1">
+                              <span className="text-[10.5px] font-bold flex items-center gap-1 min-w-0">
                                 <FileEdit className="w-3 h-3 text-violet-400 shrink-0" />
-                                <span>Post Bot</span>
+                                <span className="truncate">Post Bot</span>
                               </span>
                               {bot.botMode === 'post_bot' && (
                                 <Check className="w-3 h-3 text-violet-400 shrink-0" />
                               )}
                             </div>
-                            <p className="text-[9.5px] text-white/55 mt-0.5 leading-tight">
-                              Channel post &amp; button maker
+                            <p className="text-[9px] text-white/55 mt-0.5 leading-tight">
+                              Post &amp; buttons
+                            </p>
+                          </button>
+
+                          <button
+                            type="button"
+                            disabled={lifecycleBusy !== null}
+                            onClick={() => handleChangeBotMode(bot, 'image_url_bot')}
+                            className={`p-2 rounded-lg border text-left transition-all cursor-pointer disabled:opacity-50 ${
+                              bot.botMode === 'image_url_bot'
+                                ? 'bg-emerald-500/25 border-emerald-400/60 text-white'
+                                : 'bg-white/[0.04] hover:bg-white/[0.08] border-white/10 text-zinc-300'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="text-[10.5px] font-bold flex items-center gap-1 min-w-0">
+                                <ImageIcon className="w-3 h-3 text-emerald-400 shrink-0" />
+                                <span className="truncate">Image URL</span>
+                              </span>
+                              {bot.botMode === 'image_url_bot' && (
+                                <Check className="w-3 h-3 text-emerald-400 shrink-0" />
+                              )}
+                            </div>
+                            <p className="text-[9px] text-white/55 mt-0.5 leading-tight">
+                              Photo to URL
                             </p>
                           </button>
                         </div>
                       </div>
                     )}
 
-                    {/* Dedicated Sub-Admin Panel Credentials for Cloned Bots */}
-                    {!bot.isMain && (bot.id || bot.adminPassword) && (() => {
+                    {/* Dedicated Sub-Admin Panel Credentials ONLY for File Bot mode (never Post Bot / Image URL Bot) */}
+                    {!bot.isMain && (!bot.botMode || bot.botMode === 'file_bot') && (bot.panelUrl || bot.adminPassword) && (() => {
                       const cleanBotId = String(bot.adminUsername || bot.id || '').replace(/^clone_/i, '').replace(/[:_-]/g, '');
                       const base = typeof window !== 'undefined' ? window.location.origin : '';
                       const rawUrl = bot.panelUrl || `/panel?bot_id=${cleanBotId}`;
@@ -648,19 +677,6 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                 </div>
 
                 <div className="space-y-1.5">
-                  <label className="text-[10px] font-bold text-zinc-300 uppercase tracking-wider">
-                    New Owner User ID or @username
-                  </label>
-                  <input
-                    type="text"
-                    value={ownerInput}
-                    onChange={(e) => setOwnerInput(e.target.value)}
-                    placeholder="e.g. 123456789 or @username (optional)"
-                    className="w-full px-3 py-2 rounded-xl bg-black/60 border border-white/20 text-xs font-mono text-white placeholder-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500 transition-all"
-                  />
-                </div>
-
-                <div className="space-y-1.5">
                   <label className="text-[10px] font-bold text-zinc-300 uppercase tracking-wider flex items-center justify-between">
                     <span>Choose Bot Mode</span>
                     {!cloneMode && (
@@ -670,32 +686,6 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                     )}
                   </label>
                   <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCloneMode('file_bot');
-                        if (cloneError.includes('Bot Mode')) setCloneError('');
-                      }}
-                      className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                        cloneMode === 'file_bot'
-                          ? 'bg-sky-500/20 border-sky-400/60 text-white shadow-[0_0_15px_rgba(56,189,248,0.2)]'
-                          : 'bg-black/40 hover:bg-white/[0.06] border-white/15 text-zinc-300'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="text-xs font-bold flex items-center gap-1.5">
-                          <FolderOpen className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                          <span>File Bot</span>
-                        </span>
-                        {cloneMode === 'file_bot' && (
-                          <Check className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-                        )}
-                      </div>
-                      <p className="text-[10px] text-zinc-400 mt-1 leading-snug">
-                        Standard file delivery &amp; indexing mode
-                      </p>
-                    </button>
-
                     <button
                       type="button"
                       onClick={() => {
@@ -719,6 +709,32 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                       </div>
                       <p className="text-[10px] text-zinc-400 mt-1 leading-snug">
                         Channel post &amp; inline button mode
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCloneMode('image_url_bot');
+                        if (cloneError.includes('Bot Mode')) setCloneError('');
+                      }}
+                      className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                        cloneMode === 'image_url_bot'
+                          ? 'bg-emerald-500/20 border-emerald-400/60 text-white shadow-[0_0_15px_rgba(16,185,129,0.2)]'
+                          : 'bg-black/40 hover:bg-white/[0.06] border-white/15 text-zinc-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-xs font-bold flex items-center gap-1.5">
+                          <ImageIcon className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                          <span>Image URL Bot</span>
+                        </span>
+                        {cloneMode === 'image_url_bot' && (
+                          <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                        )}
+                      </div>
+                      <p className="text-[10px] text-zinc-400 mt-1 leading-snug">
+                        Photo-to-URL converter &amp; auto-expiry
                       </p>
                     </button>
                   </div>
