@@ -40,7 +40,7 @@ interface MoreTabProps {
   onOpenBotSwitcher?: () => void;
 }
 
-type MoreSubView = 'menu' | 'templates' | 'admins' | 'cleanup' | 'settings' | 'webhook' | 'broadcast' | 'emoji' | 'reports' | 'fraud' | 'whitelist';
+type MoreSubView = 'menu' | 'templates' | 'admins' | 'settings' | 'webhook' | 'broadcast' | 'emoji' | 'reports' | 'fraud' | 'whitelist';
 
 export const MoreTab: React.FC<MoreTabProps> = ({
   currentUser,
@@ -414,11 +414,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     }
   });
 
-  // Cleanup state
-  const [cleanupStatus, setCleanupStatus] = useState<any>(null);
-  const [cleanupRunning, setCleanupRunning] = useState(false);
-  const [cleanupMsg, setCleanupMsg] = useState<string | null>(null);
-
   // Settings state
   const [botSettings, setBotSettings] = useState<any>({
     botToken: '',
@@ -436,11 +431,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     forceJoinMode: settings?.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
     antiForwardEnabled: settings?.antiForwardEnabled ?? false,
     linkDeleteEnabled: settings?.linkDeleteEnabled ?? false,
+    autoApproveJoinRequests: settings?.autoApproveJoinRequests ?? true,
     requiredChannels: settings?.requiredChannels || [],
     adminNewPassword: ''
   });
   const [botStatusMsg, setBotStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [settingSaving, setSettingSaving] = useState(false);
+  const [savingSection, setSavingSection] = useState<'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'forceSub' | null>(null);
   const [botRuntimeStatus, setBotRuntimeStatus] = useState<'active' | 'stopped'>(settings?.botStopped ? 'stopped' : 'active');
   const [botRuntimePolling, setBotRuntimePolling] = useState<boolean>(!settings?.botStopped);
   const [botLifecycleBusy, setBotLifecycleBusy] = useState<'start' | 'stop' | 'restart' | 'clean-memory' | null>(null);
@@ -454,32 +450,47 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [loadingJoinRequests, setLoadingJoinRequests] = useState(false);
   const [showJoinRequests, setShowJoinRequests] = useState(false);
 
+  const prevServerSettingsRef = useRef<BotSettings | null>(null);
+
   useEffect(() => {
     if (settings) {
-      setBotSettings((prev: any) => ({
-        ...prev,
-        botUsername: settings.botUsername || '',
-        rootAdminId: settings.rootAdminId || '',
-        maxBotMessagesPerChat: settings.maxBotMessagesPerChat || 10,
-        dailyCleanupEnabled: settings.dailyCleanupEnabled ?? true,
-        cleanupAgeHours: settings.cleanupAgeHours || 24,
-        autoDeleteDeliveryEnabled: settings.autoDeleteDeliveryEnabled ?? true,
-        deliveryTimeoutMinutes: settings.deliveryTimeoutMinutes || 10,
-        autoDeleteNoticeEnabled: settings.autoDeleteNoticeEnabled ?? false,
-        maintenanceMode: settings.maintenanceMode ?? false,
-        maintenanceNotice: settings.maintenanceNotice || '',
-        forceSubEnabled: settings.forceSubEnabled ?? false,
-        forceJoinMode: settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
-        antiForwardEnabled: settings.antiForwardEnabled ?? false,
-        linkDeleteEnabled: settings.linkDeleteEnabled ?? false,
-        autoApproveJoinRequests: settings.autoApproveJoinRequests ?? true,
-        requiredChannels: Array.isArray(settings.requiredChannels) ? settings.requiredChannels : []
-      }));
-      setChatWhitelistEnabled(Boolean(settings.chatWhitelistEnabled));
-      setAllowedChats(Array.isArray(settings.allowedChats) ? settings.allowedChats : []);
+      const prevSrv = prevServerSettingsRef.current;
+      setBotSettings((prev: any) => {
+        const next = { ...prev };
+        const syncIfChanged = <K extends keyof BotSettings>(key: K, value: any) => {
+          const prevVal = prevSrv ? prevSrv[key] : undefined;
+          if (!prevSrv || JSON.stringify(prevVal) !== JSON.stringify(settings[key])) {
+            next[key] = value;
+          }
+        };
+        syncIfChanged('botUsername', settings.botUsername || '');
+        syncIfChanged('rootAdminId', settings.rootAdminId || '');
+        syncIfChanged('maxBotMessagesPerChat', settings.maxBotMessagesPerChat || 10);
+        syncIfChanged('dailyCleanupEnabled', settings.dailyCleanupEnabled ?? true);
+        syncIfChanged('cleanupAgeHours', settings.cleanupAgeHours || 24);
+        syncIfChanged('autoDeleteDeliveryEnabled', settings.autoDeleteDeliveryEnabled ?? true);
+        syncIfChanged('deliveryTimeoutMinutes', settings.deliveryTimeoutMinutes || 10);
+        syncIfChanged('autoDeleteNoticeEnabled', settings.autoDeleteNoticeEnabled ?? false);
+        syncIfChanged('maintenanceMode', settings.maintenanceMode ?? false);
+        syncIfChanged('maintenanceNotice', settings.maintenanceNotice || '');
+        syncIfChanged('forceSubEnabled', settings.forceSubEnabled ?? false);
+        syncIfChanged('forceJoinMode', settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join');
+        syncIfChanged('antiForwardEnabled', settings.antiForwardEnabled ?? false);
+        syncIfChanged('linkDeleteEnabled', settings.linkDeleteEnabled ?? false);
+        syncIfChanged('autoApproveJoinRequests', settings.autoApproveJoinRequests ?? true);
+        syncIfChanged('requiredChannels', Array.isArray(settings.requiredChannels) ? settings.requiredChannels : []);
+        return next;
+      });
+      if (!prevSrv || prevSrv.chatWhitelistEnabled !== settings.chatWhitelistEnabled) {
+        setChatWhitelistEnabled(Boolean(settings.chatWhitelistEnabled));
+      }
+      if (!prevSrv || JSON.stringify(prevSrv.allowedChats) !== JSON.stringify(settings.allowedChats)) {
+        setAllowedChats(Array.isArray(settings.allowedChats) ? settings.allowedChats : []);
+      }
       if (typeof settings.botStopped === 'boolean') {
         setBotRuntimeStatus(settings.botStopped ? 'stopped' : 'active');
       }
+      prevServerSettingsRef.current = settings;
     }
   }, [settings]);
 
@@ -500,8 +511,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   useEffect(() => {
     if (subView === 'admins') {
       loadAdmins();
-    } else if (subView === 'cleanup') {
-      loadCleanupStatus();
     } else if (subView === 'settings') {
       loadJoinRequests();
       loadBotRuntimeStatus();
@@ -618,36 +627,43 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     }
   };
 
-  const loadCleanupStatus = async () => {
+  const savePartialBotSetting = async (
+    section: 'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'forceSub',
+    partialPayload: Record<string, any>,
+    successText: string,
+    rollback?: () => void
+  ) => {
+    setSavingSection(section);
+    setBotStatusMsg(null);
     try {
-      const data = await api.getCleanupStatus();
-      setCleanupStatus(data);
-    } catch (err) {
-      console.error(err);
+      const res = await api.updateSettings(partialPayload);
+      if (res && res.settings) {
+        setBotSettings((prev: any) => ({
+          ...prev,
+          ...partialPayload
+        }));
+      }
+      onRefreshSettings();
+      toast.success(successText);
+    } catch (err: any) {
+      if (rollback) rollback();
+      const errText = err?.message || 'Failed to update setting';
+      toast.error(errText);
+    } finally {
+      setSavingSection(null);
     }
   };
 
   const handleUpdateDeliveryTimeout = async (newMins: number) => {
+    const prevMins = botSettings.deliveryTimeoutMinutes || 10;
     const mins = Math.max(1, Math.min(10080, Math.round(Number(newMins) || 10)));
     setBotSettings((prev: any) => ({ ...prev, deliveryTimeoutMinutes: mins }));
-    setCleanupStatus((prev: any) => ({ ...prev, deliveryTimeoutMinutes: mins }));
-    try {
-      const res = await api.updateSettings({
-        ...botSettings,
-        deliveryTimeoutMinutes: mins
-      });
-      if (res && res.settings) {
-        setBotSettings((prev: any) => ({
-          ...prev,
-          ...res.settings,
-          deliveryTimeoutMinutes: res.settings.deliveryTimeoutMinutes || mins
-        }));
-      }
-      onRefreshSettings();
-      toast.success(`File auto-delete timer set to ${mins} minute${mins === 1 ? '' : 's'}!`);
-    } catch (err: any) {
-      toast.error(err.message || 'Failed to update auto-delete timer');
-    }
+    await savePartialBotSetting(
+      'autoDelete',
+      { deliveryTimeoutMinutes: mins },
+      `File auto-delete timer set to ${mins} minute${mins === 1 ? '' : 's'}!`,
+      () => setBotSettings((prev: any) => ({ ...prev, deliveryTimeoutMinutes: prevMins }))
+    );
   };
 
   // Initial load for reports and fraud rules
@@ -1182,24 +1198,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     }
   };
 
-  // Run cleanup
-  const handleRunCleanup = async () => {
-    setCleanupRunning(true);
-    setCleanupMsg(null);
-    try {
-      const res = await api.runCleanup(botSettings.cleanupAgeHours);
-      setCleanupMsg(res.message);
-      toast.success(res.message || 'Message cleanup completed!');
-      loadCleanupStatus();
-    } catch (err: any) {
-      const errText = err.message || 'Cleanup failed';
-      setCleanupMsg(errText);
-      toast.error(errText);
-    } finally {
-      setCleanupRunning(false);
-    }
-  };
-
   // Force Sub Channel Management Handlers
   const handleAddForceSubChannel = () => {
     if (!newChannelChatId.trim()) {
@@ -1234,7 +1232,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     setNewChannelName('');
     setNewChannelChatId('');
     setShowManualAddChannel(false);
-    toast.success(`Channel "${newChan.name}" added! Click Save Configuration to apply.`);
+    toast.success(`Channel "${newChan.name}" added! Click Save Channels to apply.`);
   };
 
   const handleToggleChannel = async (channelId: string, currentEnabled: boolean) => {
@@ -1283,47 +1281,18 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         requiredChannels: existing.filter((c: any) => c.id !== channelId)
       };
     });
-    toast.info('Channel removed. Click Save Configuration to apply changes.');
+    toast.info('Channel removed. Click Save Channels to apply changes.');
   };
 
-  // Save settings & Webhook
-  const handleSaveSettings = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    setSettingSaving(true);
-    setBotStatusMsg(null);
-    try {
-      const payload = {
-        ...botSettings,
+  const handleSaveForceSubChannels = async () => {
+    await savePartialBotSetting(
+      'forceSub',
+      {
         forceSubEnabled: Boolean(botSettings.forceSubEnabled),
-        forceJoinMode: botSettings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
-        antiForwardEnabled: Boolean(botSettings.antiForwardEnabled),
-        linkDeleteEnabled: Boolean(botSettings.linkDeleteEnabled),
-        autoApproveJoinRequests: botSettings.autoApproveJoinRequests !== false,
         requiredChannels: Array.isArray(botSettings.requiredChannels) ? botSettings.requiredChannels : []
-      };
-      const res = await api.updateSettings(payload);
-      if (res && res.settings) {
-        setBotSettings((prev: any) => ({
-          ...prev,
-          ...res.settings,
-          forceSubEnabled: res.settings.forceSubEnabled ?? false,
-          forceJoinMode: res.settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
-          antiForwardEnabled: res.settings.antiForwardEnabled ?? false,
-          linkDeleteEnabled: res.settings.linkDeleteEnabled ?? false,
-          autoApproveJoinRequests: res.settings.autoApproveJoinRequests ?? true,
-          requiredChannels: Array.isArray(res.settings.requiredChannels) ? res.settings.requiredChannels : []
-        }));
-      }
-      onRefreshSettings();
-      setBotStatusMsg({ type: 'success', text: 'Bot settings updated successfully!' });
-      toast.success('Bot settings updated successfully!');
-    } catch (err: any) {
-      const errText = err.message || 'Failed to update settings';
-      setBotStatusMsg({ type: 'error', text: errText });
-      toast.error(errText);
-    } finally {
-      setSettingSaving(false);
-    }
+      },
+      'Force Sub channels saved!'
+    );
   };
 
   const handleRegisterWebhook = async () => {
@@ -1689,30 +1658,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
           </button>
 
-          {/* File Auto-Delete & Cleanup */}
-          <button
-            onClick={() => {
-              loadCleanupStatus();
-              setSubView('cleanup');
-            }}
-            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
-          >
-            <div className="flex items-center gap-3 min-w-0 flex-1">
-              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #f472b6 20%, rgba(255,255,255,.06))' }}>
-                <Clock className="w-4 h-4 text-pink-300" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
-                  <span>File Auto-Delete &amp; Cleanup</span>
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-pink-500/20 text-pink-200 font-mono font-semibold border border-pink-400/25">
-                    {botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10}m Timeout
-                  </span>
-                </div>
-              </div>
-            </div>
-            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
-          </button>
-
           {/* Broadcast Notification System */}
           <button
             onClick={() => setSubView('broadcast')}
@@ -1866,7 +1811,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   // -------------------------------------------------------------
   if (subView === 'templates') {
     const startTemplate = templates.START_MESSAGE;
-    const otherTemplates = Object.values(templates).filter((t) => t.key !== 'START_MESSAGE');
+    const otherTemplates = Object.values(templates).filter((t) => t.key !== 'START_MESSAGE' && t.key !== 'WEB_CODE_MESSAGE');
 
     return (
       <div className="space-y-4 pb-28">
@@ -2571,240 +2516,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   }
 
   // -------------------------------------------------------------
-  // SUB-VIEW: MESSAGE CLEANUP (Section 41)
-  // -------------------------------------------------------------
-  if (subView === 'cleanup') {
-    return (
-      <div className="space-y-4 pb-28">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            {renderSubViewBackButton('menu', 'Back to More')}
-            <h2 className="text-base font-bold text-white truncate">Message Cleanup</h2>
-          </div>
-          <span className="text-xs text-zinc-400 shrink-0">Persistent Cleanup</span>
-        </div>
-
-        <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-3">
-          <div className="flex items-center gap-2 text-xs font-bold text-white">
-            <Trash2 className="w-4 h-4 text-emerald-400" />
-            <span>Bot Message Limit &amp; Cleanup</span>
-          </div>
-          <p className="text-xs text-zinc-400">
-            Enforces a maximum of 10 bot-generated messages per group chat. When the 11th bot message is generated, the oldest bot message is deleted automatically.
-          </p>
-
-          <div className="p-3 rounded-xl bg-zinc-900 border border-zinc-800 space-y-1.5 text-xs text-zinc-300">
-            <div className="flex flex-wrap justify-between gap-2">
-              <span className="text-zinc-400">Max bot messages per chat:</span>
-              <span className="font-semibold text-white">10 messages</span>
-            </div>
-            <div className="flex flex-wrap justify-between gap-2">
-              <span className="text-zinc-400">Tracked bot messages:</span>
-              <span className="font-semibold text-red-400">{cleanupStatus?.trackedMessagesCount || 0} messages</span>
-            </div>
-            <div className="flex flex-wrap justify-between gap-2">
-              <span className="text-zinc-400">User message protection:</span>
-              <span className="font-semibold text-emerald-400">Never touched</span>
-            </div>
-          </div>
-
-          {cleanupMsg && (
-            <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-xs">
-              {cleanupMsg}
-            </div>
-          )}
-
-          <button
-            onClick={handleRunCleanup}
-            disabled={cleanupRunning}
-            className="w-full py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-          >
-            {cleanupRunning ? (
-              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-            ) : (
-              <>
-                <RefreshCw className="w-3.5 h-3.5" />
-                <span>Run Cleanup Now (24h+ Old Messages)</span>
-              </>
-            )}
-          </button>
-        </div>
-
-        {/* Delivery Files Auto-Destruct Status & Configurable Timer */}
-        <div className="glass-panel rounded-2xl p-4 border border-rose-500/30 bg-rose-950/15 space-y-3.5">
-          <div className="flex items-center justify-between gap-2.5">
-            <div className="flex items-center gap-2 min-w-0 flex-1">
-              <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
-                <Clock className="w-4 h-4" />
-              </div>
-              <div className="min-w-0">
-                <div className="text-xs font-bold text-white break-words">
-                  Delivery File Auto-Delete ({botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10}m Timeout)
-                </div>
-                <div className="text-[10px] text-zinc-400">Configurable self-destruct timer for delivered files</div>
-              </div>
-            </div>
-            <label className="relative inline-flex items-center cursor-pointer shrink-0">
-              <input
-                type="checkbox"
-                checked={botSettings.autoDeleteDeliveryEnabled}
-                onChange={async (e) => {
-                  const enabled = e.target.checked;
-                  setBotSettings((prev: any) => ({ ...prev, autoDeleteDeliveryEnabled: enabled }));
-                  setCleanupStatus((prev: any) => ({ ...prev, autoDeleteDeliveryEnabled: enabled }));
-                  try {
-                    await api.updateSettings({ ...botSettings, autoDeleteDeliveryEnabled: enabled });
-                    onRefreshSettings();
-                    toast.success(enabled ? 'File auto-delete enabled' : 'File auto-delete disabled');
-                  } catch (err: any) {
-                    toast.error(err.message || 'Failed to update setting');
-                  }
-                }}
-                className="sr-only peer"
-              />
-              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-rose-500"></div>
-            </label>
-          </div>
-
-          <p className="text-xs text-zinc-400">
-            Files delivered in Telegram private chat remain accessible for the exact configured duration, and then automatically delete themselves from the user's chat. They will not be deleted prematurely before this timer expires.
-          </p>
-
-          {/* Quick Preset Buttons */}
-          <div className="space-y-1.5 pt-1 border-t border-rose-500/20">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="font-semibold text-zinc-300">Quick Timer Presets:</span>
-              <span className="text-rose-400 font-mono font-bold">
-                Current: {botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10} min
-              </span>
-            </div>
-            <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5">
-              {[1, 3, 5, 10, 15, 30, 60, 120].map((presetMins) => {
-                const isSelected = (botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10) === presetMins;
-                return (
-                  <button
-                    key={presetMins}
-                    type="button"
-                    onClick={() => handleUpdateDeliveryTimeout(presetMins)}
-                    className={`py-1.5 px-2 rounded-xl text-xs font-semibold font-mono flex items-center justify-center transition-all cursor-pointer ${
-                      isSelected
-                        ? 'bg-rose-500 text-white shadow-md shadow-rose-500/30 ring-1 ring-white/30 scale-102 font-bold'
-                        : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-800'
-                    }`}
-                  >
-                    {presetMins}m
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Stepper & Custom Duration Input */}
-          <div className="p-3 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-2.5">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-              <div>
-                <label className="block text-[11px] font-semibold text-zinc-200">
-                  Custom Expiration Duration
-                </label>
-                <span className="text-[10px] text-zinc-400">Set exact minutes (e.g. 5, 10, 45, 120)</span>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const cur = botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10;
-                    handleUpdateDeliveryTimeout(Math.max(1, cur - 1));
-                  }}
-                  className="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
-                  title="Decrease 1 minute"
-                >
-                  <Minus className="w-3.5 h-3.5" />
-                </button>
-
-                <input
-                  type="number"
-                  min="1"
-                  max="10080"
-                  value={botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10}
-                  onChange={(e) => {
-                    const val = Math.max(1, Number(e.target.value) || 1);
-                    setBotSettings((prev: any) => ({ ...prev, deliveryTimeoutMinutes: val }));
-                    setCleanupStatus((prev: any) => ({ ...prev, deliveryTimeoutMinutes: val }));
-                  }}
-                  onBlur={(e) => {
-                    const val = Math.max(1, Number(e.target.value) || 10);
-                    handleUpdateDeliveryTimeout(val);
-                  }}
-                  className="w-20 bg-zinc-950 border border-rose-500/40 rounded-lg py-1 px-2 text-center text-xs text-white font-mono font-bold focus:outline-none focus:border-rose-400"
-                />
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    const cur = botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10;
-                    handleUpdateDeliveryTimeout(cur + 1);
-                  }}
-                  className="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
-                  title="Increase 1 minute"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleUpdateDeliveryTimeout(botSettings.deliveryTimeoutMinutes || 10)}
-                  className="py-1 px-3 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition-all cursor-pointer active:scale-95 shadow-sm"
-                >
-                  Save
-                </button>
-              </div>
-            </div>
-
-            <label className="flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer pt-1 border-t border-zinc-800/80">
-              <input
-                type="checkbox"
-                checked={botSettings.autoDeleteNoticeEnabled}
-                onChange={async (e) => {
-                  const notice = e.target.checked;
-                  setBotSettings((prev: any) => ({ ...prev, autoDeleteNoticeEnabled: notice }));
-                  try {
-                    await api.updateSettings({ ...botSettings, autoDeleteNoticeEnabled: notice });
-                    onRefreshSettings();
-                    toast.success(notice ? 'Notice enabled' : 'Notice disabled');
-                  } catch (err: any) {
-                    toast.error(err.message || 'Failed to update setting');
-                  }
-                }}
-                className="rounded accent-rose-500"
-              />
-              <span>Send companion self-destruct notice message with delivered file</span>
-            </label>
-          </div>
-
-          <div className="p-3 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-2 text-xs text-zinc-300">
-            <div className="flex justify-between items-center">
-              <span className="text-zinc-400">Auto-delete status:</span>
-              <span className={`px-2 py-0.5 rounded-md font-semibold text-[11px] ${cleanupStatus?.autoDeleteDeliveryEnabled ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-zinc-800 text-zinc-400'}`}>
-                {cleanupStatus?.autoDeleteDeliveryEnabled ? 'Active' : 'Disabled'}
-              </span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-zinc-400">Timeout duration:</span>
-              <span className="font-semibold text-rose-400">{botSettings.deliveryTimeoutMinutes || cleanupStatus?.deliveryTimeoutMinutes || 10} Minutes</span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-zinc-400">Active pending self-destruct timers:</span>
-              <span className="font-semibold text-amber-400">{cleanupStatus?.pendingScheduledDeletionsCount || 0} files</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // -------------------------------------------------------------
-  // SUB-VIEW: SETTINGS & BOT (Sections 51 & 58)
+  // SUB-VIEW: SETTINGS & BOT (Independent Self-Contained Cards)
   // -------------------------------------------------------------
   if (subView === 'settings') {
     return (
@@ -2834,7 +2546,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </div>
         )}
 
-        {/* Bot Runtime & Memory Control Card */}
+        {/* 1. Bot Process & Memory Control Card */}
         <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2.5 min-w-0">
@@ -2918,800 +2630,870 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           )}
         </div>
 
-        <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-4">
-          <form onSubmit={handleSaveSettings} className="space-y-3.5">
-            {/* Delivery Auto-Remove / Timeout Settings */}
-            <div className="p-3.5 rounded-2xl bg-gradient-to-br from-rose-950/20 via-zinc-900/80 to-zinc-950/90 border border-rose-500/30 space-y-3">
-              <div className="flex items-center justify-between gap-2.5">
-                <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
-                    <Clock className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-xs font-bold text-white break-words">Delivery File Auto-Delete (Timeout)</div>
-                  </div>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                  <input
-                    type="checkbox"
-                    checked={botSettings.autoDeleteDeliveryEnabled}
-                    onChange={(e) => setBotSettings({ ...botSettings, autoDeleteDeliveryEnabled: e.target.checked })}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-rose-500"></div>
-                </label>
+        {/* 2. Delivery File Auto-Delete Card (Independent) */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-rose-950/20 via-zinc-900/80 to-zinc-950/90 border border-rose-500/30 space-y-3">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+                <Clock className="w-4 h-4" />
               </div>
-
-              {botSettings.autoDeleteDeliveryEnabled && (
-                <div className="space-y-3 pt-1 border-t border-rose-500/20 text-xs">
-                  {/* Quick Preset Buttons */}
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between text-[11px]">
-                      <span className="font-semibold text-zinc-300">Quick Duration Presets:</span>
-                      <span className="text-rose-400 font-mono font-bold">
-                        {botSettings.deliveryTimeoutMinutes || 10} min
-                      </span>
-                    </div>
-                    <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5">
-                      {[1, 3, 5, 10, 15, 30, 60, 120].map((presetMins) => {
-                        const isSelected = (botSettings.deliveryTimeoutMinutes || 10) === presetMins;
-                        return (
-                          <button
-                            key={presetMins}
-                            type="button"
-                            onClick={() => {
-                              setBotSettings({ ...botSettings, deliveryTimeoutMinutes: presetMins });
-                            }}
-                            className={`py-1.5 px-2 rounded-xl text-xs font-semibold font-mono flex items-center justify-center transition-all cursor-pointer ${
-                              isSelected
-                                ? 'bg-rose-500 text-white shadow-md shadow-rose-500/30 ring-1 ring-white/30 scale-102 font-bold'
-                                : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-800'
-                            }`}
-                          >
-                            {presetMins}m
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-[11px] font-semibold text-zinc-300 mb-1">
-                      Custom Duration (Minutes)
-                    </label>
-                    <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const cur = botSettings.deliveryTimeoutMinutes || 10;
-                          setBotSettings({ ...botSettings, deliveryTimeoutMinutes: Math.max(1, cur - 1) });
-                        }}
-                        className="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
-                        title="Decrease 1 minute"
-                      >
-                        <Minus className="w-3.5 h-3.5" />
-                      </button>
-
-                      <input
-                        type="number"
-                        min="1"
-                        max="10080"
-                        value={botSettings.deliveryTimeoutMinutes}
-                        onChange={(e) => setBotSettings({ ...botSettings, deliveryTimeoutMinutes: Math.max(1, Number(e.target.value) || 1) })}
-                        placeholder="e.g. 10"
-                        className="w-24 bg-zinc-950 border border-zinc-700 rounded-xl py-1.5 px-3 text-xs text-white font-mono font-bold text-center focus:outline-none focus:border-rose-400"
-                      />
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const cur = botSettings.deliveryTimeoutMinutes || 10;
-                          setBotSettings({ ...botSettings, deliveryTimeoutMinutes: cur + 1 });
-                        }}
-                        className="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
-                        title="Increase 1 minute"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                      </button>
-
-                      <span className="text-rose-400 font-semibold text-xs ml-1">Minutes</span>
-                    </div>
-                    <span className="text-[10px] text-zinc-400 block mt-1">
-                      Files will remain accessible for exactly {botSettings.deliveryTimeoutMinutes || 10} minute(s) before self-destructing.
-                    </span>
-                  </div>
-
-                  <label className="flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer pt-1 border-t border-zinc-800/80">
-                    <input
-                      type="checkbox"
-                      checked={botSettings.autoDeleteNoticeEnabled}
-                      onChange={(e) => setBotSettings({ ...botSettings, autoDeleteNoticeEnabled: e.target.checked })}
-                      className="rounded accent-rose-500"
-                    />
-                    <span>Send companion self-destruct warning notice message with the file</span>
-                  </label>
-                </div>
-              )}
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white break-words">Delivery File Auto-Delete (Timeout)</div>
+              </div>
             </div>
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={Boolean(botSettings.autoDeleteDeliveryEnabled)}
+                onChange={async (e) => {
+                  const nextEnabled = e.target.checked;
+                  const prevEnabled = Boolean(botSettings.autoDeleteDeliveryEnabled);
+                  setBotSettings((prev: any) => ({ ...prev, autoDeleteDeliveryEnabled: nextEnabled }));
+                  await savePartialBotSetting(
+                    'autoDelete',
+                    { autoDeleteDeliveryEnabled: nextEnabled },
+                    nextEnabled ? 'File auto-delete enabled' : 'File auto-delete disabled',
+                    () => setBotSettings((prev: any) => ({ ...prev, autoDeleteDeliveryEnabled: prevEnabled }))
+                  );
+                }}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-rose-500"></div>
+            </label>
+          </div>
 
-            {/* Bot Maintenance Mode Toggle & Editable Custom Maintenance Notice */}
-            <div className="p-3.5 rounded-2xl bg-gradient-to-br from-amber-950/25 via-zinc-900/80 to-zinc-950/90 border border-amber-500/30 space-y-3">
-              <div className="flex items-center justify-between gap-2.5">
-                <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
-                    <Shield className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
-                      <span>Bot Maintenance Mode</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
-                        botSettings.maintenanceMode 
-                          ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' 
-                          : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                      }`}>
-                        {botSettings.maintenanceMode ? 'ACTIVE (OFFLINE)' : 'ONLINE'}
-                      </span>
-                    </div>
-                  </div>
+          {botSettings.autoDeleteDeliveryEnabled && (
+            <div className="space-y-3 pt-2 border-t border-rose-500/20 text-xs">
+              {/* Quick Preset Buttons */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="font-semibold text-zinc-300">Quick Duration Presets:</span>
+                  <span className="text-rose-400 font-mono font-bold">
+                    {botSettings.deliveryTimeoutMinutes || 10} min
+                  </span>
                 </div>
-
-                <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                  <input
-                    type="checkbox"
-                    checked={botSettings.maintenanceMode}
-                    onChange={(e) => setBotSettings({ ...botSettings, maintenanceMode: e.target.checked })}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500"></div>
-                </label>
+                <div className="grid grid-cols-4 sm:grid-cols-8 gap-1.5">
+                  {[1, 3, 5, 10, 15, 30, 60, 120].map((presetMins) => {
+                    const isSelected = (botSettings.deliveryTimeoutMinutes || 10) === presetMins;
+                    return (
+                      <button
+                        key={presetMins}
+                        type="button"
+                        disabled={savingSection === 'autoDelete'}
+                        onClick={() => handleUpdateDeliveryTimeout(presetMins)}
+                        className={`py-1.5 px-2 rounded-xl text-xs font-semibold font-mono flex items-center justify-center transition-all cursor-pointer disabled:opacity-60 ${
+                          isSelected
+                            ? 'bg-rose-500 text-white shadow-md shadow-rose-500/30 ring-1 ring-white/30 scale-102 font-bold'
+                            : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-800'
+                        }`}
+                      >
+                        {presetMins}m
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
 
-              {/* Maintenance Notice Customization Input with Dynamic Variable Support */}
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-xs font-semibold text-zinc-300">
-                    Maintenance Notice
-                  </label>
-                  <span className="text-[10px] text-amber-400 font-mono">Dynamic Tags</span>
-                </div>
-                <textarea
-                  ref={maintenanceTextareaRef}
-                  rows={2}
-                  value={botSettings.maintenanceNotice || ''}
-                  onChange={(e) => {
-                    setBotSettings({ ...botSettings, maintenanceNotice: e.target.value });
-                    syncTextareaSelection(e.currentTarget, maintenanceSelectionRef);
-                  }}
-                  onSelect={(e) => syncTextareaSelection(e.currentTarget, maintenanceSelectionRef)}
-                  onKeyUp={(e) => syncTextareaSelection(e.currentTarget, maintenanceSelectionRef)}
-                  onClick={(e) => syncTextareaSelection(e.currentTarget, maintenanceSelectionRef)}
-                  onBlur={(e) => syncTextareaSelection(e.currentTarget, maintenanceSelectionRef)}
-                  placeholder="e.g. ⚠️ Hello @username! {bot_name} is under maintenance. User ID: {user_id}"
-                  className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-2.5 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-amber-500"
-                />
-                <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-                  {[
-                    { tag: '@username', label: '@username' },
-                    { tag: '{user_id}', label: '{user_id}' },
-                    { tag: '{bot_name}', label: '{bot_name}' },
-                    { tag: '{name}', label: '{name}' },
-                  ].map(({ tag, label }) => (
-                    <button
-                      key={tag}
-                      type="button"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => {
-                        const current = botSettings.maintenanceNotice || '';
-                        insertAtCursor(
-                          maintenanceTextareaRef.current,
-                          current,
-                          tag,
-                          (nextVal) =>
-                            setBotSettings((prev: any) =>
-                              prev ? { ...prev, maintenanceNotice: nextVal } : prev
-                            ),
-                          maintenanceSelectionRef
-                        );
-                      }}
-                      className="px-2 py-0.5 rounded-md bg-zinc-800/90 hover:bg-zinc-700 border border-zinc-700/80 text-[10px] font-mono text-zinc-300 hover:text-white transition-colors cursor-pointer"
-                      title={`Click to insert ${tag}`}
-                    >
-                      +{label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* Anti-Forward Protection System (Block & Auto-Delete Forwarded Messages) */}
-            <div className="p-3.5 rounded-2xl bg-gradient-to-br from-violet-950/25 via-zinc-900/80 to-zinc-950/90 border border-violet-500/30 space-y-3">
-              <div className="flex items-center justify-between gap-2.5">
-                <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <div className="w-8 h-8 rounded-xl bg-violet-500/20 border border-violet-500/30 flex items-center justify-center text-violet-400 shrink-0">
-                    <ShieldAlert className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
-                      <span>Anti-Forward Protection</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
-                        botSettings.antiForwardEnabled 
-                          ? 'bg-violet-500/20 text-violet-300 border-violet-500/40' 
-                          : 'bg-zinc-800 text-zinc-400 border-zinc-700'
-                      }`}>
-                        {botSettings.antiForwardEnabled ? 'ACTIVE (BLOCKING)' : 'DISABLED'}
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-zinc-400 mt-0.5">
-                      Detect and instantly delete any forwarded messages from other chats, channels, or users in connected groups
-                    </p>
-                  </div>
-                </div>
-
-                <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                  <input
-                    type="checkbox"
-                    checked={botSettings.antiForwardEnabled || false}
-                    onChange={(e) => setBotSettings((prev: any) => ({ ...prev, antiForwardEnabled: e.target.checked }))}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-violet-500"></div>
+                <label className="block text-[11px] font-semibold text-zinc-300 mb-1">
+                  Custom Duration (Minutes)
                 </label>
-              </div>
-            </div>
-
-            {/* Link Delete (On/Off) Toggle */}
-            <div className="p-3.5 rounded-2xl bg-gradient-to-br from-rose-950/25 via-zinc-900/80 to-zinc-950/90 border border-rose-500/30 space-y-3">
-              <div className="flex items-center justify-between gap-2.5">
-                <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
-                    <Link2 className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
-                      <span>Link Delete (On/Off)</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
-                        botSettings.linkDeleteEnabled 
-                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' 
-                          : 'bg-zinc-800 text-zinc-400 border-zinc-700'
-                      }`}>
-                        {botSettings.linkDeleteEnabled ? 'ON (DELETING LINKS)' : 'OFF'}
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-zinc-400 mt-0.5">
-                      Automatically detect and delete unauthorized links from non-admin members in groups/chats. Turn OFF to permit links.
-                    </p>
-                  </div>
-                </div>
-
-                <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                  <input
-                    type="checkbox"
-                    checked={Boolean(botSettings.linkDeleteEnabled)}
-                    onChange={async (e) => {
-                      const nextEnabled = e.target.checked;
-                      const prevEnabled = Boolean(botSettings.linkDeleteEnabled);
-                      setBotSettings((prev: any) => ({ ...prev, linkDeleteEnabled: nextEnabled }));
-                      try {
-                        await api.updateSettings({ linkDeleteEnabled: nextEnabled });
-                        onRefreshSettings();
-                        toast.success(nextEnabled ? 'Link Delete turned ON' : 'Link Delete turned OFF');
-                      } catch (err: any) {
-                        setBotSettings((prev: any) => ({ ...prev, linkDeleteEnabled: prevEnabled }));
-                        toast.error(err?.message || 'Failed to update Link Delete setting');
-                      }
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={savingSection === 'autoDelete'}
+                    onClick={() => {
+                      const cur = botSettings.deliveryTimeoutMinutes || 10;
+                      handleUpdateDeliveryTimeout(Math.max(1, cur - 1));
                     }}
-                    className="sr-only peer"
+                    className="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer disabled:opacity-60"
+                    title="Decrease 1 minute"
+                  >
+                    <Minus className="w-3.5 h-3.5" />
+                  </button>
+
+                  <input
+                    type="number"
+                    min="1"
+                    max="10080"
+                    value={botSettings.deliveryTimeoutMinutes}
+                    onChange={(e) => setBotSettings((prev: any) => ({ ...prev, deliveryTimeoutMinutes: Math.max(1, Number(e.target.value) || 1) }))}
+                    placeholder="e.g. 10"
+                    className="w-24 bg-zinc-950 border border-zinc-700 rounded-xl py-1.5 px-3 text-xs text-white font-mono font-bold text-center focus:outline-none focus:border-rose-400"
                   />
-                  <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-rose-500"></div>
-                </label>
+
+                  <button
+                    type="button"
+                    disabled={savingSection === 'autoDelete'}
+                    onClick={() => {
+                      const cur = botSettings.deliveryTimeoutMinutes || 10;
+                      handleUpdateDeliveryTimeout(cur + 1);
+                    }}
+                    className="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white flex items-center justify-center transition-colors cursor-pointer disabled:opacity-60"
+                    title="Increase 1 minute"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                  </button>
+
+                  <span className="text-rose-400 font-semibold text-xs ml-1">Minutes</span>
+
+                  <button
+                    type="button"
+                    disabled={savingSection === 'autoDelete'}
+                    onClick={() => handleUpdateDeliveryTimeout(botSettings.deliveryTimeoutMinutes || 10)}
+                    className="ml-auto px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-sm disabled:opacity-50"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>{savingSection === 'autoDelete' ? 'Saving...' : 'Save Timer'}</span>
+                  </button>
+                </div>
+                <span className="text-[10px] text-zinc-400 block mt-1">
+                  Files will remain accessible for exactly {botSettings.deliveryTimeoutMinutes || 10} minute(s) before self-destructing.
+                </span>
+              </div>
+
+              <label className="flex items-center gap-2 text-[11px] text-zinc-300 cursor-pointer pt-2 border-t border-zinc-800/80">
+                <input
+                  type="checkbox"
+                  checked={Boolean(botSettings.autoDeleteNoticeEnabled)}
+                  onChange={async (e) => {
+                    const nextNotice = e.target.checked;
+                    const prevNotice = Boolean(botSettings.autoDeleteNoticeEnabled);
+                    setBotSettings((prev: any) => ({ ...prev, autoDeleteNoticeEnabled: nextNotice }));
+                    await savePartialBotSetting(
+                      'autoDelete',
+                      { autoDeleteNoticeEnabled: nextNotice },
+                      nextNotice ? 'Auto-delete notice enabled' : 'Auto-delete notice disabled',
+                      () => setBotSettings((prev: any) => ({ ...prev, autoDeleteNoticeEnabled: prevNotice }))
+                    );
+                  }}
+                  className="rounded accent-rose-500"
+                />
+                <span>Send companion self-destruct warning notice message with the file</span>
+              </label>
+            </div>
+          )}
+        </div>
+
+        {/* 3. Bot Maintenance Mode Card (Independent) */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-amber-950/25 via-zinc-900/80 to-zinc-950/90 border border-amber-500/30 space-y-3">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+                <Shield className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>Bot Maintenance Mode</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                    botSettings.maintenanceMode 
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' 
+                      : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                  }`}>
+                    {botSettings.maintenanceMode ? 'ACTIVE (OFFLINE)' : 'ONLINE'}
+                  </span>
+                </div>
               </div>
             </div>
 
-            {/* Force Sub / Mandatory Channel Join System */}
-            <div className="p-3.5 rounded-2xl bg-gradient-to-br from-indigo-950/25 via-zinc-900/80 to-zinc-950/90 border border-indigo-500/30 space-y-3">
-              <div className="flex items-center justify-between gap-2.5">
-                <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <div className="w-8 h-8 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
-                    <Radio className="w-4 h-4" />
-                  </div>
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={Boolean(botSettings.maintenanceMode)}
+                onChange={async (e) => {
+                  const nextMode = e.target.checked;
+                  const prevMode = Boolean(botSettings.maintenanceMode);
+                  setBotSettings((prev: any) => ({ ...prev, maintenanceMode: nextMode }));
+                  await savePartialBotSetting(
+                    'maintenance',
+                    { maintenanceMode: nextMode },
+                    nextMode ? 'Bot Maintenance Mode activated' : 'Bot is now ONLINE',
+                    () => setBotSettings((prev: any) => ({ ...prev, maintenanceMode: prevMode }))
+                  );
+                }}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500"></div>
+            </label>
+          </div>
+
+          {/* Maintenance Notice Customization Input with Dynamic Variable Support */}
+          <div className="pt-2 border-t border-amber-500/20 space-y-2">
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-semibold text-zinc-300">
+                Maintenance Notice
+              </label>
+              <span className="text-[10px] text-amber-400 font-mono">Dynamic Tags</span>
+            </div>
+            <textarea
+              ref={maintenanceTextareaRef}
+              rows={2}
+              value={botSettings.maintenanceNotice || ''}
+              onChange={(e) => {
+                setBotSettings((prev: any) => ({ ...prev, maintenanceNotice: e.target.value }));
+                syncTextareaSelection(e.currentTarget, maintenanceSelectionRef);
+              }}
+              onSelect={(e) => syncTextareaSelection(e.currentTarget, maintenanceSelectionRef)}
+              onKeyUp={(e) => syncTextareaSelection(e.currentTarget, maintenanceSelectionRef)}
+              onClick={(e) => syncTextareaSelection(e.currentTarget, maintenanceSelectionRef)}
+              onBlur={(e) => syncTextareaSelection(e.currentTarget, maintenanceSelectionRef)}
+              placeholder="e.g. ⚠️ Hello @username! {bot_name} is under maintenance. User ID: {user_id}"
+              className="w-full bg-zinc-900 border border-zinc-700 rounded-xl p-2.5 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-amber-500"
+            />
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {[
+                  { tag: '@username', label: '@username' },
+                  { tag: '{user_id}', label: '{user_id}' },
+                  { tag: '{bot_name}', label: '{bot_name}' },
+                  { tag: '{name}', label: '{name}' },
+                ].map(({ tag, label }) => (
+                  <button
+                    key={tag}
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      const current = botSettings.maintenanceNotice || '';
+                      insertAtCursor(
+                        maintenanceTextareaRef.current,
+                        current,
+                        tag,
+                        (nextVal) =>
+                          setBotSettings((prev: any) =>
+                            prev ? { ...prev, maintenanceNotice: nextVal } : prev
+                          ),
+                        maintenanceSelectionRef
+                      );
+                    }}
+                    className="px-2 py-0.5 rounded-md bg-zinc-800/90 hover:bg-zinc-700 border border-zinc-700/80 text-[10px] font-mono text-zinc-300 hover:text-white transition-colors cursor-pointer"
+                    title={`Click to insert ${tag}`}
+                  >
+                    +{label}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                disabled={savingSection === 'maintenance'}
+                onClick={() =>
+                  savePartialBotSetting(
+                    'maintenance',
+                    { maintenanceNotice: String(botSettings.maintenanceNotice || '') },
+                    'Maintenance notice saved!'
+                  )
+                }
+                className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-sm disabled:opacity-50 shrink-0"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>{savingSection === 'maintenance' ? 'Saving...' : 'Save Notice'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* 4. Anti-Forward Protection Card (Independent) */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-violet-950/25 via-zinc-900/80 to-zinc-950/90 border border-violet-500/30 space-y-3">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <div className="w-8 h-8 rounded-xl bg-violet-500/20 border border-violet-500/30 flex items-center justify-center text-violet-400 shrink-0">
+                <ShieldAlert className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>Anti-Forward Protection</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                    botSettings.antiForwardEnabled 
+                      ? 'bg-violet-500/20 text-violet-300 border-violet-500/40' 
+                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                  }`}>
+                    {botSettings.antiForwardEnabled ? 'ACTIVE (BLOCKING)' : 'DISABLED'}
+                  </span>
+                </div>
+                <p className="text-[10px] text-zinc-400 mt-0.5">
+                  Detect and instantly delete any forwarded messages from other chats, channels, or users in connected groups
+                </p>
+              </div>
+            </div>
+
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={Boolean(botSettings.antiForwardEnabled)}
+                onChange={async (e) => {
+                  const nextEnabled = e.target.checked;
+                  const prevEnabled = Boolean(botSettings.antiForwardEnabled);
+                  setBotSettings((prev: any) => ({ ...prev, antiForwardEnabled: nextEnabled }));
+                  await savePartialBotSetting(
+                    'antiForward',
+                    { antiForwardEnabled: nextEnabled },
+                    nextEnabled ? 'Anti-Forward Protection enabled' : 'Anti-Forward Protection disabled',
+                    () => setBotSettings((prev: any) => ({ ...prev, antiForwardEnabled: prevEnabled }))
+                  );
+                }}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-violet-500"></div>
+            </label>
+          </div>
+        </div>
+
+        {/* 5. Link Delete (On/Off) Card (Independent) */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-rose-950/25 via-zinc-900/80 to-zinc-950/90 border border-rose-500/30 space-y-3">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+                <Link2 className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>Link Delete (On/Off)</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                    botSettings.linkDeleteEnabled 
+                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' 
+                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                  }`}>
+                    {botSettings.linkDeleteEnabled ? 'ON (DELETING LINKS)' : 'OFF'}
+                  </span>
+                </div>
+                <p className="text-[10px] text-zinc-400 mt-0.5">
+                  Automatically detect and delete unauthorized links from non-admin members in groups/chats. Turn OFF to permit links.
+                </p>
+              </div>
+            </div>
+
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={Boolean(botSettings.linkDeleteEnabled)}
+                onChange={async (e) => {
+                  const nextEnabled = e.target.checked;
+                  const prevEnabled = Boolean(botSettings.linkDeleteEnabled);
+                  setBotSettings((prev: any) => ({ ...prev, linkDeleteEnabled: nextEnabled }));
+                  await savePartialBotSetting(
+                    'linkDelete',
+                    { linkDeleteEnabled: nextEnabled },
+                    nextEnabled ? 'Link Delete turned ON' : 'Link Delete turned OFF',
+                    () => setBotSettings((prev: any) => ({ ...prev, linkDeleteEnabled: prevEnabled }))
+                  );
+                }}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-rose-500"></div>
+            </label>
+          </div>
+        </div>
+
+        {/* 6. Mandatory Channel Join (Force Sub) Card (Independent) */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-indigo-950/25 via-zinc-900/80 to-zinc-950/90 border border-indigo-500/30 space-y-3">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <div className="w-8 h-8 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
+                <Radio className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>Mandatory Channel Join (Force Sub)</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                    botSettings.forceSubEnabled 
+                      ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40' 
+                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                  }`}>
+                    {botSettings.forceSubEnabled ? 'ACTIVE (FORCED)' : 'OFF'}
+                  </span>
+                </div>
+                <p className="text-[10px] text-zinc-400 mt-0.5">
+                  Require users to subscribe to specific channels/groups before accessing bot files
+                </p>
+              </div>
+            </div>
+
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={Boolean(botSettings.forceSubEnabled)}
+                onChange={async (e) => {
+                  const nextEnabled = e.target.checked;
+                  const prevEnabled = Boolean(botSettings.forceSubEnabled);
+                  setBotSettings((prev: any) => ({ ...prev, forceSubEnabled: nextEnabled }));
+                  await savePartialBotSetting(
+                    'forceSub',
+                    { forceSubEnabled: nextEnabled },
+                    nextEnabled ? 'Mandatory Channel Join enabled' : 'Mandatory Channel Join disabled',
+                    () => setBotSettings((prev: any) => ({ ...prev, forceSubEnabled: prevEnabled }))
+                  );
+                }}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-500"></div>
+            </label>
+          </div>
+
+          {botSettings.forceSubEnabled && (
+            <div className="space-y-3.5 pt-2 border-t border-indigo-500/20">
+              {/* Action Bar: Connect Command Guide & Edit Message Template */}
+              <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-zinc-950/70 border border-indigo-500/20">
+                <div className="flex items-center gap-2 text-xs text-indigo-300 font-semibold">
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                  <span>Chat Connection &amp; Templates</span>
+                  <span className="hidden sm:inline-flex text-[10px] font-mono text-zinc-400 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
+                    /connect &lt;chat_id_or_username&gt;
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleOpenForceSubTemplate}
+                    className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-indigo-300 hover:text-indigo-200 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer border border-zinc-700/80"
+                    title="Edit Force Sub Message in Message Templates"
+                  >
+                    <Edit2 className="w-3 h-3" />
+                    <span>Edit Msg Template</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Force Join Verification Mode Toggle: Auto Join vs Request Only */}
+              <div className="p-3 rounded-xl bg-zinc-950/70 border border-indigo-500/30 space-y-2.5">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
                   <div className="min-w-0">
                     <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
-                      <span>Mandatory Channel Join (Force Sub)</span>
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
-                        botSettings.forceSubEnabled 
-                          ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40' 
-                          : 'bg-zinc-800 text-zinc-400 border-zinc-700'
-                      }`}>
-                        {botSettings.forceSubEnabled ? 'ACTIVE (FORCED)' : 'OFF'}
+                      <span>Force Join Mode</span>
+                      <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                        {botSettings.forceJoinMode === 'request_only' ? 'REQUEST ONLY' : 'AUTO JOIN'}
                       </span>
                     </div>
                     <p className="text-[10px] text-zinc-400 mt-0.5">
-                      Require users to subscribe to specific channels/groups before accessing bot files
+                      {botSettings.forceJoinMode === 'request_only'
+                        ? 'Users send a join request to the channel; tapping Verify checks pending join requests by User ID / username.'
+                        : 'Traditional link-based checking; users must join the channel directly before verification succeeds.'}
                     </p>
                   </div>
                 </div>
 
-                <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                  <input
-                    type="checkbox"
-                    checked={botSettings.forceSubEnabled || false}
-                    onChange={(e) => setBotSettings((prev: any) => ({ ...prev, forceSubEnabled: e.target.checked }))}
-                    className="sr-only peer"
-                  />
-                  <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-500"></div>
-                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  {([
+                    {
+                      id: 'auto_join' as const,
+                      title: 'Auto Join',
+                      desc: 'Direct channel membership check'
+                    },
+                    {
+                      id: 'request_only' as const,
+                      title: 'Request Only',
+                      desc: 'Verify pending join requests list'
+                    }
+                  ]).map((mode) => {
+                    const isSelected = (botSettings.forceJoinMode || 'auto_join') === mode.id;
+                    return (
+                      <button
+                        key={mode.id}
+                        type="button"
+                        onClick={async () => {
+                          const prevMode = botSettings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join';
+                          if (prevMode === mode.id) return;
+                          setBotSettings((prev: any) => ({ ...prev, forceJoinMode: mode.id }));
+                          await savePartialBotSetting(
+                            'forceSub',
+                            { forceJoinMode: mode.id },
+                            mode.id === 'request_only'
+                              ? 'Force Join Mode switched to Request Only'
+                              : 'Force Join Mode switched to Auto Join',
+                            () => setBotSettings((prev: any) => ({ ...prev, forceJoinMode: prevMode }))
+                          );
+                        }}
+                        className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                          isSelected
+                            ? 'bg-indigo-500/20 border-indigo-400/60 text-white shadow-sm'
+                            : 'bg-zinc-900/70 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-1.5">
+                          <span className="text-xs font-bold">{mode.title}</span>
+                          <span
+                            className={`w-2 h-2 rounded-full ${
+                              isSelected ? 'bg-indigo-400 shadow-[0_0_8px_#818cf8]' : 'bg-zinc-700'
+                            }`}
+                          />
+                        </div>
+                        <div className="text-[10px] text-zinc-400 mt-0.5 leading-snug">
+                          {mode.desc}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
 
-              {botSettings.forceSubEnabled && (
-                <div className="space-y-3.5 pt-2 border-t border-indigo-500/20">
-                  {/* Action Bar: Connect Command Guide & Edit Message Template */}
-                  <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-zinc-950/70 border border-indigo-500/20">
-                    <div className="flex items-center gap-2 text-xs text-indigo-300 font-semibold">
-                      <Sparkles className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                      <span>Chat Connection &amp; Templates</span>
-                      <span className="hidden sm:inline-flex text-[10px] font-mono text-zinc-400 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
-                        /connect &lt;chat_id_or_username&gt;
-                      </span>
+              {/* Private Channels & Groups: Join Request & Auto-Approval Settings */}
+              <div className="p-3 rounded-xl bg-zinc-950/70 border border-emerald-500/30 space-y-2.5">
+                <div className="flex items-center justify-between gap-2.5">
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <div className="w-7 h-7 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                      <CheckCircle2 className="w-4 h-4" />
                     </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={handleOpenForceSubTemplate}
-                        className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-indigo-300 hover:text-indigo-200 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer border border-zinc-700/80"
-                        title="Edit Force Sub Message in Message Templates"
-                      >
-                        <Edit2 className="w-3 h-3" />
-                        <span>Edit Msg Template</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Force Join Verification Mode Toggle: Auto Join vs Request Only */}
-                  <div className="p-3 rounded-xl bg-zinc-950/70 border border-indigo-500/30 space-y-2.5">
-                    <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <div className="min-w-0">
-                        <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
-                          <span>Force Join Mode</span>
-                          <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                            {botSettings.forceJoinMode === 'request_only' ? 'REQUEST ONLY' : 'AUTO JOIN'}
-                          </span>
-                        </div>
-                        <p className="text-[10px] text-zinc-400 mt-0.5">
-                          {botSettings.forceJoinMode === 'request_only'
-                            ? 'Users send a join request to the channel; tapping Verify checks pending join requests by User ID / username.'
-                            : 'Traditional link-based checking; users must join the channel directly before verification succeeds.'}
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      {([
-                        {
-                          id: 'auto_join' as const,
-                          title: 'Auto Join',
-                          desc: 'Direct channel membership check'
-                        },
-                        {
-                          id: 'request_only' as const,
-                          title: 'Request Only',
-                          desc: 'Verify pending join requests list'
-                        }
-                      ]).map((mode) => {
-                        const isSelected = (botSettings.forceJoinMode || 'auto_join') === mode.id;
-                        return (
-                          <button
-                            key={mode.id}
-                            type="button"
-                            onClick={async () => {
-                              const prevMode = botSettings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join';
-                              if (prevMode === mode.id) return;
-                              setBotSettings((prev: any) => ({ ...prev, forceJoinMode: mode.id }));
-                              try {
-                                await api.updateSettings({ forceJoinMode: mode.id });
-                                onRefreshSettings();
-                                toast.success(
-                                  mode.id === 'request_only'
-                                    ? 'Force Join Mode switched to Request Only'
-                                    : 'Force Join Mode switched to Auto Join'
-                                );
-                              } catch (err: any) {
-                                setBotSettings((prev: any) => ({ ...prev, forceJoinMode: prevMode }));
-                                toast.error(err?.message || 'Failed to update Force Join Mode');
-                              }
-                            }}
-                            className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                              isSelected
-                                ? 'bg-indigo-500/20 border-indigo-400/60 text-white shadow-sm'
-                                : 'bg-zinc-900/70 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
-                            }`}
-                          >
-                            <div className="flex items-center justify-between gap-1.5">
-                              <span className="text-xs font-bold">{mode.title}</span>
-                              <span
-                                className={`w-2 h-2 rounded-full ${
-                                  isSelected ? 'bg-indigo-400 shadow-[0_0_8px_#818cf8]' : 'bg-zinc-700'
-                                }`}
-                              />
-                            </div>
-                            <div className="text-[10px] text-zinc-400 mt-0.5 leading-snug">
-                              {mode.desc}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-
-                  {/* Private Channels & Groups: Join Request & Auto-Approval Settings */}
-                  <div className="p-3 rounded-xl bg-zinc-950/70 border border-emerald-500/30 space-y-2.5">
-                    <div className="flex items-center justify-between gap-2.5">
-                      <div className="flex items-center gap-2 min-w-0 flex-1">
-                        <div className="w-7 h-7 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
-                          <CheckCircle2 className="w-4 h-4" />
-                        </div>
-                        <div className="min-w-0">
-                          <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
-                            <span>Auto-Approve Join Requests</span>
-                            <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                              {botSettings.forceJoinMode === 'request_only' ? 'PAUSED IN REQUEST ONLY' : 'SMART AUTO-APPROVAL'}
-                            </span>
-                          </div>
-                          <p className="text-[10px] text-zinc-400 mt-0.5">
-                            {botSettings.forceJoinMode === 'request_only'
-                              ? 'Requests stay pending in the channel list for instant verification while Request Only mode is active'
-                              : 'Automatically accept join requests for private channels & groups and verify user access instantly'}
-                          </p>
-                        </div>
-                      </div>
-
-                      <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                        <input
-                          type="checkbox"
-                          checked={botSettings.autoApproveJoinRequests !== false}
-                          onChange={(e) => setBotSettings((prev: any) => ({ ...prev, autoApproveJoinRequests: e.target.checked }))}
-                          className="sr-only peer"
-                        />
-                        <div className="w-8 h-4 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
-                      </label>
-                    </div>
-
-                    {/* Join Request Records Drawer / Stats */}
-                    <div className="pt-2 border-t border-zinc-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
-                      <div className="flex items-center gap-2 text-[11px] text-zinc-400">
-                        <span className="text-zinc-300 font-medium">Join Requests Recorded:</span>
-                        <span className="px-1.5 py-0.5 rounded bg-zinc-800 font-mono text-white text-[10px] border border-zinc-700">
-                          {joinRequests.length}
-                        </span>
-                        {joinRequests.filter(r => r.status === 'approved').length > 0 && (
-                          <span className="text-[10px] text-emerald-400 font-semibold">
-                            ({joinRequests.filter(r => r.status === 'approved').length} approved)
-                          </span>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => loadJoinRequests()}
-                          disabled={loadingJoinRequests}
-                          className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors cursor-pointer"
-                          title="Refresh Join Requests"
-                        >
-                          <RefreshCw className={`w-3 h-3 ${loadingJoinRequests ? 'animate-spin text-emerald-400' : ''}`} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setShowJoinRequests(!showJoinRequests)}
-                          className="text-[11px] text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1 cursor-pointer"
-                        >
-                          <span>{showJoinRequests ? 'Hide Details' : 'View Log'}</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    {showJoinRequests && (
-                      <div className="mt-2 pt-2 border-t border-zinc-800/80 space-y-2 max-h-60 overflow-y-auto">
-                        {joinRequests.length === 0 ? (
-                          <div className="p-3 rounded-lg bg-zinc-900/60 text-center text-xs text-zinc-400 italic">
-                            No join requests received yet. When users submit join requests to private channels, they will be logged and approved here.
-                          </div>
-                        ) : (
-                          joinRequests.slice(0, 15).map((req) => (
-                            <div
-                              key={req.id}
-                              className="p-2 rounded-lg bg-zinc-900/80 border border-zinc-800 text-xs flex items-center justify-between gap-2"
-                            >
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-1.5">
-                                  <span className="font-semibold text-white truncate">
-                                    {req.userName || 'User'}
-                                  </span>
-                                  {req.userUsername && (
-                                    <span className="text-[10px] text-zinc-400 truncate">
-                                      {req.userUsername}
-                                    </span>
-                                  )}
-                                  <span className="text-[9px] font-mono text-zinc-400 bg-zinc-800 px-1 rounded">
-                                    ID: {req.userId}
-                                  </span>
-                                </div>
-                                <div className="text-[10px] text-zinc-400 truncate mt-0.5">
-                                  Channel: <span className="text-zinc-300 font-medium">{req.chatTitle || req.chatId}</span>
-                                </div>
-                              </div>
-
-                              <div className="flex items-center gap-2 shrink-0">
-                                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                                  req.status === 'approved'
-                                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                    : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                                }`}>
-                                  {req.status === 'approved' ? 'APPROVED ✅' : 'PENDING ⏳'}
-                                </span>
-                                {req.status === 'pending' && (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleApproveJoinRequest(req.chatId, req.userId)}
-                                    className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-semibold transition-all cursor-pointer"
-                                  >
-                                    Approve
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          ))
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* List of Detected & Configured Channels / Groups */}
-                  <div>
-                    <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                      <div>
-                        <label className="text-[11px] font-semibold text-zinc-300 flex flex-wrap items-center gap-1.5">
-                          <span>Channels & Groups List</span>
-                          <span className="text-[10px] font-normal px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
-                            {(botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false).length} active of {(botSettings.requiredChannels || []).length}
-                          </span>
-                        </label>
-                      </div>
-                      <span className="text-[10px] text-zinc-400">Toggle switch ON/OFF to include or exclude</span>
-                    </div>
-
-                    {(!botSettings.requiredChannels || botSettings.requiredChannels.length === 0) ? (
-                      <div className="p-4 rounded-xl bg-zinc-950/60 border border-zinc-800/80 text-center space-y-2">
-                        <div className="text-xs text-zinc-400">
-                          No connected channels or groups yet.
-                        </div>
-                        <p className="text-[11px] text-zinc-500 max-w-sm mx-auto">
-                          Add the bot as an administrator to your Telegram channel or group, then send <code className="text-indigo-400 font-mono">/connect &lt;chat_id_or_username&gt;</code> to register it instantly!
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        {botSettings.requiredChannels.map((ch: any) => {
-                          const isChanActive = ch.enabled !== false;
-                          const isAuto = ch.isAutoDetected !== false;
-                          const channelType = ch.type || (String(ch.chatId).startsWith('-100') ? 'supergroup' : 'channel');
-
-                          return (
-                            <div
-                              key={ch.id}
-                              className={`p-3 rounded-xl border transition-all text-xs flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 ${
-                                isChanActive 
-                                  ? 'bg-zinc-950/80 border-indigo-500/40 shadow-sm' 
-                                  : 'bg-zinc-900/40 border-zinc-800/60 opacity-60'
-                              }`}
-                            >
-                              <div className="min-w-0 flex-1 space-y-1">
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  <span className="font-bold text-white text-xs truncate">
-                                    {ch.name}
-                                  </span>
-
-                                  {/* Type Badge */}
-                                  <span className="text-[9px] font-semibold uppercase px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
-                                    {channelType === 'supergroup' ? '👥 Supergroup' : channelType === 'group' ? '👥 Group' : '📢 Channel'}
-                                  </span>
-
-                                  {/* Auto-detected pill */}
-                                  {isAuto && (
-                                    <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20">
-                                      ⚡ Auto-Detected
-                                    </span>
-                                  )}
-
-                                  {/* Active / Excluded status pill */}
-                                  <span className={`text-[9px] font-semibold px-1.5 py-0.2 rounded ${
-                                    isChanActive
-                                      ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                                      : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
-                                  }`}>
-                                    {isChanActive ? '✓ Required for Users' : '✕ Excluded / Off'}
-                                  </span>
-                                </div>
-
-                                <div className="flex flex-wrap items-center gap-2 text-[10px] text-zinc-400 min-w-0">
-                                  <span className="font-mono text-indigo-400 bg-indigo-500/10 px-1.5 py-0.2 rounded border border-indigo-500/20 truncate max-w-full">
-                                    {ch.chatId}
-                                  </span>
-
-                                  {ch.inviteLink && (
-                                    <a
-                                      href={ch.inviteLink}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      className="text-zinc-400 hover:text-indigo-300 min-w-0 break-all inline-flex items-center gap-1 transition-colors"
-                                    >
-                                      <span className="truncate max-w-[200px] sm:max-w-none">{ch.inviteLink}</span>
-                                      <ExternalLink className="w-2.5 h-2.5 shrink-0" />
-                                    </a>
-                                  )}
-                                </div>
-                              </div>
-
-                              <div className="flex items-center gap-2 shrink-0 ml-auto">
-                                {/* Toggle Switch (ON / OFF) */}
-                                <label className="relative inline-flex items-center cursor-pointer" title={isChanActive ? "Click to exclude channel" : "Click to require channel"}>
-                                  <input
-                                    type="checkbox"
-                                    checked={isChanActive}
-                                    onChange={() => handleToggleChannel(ch.id, isChanActive)}
-                                    className="sr-only peer"
-                                  />
-                                  <div className="w-8 h-4 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
-                                </label>
-
-                                {/* Delete / Remove Button */}
-                                <button
-                                  type="button"
-                                  onClick={() => handleRemoveForceSubChannel(ch.id)}
-                                  className="p-1.5 rounded-lg bg-zinc-800 hover:bg-rose-500/20 text-zinc-400 hover:text-rose-400 transition-colors cursor-pointer"
-                                  title="Remove from list"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Manual Add Collapsible Toggle */}
-                  <div className="pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setShowManualAddChannel(!showManualAddChannel)}
-                      className="text-xs text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1.5 cursor-pointer py-1"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>{showManualAddChannel ? 'Hide Manual Add Form' : 'Add Channel / Group Manually'}</span>
-                    </button>
-
-                    {showManualAddChannel && (
-                      <div className="mt-2 p-3 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-2.5">
-                        <div className="text-[11px] font-bold text-indigo-300 flex flex-wrap items-center justify-between gap-1.5">
-                          <span className="flex items-center gap-1">
-                            <Plus className="w-3.5 h-3.5 shrink-0" />
-                            <span>Add Channel / Group by ID or Username</span>
-                          </span>
-                          <span className="text-[10px] text-zinc-400 font-normal">No invite link required</span>
-                        </div>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          <div>
-                            <label className="text-[10px] text-zinc-400 mb-1 block">Chat ID or Username *</label>
-                            <input
-                              type="text"
-                              value={newChannelChatId}
-                              onChange={(e) => setNewChannelChatId(e.target.value)}
-                              placeholder="@channel or -100xxxxxxxxxx"
-                              className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-[10px] text-zinc-400 mb-1 block">Channel Name (Optional)</label>
-                            <input
-                              type="text"
-                              value={newChannelName}
-                              onChange={(e) => setNewChannelName(e.target.value)}
-                              placeholder="e.g. VIP Channel (auto-named if blank)"
-                              className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
-                            />
-                          </div>
-                        </div>
-
-                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                          <p className="text-[10px] text-zinc-400">
-                            💡 You can also send <code className="text-indigo-300">/connect &lt;channel_id&gt;</code> directly in Telegram.
-                          </p>
-                          <button
-                            type="button"
-                            onClick={handleAddForceSubChannel}
-                            className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-sm shrink-0"
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                            <span>Add Channel</span>
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Telegram Inline Button Theme Preview (Showing only active channels) */}
-                  {Array.isArray(botSettings.requiredChannels) && botSettings.requiredChannels.length > 0 && (
-                    <div className="p-3.5 rounded-xl bg-zinc-950/70 border border-indigo-500/30 space-y-2.5">
-                      <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-400 flex flex-wrap items-center justify-between gap-1.5">
-                        <span>Telegram Inline Button Theme Preview</span>
-                        <span className="text-zinc-400 font-normal">
-                          {(botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false).length} active channel(s)
+                    <div className="min-w-0">
+                      <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                        <span>Auto-Approve Join Requests</span>
+                        <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                          {botSettings.forceJoinMode === 'request_only' ? 'PAUSED IN REQUEST ONLY' : 'SMART AUTO-APPROVAL'}
                         </span>
                       </div>
-
-                      {(() => {
-                        const activeChannels = (botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false);
-                        if (activeChannels.length === 0) {
-                          return (
-                            <div className="p-3 rounded-lg bg-zinc-900/60 border border-zinc-800 text-center text-xs text-zinc-400 italic">
-                              All channel toggles are currently turned OFF. Users will bypass verification until a channel is enabled.
-                            </div>
-                          );
-                        }
-
-                        return (
-                          <div className="space-y-1.5 pt-0.5">
-                            {activeChannels.map((c: any) => (
-                              <div
-                                key={c.id}
-                                className="w-full py-2 px-3 rounded-xl bg-blue-600 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm border border-blue-500/40 select-none"
-                              >
-                                <span className="truncate">📢 Join {c.name || 'Channel'}</span>
-                              </div>
-                            ))}
-                            <div className="w-full py-2 px-3 rounded-xl bg-emerald-600 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm border border-emerald-500/40 select-none">
-                              <span>🔄 Verify / Try Again ✅</span>
-                            </div>
-                          </div>
-                        );
-                      })()}
-
-                      <p className="text-[10px] text-zinc-400 text-center pt-0.5 italic">
-                        Styled with primary link accents and success confirmation theme matching the bot.
+                      <p className="text-[10px] text-zinc-400 mt-0.5">
+                        {botSettings.forceJoinMode === 'request_only'
+                          ? 'Requests stay pending in the channel list for instant verification while Request Only mode is active'
+                          : 'Automatically accept join requests for private channels & groups and verify user access instantly'}
                       </p>
                     </div>
-                  )}
+                  </div>
 
-                  {/* Quick Save Force Sub Button */}
-                  <div className="pt-2 border-t border-indigo-500/20 flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-[10px] text-zinc-400">
-                      {(botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false).length} active channel(s) in mandatory join list
+                  <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                    <input
+                      type="checkbox"
+                      checked={botSettings.autoApproveJoinRequests !== false}
+                      onChange={async (e) => {
+                        const nextApprove = e.target.checked;
+                        const prevApprove = botSettings.autoApproveJoinRequests !== false;
+                        setBotSettings((prev: any) => ({ ...prev, autoApproveJoinRequests: nextApprove }));
+                        await savePartialBotSetting(
+                          'forceSub',
+                          { autoApproveJoinRequests: nextApprove },
+                          nextApprove ? 'Auto-Approve Join Requests enabled' : 'Auto-Approve Join Requests disabled',
+                          () => setBotSettings((prev: any) => ({ ...prev, autoApproveJoinRequests: prevApprove }))
+                        );
+                      }}
+                      className="sr-only peer"
+                    />
+                    <div className="w-8 h-4 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
+                  </label>
+                </div>
+
+                {/* Join Request Records Drawer / Stats */}
+                <div className="pt-2 border-t border-zinc-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-2 text-[11px] text-zinc-400">
+                    <span className="text-zinc-300 font-medium">Join Requests Recorded:</span>
+                    <span className="px-1.5 py-0.5 rounded bg-zinc-800 font-mono text-white text-[10px] border border-zinc-700">
+                      {joinRequests.length}
                     </span>
+                    {joinRequests.filter(r => r.status === 'approved').length > 0 && (
+                      <span className="text-[10px] text-emerald-400 font-semibold">
+                        ({joinRequests.filter(r => r.status === 'approved').length} approved)
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
                     <button
                       type="button"
-                      disabled={settingSaving}
-                      onClick={() => handleSaveSettings()}
-                      className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-sm disabled:opacity-50 shrink-0"
+                      onClick={() => loadJoinRequests()}
+                      disabled={loadingJoinRequests}
+                      className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors cursor-pointer"
+                      title="Refresh Join Requests"
                     >
-                      <Check className="w-3.5 h-3.5" />
-                      <span>{settingSaving ? 'Saving...' : 'Save Channels'}</span>
+                      <RefreshCw className={`w-3 h-3 ${loadingJoinRequests ? 'animate-spin text-emerald-400' : ''}`} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowJoinRequests(!showJoinRequests)}
+                      className="text-[11px] text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1 cursor-pointer"
+                    >
+                      <span>{showJoinRequests ? 'Hide Details' : 'View Log'}</span>
                     </button>
                   </div>
                 </div>
-              )}
-            </div>
 
-            <button
-              type="submit"
-              disabled={settingSaving}
-              className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold cursor-pointer shadow-md shadow-blue-600/30 disabled:opacity-50 transition-colors"
-            >
-              {settingSaving ? 'Saving...' : 'Save Configuration'}
-            </button>
-          </form>
+                {showJoinRequests && (
+                  <div className="mt-2 pt-2 border-t border-zinc-800/80 space-y-2 max-h-60 overflow-y-auto">
+                    {joinRequests.length === 0 ? (
+                      <div className="p-3 rounded-lg bg-zinc-900/60 text-center text-xs text-zinc-400 italic">
+                        No join requests received yet. When users submit join requests to private channels, they will be logged and approved here.
+                      </div>
+                    ) : (
+                      joinRequests.slice(0, 15).map((req) => (
+                        <div
+                          key={req.id}
+                          className="p-2 rounded-lg bg-zinc-900/80 border border-zinc-800 text-xs flex items-center justify-between gap-2"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-semibold text-white truncate">
+                                {req.userName || 'User'}
+                              </span>
+                              {req.userUsername && (
+                                <span className="text-[10px] text-zinc-400 truncate">
+                                  {req.userUsername}
+                                </span>
+                              )}
+                              <span className="text-[9px] font-mono text-zinc-400 bg-zinc-800 px-1 rounded">
+                                ID: {req.userId}
+                              </span>
+                            </div>
+                            <div className="text-[10px] text-zinc-400 truncate mt-0.5">
+                              Channel: <span className="text-zinc-300 font-medium">{req.chatTitle || req.chatId}</span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                              req.status === 'approved'
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                            }`}>
+                              {req.status === 'approved' ? 'APPROVED ✅' : 'PENDING ⏳'}
+                            </span>
+                            {req.status === 'pending' && (
+                              <button
+                                type="button"
+                                onClick={() => handleApproveJoinRequest(req.chatId, req.userId)}
+                                className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-semibold transition-all cursor-pointer"
+                              >
+                                Approve
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* List of Detected & Configured Channels / Groups */}
+              <div>
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <div>
+                    <label className="text-[11px] font-semibold text-zinc-300 flex flex-wrap items-center gap-1.5">
+                      <span>Channels & Groups List</span>
+                      <span className="text-[10px] font-normal px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
+                        {(botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false).length} active of {(botSettings.requiredChannels || []).length}
+                      </span>
+                    </label>
+                  </div>
+                  <span className="text-[10px] text-zinc-400">Toggle switch ON/OFF to include or exclude</span>
+                </div>
+
+                {(!botSettings.requiredChannels || botSettings.requiredChannels.length === 0) ? (
+                  <div className="p-4 rounded-xl bg-zinc-950/60 border border-zinc-800/80 text-center space-y-2">
+                    <div className="text-xs text-zinc-400">
+                      No connected channels or groups yet.
+                    </div>
+                    <p className="text-[11px] text-zinc-500 max-w-sm mx-auto">
+                      Add the bot as an administrator to your Telegram channel or group, then send <code className="text-indigo-400 font-mono">/connect &lt;chat_id_or_username&gt;</code> to register it instantly!
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {botSettings.requiredChannels.map((ch: any) => {
+                      const isChanActive = ch.enabled !== false;
+                      const isAuto = ch.isAutoDetected !== false;
+                      const channelType = ch.type || (String(ch.chatId).startsWith('-100') ? 'supergroup' : 'channel');
+
+                      return (
+                        <div
+                          key={ch.id}
+                          className={`p-3 rounded-xl border transition-all text-xs flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 ${
+                            isChanActive 
+                              ? 'bg-zinc-950/80 border-indigo-500/40 shadow-sm' 
+                              : 'bg-zinc-900/40 border-zinc-800/60 opacity-60'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-bold text-white text-xs truncate">
+                                {ch.name}
+                              </span>
+
+                              {/* Type Badge */}
+                              <span className="text-[9px] font-semibold uppercase px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+                                {channelType === 'supergroup' ? '👥 Supergroup' : channelType === 'group' ? '👥 Group' : '📢 Channel'}
+                              </span>
+
+                              {/* Auto-detected pill */}
+                              {isAuto && (
+                                <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                                  ⚡ Auto-Detected
+                                </span>
+                              )}
+
+                              {/* Active / Excluded status pill */}
+                              <span className={`text-[9px] font-semibold px-1.5 py-0.2 rounded ${
+                                isChanActive
+                                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                  : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                              }`}>
+                                {isChanActive ? '✓ Required for Users' : '✕ Excluded / Off'}
+                              </span>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2 text-[10px] text-zinc-400 min-w-0">
+                              <span className="font-mono text-indigo-400 bg-indigo-500/10 px-1.5 py-0.2 rounded border border-indigo-500/20 truncate max-w-full">
+                                {ch.chatId}
+                              </span>
+
+                              {ch.inviteLink && (
+                                <a
+                                  href={ch.inviteLink}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-zinc-400 hover:text-indigo-300 min-w-0 break-all inline-flex items-center gap-1 transition-colors"
+                                >
+                                  <span className="truncate max-w-[200px] sm:max-w-none">{ch.inviteLink}</span>
+                                  <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                                </a>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 shrink-0 ml-auto">
+                            {/* Toggle Switch (ON / OFF) */}
+                            <label className="relative inline-flex items-center cursor-pointer" title={isChanActive ? "Click to exclude channel" : "Click to require channel"}>
+                              <input
+                                type="checkbox"
+                                checked={isChanActive}
+                                onChange={() => handleToggleChannel(ch.id, isChanActive)}
+                                className="sr-only peer"
+                              />
+                              <div className="w-8 h-4 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
+                            </label>
+
+                            {/* Delete / Remove Button */}
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveForceSubChannel(ch.id)}
+                              className="p-1.5 rounded-lg bg-zinc-800 hover:bg-rose-500/20 text-zinc-400 hover:text-rose-400 transition-colors cursor-pointer"
+                              title="Remove from list"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Manual Add Collapsible Toggle */}
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowManualAddChannel(!showManualAddChannel)}
+                  className="text-xs text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1.5 cursor-pointer py-1"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>{showManualAddChannel ? 'Hide Manual Add Form' : 'Add Channel / Group Manually'}</span>
+                </button>
+
+                {showManualAddChannel && (
+                  <div className="mt-2 p-3 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-2.5">
+                    <div className="text-[11px] font-bold text-indigo-300 flex flex-wrap items-center justify-between gap-1.5">
+                      <span className="flex items-center gap-1">
+                        <Plus className="w-3.5 h-3.5 shrink-0" />
+                        <span>Add Channel / Group by ID or Username</span>
+                      </span>
+                      <span className="text-[10px] text-zinc-400 font-normal">No invite link required</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div>
+                        <label className="text-[10px] text-zinc-400 mb-1 block">Chat ID or Username *</label>
+                        <input
+                          type="text"
+                          value={newChannelChatId}
+                          onChange={(e) => setNewChannelChatId(e.target.value)}
+                          placeholder="@channel or -100xxxxxxxxxx"
+                          className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-zinc-400 mb-1 block">Channel Name (Optional)</label>
+                        <input
+                          type="text"
+                          value={newChannelName}
+                          onChange={(e) => setNewChannelName(e.target.value)}
+                          placeholder="e.g. VIP Channel (auto-named if blank)"
+                          className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                      <p className="text-[10px] text-zinc-400">
+                        💡 You can also send <code className="text-indigo-300">/connect &lt;channel_id&gt;</code> directly in Telegram.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleAddForceSubChannel}
+                        className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-sm shrink-0"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Add Channel</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Telegram Inline Button Theme Preview (Showing only active channels) */}
+              {Array.isArray(botSettings.requiredChannels) && botSettings.requiredChannels.length > 0 && (
+                <div className="p-3.5 rounded-xl bg-zinc-950/70 border border-indigo-500/30 space-y-2.5">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-400 flex flex-wrap items-center justify-between gap-1.5">
+                    <span>Telegram Inline Button Theme Preview</span>
+                    <span className="text-zinc-400 font-normal">
+                      {(botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false).length} active channel(s)
+                    </span>
+                  </div>
+
+                  {(() => {
+                    const activeChannels = (botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false);
+                    if (activeChannels.length === 0) {
+                      return (
+                        <div className="p-3 rounded-lg bg-zinc-900/60 border border-zinc-800 text-center text-xs text-zinc-400 italic">
+                          All channel toggles are currently turned OFF. Users will bypass verification until a channel is enabled.
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <div className="space-y-1.5 pt-0.5">
+                        {activeChannels.map((c: any, idx: number) => (
+                          <div
+                            key={c.id}
+                            className="w-full py-2 px-3 rounded-xl bg-blue-600 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm border border-blue-500/40 select-none"
+                          >
+                            <span className="truncate">📢 Join Channel {idx + 1}</span>
+                          </div>
+                        ))}
+                        <div className="w-full py-2 px-3 rounded-xl bg-emerald-600 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm border border-emerald-500/40 select-none">
+                          <span>🔄 Verify / Try Again ✅</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  <p className="text-[10px] text-zinc-400 text-center pt-0.5 italic">
+                    Styled with primary link accents and success confirmation theme matching the bot.
+                  </p>
+                </div>
+              )}
+
+              {/* Quick Save Force Sub Button */}
+              <div className="pt-2 border-t border-indigo-500/20 flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[10px] text-zinc-400">
+                  {(botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false).length} active channel(s) in mandatory join list
+                </span>
+                <button
+                  type="button"
+                  disabled={savingSection === 'forceSub'}
+                  onClick={handleSaveForceSubChannels}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-sm disabled:opacity-50 shrink-0"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  <span>{savingSection === 'forceSub' ? 'Saving...' : 'Save Channels'}</span>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );

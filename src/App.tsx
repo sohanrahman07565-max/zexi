@@ -291,75 +291,6 @@ export default function App() {
     }
   }, []);
 
-  // Smooth horizontal touch swipe gestures across main screen area
-  const touchStartPos = React.useRef<{ x: number; y: number } | null>(null);
-
-  const isInsideHorizontalScrollOrInteractive = (
-    target: EventTarget | null,
-    boundary: HTMLElement | null
-  ): boolean => {
-    let el = target as HTMLElement | null;
-    while (el && el !== boundary) {
-      if (el.hasAttribute('data-no-tab-swipe')) {
-        return true;
-      }
-      const tag = el.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'OPTION' || tag === 'VIDEO' || tag === 'AUDIO') {
-        return true;
-      }
-      try {
-        const style = window.getComputedStyle(el);
-        const ox = style.overflowX;
-        if ((ox === 'auto' || ox === 'scroll') && el.scrollWidth > el.clientWidth + 2) {
-          return true;
-        }
-      } catch {}
-      el = el.parentElement;
-    }
-    return false;
-  };
-
-  const handleTouchStart = (e: React.TouchEvent<HTMLElement>) => {
-    if (e.touches.length !== 1) {
-      touchStartPos.current = null;
-      return;
-    }
-    if (isInsideHorizontalScrollOrInteractive(e.target, e.currentTarget)) {
-      touchStartPos.current = null;
-      return;
-    }
-    touchStartPos.current = {
-      x: e.touches[0].clientX,
-      y: e.touches[0].clientY
-    };
-  };
-
-  const handleTouchCancel = () => {
-    touchStartPos.current = null;
-  };
-
-  const handleTouchEnd = (e: React.TouchEvent) => {
-    if (!touchStartPos.current) return;
-    const deltaX = e.changedTouches[0].clientX - touchStartPos.current.x;
-    const deltaY = e.changedTouches[0].clientY - touchStartPos.current.y;
-    touchStartPos.current = null;
-
-    // Minimum 45px distance, with horizontal displacement clearly exceeding vertical
-    if (Math.abs(deltaX) > 45 && Math.abs(deltaX) > Math.abs(deltaY) * 1.3) {
-      const tabOrder = ['dashboard', 'files', 'filters', 'design', 'more'];
-      const currentIndex = tabOrder.indexOf(currentTab);
-      if (currentIndex !== -1) {
-        if (deltaX < 0 && currentIndex < tabOrder.length - 1) {
-          // Swiped left -> advance to next tab
-          handleNavigate(tabOrder[currentIndex + 1]);
-        } else if (deltaX > 0 && currentIndex > 0) {
-          // Swiped right -> return to previous tab
-          handleNavigate(tabOrder[currentIndex - 1]);
-        }
-      }
-    }
-  };
-
   // Real-time active bot session status checker
   const checkBotSession = useCallback(async () => {
     try {
@@ -561,13 +492,8 @@ export default function App() {
           onOpenBotSwitcher={() => setIsBotSwitcherOpen(true)}
         />
 
-        {/* Tab Content Views with Zero-Delay Native Speed Transitions and Touch Swipe */}
-        <main
-          onTouchStart={handleTouchStart}
-          onTouchEnd={handleTouchEnd}
-          onTouchCancel={handleTouchCancel}
-          className="flex-1 w-full min-w-0"
-        >
+        {/* Tab Content Views with Zero-Delay Native Speed Transitions */}
+        <main className="flex-1 w-full min-w-0">
           {/* Dashboard Tab */}
           <div className={currentTab === 'dashboard' ? 'block animate-tab-fade-in' : 'hidden'}>
             <DashboardTab

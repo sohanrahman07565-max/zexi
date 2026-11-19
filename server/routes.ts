@@ -992,47 +992,6 @@ apiRouter.get('/auth/avatar', authenticate, async (req: Request, res: Response) 
   return res.status(204).end();
 });
 
-// POST /api/auth/forgot-password (Validates WebCode from /webcode command)
-apiRouter.post('/auth/forgot-password', async (req: Request, res: Response) => {
-  const { telegramId, code, newPassword } = req.body;
-  if (!telegramId || !code || !newPassword) {
-    return res.status(400).json({ error: 'Telegram ID, verification code, and new password are required' });
-  }
-
-  if (String(newPassword).length < 6) {
-    return res.status(400).json({ error: 'New password must be at least 6 characters' });
-  }
-
-  const cleanId = String(telegramId).trim();
-  const cleanCode = String(code).trim();
-  console.info('[Auth] Forgot-password reset attempt for telegramId:', cleanId);
-
-  // Force-reload fresh data from persistent storage
-  await storage.loadLatest(true);
-
-  const isValidCode = await storage.verifyAndConsumeWebCode(cleanId, cleanCode);
-  if (!isValidCode) {
-    console.warn('[Auth] Forgot-password failed: invalid or expired verification code for telegramId:', cleanId);
-    return res.status(400).json({ error: 'Invalid or expired verification code. Use /webcode in Telegram to get a fresh code.' });
-  }
-
-  const admin = await storage.getAdmin(cleanId);
-  if (!admin) {
-    console.warn('[Auth] Forgot-password failed: admin account not found for telegramId:', cleanId);
-    return res.status(404).json({ error: 'Admin account not found' });
-  }
-
-  admin.passwordHash = await hashPassword(String(newPassword));
-  const saved = await storage.saveAdmin(admin);
-  if (!saved) {
-    console.error('[Auth] Failed to persist new password during reset for telegramId:', cleanId);
-    return res.status(500).json({ error: 'Storage error saving new password' });
-  }
-
-  console.info('[Auth] Password successfully reset for telegramId:', cleanId);
-  return res.json({ success: true, message: 'Password has been reset successfully. You can now log in.' });
-});
-
 // Public info for login screen styling & bot info for Telegram Login Widget
 apiRouter.get('/auth/login-design', async (req: Request, res: Response) => {
   const design = await storage.getDesign();

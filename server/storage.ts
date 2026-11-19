@@ -213,13 +213,6 @@ export interface ScheduledDeletion {
   createdAt: string;
 }
 
-export interface WebCodeRecord {
-  telegramId: string;
-  code: string;
-  expiresAt: number;
-  used: boolean;
-}
-
 export interface SessionRecord {
   token: string;
   adminId: string;
@@ -334,7 +327,6 @@ export interface AppDatabase {
   templates: Record<string, MessageTemplate>;
   admins: AdminUser[];
   sessions: SessionRecord[];
-  webcodes: WebCodeRecord[];
   trackedMessages: Record<string, TrackedMessage[]>;
   scheduledDeletions?: ScheduledDeletion[];
   chatDeliveryMessages?: Record<string, number[]>;
@@ -427,13 +419,6 @@ export const DEFAULT_TEMPLATES: Record<string, MessageTemplate> = {
     description: 'Message sent when content is saved successfully',
     content: '✅ <b>Saved Successfully!</b>\n• <b>Trigger:</b> <code>{trigger}</code>',
     variables: ['trigger', 'type', 'name']
-  },
-  WEB_CODE_MESSAGE: {
-    key: 'WEB_CODE_MESSAGE',
-    name: 'Web Verification Code Message',
-    description: 'Message sent when admin requests a WebCode for password reset',
-    content: '🔐 <b>Web Admin Verification Code</b>\n\n<code>{code}</code>\n\n⏳ <i>Valid for 10 minutes. Tap the code above to copy.</i>',
-    variables: ['code']
   },
   PASSWORD_UPDATED: {
     key: 'PASSWORD_UPDATED',
@@ -585,7 +570,6 @@ export class SharedStorageService {
       templates: { ...DEFAULT_TEMPLATES },
       admins: [],
       sessions: [],
-      webcodes: [],
       trackedMessages: {},
       scheduledDeletions: [],
       uploadedFilesIndex: {},
@@ -915,7 +899,6 @@ export class SharedStorageService {
           chatDeliveryMessages: this.db.chatDeliveryMessages,
           backupServer: this.db.backupServer,
           addSessions: this.db.addSessions,
-          webcodes: this.db.webcodes,
           uploadedFilesIndex: this.db.uploadedFilesIndex,
           updatedAt: new Date().toISOString()
         });
@@ -1098,7 +1081,6 @@ export class SharedStorageService {
     clearedBlobs: number;
     clearedMemoryFiles: number;
     prunedSessions: number;
-    prunedWebcodes: number;
   }> {
     const now = Date.now();
     const clearedLruEntries = this.lruCache.size;
@@ -1118,16 +1100,12 @@ export class SharedStorageService {
     this.db.sessions = (this.db.sessions || []).filter(s => s && s.expiresAt > now);
     const prunedSessions = Math.max(0, prevSessions - this.db.sessions.length);
 
-    const prevCodes = Array.isArray(this.db.webcodes) ? this.db.webcodes.length : 0;
-    this.db.webcodes = (this.db.webcodes || []).filter(w => w && !w.used && w.expiresAt > now);
-    const prunedWebcodes = Math.max(0, prevCodes - this.db.webcodes.length);
-
     this.rebuildCache();
-    if (prunedSessions > 0 || prunedWebcodes > 0) {
+    if (prunedSessions > 0) {
       await this.persist(false).catch(() => {});
     }
 
-    return { clearedLruEntries, clearedBlobs, clearedMemoryFiles, prunedSessions, prunedWebcodes };
+    return { clearedLruEntries, clearedBlobs, clearedMemoryFiles, prunedSessions };
   }
 
   // --- Hybrid Blob / Netlify Blobs Compatibility Layer ---
@@ -1243,13 +1221,15 @@ export class SharedStorageService {
     const rawLoadedClonedBots = Array.isArray(loadedData.clonedBots) ? loadedData.clonedBots : existingClonedBots;
     const loadedClonedBots = rawLoadedClonedBots.filter(b => b && b.id && !SharedStorageService.isClonedBotDeleted(b.id));
 
+    const cleanedLoadedTemplates = { ...(loadedData.templates || {}) };
+    delete cleanedLoadedTemplates.WEB_CODE_MESSAGE;
+
     this.db = {
       items: Array.isArray(loadedData.items) ? loadedData.items : [],
-      templates: { ...DEFAULT_TEMPLATES, ...(loadedData.templates || {}) },
+      templates: { ...DEFAULT_TEMPLATES, ...cleanedLoadedTemplates },
       admins: Array.isArray(loadedData.admins) ? loadedData.admins : [],
       sessions: Array.from(mergedSessionsMap.values()),
       clonedBots: loadedClonedBots,
-      webcodes: Array.isArray(loadedData.webcodes) ? loadedData.webcodes : [],
       trackedMessages: loadedData.trackedMessages || {},
       scheduledDeletions: Array.isArray(loadedData.scheduledDeletions) ? loadedData.scheduledDeletions : [],
       uploadedFilesIndex: loadedData.uploadedFilesIndex || {},
@@ -1542,53 +1522,6 @@ export class SharedStorageService {
     this.db.admins = this.db.admins.filter(a => String(a.id).trim() !== cleanId && String(a.telegramId).trim() !== cleanId);
     if (this.db.admins.length !== lenBefore) {
       return await this.persist();
-    }
-    return false;
-  }
-
-  // --- WebCodes (Forgot Password) ---
-  public async createWebCode(telegramId: string): Promise<string> {
-    await this.loadLatest(true);
-    const cleanId = String(telegramId).trim().replace(/^@/, '');
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
-
-    // Clean any prior unused codes for this admin
-    this.db.webcodes = this.db.webcodes.filter(w => w.telegramId !== cleanId);
-    this.db.webcodes.push({
-      telegramId: cleanId,
-      code,
-      expiresAt,
-      used: false
-    });
-
-    const success = await this.persist();
-    if (!success) {
-      throw new Error('Failed to save verification code to persistent storage');
-    }
-    return code;
-  }
-
-  public async verifyAndConsumeWebCode(telegramId: string, code: string): Promise<boolean> {
-    await this.loadLatest(true);
-    const cleanId = String(telegramId).trim().replace(/^@/, '');
-    const cleanCode = String(code).trim();
-    const now = Date.now();
-
-    const record = this.db.webcodes.find(w => 
-      (w.telegramId === cleanId || w.telegramId.replace(/^@/, '') === cleanId) && 
-      w.code === cleanCode && 
-      !w.used && 
-      w.expiresAt > now
-    );
-
-    if (record) {
-      record.used = true;
-      const success = await this.persist();
-      if (!success) {
-        console.error('[Storage] Warning: Failed to persist webcode consumption flag.');
-      }
-      return true;
     }
     return false;
   }

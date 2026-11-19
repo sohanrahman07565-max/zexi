@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 interface BottomNavProps {
   currentTab: string;
@@ -60,22 +60,170 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
   const activeIndex = tabs.findIndex((t) => t.id === currentTab);
   const safeIndex = activeIndex >= 0 ? activeIndex : 0;
 
+  const currentTabRef = useRef(currentTab);
+  currentTabRef.current = currentTab;
+
+  const navRef = useRef<HTMLElement | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragIndexFloat, setDragIndexFloat] = useState<number | null>(null);
+  const [dragHoveredTabId, setDragHoveredTabId] = useState<string | null>(null);
+
+  const gestureRef = useRef<{
+    active: boolean;
+    pointerId: number | null;
+    startX: number;
+    startY: number;
+    dragging: boolean;
+  }>({
+    active: false,
+    pointerId: null,
+    startX: 0,
+    startY: 0,
+    dragging: false,
+  });
+  const suppressNextClickRef = useRef(false);
+
+  const resolveMetrics = useCallback(
+    (clientX: number) => {
+      const navEl = navRef.current;
+      if (!navEl) return null;
+      const rect = navEl.getBoundingClientRect();
+      const computed = window.getComputedStyle(navEl);
+      const padLeft = parseFloat(computed.paddingLeft) || 6;
+      const padRight = parseFloat(computed.paddingRight) || 6;
+      const innerWidth = Math.max(1, rect.width - padLeft - padRight);
+      const slotWidth = innerWidth / tabs.length;
+      const relX = clientX - (rect.left + padLeft);
+
+      const clampedFloat = Math.max(0, Math.min(tabs.length - 1, relX / slotWidth - 0.5));
+      const hoveredIdx = Math.max(0, Math.min(tabs.length - 1, Math.round(clampedFloat)));
+      return { clampedFloat, hoveredIdx };
+    },
+    [tabs.length]
+  );
+
+  useEffect(() => {
+    const handlePointerMove = (e: PointerEvent) => {
+      const g = gestureRef.current;
+      if (!g.active || (g.pointerId !== null && e.pointerId !== g.pointerId)) return;
+
+      const deltaX = e.clientX - g.startX;
+      const deltaY = e.clientY - g.startY;
+
+      if (!g.dragging) {
+        // Require a clear drag distance before switching from tap mode to slide mode
+        if (Math.abs(deltaX) < 7 && Math.abs(deltaY) < 7) return;
+        // If user moved predominantly horizontally, enter pill drag mode
+        if (Math.abs(deltaX) >= Math.abs(deltaY)) {
+          g.dragging = true;
+          setIsDragging(true);
+          try {
+            if (navRef.current && g.pointerId !== null && !navRef.current.hasPointerCapture(g.pointerId)) {
+              navRef.current.setPointerCapture(g.pointerId);
+            }
+          } catch {}
+        } else {
+          // Vertical move outside bar — abort drag cleanly without blocking taps
+          g.active = false;
+          g.pointerId = null;
+          return;
+        }
+      }
+
+      const metrics = resolveMetrics(e.clientX);
+      if (!metrics) return;
+      setDragIndexFloat(metrics.clampedFloat);
+      const hoveredTab = tabs[metrics.hoveredIdx];
+      if (hoveredTab) {
+        setDragHoveredTabId(hoveredTab.id);
+      }
+    };
+
+    const finishPointer = (e: PointerEvent, isCancel: boolean) => {
+      const g = gestureRef.current;
+      if (!g.active || (g.pointerId !== null && e.pointerId !== g.pointerId)) return;
+
+      const wasDragging = g.dragging;
+      const capturedId = g.pointerId;
+      g.active = false;
+      g.pointerId = null;
+      g.dragging = false;
+
+      if (wasDragging) {
+        if (!isCancel) {
+          const metrics = resolveMetrics(e.clientX);
+          if (metrics) {
+            const targetTab = tabs[metrics.hoveredIdx];
+            if (targetTab && targetTab.id !== currentTabRef.current) {
+              onSelectTab(targetTab.id);
+            }
+          }
+        }
+        suppressNextClickRef.current = true;
+        setTimeout(() => {
+          suppressNextClickRef.current = false;
+        }, 120);
+      }
+
+      setIsDragging(false);
+      setDragIndexFloat(null);
+      setDragHoveredTabId(null);
+
+      try {
+        if (navRef.current && capturedId !== null && navRef.current.hasPointerCapture(capturedId)) {
+          navRef.current.releasePointerCapture(capturedId);
+        }
+      } catch {}
+    };
+
+    const handlePointerUp = (e: PointerEvent) => finishPointer(e, false);
+    const handlePointerCancel = (e: PointerEvent) => finishPointer(e, true);
+
+    window.addEventListener('pointermove', handlePointerMove, { passive: true });
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerCancel);
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerCancel);
+    };
+  }, [onSelectTab, resolveMetrics, tabs]);
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLElement>) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    gestureRef.current = {
+      active: true,
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startY: e.clientY,
+      dragging: false,
+    };
+  };
+
+  const pillTranslatePct =
+    isDragging && dragIndexFloat !== null ? dragIndexFloat * 100 : safeIndex * 100;
+
   return (
     <div className="lg-nav-shell">
       <nav
+        ref={navRef}
         aria-label="Bottom Navigation"
+        onPointerDown={handlePointerDown}
         className="lg-nav"
       >
         {/* Sliding Liquid Glass Pill */}
         <div
-          className="lg-pill"
+          className={`lg-pill ${isDragging ? 'drag' : ''}`}
           style={{
-            transform: `translateX(${safeIndex * 100}%)`,
+            transform: `translateX(${pillTranslatePct}%)`,
           }}
         />
 
         {tabs.map((tab) => {
           const isTabActive = currentTab === tab.id;
+          const isVisuallyHighlighted =
+            isDragging && dragHoveredTabId ? dragHoveredTabId === tab.id : isTabActive;
 
           return (
             <button
@@ -83,13 +231,14 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
               type="button"
               data-tab-id={tab.id}
               onClick={() => {
+                if (suppressNextClickRef.current) return;
                 if (tab.id !== currentTab) {
                   onSelectTab(tab.id);
                 }
               }}
               aria-selected={isTabActive}
               title={tab.label}
-              className={`lg-nb ${isTabActive ? 'on' : ''}`}
+              className={`lg-nb ${isVisuallyHighlighted ? 'on' : ''}`}
             >
               {tab.icon}
               <span className="truncate max-w-full">{tab.label}</span>

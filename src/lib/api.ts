@@ -496,17 +496,6 @@ export const api = {
     }
   },
 
-  async forgotPassword(telegramId: string, code: string, newPassword: string): Promise<{ success: boolean; message: string }> {
-    const res = await fetch('/api/auth/forgot-password', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ telegramId, code, newPassword })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Password reset failed');
-    return data;
-  },
-
   async setupOwner(telegramId: string, name: string, password: string): Promise<any> {
     const res = await fetch('/api/auth/setup-owner', {
       method: 'POST',

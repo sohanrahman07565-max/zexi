@@ -1578,7 +1578,6 @@ export class TelegramService {
       `• <code>/setstartmsg &lt;text&gt;</code> — Update <code>/start</code> welcome message`,
       `• <code>/setstartmedia &lt;url|file_id&gt;</code> — Attach photo/video to <code>/start</code>`,
       `• <code>/clearstartmedia</code> — Remove media from <code>/start</code> message`,
-      `• <code>/webcode</code> — Generate 10-minute Web Panel login code`,
       `• <code>/setpassword &lt;password&gt;</code> — Set/change Web Panel password`,
       `• <code>/broadcast</code> · <code>/settings</code> — Panel broadcast &amp; filter guide`,
       ...(isMainBot ? [`• <code>/clone &lt;bot_token&gt;</code> — Clone an isolated bot instance`] : []),
@@ -3044,7 +3043,6 @@ export class TelegramService {
     // 2. Identify Admin Commands in group (strictly restricted to authorized admins & private DM delivery)
     const isAddCommand = /^\/add(?:@\w+)?(?:\s+|$)/i.test(text);
     const isCancelCommand = /^\/cancel(?:@\w+)?(?:\s+|$)/i.test(text);
-    const isWebCodeCommand = /^\/webcode(?:@\w+)?(?:\s+|$)/i.test(text);
     const isSetPasswordCommand = /^\/setpassword(?:@\w+)?(?:\s+|$)/i.test(text);
     const isSetStartMsgCommand = /^\/(?:setstartmsg|startmsg)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isSetStartMediaCommand = /^\/setstartmedia(?:@\w+)?(?:\s+|$)/i.test(text);
@@ -3067,7 +3065,6 @@ export class TelegramService {
     const isAdminCommand =
       isAddCommand ||
       isCancelCommand ||
-      isWebCodeCommand ||
       isSetPasswordCommand ||
       isSetStartMsgCommand ||
       isSetStartMediaCommand ||
@@ -3265,7 +3262,7 @@ export class TelegramService {
               text:
                 `📢 <b>Broadcast &amp; Mass Messaging</b>\n\n` +
                 `For rich media formatting, targeted delivery &amp; delivery analytics, please use the <b>Broadcast</b> tool inside the Web Admin Panel.\n\n` +
-                `💡 <i>Tip: Run <code>/webcode</code> to generate a quick login code or check <code>/admins</code> for total user reach.</i>`,
+                `💡 <i>Tip: Check <code>/admins</code> for total user reach.</i>`,
               parse_mode: 'HTML'
             });
           },
@@ -3290,9 +3287,9 @@ export class TelegramService {
               text:
                 `⚙️ <b>Bot Settings &amp; Filter Configuration</b>\n\n` +
                 `• Add files, links, or triggers: <code>/add</code>\n` +
-                `• Force Subscribe channels: <code>/connect</code> / <code>/disconnect</code>\n` +
-                `• Group whitelist guard: <code>/allowchat</code> / <code>/ignorechat</code>\n` +
-                `• Full Settings, Design &amp; Fraud Filter controls: Open the Web Admin Panel (run <code>/webcode</code> for login code).`,
+                `• Manage Force Subscribe channels: <code>/connect</code> / <code>/disconnect</code>\n` +
+                `• Manage Group whitelist guard: <code>/allowchat</code> / <code>/ignorechat</code>\n` +
+                `• Full Settings, Design &amp; Fraud Filter controls: Open the Web Admin Panel.`,
               parse_mode: 'HTML'
             });
           },
@@ -3335,16 +3332,6 @@ export class TelegramService {
             await this.callTelegramApi('sendMessage', { chat_id: fromId, text: cancelMsg, parse_mode: 'HTML' });
           },
           'Operation cancelled in your private messages.'
-        );
-        return;
-      }
-
-      if (isWebCodeCommand) {
-        await executeWithPrivateDelivery(
-          async () => {
-            await this.handleWebCodeCommand(fromId, fromId);
-          },
-          'One-time web login code sent to your private messages.'
         );
         return;
       }
@@ -4833,13 +4820,7 @@ export class TelegramService {
       return;
     }
 
-    // 4. Command: /webcode
-    if (/^\/webcode(?:@\w+)?(?:\s|$)/i.test(text)) {
-      await this.handleWebCodeCommand(fromId, chatId);
-      return;
-    }
-
-    // 5. Command: /setpassword
+    // 4. Command: /setpassword
     if (/^\/setpassword(?:@\w+)?(?:\s|$)/i.test(text)) {
       await this.handleSetPasswordCommand(fromId, chatId, text);
       return;
@@ -4913,8 +4894,7 @@ export class TelegramService {
         chat_id: chatId,
         text:
           `📢 <b>Broadcast &amp; Mass Messaging</b>\n\n` +
-          `Use the <b>Broadcast</b> feature inside the Web Admin Panel to send rich announcements, media, and targeted messages to all bot users.\n\n` +
-          `💡 <i>Run <code>/webcode</code> to generate a login verification code.</i>`,
+          `Use the <b>Broadcast</b> feature inside the Web Admin Panel to send rich announcements, media, and targeted messages to all bot users.`,
         parse_mode: 'HTML'
       });
       return;
@@ -4937,7 +4917,7 @@ export class TelegramService {
           `• Add files, links, or triggers: <code>/add</code>\n` +
           `• Manage Force Sub channels: <code>/connect</code> / <code>/disconnect</code>\n` +
           `• Manage Chat Whitelist: <code>/allowchat</code> / <code>/ignorechat</code>\n` +
-          `• Full Settings, Filter Rules &amp; File Deletion: Open the Web Admin Panel (run <code>/webcode</code> for login code).\n\n` +
+          `• Full Settings, Filter Rules &amp; File Deletion: Open the Web Admin Panel.\n\n` +
           `<i>Send <code>/help</code> to view the complete admin command guide.</i>`,
         parse_mode: 'HTML'
       });
@@ -7688,40 +7668,6 @@ export class TelegramService {
   // =========================================================================
   // ADMIN COMMANDS
   // =========================================================================
-  private static async handleWebCodeCommand(fromId: string, chatId: string | number): Promise<void> {
-    const isAuthorized = await this.isAuthorizedAdmin(fromId);
-    if (!isAuthorized) {
-      console.warn('[Telegram] /webcode rejected: sender not authorized telegramId:', fromId);
-      await this.callTelegramApi('sendMessage', {
-        chat_id: chatId,
-        text: '⛔ <b>Access Denied</b>\n<i>You are not an authorized administrator.</i>',
-        parse_mode: 'HTML'
-      });
-      return;
-    }
-
-    try {
-      const code = await storage.createWebCode(fromId);
-      console.info('[Telegram] /webcode generated successfully for telegramId:', fromId);
-      const templates = await storage.getTemplates();
-      const tpl = templates.WEB_CODE_MESSAGE?.content || '🔐 <b>Web Admin Verification Code</b>\n\n<code>{code}</code>\n\n⏳ <i>Valid for 10 minutes. Tap the code above to copy.</i>';
-      const reply = tpl.replace('{code}', this.escapeHtml(code));
-
-      await this.callTelegramApi('sendMessage', {
-        chat_id: chatId,
-        text: reply,
-        parse_mode: 'HTML'
-      });
-    } catch (err: any) {
-      console.error('[Telegram] Failed to generate/save webcode for telegramId:', fromId, err?.message);
-      await this.callTelegramApi('sendMessage', {
-        chat_id: chatId,
-        text: '❌ <b>Storage Error</b>\n<i>Failed to generate verification code. Please try again.</i>',
-        parse_mode: 'HTML'
-      });
-    }
-  }
-
   private static async handleSetPasswordCommand(fromId: string, chatId: string | number, text: string): Promise<void> {
     const isAuthorized = await this.isAuthorizedAdmin(fromId);
     if (!isAuthorized) {
@@ -10959,8 +10905,7 @@ export class TelegramService {
             (res.clearedLruEntries || 0) +
             (res.clearedBlobs || 0) +
             (res.clearedMemoryFiles || 0) +
-            (res.prunedSessions || 0) +
-            (res.prunedWebcodes || 0);
+            (res.prunedSessions || 0);
         }
       }
     }
