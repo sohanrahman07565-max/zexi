@@ -261,7 +261,7 @@ async function findClonedBotAuth(cleanId: string, requestedBotId?: string): Prom
       name: target.ownerUsername ? `@${target.ownerUsername.replace(/^@+/, '')}` : `${target.name || 'Bot'} Owner`,
       username: target.id,
       role: 'owner',
-      passwordHash: await hashPassword(target.adminPassword || 'Zexi#Admin123'),
+      passwordHash: await hashPassword(target.adminPassword || 'Dark#Admin123'),
       permissions: {
         files_view: true, files_add: true, files_edit: true, files_delete: true,
         links_view: true, links_add: true, links_edit: true, links_delete: true,
@@ -1683,7 +1683,7 @@ apiRouter.post('/users/:id/grant-admin', authenticate, async (req: Request, res:
     if (password && String(password).trim().length >= 6) {
       passwordHash = await hashPassword(String(password).trim());
     } else if (!passwordHash) {
-      generatedPassword = `Zexi#${crypto.randomBytes(4).toString('hex')}`;
+      generatedPassword = `Dark#${crypto.randomBytes(4).toString('hex')}`;
       passwordHash = await hashPassword(generatedPassword);
     }
 

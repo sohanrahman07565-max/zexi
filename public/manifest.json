@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "Zexi Tools Bot",
-  "short_name": "Zexi Tools",
+  "name": "Dark Tools Bot",
+  "short_name": "Dark Tools",
   "description": "Mobile-first Telegram group file and link delivery system with exact trigger matching, deep-link private delivery, and Render Web Service administration.",
   "start_url": "/",
   "scope": "/",

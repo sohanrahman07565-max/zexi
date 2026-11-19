@@ -6853,16 +6853,146 @@ export class TelegramService {
     };
   }
 
+  private static extractFreeFireFooterLine(apiData: any): string {
+    const p = apiData?.player && typeof apiData.player === 'object' && !apiData.player.error ? apiData.player : apiData;
+    const rawObj = apiData?.raw && typeof apiData.raw === 'object' ? apiData.raw : undefined;
+    const metaObj = apiData?.meta && typeof apiData.meta === 'object' ? apiData.meta : undefined;
+
+    const explicitCandidates = [
+      apiData?.footer,
+      apiData?.footer_text,
+      apiData?.footerText,
+      apiData?.credit,
+      apiData?.credits,
+      apiData?.credit_text,
+      apiData?.creditText,
+      apiData?.powered_by,
+      apiData?.poweredBy,
+      apiData?.info_text,
+      apiData?.infoText,
+      apiData?.extra_info,
+      apiData?.extraInfo,
+      apiData?.additional_info,
+      apiData?.additionalInfo,
+      apiData?.status_info,
+      apiData?.statusInfo,
+      apiData?.api_info,
+      apiData?.apiInfo,
+      apiData?.footer_note,
+      apiData?.footerNote,
+      apiData?.attribution,
+      apiData?.developer,
+      apiData?.author,
+      apiData?.note,
+      typeof apiData?.info === 'string' ? apiData.info : undefined,
+      p?.footer,
+      p?.footer_text,
+      p?.footerText,
+      p?.credit,
+      p?.credits,
+      p?.credit_text,
+      p?.creditText,
+      p?.powered_by,
+      p?.poweredBy,
+      p?.info_text,
+      p?.infoText,
+      p?.extra_info,
+      p?.extraInfo,
+      p?.additional_info,
+      p?.additionalInfo,
+      p?.status_info,
+      p?.statusInfo,
+      p?.api_info,
+      p?.apiInfo,
+      p?.footer_note,
+      p?.footerNote,
+      p?.attribution,
+      p?.developer,
+      p?.author,
+      p?.note,
+      typeof p?.info === 'string' ? p.info : undefined,
+      metaObj?.footer,
+      metaObj?.footer_text,
+      metaObj?.credit,
+      metaObj?.credits,
+      metaObj?.powered_by,
+      typeof metaObj?.info === 'string' ? metaObj.info : undefined,
+      rawObj?.footer,
+      rawObj?.credit,
+      rawObj?.powered_by
+    ];
+
+    for (const candidate of explicitCandidates) {
+      if (typeof candidate === 'string' && this.isPresentValue(candidate)) {
+        return this.escapeHtml(candidate.trim());
+      }
+    }
+
+    const allFieldsList = Array.isArray(apiData?.all_fields)
+      ? apiData.all_fields
+      : (Array.isArray(p?.all_fields) ? p.all_fields : null);
+    if (allFieldsList) {
+      const footerFieldKeys = new Set([
+        'footer',
+        'footer_text',
+        'credit',
+        'credits',
+        'credit_text',
+        'powered_by',
+        'info_text',
+        'extra_info',
+        'additional_info',
+        'status_info',
+        'api_info',
+        'footer_note',
+        'attribution',
+        'developer',
+        'author',
+        'note',
+        'info'
+      ]);
+      for (const entry of allFieldsList) {
+        const entryKey = typeof entry?.key === 'string' ? entry.key.trim().toLowerCase() : '';
+        if (footerFieldKeys.has(entryKey) && typeof entry?.value === 'string' && this.isPresentValue(entry.value)) {
+          return this.escapeHtml(entry.value.trim());
+        }
+      }
+    }
+
+    const sourceVal = [apiData?.source, p?.source, rawObj?.source].find(
+      (v) => typeof v === 'string' && this.isPresentValue(v)
+    ) as string | undefined;
+    const fetchedAtVal = [apiData?.fetched_at, p?.fetched_at, rawObj?.fetched_at, apiData?.last_updated, p?.last_updated].find(
+      (v) => typeof v === 'string' && this.isPresentValue(v)
+    ) as string | undefined;
+
+    if (sourceVal || fetchedAtVal) {
+      const parts: string[] = [];
+      if (sourceVal) {
+        const isCached = apiData?.cached === true || p?.cached === true;
+        parts.push(`📡 Source: ${this.escapeHtml(sourceVal.trim())}${isCached ? ' (Cached)' : ''}`);
+      }
+      if (fetchedAtVal) {
+        parts.push(`🕒 ${this.escapeHtml(fetchedAtVal.trim())}`);
+      }
+      return parts.join(' • ');
+    }
+
+    return '✨ Powered by Dark Team';
+  }
+
   public static formatGuildInfoMessage(
     guild: ReturnType<typeof TelegramService.extractGuildInfo>,
-    playerUid: string
+    playerUid: string,
+    apiData?: any
   ): string {
+    const footerLine = this.extractFreeFireFooterLine(apiData);
     return [
       guild.summaryHtml,
       '━━━━━━━━━━━━━━━━━━━━',
       `🆔 <b>Player UID:</b> <code>${this.escapeHtml(playerUid)}</code>`,
       '⚡ <b>FREE FIRE PROFILE SYSTEM</b>',
-      '✨ Powered by Zexi Team'
+      footerLine
     ].join('\n');
   }
 
@@ -6925,6 +7055,7 @@ export class TelegramService {
 
     const rawSig = this.isPresentValue(p?.signature || apiData?.signature) ? String(p?.signature || apiData?.signature) : '';
     const cleanBio = rawSig ? this.cleanFfSignature(rawSig).slice(0, 300) : 'No bio set';
+    const footerLine = this.extractFreeFireFooterLine(apiData);
 
     return [
       headerTitle,
@@ -6955,7 +7086,7 @@ export class TelegramService {
       `<blockquote>${this.escapeHtml(cleanBio)}</blockquote>`,
       '━━━━━━━━━━━━━━━━━━━━',
       '⚡ <b>FREE FIRE PROFILE SYSTEM</b>',
-      '✨ Powered by Zexi Team'
+      footerLine
     ].join('\n');
   }
 
@@ -9083,7 +9214,7 @@ export class TelegramService {
           await this.callTelegramApi('editMessageText', {
             chat_id: chatId,
             message_id: cb.message.message_id,
-            text: this.formatGuildInfoMessage(guild, targetUid),
+            text: this.formatGuildInfoMessage(guild, targetUid, playerData),
             parse_mode: 'HTML',
             reply_markup: {
               inline_keyboard: [
@@ -11121,7 +11252,7 @@ export class TelegramService {
           };
 
       const existingAdmin = await storage.getAdmin(targetId);
-      const generatedPassword = existingAdmin?.passwordHash ? undefined : `Zexi#${crypto.randomBytes(4).toString('hex')}`;
+      const generatedPassword = existingAdmin?.passwordHash ? undefined : `Dark#${crypto.randomBytes(4).toString('hex')}`;
       const passwordHash = existingAdmin?.passwordHash || await hashPassword(generatedPassword!);
 
       const adminRecord: AdminUser = {
@@ -12021,7 +12152,7 @@ export class TelegramBotManager {
     // 2. Generate secure password and use clean Bot ID (e.g. 9112185641) as login identifier
     const randPart = Math.random().toString(36).substring(2, 6).toUpperCase();
     const numPart = Math.floor(100 + Math.random() * 900);
-    const adminPassword = `Zexi#${randPart}${numPart}`;
+    const adminPassword = `Dark#${randPart}${numPart}`;
     const baseDomain = this.getActiveBaseUrl(customBaseUrl);
     const panelUrl = `${baseDomain}/panel?bot_id=${botId}`;
 

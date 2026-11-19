@@ -928,7 +928,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
       <main className={`zexi-login-card ${isSuccessExiting ? 'exiting' : ''}`} id="card" ref={cardRef}>
         <div className="zexi-login-logo">
           <img
-            alt="Zexi"
+            alt="Dark"
             src={logoSrc}
             onError={() => {
               if (logoSrc !== EMBEDDED_ZEXI_LOGO) {
@@ -1109,7 +1109,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
         </form>
 
         <div className="zexi-login-foot-wrap">
-          <div className="zexi-login-foot">POWERED BY ZEXI TEAM</div>
+          <div className="zexi-login-foot">POWERED BY DARK TEAM</div>
         </div>
       </main>
     </div>
