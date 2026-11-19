@@ -6959,14 +6959,6 @@ export class TelegramService {
       }
     }
 
-    const fetchedAtVal = [apiData?.fetched_at, p?.fetched_at, rawObj?.fetched_at, apiData?.last_updated, p?.last_updated].find(
-      (v) => typeof v === 'string' && this.isPresentValue(v)
-    ) as string | undefined;
-
-    if (fetchedAtVal) {
-      return `🕒 ${this.escapeHtml(fetchedAtVal.trim())}`;
-    }
-
     return '✨ Powered by Dark Team';
   }
 
