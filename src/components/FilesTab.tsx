@@ -367,12 +367,14 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
       let finalSetupVideoFileName = setupVideoFileName;
       if (hasSetupVideo) {
         if (setupVideoChoice === 'upload' && setupVideoFile) {
-          setUploadStatus('Uploading setup video...');
+          setUploadStatus('Uploading setup video... 0%');
           const vFd = new FormData();
           vFd.append('file', setupVideoFile);
           vFd.append('fileName', setupVideoFile.name);
           vFd.append('fileType', 'video');
-          const vRes = await api.uploadFile(vFd);
+          const vRes = await api.uploadFile(vFd, (pct) => {
+            setUploadStatus(`Uploading setup video... ${pct}%`);
+          });
           finalSetupVideoUrl = vRes.uploadedFileId || vRes.fileId;
           finalSetupVideoTelegramFileId = (vRes.fileId && vRes.fileId !== vRes.uploadedFileId) ? vRes.fileId : '';
           finalSetupVideoFileName = setupVideoFile.name;
@@ -392,11 +394,14 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
         // If a new file was uploaded to replace it
         const pendingFile = selectedFiles.find((f) => f.file);
         if (pendingFile && pendingFile.file && isAutoFile) {
+          setUploadStatus(`Uploading ${pendingFile.name}... 0%`);
           const fd = new FormData();
           fd.append('file', pendingFile.file);
           fd.append('fileName', pendingFile.name);
           fd.append('fileType', pendingFile.type);
-          const res = await api.uploadFile(fd);
+          const res = await api.uploadFile(fd, (pct) => {
+            setUploadStatus(`Uploading ${pendingFile.name}... ${pct}%`);
+          });
           uploadedFileId = res.uploadedFileId || res.fileId;
           telegramFileId = res.fileId;
           fileName = pendingFile.name;
@@ -467,12 +472,14 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
             let telegramFileId: string | undefined = entry.telegramFileId;
 
             if (entry.file) {
-              setUploadStatus(`Uploading ${entry.name} (${i + 1}/${selectedFiles.length})...`);
+              setUploadStatus(`Uploading ${entry.name} (${i + 1}/${selectedFiles.length})... 0%`);
               const fd = new FormData();
               fd.append('file', entry.file);
               fd.append('fileName', entry.name);
               fd.append('fileType', entry.type);
-              const res = await api.uploadFile(fd);
+              const res = await api.uploadFile(fd, (pct) => {
+                setUploadStatus(`Uploading ${entry.name} (${i + 1}/${selectedFiles.length})... ${pct}%`);
+              });
               uploadedFileId = res.uploadedFileId || res.fileId;
               telegramFileId = res.fileId;
             }

@@ -561,20 +561,156 @@ export const api = {
     return data;
   },
 
-  async uploadFile(payload: FormData | {
-    fileName: string;
-    fileType: 'document' | 'photo' | 'video' | 'audio';
-    fileBase64?: string;
-    caption?: string;
-  }): Promise<{ success: boolean; fileId: string; uploadedFileId?: string; fileUniqueId?: string; fileName: string; fileSize: number; warning?: string }> {
+  async uploadFile(
+    payload: FormData | {
+      fileName: string;
+      fileType: 'document' | 'photo' | 'video' | 'audio';
+      fileBase64?: string;
+      caption?: string;
+    },
+    onProgress?: (percent: number, loadedBytes: number, totalBytes: number) => void
+  ): Promise<{ success: boolean; fileId: string; uploadedFileId?: string; fileUniqueId?: string; fileName: string; fileSize: number; warning?: string }> {
+    const parseResponseSafe = async (res: Response, fallbackMsg: string): Promise<any> => {
+      const text = await res.text();
+      if (!text) return {};
+      try {
+        return JSON.parse(text);
+      } catch {
+        if (res.status === 413) {
+          return { error: 'Payload too large for gateway (HTTP 413)' };
+        }
+        const stripped = text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+        return { error: stripped ? `${fallbackMsg} (HTTP ${res.status}): ${stripped.slice(0, 140)}` : `${fallbackMsg} (HTTP ${res.status})` };
+      }
+    };
+
+    const uploadViaChunks = async (
+      fileBlob: Blob,
+      fileName: string,
+      fileType: string,
+      caption: string | undefined,
+      chunkSizeBytes: number
+    ) => {
+      const totalSize = fileBlob.size;
+      const totalChunks = Math.max(1, Math.ceil(totalSize / chunkSizeBytes));
+      const mimeType = fileBlob.type || 'application/octet-stream';
+
+      const initRes = await authFetch('/api/items/upload/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName,
+          fileSize: totalSize,
+          mimeType,
+          fileType,
+          totalChunks,
+          chunkSize: chunkSizeBytes
+        })
+      });
+      const initData = await parseResponseSafe(initRes, 'Failed to initialize upload');
+      if (!initRes.ok || !initData?.uploadId) {
+        throw new Error(initData?.error || 'Failed to initialize chunked upload');
+      }
+
+      const uploadId = String(initData.uploadId);
+
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * chunkSizeBytes;
+        const end = Math.min(totalSize, start + chunkSizeBytes);
+        const chunkSlice = fileBlob.slice(start, end);
+
+        let lastErr: Error | null = null;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            const chunkRes = await authFetch(
+              `/api/items/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&index=${i}`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/octet-stream' },
+                body: chunkSlice
+              }
+            );
+            const chunkData = await parseResponseSafe(chunkRes, `Chunk ${i + 1}/${totalChunks} failed`);
+            if (!chunkRes.ok) {
+              throw new Error(chunkData?.error || `Chunk ${i + 1}/${totalChunks} failed (HTTP ${chunkRes.status})`);
+            }
+            lastErr = null;
+            break;
+          } catch (err: any) {
+            lastErr = err instanceof Error ? err : new Error(String(err));
+            if (attempt < 3) {
+              await new Promise((r) => setTimeout(r, 400 * attempt));
+            }
+          }
+        }
+        if (lastErr) {
+          throw lastErr;
+        }
+        if (onProgress) {
+          const pct = Math.min(95, Math.round(((i + 1) / totalChunks) * 95));
+          onProgress(pct, end, totalSize);
+        }
+      }
+
+      const completeRes = await authFetch('/api/items/upload/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uploadId,
+          fileName,
+          fileType,
+          mimeType,
+          fileSize: totalSize,
+          totalChunks,
+          caption
+        })
+      });
+      const completeData = await parseResponseSafe(completeRes, 'Failed to finalize upload');
+      if (!completeRes.ok) {
+        throw new Error(completeData?.error || 'Failed to finalize upload');
+      }
+      if (onProgress) {
+        onProgress(100, totalSize, totalSize);
+      }
+      return completeData;
+    };
+
     const isFormData = payload instanceof FormData;
+    if (isFormData) {
+      const rawFile = payload.get('file');
+      const fileName = String(payload.get('fileName') || (rawFile instanceof File ? rawFile.name : 'file'));
+      const fileType = String(payload.get('fileType') || 'document');
+      const rawCaption = payload.get('caption');
+      const caption = typeof rawCaption === 'string' && rawCaption ? rawCaption : undefined;
+
+      const DIRECT_THRESHOLD = 4 * 1024 * 1024; // Use chunked upload above 4MB to avoid reverse-proxy 413/timeout
+      if (rawFile instanceof Blob && rawFile.size > DIRECT_THRESHOLD) {
+        return await uploadViaChunks(rawFile, fileName, fileType, caption, 4 * 1024 * 1024);
+      }
+
+      const res = await authFetch('/api/items/upload', {
+        method: 'POST',
+        body: payload
+      });
+      if (res.status === 413 && rawFile instanceof Blob) {
+        // Fallback to 1MB chunks if a strict proxy rejects even <= 4MB direct uploads
+        return await uploadViaChunks(rawFile, fileName, fileType, caption, 1024 * 1024);
+      }
+      const data = await parseResponseSafe(res, 'Failed to upload file');
+      if (!res.ok) throw new Error(data?.error || 'Failed to upload file');
+      if (onProgress && rawFile instanceof Blob) {
+        onProgress(100, rawFile.size, rawFile.size);
+      }
+      return data;
+    }
+
     const res = await authFetch('/api/items/upload', {
       method: 'POST',
-      headers: isFormData ? undefined : { 'Content-Type': 'application/json' },
-      body: isFormData ? payload : JSON.stringify(payload)
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to upload file');
+    const data = await parseResponseSafe(res, 'Failed to upload file');
+    if (!res.ok) throw new Error(data?.error || 'Failed to upload file');
     return data;
   },
 

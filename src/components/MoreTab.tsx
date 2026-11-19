@@ -1907,7 +1907,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               </button>
             </div>
 
-            <div className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 text-xs font-mono text-zinc-200 whitespace-pre-wrap break-words overflow-x-auto">
+            <div
+              data-no-tab-swipe="true"
+              onTouchStart={(e) => e.stopPropagation()}
+              onTouchEnd={(e) => e.stopPropagation()}
+              className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 text-xs font-mono text-zinc-200 whitespace-pre-wrap break-words overflow-x-auto"
+            >
               {startTemplate.content}
             </div>
 
@@ -1950,7 +1955,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               </div>
 
               {/* Template Content Box */}
-              <div className="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 text-xs font-mono text-zinc-200 whitespace-pre-wrap break-words overflow-x-auto">
+              <div
+                data-no-tab-swipe="true"
+                onTouchStart={(e) => e.stopPropagation()}
+                onTouchEnd={(e) => e.stopPropagation()}
+                className="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 text-xs font-mono text-zinc-200 whitespace-pre-wrap break-words overflow-x-auto"
+              >
                 {tpl.content}
               </div>
 

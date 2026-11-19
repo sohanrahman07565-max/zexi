@@ -497,28 +497,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
           object-fit: cover;
           position: relative;
           z-index: 1;
-          box-shadow: 0 8px 30px rgba(168, 85, 247, 0.5);
-        }
-
-        .zexi-login-logo::before,
-        .zexi-login-logo::after {
-          content: "";
-          position: absolute;
-          inset: -4px;
-          border-radius: 26px;
-          border: 2px solid var(--zexi-violet);
-          opacity: 0;
-          animation: zexiLoginRing 3s ease-out infinite;
-        }
-
-        .zexi-login-logo::after {
-          animation-delay: 1.5s;
-          border-color: var(--zexi-pink);
-        }
-
-        @keyframes zexiLoginRing {
-          0% { transform: scale(0.95); opacity: 0.7; }
-          100% { transform: scale(1.55); opacity: 0; }
         }
 
         @keyframes zexiLoginFloat {

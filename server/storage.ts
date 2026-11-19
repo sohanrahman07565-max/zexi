@@ -2924,6 +2924,177 @@ export class SharedStorageService {
     return dirs;
   }
 
+  private static readonly MAX_RAM_CACHE_BYTES = 25 * 1024 * 1024;
+
+  public getPrimaryUploadDir(): string {
+    for (const dir of this.getUploadDirs()) {
+      try {
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+        return dir;
+      } catch {}
+    }
+    const fallback = '/tmp/tg_uploads';
+    try {
+      if (!fs.existsSync(fallback)) fs.mkdirSync(fallback, { recursive: true });
+    } catch {}
+    return fallback;
+  }
+
+  public getUploadedFilePath(fileId: string): string | null {
+    if (!fileId) return null;
+    const cleanId = String(fileId).trim();
+    for (const dir of this.getUploadDirs()) {
+      try {
+        const filePath = path.join(dir, cleanId);
+        if (fs.existsSync(filePath)) {
+          return filePath;
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  private async syncUploadedBufferToRtdb(
+    cleanId: string,
+    buffer: Buffer,
+    meta: { fileName: string; fileType: 'document' | 'photo' | 'video' | 'audio'; mimeType: string; size: number; createdAt: string }
+  ): Promise<void> {
+    if (meta.size <= 0 || meta.size > 24 * 1024 * 1024) return;
+    if (meta.size <= 3 * 1024 * 1024) {
+      try {
+        const token = await this.getFirebaseAuthToken();
+        const url = this.getRtdbUrl(`/uploaded_files/${cleanId}`, token);
+        const body = JSON.stringify({
+          id: cleanId,
+          fileName: meta.fileName,
+          fileType: meta.fileType,
+          mimeType: meta.mimeType,
+          size: meta.size,
+          base64: buffer.toString('base64'),
+          createdAt: meta.createdAt
+        });
+        const cloudRes = await fetch(url, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body
+        });
+        if (!cloudRes.ok && token) {
+          await fetch(this.getRtdbUrl(`/uploaded_files/${cleanId}`), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body
+          });
+        }
+      } catch {}
+      return;
+    }
+
+    try {
+      const token = await this.getFirebaseAuthToken();
+      const fullB64 = buffer.toString('base64');
+      const CHUNK_LEN = 1800000;
+      const totalChunks = Math.ceil(fullB64.length / CHUNK_LEN);
+      let allChunksOk = true;
+      for (let idx = 0; idx < totalChunks; idx++) {
+        const part = fullB64.slice(idx * CHUNK_LEN, (idx + 1) * CHUNK_LEN);
+        const cUrl = this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/c_${idx}`, token);
+        let cRes = await fetch(cUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(part)
+        });
+        if (!cRes.ok && token) {
+          cRes = await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/c_${idx}`), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(part)
+          });
+        }
+        if (!cRes.ok) {
+          allChunksOk = false;
+          break;
+        }
+      }
+      if (allChunksOk) {
+        const metaUrl = this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/meta`, token);
+        const metaBody = JSON.stringify({
+          id: cleanId,
+          fileName: meta.fileName,
+          fileType: meta.fileType,
+          mimeType: meta.mimeType,
+          size: meta.size,
+          totalChunks,
+          createdAt: meta.createdAt
+        });
+        const mRes = await fetch(metaUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: metaBody
+        });
+        if (!mRes.ok && token) {
+          await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/meta`), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: metaBody
+          });
+        }
+      }
+    } catch {}
+  }
+
+  public async registerUploadedFileFromDisk(fileId: string, data: {
+    fileName: string;
+    fileType?: 'document' | 'photo' | 'video' | 'audio';
+    mimeType?: string;
+    size: number;
+    bufferForSmallSync?: Buffer;
+  }): Promise<void> {
+    const cleanId = String(fileId).trim();
+    const fType = data.fileType || 'document';
+    const mime = data.mimeType || 'application/octet-stream';
+    const createdAt = new Date().toISOString();
+    const size = data.size;
+
+    const meta = {
+      id: cleanId,
+      fileName: data.fileName,
+      fileType: fType,
+      mimeType: mime,
+      size,
+      createdAt
+    };
+
+    for (const dir of this.getUploadDirs()) {
+      try {
+        if (!fs.existsSync(dir)) {
+          await fs.promises.mkdir(dir, { recursive: true });
+        }
+        if (fs.existsSync(path.join(dir, cleanId))) {
+          await fs.promises.writeFile(path.join(dir, `${cleanId}.meta.json`), JSON.stringify(meta));
+        }
+      } catch {}
+    }
+
+    if (data.bufferForSmallSync && size <= 24 * 1024 * 1024) {
+      if (size <= SharedStorageService.MAX_RAM_CACHE_BYTES) {
+        SharedStorageService.uploadedFilesMemory.set(cleanId, {
+          ...meta,
+          buffer: data.bufferForSmallSync
+        });
+      }
+      await this.syncUploadedBufferToRtdb(cleanId, data.bufferForSmallSync, meta);
+    }
+
+    await this.loadLatest(true);
+    if (!this.db.uploadedFilesIndex) {
+      this.db.uploadedFilesIndex = {};
+    }
+    this.db.uploadedFilesIndex[cleanId] = meta;
+    await this.persist(true);
+  }
+
   public async saveUploadedFile(fileId: string, data: {
     buffer: Buffer;
     fileName: string;
@@ -2946,117 +3117,13 @@ export class SharedStorageService {
       createdAt
     };
 
-    // 1. Cache in static memory across instances
-    SharedStorageService.uploadedFilesMemory.set(cleanId, record);
+    // 1. Cache files <= 25MB in static memory (large files stay streamed on disk to avoid OOM crashes)
+    if (size <= SharedStorageService.MAX_RAM_CACHE_BYTES) {
+      SharedStorageService.uploadedFilesMemory.set(cleanId, record);
+    }
 
     // 2. Persist to disk (.data/uploads and /tmp/tg_uploads)
-    for (const dir of this.getUploadDirs()) {
-      try {
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true });
-        }
-        fs.writeFileSync(path.join(dir, cleanId), data.buffer);
-        const meta = {
-          id: cleanId,
-          fileName: data.fileName,
-          fileType: fType,
-          mimeType: mime,
-          size,
-          createdAt
-        };
-        fs.writeFileSync(path.join(dir, `${cleanId}.meta.json`), JSON.stringify(meta));
-      } catch (err) {
-        console.warn(`[Storage] Could not write upload to disk ${dir}:`, err);
-      }
-    }
-
-    // 3. Persist small/medium files (<= 3MB) directly in Firebase RTDB and larger videos (<= 24MB) via RTDB chunks so media survives restarts/updates
-    if (size > 0 && size <= 3 * 1024 * 1024) {
-      try {
-        const token = await this.getFirebaseAuthToken();
-        const url = this.getRtdbUrl(`/uploaded_files/${cleanId}`, token);
-        const body = JSON.stringify({
-          id: cleanId,
-          fileName: data.fileName,
-          fileType: fType,
-          mimeType: mime,
-          size,
-          base64: data.buffer.toString('base64'),
-          createdAt
-        });
-        let cloudRes = await fetch(url, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body
-        });
-        if (!cloudRes.ok && token) {
-          await fetch(this.getRtdbUrl(`/uploaded_files/${cleanId}`), {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body
-          });
-        }
-      } catch {}
-    } else if (size > 3 * 1024 * 1024 && size <= 24 * 1024 * 1024) {
-      try {
-        const token = await this.getFirebaseAuthToken();
-        const fullB64 = data.buffer.toString('base64');
-        const CHUNK_LEN = 1800000; // ~1.35MB binary per RTDB node
-        const totalChunks = Math.ceil(fullB64.length / CHUNK_LEN);
-        let allChunksOk = true;
-        for (let idx = 0; idx < totalChunks; idx++) {
-          const part = fullB64.slice(idx * CHUNK_LEN, (idx + 1) * CHUNK_LEN);
-          const cUrl = this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/c_${idx}`, token);
-          let cRes = await fetch(cUrl, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(part)
-          });
-          if (!cRes.ok && token) {
-            cRes = await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/c_${idx}`), {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(part)
-            });
-          }
-          if (!cRes.ok) {
-            allChunksOk = false;
-            break;
-          }
-        }
-        if (allChunksOk) {
-          const metaUrl = this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/meta`, token);
-          const metaBody = JSON.stringify({
-            id: cleanId,
-            fileName: data.fileName,
-            fileType: fType,
-            mimeType: mime,
-            size,
-            totalChunks,
-            createdAt
-          });
-          let mRes = await fetch(metaUrl, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: metaBody
-          });
-          if (!mRes.ok && token) {
-            await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/meta`), {
-              method: 'PUT',
-              headers: { 'Content-Type': 'application/json' },
-              body: metaBody
-            });
-          }
-        }
-      } catch {}
-    }
-
-    // 4. Keep index in database (metadata only inside app_state)
-    await this.loadLatest(true);
-    if (!this.db.uploadedFilesIndex) {
-      this.db.uploadedFilesIndex = {};
-    }
-    this.db.uploadedFilesIndex[cleanId] = {
+    const meta = {
       id: cleanId,
       fileName: data.fileName,
       fileType: fType,
@@ -3064,6 +3131,25 @@ export class SharedStorageService {
       size,
       createdAt
     };
+    for (const dir of this.getUploadDirs()) {
+      try {
+        await fs.promises.mkdir(dir, { recursive: true });
+        await fs.promises.writeFile(path.join(dir, cleanId), data.buffer);
+        await fs.promises.writeFile(path.join(dir, `${cleanId}.meta.json`), JSON.stringify(meta));
+      } catch (err) {
+        console.warn(`[Storage] Could not write upload to disk ${dir}:`, err);
+      }
+    }
+
+    // 3. Persist small/medium files (<= 24MB) to Firebase RTDB so media survives restarts/updates
+    await this.syncUploadedBufferToRtdb(cleanId, data.buffer, meta);
+
+    // 4. Keep index in database (metadata only inside app_state)
+    await this.loadLatest(true);
+    if (!this.db.uploadedFilesIndex) {
+      this.db.uploadedFilesIndex = {};
+    }
+    this.db.uploadedFilesIndex[cleanId] = meta;
     await this.persist(true);
     return record;
   }
@@ -3083,11 +3169,11 @@ export class SharedStorageService {
         const filePath = path.join(dir, cleanId);
         const metaPath = path.join(dir, `${cleanId}.meta.json`);
         if (fs.existsSync(filePath)) {
-          const buffer = fs.readFileSync(filePath);
+          const buffer = await fs.promises.readFile(filePath);
           let meta: any = {};
           if (fs.existsSync(metaPath)) {
             try {
-              meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+              meta = JSON.parse(await fs.promises.readFile(metaPath, 'utf8'));
             } catch {}
           }
           const rec: UploadedFileRecord = {
@@ -3099,10 +3185,12 @@ export class SharedStorageService {
             buffer,
             createdAt: meta.createdAt || new Date().toISOString()
           };
-          SharedStorageService.uploadedFilesMemory.set(cleanId, rec);
+          if (buffer.length <= SharedStorageService.MAX_RAM_CACHE_BYTES) {
+            SharedStorageService.uploadedFilesMemory.set(cleanId, rec);
+          }
           return rec;
         }
-      } catch (err) {
+      } catch {
         // Continue
       }
     }

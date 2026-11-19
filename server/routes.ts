@@ -1,5 +1,7 @@
-import { Router, Request, Response, NextFunction } from 'express';
+import express, { Router, Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import multer from 'multer';
 import dotenv from 'dotenv';
 import { storage, StorageManager, storageContext, AdminUser, ItemRecord, TriggerType, OpenMode, ClonedBotRecord, SharedStorageService } from './storage';
@@ -57,13 +59,32 @@ apiRouter.all(['/health', '/ping'], async (_req: Request, res: Response) => {
   });
 });
 
-// Multer upload middleware for direct binary/multipart file streaming (up to 200MB)
+// Multer upload middleware for direct binary/multipart file streaming (up to 500MB)
 const uploadMiddleware = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 200 * 1024 * 1024 // 200MB limit
+    fileSize: 500 * 1024 * 1024 // 500MB limit
   }
 });
+
+// Express wrapper for Multer so size/multipart errors ALWAYS return structured JSON instead of HTML
+function handleMulterSingle(fieldName: string) {
+  const middleware = uploadMiddleware.single(fieldName);
+  return (req: Request, res: Response, next: NextFunction) => {
+    middleware(req, res, (err: any) => {
+      if (!err) return next();
+      if (err instanceof multer.MulterError) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(413).json({
+            error: 'File exceeds single-request limit. Retrying or use chunked upload for large files.'
+          });
+        }
+        return res.status(400).json({ error: err.message || 'Multipart upload error' });
+      }
+      return res.status(400).json({ error: err?.message || 'File upload failed' });
+    });
+  };
+}
 
 // Middleware to authenticate session via Bearer token (priority) or HTTP-only cookie
 async function authenticate(req: Request, res: Response, next: NextFunction) {
@@ -2174,8 +2195,256 @@ apiRouter.delete('/items/:id', authenticate, async (req: Request, res: Response)
   return res.json({ success: deleted });
 });
 
+// POST /api/items/upload/init (Initialize a chunked upload session for large files)
+apiRouter.post('/items/upload/init', authenticate, async (req: Request, res: Response) => {
+  const admin = (req as any).admin as AdminUser;
+  if (admin.role !== 'owner' && !admin.permissions?.files_add && !admin.permissions?.links_add && !admin.permissions?.files_edit && !admin.permissions?.links_edit) {
+    return res.status(403).json({ error: 'Permission denied: Cannot upload files' });
+  }
+  try {
+    const fileName = String(req.body?.fileName || 'file').trim() || 'file';
+    const fileSize = Number(req.body?.fileSize || 0);
+    const totalChunks = Number(req.body?.totalChunks || 0);
+    if (!Number.isFinite(fileSize) || fileSize <= 0) {
+      return res.status(400).json({ error: 'Selected file is empty or invalid size' });
+    }
+    const MAX_CHUNKED_FILE_SIZE = 1024 * 1024 * 1024; // 1GB max
+    if (fileSize > MAX_CHUNKED_FILE_SIZE) {
+      return res.status(413).json({ error: 'File size exceeds 1 GB maximum limit.' });
+    }
+    if (!Number.isInteger(totalChunks) || totalChunks < 1 || totalChunks > 2000) {
+      return res.status(400).json({ error: 'Invalid chunk count for upload' });
+    }
+
+    const uploadId = `upload_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
+    const baseDir = storage.getPrimaryUploadDir();
+    const chunkDir = path.join(baseDir, '.chunks', uploadId);
+    await fs.promises.mkdir(chunkDir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(chunkDir, 'session.json'),
+      JSON.stringify({
+        uploadId,
+        fileName,
+        fileSize,
+        totalChunks,
+        mimeType: String(req.body?.mimeType || 'application/octet-stream'),
+        fileType: String(req.body?.fileType || 'document'),
+        createdAt: new Date().toISOString()
+      })
+    );
+
+    return res.json({ success: true, uploadId });
+  } catch (err: any) {
+    console.error('[UploadInit] Failed:', err);
+    return res.status(500).json({ error: err?.message || 'Failed to initialize chunked upload' });
+  }
+});
+
+// POST /api/items/upload/chunk (Receive a single raw binary chunk)
+apiRouter.post(
+  '/items/upload/chunk',
+  authenticate,
+  express.raw({ type: '*/*', limit: '25mb' }),
+  async (req: Request, res: Response) => {
+    const admin = (req as any).admin as AdminUser;
+    if (admin.role !== 'owner' && !admin.permissions?.files_add && !admin.permissions?.links_add && !admin.permissions?.files_edit && !admin.permissions?.links_edit) {
+      return res.status(403).json({ error: 'Permission denied: Cannot upload files' });
+    }
+    try {
+      const uploadId = String(req.query.uploadId || '').trim();
+      const index = Number(req.query.index);
+      if (!/^upload_[a-z0-9_]+$/i.test(uploadId)) {
+        return res.status(400).json({ error: 'Invalid uploadId' });
+      }
+      if (!Number.isInteger(index) || index < 0 || index >= 2000) {
+        return res.status(400).json({ error: 'Invalid chunk index' });
+      }
+      const chunkBuf = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || '');
+      if (!chunkBuf || chunkBuf.length === 0) {
+        return res.status(400).json({ error: 'Empty chunk payload' });
+      }
+
+      const baseDir = storage.getPrimaryUploadDir();
+      const chunkDir = path.join(baseDir, '.chunks', uploadId);
+      if (!fs.existsSync(chunkDir)) {
+        return res.status(404).json({ error: 'Upload session expired or not found. Please retry upload.' });
+      }
+
+      await fs.promises.writeFile(path.join(chunkDir, `chunk_${index}.part`), chunkBuf);
+      return res.json({ success: true, index, receivedBytes: chunkBuf.length });
+    } catch (err: any) {
+      console.error('[UploadChunk] Failed:', err);
+      return res.status(500).json({ error: err?.message || 'Failed to write upload chunk' });
+    }
+  }
+);
+
+// POST /api/items/upload/complete (Assemble chunks on disk without giant memory spikes & register item upload)
+apiRouter.post('/items/upload/complete', authenticate, async (req: Request, res: Response) => {
+  const admin = (req as any).admin as AdminUser;
+  if (admin.role !== 'owner' && !admin.permissions?.files_add && !admin.permissions?.links_add && !admin.permissions?.files_edit && !admin.permissions?.links_edit) {
+    return res.status(403).json({ error: 'Permission denied: Cannot upload files' });
+  }
+  try {
+    const uploadId = String(req.body?.uploadId || '').trim();
+    const totalChunks = Number(req.body?.totalChunks || 0);
+    if (!/^upload_[a-z0-9_]+$/i.test(uploadId)) {
+      return res.status(400).json({ error: 'Invalid uploadId' });
+    }
+
+    const baseDir = storage.getPrimaryUploadDir();
+    const chunkDir = path.join(baseDir, '.chunks', uploadId);
+    if (!fs.existsSync(chunkDir)) {
+      return res.status(404).json({ error: 'Upload session not found' });
+    }
+
+    let sessionMeta: any = {};
+    try {
+      sessionMeta = JSON.parse(await fs.promises.readFile(path.join(chunkDir, 'session.json'), 'utf8'));
+    } catch {}
+
+    const expectedChunks = Number.isInteger(totalChunks) && totalChunks > 0
+      ? totalChunks
+      : Number(sessionMeta.totalChunks || 0);
+    if (!expectedChunks || expectedChunks < 1) {
+      return res.status(400).json({ error: 'Invalid chunk count' });
+    }
+
+    for (let i = 0; i < expectedChunks; i++) {
+      const partPath = path.join(chunkDir, `chunk_${i}.part`);
+      if (!fs.existsSync(partPath)) {
+        return res.status(400).json({ error: `Missing upload chunk ${i + 1} of ${expectedChunks}. Please retry.` });
+      }
+    }
+
+    const finalPath = path.join(baseDir, uploadId);
+    const writeStream = fs.createWriteStream(finalPath);
+    let assembledSize = 0;
+
+    try {
+      for (let i = 0; i < expectedChunks; i++) {
+        const partPath = path.join(chunkDir, `chunk_${i}.part`);
+        const chunkData = await fs.promises.readFile(partPath);
+        assembledSize += chunkData.length;
+        if (!writeStream.write(chunkData)) {
+          await new Promise<void>((resolve, reject) => {
+            writeStream.once('drain', resolve);
+            writeStream.once('error', reject);
+          });
+        }
+      }
+      await new Promise<void>((resolve, reject) => {
+        writeStream.end(() => resolve());
+        writeStream.once('error', reject);
+      });
+    } catch (streamErr) {
+      writeStream.destroy();
+      throw streamErr;
+    }
+
+    // Clean up chunk staging folder
+    await fs.promises.rm(chunkDir, { recursive: true, force: true }).catch(() => {});
+
+    const fileName = String(req.body?.fileName || sessionMeta.fileName || 'file').trim() || 'file';
+    const rawMime = String(req.body?.mimeType || sessionMeta.mimeType || 'application/octet-stream');
+    const declaredType = String(req.body?.fileType || sessionMeta.fileType || '');
+    const fType: 'document' | 'photo' | 'video' | 'audio' =
+      ['document', 'photo', 'video', 'audio'].includes(declaredType)
+        ? (declaredType as any)
+        : rawMime.startsWith('image/')
+        ? 'photo'
+        : rawMime.startsWith('video/')
+        ? 'video'
+        : rawMime.startsWith('audio/')
+        ? 'audio'
+        : 'document';
+    const caption: string | undefined = req.body?.caption || undefined;
+
+    const MAX_TG_BOT_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+    const smallBuffer = assembledSize <= MAX_TG_BOT_FILE_SIZE
+      ? await fs.promises.readFile(finalPath)
+      : undefined;
+
+    await storage.registerUploadedFileFromDisk(uploadId, {
+      fileName,
+      fileType: fType,
+      mimeType: rawMime,
+      size: assembledSize,
+      bufferForSmallSync: assembledSize <= 24 * 1024 * 1024 ? smallBuffer : undefined
+    });
+
+    console.info(`[ChunkUpload] Assembled "${fileName}" (${(assembledSize / (1024 * 1024)).toFixed(2)} MB) as ${uploadId}`);
+
+    if (assembledSize > MAX_TG_BOT_FILE_SIZE) {
+      return res.json({
+        success: true,
+        fileId: uploadId,
+        uploadedFileId: uploadId,
+        fileName,
+        fileSize: assembledSize,
+        fileType: fType,
+        warning: `File size is ${(assembledSize / (1024 * 1024)).toFixed(1)} MB. Telegram Bot API allows bot files up to 50MB. File is saved to storage.`
+      });
+    }
+
+    // Try Telegram pre-registration for <= 50MB files
+    let result: { ok: boolean; fileId?: string; fileUniqueId?: string; error?: string } = { ok: false, error: 'Telegram upload deferred' };
+    if (smallBuffer) {
+      try {
+        const settings = await storage.getSettings();
+        const candidateChat = admin.telegramId || (admin as any).id || settings.rootAdminId || process.env.ROOT_ADMIN_ID;
+        result = await TelegramService.uploadFileToTelegram(
+          smallBuffer,
+          fileName,
+          fType,
+          caption,
+          candidateChat,
+          rawMime
+        );
+        if (!result.ok && (settings.rootAdminId || process.env.ROOT_ADMIN_ID) && candidateChat !== (settings.rootAdminId || process.env.ROOT_ADMIN_ID)) {
+          result = await TelegramService.uploadFileToTelegram(
+            smallBuffer,
+            fileName,
+            fType,
+            caption,
+            settings.rootAdminId || process.env.ROOT_ADMIN_ID,
+            rawMime
+          );
+        }
+      } catch (tgErr: any) {
+        console.warn('[ChunkUpload] Telegram pre-registration error:', tgErr?.message);
+      }
+    }
+
+    if (result.ok && result.fileId) {
+      return res.json({
+        success: true,
+        fileId: result.fileId,
+        uploadedFileId: uploadId,
+        fileUniqueId: result.fileUniqueId,
+        fileName,
+        fileSize: assembledSize,
+        fileType: fType
+      });
+    }
+
+    return res.json({
+      success: true,
+      fileId: uploadId,
+      uploadedFileId: uploadId,
+      fileName,
+      fileSize: assembledSize,
+      fileType: fType,
+      warning: result.error ? `Saved to bot storage. The bot will deliver the file directly upon trigger.` : undefined
+    });
+  } catch (err: any) {
+    console.error('[UploadComplete] Failed:', err);
+    return res.status(500).json({ error: err?.message || 'Failed to finalize uploaded file' });
+  }
+});
+
 // POST /api/items/upload (Upload direct media from phone storage/browser via multipart FormData or base64)
-apiRouter.post('/items/upload', authenticate, uploadMiddleware.single('file'), async (req: Request, res: Response) => {
+apiRouter.post('/items/upload', authenticate, handleMulterSingle('file'), async (req: Request, res: Response) => {
   const admin = (req as any).admin as AdminUser;
   if (admin.role !== 'owner' && !admin.permissions?.files_add && !admin.permissions?.links_add && !admin.permissions?.files_edit && !admin.permissions?.links_edit) {
     return res.status(403).json({ error: 'Permission denied: Cannot upload files' });
@@ -2310,7 +2579,21 @@ apiRouter.post('/items/upload', authenticate, uploadMiddleware.single('file'), a
 // GET /api/uploads/:fileId (Stream or download stored uploaded media)
 apiRouter.get('/uploads/:fileId', async (req: Request, res: Response) => {
   try {
-    const file = await storage.getUploadedFile(req.params.fileId);
+    const cleanId = String(req.params.fileId || '').trim();
+    const diskPath = storage.getUploadedFilePath(cleanId);
+    if (diskPath) {
+      const stat = await fs.promises.stat(diskPath);
+      let meta: any = {};
+      try {
+        meta = JSON.parse(await fs.promises.readFile(`${diskPath}.meta.json`, 'utf8'));
+      } catch {}
+      res.setHeader('Content-Type', meta.mimeType || 'application/octet-stream');
+      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(meta.fileName || 'file')}"`);
+      res.setHeader('Content-Length', stat.size);
+      return fs.createReadStream(diskPath).pipe(res);
+    }
+
+    const file = await storage.getUploadedFile(cleanId);
     if (!file) {
       return res.status(404).json({ error: 'Uploaded file not found' });
     }
@@ -3295,7 +3578,7 @@ apiRouter.get('/bot/status', async (_req: Request, res: Response) => {
 // ============================================================================
 
 // POST /api/broadcast (Send broadcast message to all bot users)
-apiRouter.post('/broadcast', authenticate, uploadMiddleware.single('media'), async (req: Request, res: Response) => {
+apiRouter.post('/broadcast', authenticate, handleMulterSingle('media'), async (req: Request, res: Response) => {
   try {
     const { message, mediaType = 'text', mediaUrl, pinMessage } = req.body;
     const isPinned = pinMessage === true || pinMessage === 'true';
@@ -3389,7 +3672,7 @@ apiRouter.post('/broadcast', authenticate, uploadMiddleware.single('media'), asy
 });
 
 // POST /api/broadcast/test (Send a single test notification to current admin)
-apiRouter.post('/broadcast/test', authenticate, uploadMiddleware.single('media'), async (req: Request, res: Response) => {
+apiRouter.post('/broadcast/test', authenticate, handleMulterSingle('media'), async (req: Request, res: Response) => {
   try {
     const admin = (req as any).admin as AdminUser;
     const settings = await storage.getSettings();

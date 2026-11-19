@@ -241,7 +241,14 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
       </div>
 
       {/* Category Tabs */}
-      <div className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-xs">
+      <div
+        data-no-tab-swipe="true"
+        onTouchStart={(e) => e.stopPropagation()}
+        onTouchMove={(e) => e.stopPropagation()}
+        onTouchEnd={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+        className="flex items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar text-xs touch-pan-x"
+      >
         <button
           onClick={() => setActiveCategory('all')}
           className={`py-1.5 px-3 rounded-xl font-medium shrink-0 flex items-center gap-1.5 transition-all cursor-pointer ${
@@ -307,7 +314,14 @@ export const EmojiStore: React.FC<EmojiStoreProps> = ({ onBack }) => {
         </div>
 
         <div className="flex items-center gap-2">
-          <div className="flex-1 min-w-0 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-base text-white tracking-widest min-h-10 flex items-center overflow-x-auto">
+          <div
+            data-no-tab-swipe="true"
+            onTouchStart={(e) => e.stopPropagation()}
+            onTouchMove={(e) => e.stopPropagation()}
+            onTouchEnd={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            className="flex-1 min-w-0 bg-zinc-900 border border-zinc-800 rounded-xl px-3 py-2 text-base text-white tracking-widest min-h-10 flex items-center overflow-x-auto touch-pan-x"
+          >
             {collectedEmojis || <span className="text-zinc-500 text-xs tracking-normal">Tap emojis above to collect...</span>}
           </div>
 

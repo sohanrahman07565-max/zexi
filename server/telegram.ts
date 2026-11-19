@@ -23,6 +23,16 @@ interface CloneSession {
 }
 
 // In-memory conversation state for interactive private chat commands (like /add)
+interface AddFileEntry {
+  fileId: string;
+  fileUniqueId?: string;
+  fileType: 'document' | 'photo' | 'video' | 'audio';
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+  caption?: string;
+}
+
 interface AddSession {
   stage: 
     | 'awaiting_content'
@@ -46,14 +56,8 @@ interface AddSession {
   isTextOnly?: boolean;
   textResponse?: string;
   fileName?: string;
-  fileData?: {
-    fileId: string;
-    fileUniqueId?: string;
-    fileType: 'document' | 'photo' | 'video' | 'audio';
-    fileName?: string;
-    mimeType?: string;
-    fileSize?: number;
-  };
+  fileData?: AddFileEntry;
+  filesData?: AddFileEntry[];
   linkData?: {
     url: string;
     name?: string;
@@ -81,6 +85,26 @@ interface AddSession {
 }
 
 const activeAddSessions: Map<string, AddSession> = new Map();
+const addSessionLocks: Map<string, Promise<void>> = new Map();
+async function withAddSessionLock<T>(fromId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = addSessionLocks.get(fromId) || Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const chained = prev.catch(() => {}).then(() => current);
+  addSessionLocks.set(fromId, chained);
+  await prev.catch(() => {});
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (addSessionLocks.get(fromId) === chained) {
+      addSessionLocks.delete(fromId);
+    }
+  }
+}
+
 const activeEditSessions: Map<string, { templateKey: string }> = new Map();
 const activeSetChannelSessions: Map<string, { timestamp: number }> = new Map();
 const activeCloneSessions: Map<string, CloneSession> = new Map();
@@ -895,6 +919,9 @@ export class TelegramService {
           reply_markup: replyMarkup
         });
         if (editRes && editRes.ok) {
+          return session.lastPromptMessageId;
+        }
+        if (editRes && typeof editRes.description === 'string' && editRes.description.toLowerCase().includes('message is not modified')) {
           return session.lastPromptMessageId;
         }
       } catch (err) {
@@ -7839,6 +7866,121 @@ export class TelegramService {
     return null;
   }
 
+  private static formatFileSizeCompact(bytes?: number): string {
+    if (!bytes || bytes <= 0) return '0 B';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  }
+
+  private static getFileTypeEmoji(fileType?: string): string {
+    if (fileType === 'photo') return '🖼️';
+    if (fileType === 'video') return '🎬';
+    if (fileType === 'audio') return '🎵';
+    return '📄';
+  }
+
+  private static appendFileToSession(session: AddSession, media: AddFileEntry): boolean {
+    if (!Array.isArray(session.filesData)) {
+      session.filesData = session.fileData ? [session.fileData] : [];
+    }
+    const alreadyExists = session.filesData.some((f) =>
+      (media.fileUniqueId && f.fileUniqueId && f.fileUniqueId === media.fileUniqueId) ||
+      f.fileId === media.fileId
+    );
+    if (!alreadyExists) {
+      session.filesData.push(media);
+    }
+    session.fileData = session.filesData[0];
+    session.type = 'file';
+    session.isTextOnly = false;
+    return !alreadyExists;
+  }
+
+  private static buildMultiFileCollectorPrompt(session: AddSession): { text: string; replyMarkup: any } {
+    const files = Array.isArray(session.filesData) && session.filesData.length > 0
+      ? session.filesData
+      : (session.fileData ? [session.fileData] : []);
+
+    if (files.length === 0) {
+      return {
+        text: `📤 <b>Send File(s) — Multi-File Mode</b>\n\nPlease send one or more files (Document, Photo, Video, Audio, APK, or ZIP).\n<i>You can send multiple files one-by-one or as an album, then tap Done when finished.</i>`,
+        replyMarkup: {
+          inline_keyboard: [
+            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+          ]
+        }
+      };
+    }
+
+    const maxPreview = 12;
+    const displayStart = files.length > maxPreview ? files.length - maxPreview : 0;
+    const lines = files.slice(displayStart).map((f, idx) => {
+      const num = displayStart + idx + 1;
+      const emoji = this.getFileTypeEmoji(f.fileType);
+      const name = this.escapeHtml(f.fileName || `File ${num}`);
+      const sizeStr = f.fileSize ? ` (<code>${this.formatFileSizeCompact(f.fileSize)}</code>)` : '';
+      return `${num}. ${emoji} <code>${name}</code>${sizeStr}`;
+    });
+    const prefixNotice = displayStart > 0 ? `<i>...plus ${displayStart} earlier file${displayStart === 1 ? '' : 's'}</i>\n` : '';
+
+    return {
+      text:
+        `📦 <b>Files Collected (${files.length})</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `${prefixNotice}${lines.join('\n')}\n\n` +
+        `➕ <i>Send more files (or an album) to keep adding to this batch, or tap <b>✅ Done — Continue</b> below to configure triggers &amp; save all ${files.length} file${files.length === 1 ? '' : 's'}.</i>`,
+      replyMarkup: {
+        inline_keyboard: [
+          [{ text: `✅ Done — Continue (${files.length} ${files.length === 1 ? 'File' : 'Files'})`, callback_data: 'add_files_done', style: 'success' }],
+          [
+            { text: '🗑️ Remove Last', callback_data: 'add_files_pop', style: 'primary' },
+            { text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }
+          ]
+        ]
+      }
+    };
+  }
+
+  private static async promptTriggerTypeStep(
+    fromId: string,
+    chatId: string | number,
+    session: AddSession
+  ): Promise<void> {
+    const filesCount = session.type === 'file' && !session.isTextOnly
+      ? (session.filesData?.length || (session.fileData ? 1 : 0))
+      : 0;
+    const isLink = session.type === 'link';
+    const stepHeader = isLink ? 'Step 1/7' : 'Step 1/4';
+    const headerLine = isLink
+      ? `✅ <b>Link Received:</b> <code>${this.escapeHtml(session.linkData?.url || '')}</code>`
+      : session.isTextOnly
+      ? `✅ <b>Text Response Ready</b>`
+      : filesCount > 1
+      ? `📦 <b>Batch Ready:</b> <code>${filesCount} Files</code>`
+      : `✅ <b>File Received:</b> <code>${this.escapeHtml(session.filesData?.[0]?.fileName || session.fileData?.fileName || 'File')}</code>`;
+
+    session.stage = 'awaiting_trigger_type';
+    const promptId = await TelegramService.sendOrEditSetupPrompt(
+      chatId,
+      `${headerLine}\n\n<b>${stepHeader}: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
+      {
+        inline_keyboard: [
+          [
+            { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
+            { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
+            { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
+          ],
+          [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+        ]
+      },
+      session
+    );
+    if (promptId) session.lastPromptMessageId = promptId;
+    activeAddSessions.set(fromId, session);
+    await storage.saveAddSession(fromId, session);
+  }
+
   private static async handleAddCommand(
     fromId: string,
     chatId: string | number,
@@ -7866,31 +8008,64 @@ export class TelegramService {
       await this.deleteUserMessage(chatId, message.message_id);
     }
 
-    // Ensure any channel connection session is cleared so /add strictly processes content
-    activeSetChannelSessions.delete(fromId);
+    await withAddSessionLock(fromId, async () => {
+      // Ensure any channel connection session is cleared so /add strictly processes content
+      activeSetChannelSessions.delete(fromId);
 
-    const replyMsg = message?.reply_to_message;
-    const media = this.extractMediaFromMessage(message) || (replyMsg ? this.extractMediaFromMessage(replyMsg) : null);
-    const rawInput = (text || message?.caption || replyMsg?.text || replyMsg?.caption || '').trim();
-    const urlMatch = rawInput.match(/https?:\/\/[^\s]+/i);
+      const replyMsg = message?.reply_to_message;
+      const media = this.extractMediaFromMessage(message) || (replyMsg ? this.extractMediaFromMessage(replyMsg) : null);
+      const rawInput = (text || message?.caption || replyMsg?.text || replyMsg?.caption || '').trim();
+      const urlMatch = rawInput.match(/https?:\/\/[^\s]+/i);
 
-    if (media) {
-      const sessionData: AddSession = {
-        stage: 'awaiting_trigger_type',
-        type: 'file',
-        fileData: media,
-        caption: (message?.caption && !/^(?:\/|#)?(?:add)/i.test(message.caption) ? message.caption : replyMsg?.caption) || undefined
-      };
+      if (media) {
+        const cleanCaption = (message?.caption && !/^(?:\/|#)?(?:add)/i.test(message.caption) ? message.caption : replyMsg?.caption) || undefined;
+        const entry: AddFileEntry = { ...media, caption: cleanCaption };
+        const sessionData: AddSession = {
+          stage: 'awaiting_file_content',
+          type: 'file',
+          isTextOnly: false,
+          fileData: entry,
+          filesData: [entry],
+          caption: cleanCaption
+        };
 
+        const collector = this.buildMultiFileCollectorPrompt(sessionData);
+        const promptId = await TelegramService.sendOrEditSetupPrompt(
+          chatId,
+          collector.text,
+          collector.replyMarkup,
+          sessionData
+        );
+        if (promptId) sessionData.lastPromptMessageId = promptId;
+        activeAddSessions.set(fromId, sessionData);
+        await storage.saveAddSession(fromId, sessionData);
+        return;
+      }
+
+      if (urlMatch && !/^\/add(?:@\w+)?$/i.test(text?.trim() || '')) {
+        const sessionData: AddSession = {
+          stage: 'awaiting_trigger_type',
+          type: 'link',
+          linkData: {
+            url: urlMatch[0]
+          }
+        };
+
+        await this.promptTriggerTypeStep(fromId, chatId, sessionData);
+        return;
+      }
+
+      // Command Entry: When an admin types /add, the bot asks what they want to add
+      const sessionData: AddSession = { stage: 'awaiting_content', filesData: [] };
       const promptId = await TelegramService.sendOrEditSetupPrompt(
         chatId,
-        `✅ <b>File Received:</b> <code>${this.escapeHtml(media.fileName)}</code>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
+        `📥 <b>What would you like to add?</b>\n\nChoose an option below or send your content directly:\n• <b>File(s):</b> Send 1 or multiple Documents, Photos, Videos, Audio, APKs, ZIPs\n• <b>Link:</b> Website URL (https://...)\n• <b>Text Response:</b> Custom text / message`,
         {
           inline_keyboard: [
             [
-              { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
-              { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
-              { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
+              { text: '📁 Add File(s)', callback_data: 'add_choose_file', style: 'primary' },
+              { text: '🔗 Add Link', callback_data: 'add_choose_link', style: 'primary' },
+              { text: '💬 Add Text', callback_data: 'add_choose_text', style: 'primary' }
             ],
             [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
           ]
@@ -7900,59 +8075,7 @@ export class TelegramService {
       if (promptId) sessionData.lastPromptMessageId = promptId;
       activeAddSessions.set(fromId, sessionData);
       await storage.saveAddSession(fromId, sessionData);
-      return;
-    }
-
-    if (urlMatch && !/^\/add(?:@\w+)?$/i.test(text?.trim() || '')) {
-      const sessionData: AddSession = {
-        stage: 'awaiting_trigger_type',
-        type: 'link',
-        linkData: {
-          url: urlMatch[0]
-        }
-      };
-
-      const promptId = await TelegramService.sendOrEditSetupPrompt(
-        chatId,
-        `✅ <b>Link Received:</b> <code>${this.escapeHtml(urlMatch[0])}</code>\n\n<b>Step 1/7: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
-        {
-          inline_keyboard: [
-            [
-              { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
-              { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
-              { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
-            ],
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
-        },
-        sessionData
-      );
-      if (promptId) sessionData.lastPromptMessageId = promptId;
-      activeAddSessions.set(fromId, sessionData);
-      await storage.saveAddSession(fromId, sessionData);
-      return;
-    }
-
-    // Command Entry: When an admin types /add, the bot asks what they want to add
-    const sessionData: AddSession = { stage: 'awaiting_content' };
-    const promptId = await TelegramService.sendOrEditSetupPrompt(
-      chatId,
-      `📥 <b>What would you like to add?</b>\n\nChoose an option below or send your content directly:\n• <b>File:</b> Document, Photo, Video, Audio, APK, ZIP\n• <b>Link:</b> Website URL (https://...)\n• <b>Text Response:</b> Custom text / message`,
-      {
-        inline_keyboard: [
-          [
-            { text: '📁 Add File', callback_data: 'add_choose_file', style: 'primary' },
-            { text: '🔗 Add Link', callback_data: 'add_choose_link', style: 'primary' },
-            { text: '💬 Add Text', callback_data: 'add_choose_text', style: 'primary' }
-          ],
-          [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-        ]
-      },
-      sessionData
-    );
-    if (promptId) sessionData.lastPromptMessageId = promptId;
-    activeAddSessions.set(fromId, sessionData);
-    await storage.saveAddSession(fromId, sessionData);
+    });
   }
 
   private static async handleActiveAddSessionMessage(
@@ -7960,146 +8083,95 @@ export class TelegramService {
     fromId: string,
     chatId: string | number,
     text: string,
-    session: AddSession
+    _initialSession: AddSession
   ): Promise<void> {
     // Automatically delete user's intermediate input message so chat remains in a single dynamic bubble
     if (message?.message_id) {
       await this.deleteUserMessage(chatId, message.message_id);
     }
 
-    const rawInput = text.trim();
+    await withAddSessionLock(fromId, async () => {
+      let session = activeAddSessions.get(fromId);
+      if (!session) {
+        session = await storage.getAddSession(fromId);
+        if (session) activeAddSessions.set(fromId, session);
+      }
+      if (!session) return;
 
-    // Stage 1: Awaiting Content Choice (Detects File, Link, or Pure Text)
-    if (session.stage === 'awaiting_content') {
-      const media = this.extractMediaFromMessage(message);
-      if (media) {
-        session.type = 'file';
-        session.fileData = media;
-        session.isTextOnly = false;
-        if (message.caption) {
-          session.caption = message.caption;
+      const rawInput = text.trim();
+
+      // Stage 1: Awaiting Content Choice (Detects File, Link, or Pure Text)
+      if (session.stage === 'awaiting_content') {
+        const media = this.extractMediaFromMessage(message);
+        if (media) {
+          const fileCaption = message.caption && !/^(?:\/|#)?(?:add)/i.test(message.caption) ? message.caption : undefined;
+          const entry: AddFileEntry = { ...media, caption: fileCaption };
+          this.appendFileToSession(session, entry);
+          if (fileCaption && !session.caption) {
+            session.caption = fileCaption;
+          }
+          session.stage = 'awaiting_file_content';
+
+          const collector = this.buildMultiFileCollectorPrompt(session);
+          const promptId = await TelegramService.sendOrEditSetupPrompt(
+            chatId,
+            collector.text,
+            collector.replyMarkup,
+            session
+          );
+          if (promptId) session.lastPromptMessageId = promptId;
+          activeAddSessions.set(fromId, session);
+          await storage.saveAddSession(fromId, session);
+          return;
         }
-        session.stage = 'awaiting_trigger_type';
 
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
-          chatId,
-          `✅ <b>File Received:</b> <code>${this.escapeHtml(media.fileName)}</code>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
-          {
-            inline_keyboard: [
-              [
-                { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
-                { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
-                { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
-              ],
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
-        );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-        return;
-      }
-
-      const urlMatch = rawInput.match(/https?:\/\/[^\s]+/i);
-      if (urlMatch) {
-        session.type = 'link';
-        session.linkData = { url: urlMatch[0] };
-        session.stage = 'awaiting_trigger_type';
-
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
-          chatId,
-          `✅ <b>Link Received:</b> <code>${this.escapeHtml(urlMatch[0])}</code>\n\n<b>Step 1/7: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
-          {
-            inline_keyboard: [
-              [
-                { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
-                { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
-                { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
-              ],
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
-        );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-        return;
-      }
-
-      // If user typed normal text (no file and no URL), automatically treat it as a Text Response!
-      if (rawInput) {
-        session.type = 'file';
-        session.isTextOnly = true;
-        session.caption = rawInput;
-        session.textResponse = rawInput;
-        session.fileName = 'Text: ' + (rawInput.slice(0, 25).replace(/\n/g, ' '));
-        session.stage = 'awaiting_trigger_type';
-
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
-          chatId,
-          `✅ <b>Text Response Received:</b>\n<blockquote>${this.escapeHtml(rawInput.slice(0, 100))}${rawInput.length > 100 ? '...' : ''}</blockquote>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
-          {
-            inline_keyboard: [
-              [
-                { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
-                { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
-                { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
-              ],
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
-        );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-        return;
-      }
-
-      const promptId = await TelegramService.sendOrEditSetupPrompt(
-        chatId,
-        '📥 Please send the <b>File</b>, <b>Web Link (URL)</b>, or enter a <b>Text Message</b> to deliver (or type /cancel to abort):',
-        {
-          inline_keyboard: [
-            [
-              { text: '📁 Add File', callback_data: 'add_choose_file', style: 'primary' },
-              { text: '🔗 Add Link', callback_data: 'add_choose_link', style: 'primary' },
-              { text: '💬 Add Text', callback_data: 'add_choose_text', style: 'primary' }
-            ],
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
-        },
-        session
-      );
-      if (promptId) session.lastPromptMessageId = promptId;
-      activeAddSessions.set(fromId, session);
-      await storage.saveAddSession(fromId, session);
-      return;
-    }
-
-    // Stage 1a: Explicitly awaiting file content (PATH A)
-    if (session.stage === 'awaiting_file_content') {
-      const media = this.extractMediaFromMessage(message);
-      if (media) {
-        session.type = 'file';
-        session.fileData = media;
-        if (message.caption) {
-          session.caption = message.caption;
+        const urlMatch = rawInput.match(/https?:\/\/[^\s]+/i);
+        if (urlMatch) {
+          session.type = 'link';
+          session.linkData = { url: urlMatch[0] };
+          await this.promptTriggerTypeStep(fromId, chatId, session);
+          return;
         }
-        session.stage = 'awaiting_trigger_type';
+
+        // If user typed normal text (no file and no URL), automatically treat it as a Text Response!
+        if (rawInput) {
+          session.type = 'file';
+          session.isTextOnly = true;
+          session.caption = rawInput;
+          session.textResponse = rawInput;
+          session.fileName = 'Text: ' + (rawInput.slice(0, 25).replace(/\n/g, ' '));
+          session.stage = 'awaiting_trigger_type';
+
+          const promptId = await TelegramService.sendOrEditSetupPrompt(
+            chatId,
+            `✅ <b>Text Response Received:</b>\n<blockquote>${this.escapeHtml(rawInput.slice(0, 100))}${rawInput.length > 100 ? '...' : ''}</blockquote>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
+            {
+              inline_keyboard: [
+                [
+                  { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
+                  { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
+                  { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
+                ],
+                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+              ]
+            },
+            session
+          );
+          if (promptId) session.lastPromptMessageId = promptId;
+          activeAddSessions.set(fromId, session);
+          await storage.saveAddSession(fromId, session);
+          return;
+        }
 
         const promptId = await TelegramService.sendOrEditSetupPrompt(
           chatId,
-          `✅ <b>File Received:</b> <code>${this.escapeHtml(media.fileName)}</code>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
+          '📥 Please send one or more <b>Files</b>, a <b>Web Link (URL)</b>, or enter a <b>Text Message</b> to deliver (or type /cancel to abort):',
           {
             inline_keyboard: [
               [
-                { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
-                { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
-                { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
+                { text: '📁 Add File(s)', callback_data: 'add_choose_file', style: 'primary' },
+                { text: '🔗 Add Link', callback_data: 'add_choose_link', style: 'primary' },
+                { text: '💬 Add Text', callback_data: 'add_choose_text', style: 'primary' }
               ],
               [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
             ]
@@ -8112,21 +8184,69 @@ export class TelegramService {
         return;
       }
 
-      const promptId = await TelegramService.sendOrEditSetupPrompt(
-        chatId,
-        '❌ <b>No File Detected</b>\n<i>Please send a Document, Photo, Video, or Audio, or send <code>/cancel</code> to abort.</i>',
-        {
-          inline_keyboard: [
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
-        },
-        session
-      );
-      if (promptId) session.lastPromptMessageId = promptId;
-      activeAddSessions.set(fromId, session);
-      await storage.saveAddSession(fromId, session);
-      return;
-    }
+      // Stage 1a: Explicitly awaiting file content (PATH A - Multi-File Batch & Sequence Support)
+      if (session.stage === 'awaiting_file_content') {
+        const media = this.extractMediaFromMessage(message);
+        if (media) {
+          const fileCaption = message.caption && !/^(?:\/|#)?(?:add)/i.test(message.caption) ? message.caption : undefined;
+          const entry: AddFileEntry = { ...media, caption: fileCaption };
+          this.appendFileToSession(session, entry);
+          if (fileCaption && !session.caption) {
+            session.caption = fileCaption;
+          }
+
+          const collector = this.buildMultiFileCollectorPrompt(session);
+          const promptId = await TelegramService.sendOrEditSetupPrompt(
+            chatId,
+            collector.text,
+            collector.replyMarkup,
+            session
+          );
+          if (promptId) session.lastPromptMessageId = promptId;
+          activeAddSessions.set(fromId, session);
+          await storage.saveAddSession(fromId, session);
+          return;
+        }
+
+        const existingCount = Array.isArray(session.filesData) && session.filesData.length > 0
+          ? session.filesData.length
+          : (session.fileData ? 1 : 0);
+
+        const lowerCmd = rawInput.toLowerCase();
+        if (existingCount > 0 && (lowerCmd === '/done' || lowerCmd === 'done' || lowerCmd === 'next' || lowerCmd === 'finish')) {
+          await this.promptTriggerTypeStep(fromId, chatId, session);
+          return;
+        }
+
+        if (existingCount > 0) {
+          const collector = this.buildMultiFileCollectorPrompt(session);
+          const promptId = await TelegramService.sendOrEditSetupPrompt(
+            chatId,
+            `${collector.text}\n\n💡 <i>Send more files or tap <b>✅ Done — Continue</b> (or send <code>done</code>).</i>`,
+            collector.replyMarkup,
+            session
+          );
+          if (promptId) session.lastPromptMessageId = promptId;
+          activeAddSessions.set(fromId, session);
+          await storage.saveAddSession(fromId, session);
+          return;
+        }
+
+        const promptId = await TelegramService.sendOrEditSetupPrompt(
+          chatId,
+          '❌ <b>No File Detected</b>\n<i>Please send one or more Documents, Photos, Videos, or Audio files, or send <code>/cancel</code> to abort.</i>',
+          {
+            inline_keyboard: [
+              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+            ]
+          },
+          session
+        );
+        if (promptId) session.lastPromptMessageId = promptId;
+        activeAddSessions.set(fromId, session);
+        await storage.saveAddSession(fromId, session);
+        return;
+      }
 
     // Stage 1b: Explicitly awaiting link URL (PATH B)
     if (session.stage === 'awaiting_link_url') {
@@ -8634,6 +8754,7 @@ export class TelegramService {
       await storage.saveAddSession(fromId, session);
       return;
     }
+    });
   }
 
   // Prompt admin for Setup Video choice during /add wizard
@@ -8666,7 +8787,7 @@ export class TelegramService {
     }
   }
 
-  // Final Step: Save item (File or Link) and notify user with summary & test button
+  // Final Step: Save item(s) (Single or Batch Files, Text, or Link) and notify user with summary & test button
   private static async finalizeAndSaveItem(
     fromId: string,
     chatId: string | number,
@@ -8674,15 +8795,20 @@ export class TelegramService {
   ): Promise<void> {
     const rawKeyword = session.rawKeyword || (session.trigger ? session.trigger.replace(/^[#/]+/, '') : 'item');
     const triggerType: TriggerType = session.triggerType || 'hashtag';
-    const primaryTrigger = session.trigger || (
-      triggerType === 'hashtag' ? `#${rawKeyword}` : triggerType === 'slash' ? `/${rawKeyword}` : rawKeyword
-    );
+    const formatTrigger = (kw: string) =>
+      triggerType === 'hashtag' ? `#${kw}` : triggerType === 'slash' ? `/${kw}` : kw;
+    const primaryTrigger = session.trigger || formatTrigger(rawKeyword);
     const triggers = [primaryTrigger];
 
     await storage.loadLatest(true);
     const isFile = session.type === 'file';
-    const isTextOnly = Boolean(session.isTextOnly || (!session.fileData && isFile));
-    const id = `${isFile ? (isTextOnly ? 't_' : 'f_') : 'l_'}${Date.now().toString(36)}`;
+    const collectedFiles = isFile && !session.isTextOnly
+      ? (Array.isArray(session.filesData) && session.filesData.length > 0
+          ? session.filesData
+          : (session.fileData ? [session.fileData] : []))
+      : [];
+    const isTextOnly = Boolean(session.isTextOnly || (isFile && collectedFiles.length === 0));
+    const baseTimestamp = Date.now().toString(36);
     const retentionType = session.retentionType || 'permanent';
     const retentionDays = retentionType === 'temporary' ? (session.retentionDays || 7) : undefined;
     const expiresAt = retentionType === 'temporary'
@@ -8702,14 +8828,14 @@ export class TelegramService {
     const setupVideoButtonText = hasSetupVideo ? '🎬 Setup Video' : undefined;
     const setupResourceButtonText = hasSetupVideo ? (isFile ? (isTextOnly ? '💬 View Message' : '📁 Get File') : '🔗 Open Link') : undefined;
 
-    let newItem: ItemRecord;
+    const savedItems: ItemRecord[] = [];
 
     if (isFile && isTextOnly) {
       const textContent = session.textResponse || session.caption || rawKeyword;
       const cleanSnippet = textContent.replace(/\n/g, ' ').trim();
       const textTitle = session.fileName || `Text: ${cleanSnippet.slice(0, 25)}${cleanSnippet.length > 25 ? '...' : ''}`;
-      newItem = {
-        id,
+      const newItem: ItemRecord = {
+        id: `t_${baseTimestamp}`,
         type: 'file',
         name: textTitle,
         triggers,
@@ -8736,41 +8862,65 @@ export class TelegramService {
         setupVideoButtonText,
         setupResourceButtonText
       };
+      await storage.saveItem(newItem);
+      savedItems.push(newItem);
     } else if (isFile) {
-      const fileName = session.fileData?.fileName || 'Uploaded File';
-      newItem = {
-        id,
-        type: 'file',
-        name: fileName,
-        triggers,
-        triggerType,
-        rawKeyword,
-        inFiltersList,
-        isTextOnly: false,
-        fileEnabled: true,
-        telegramFileId: session.fileData?.fileId,
-        telegramFileUniqueId: session.fileData?.fileUniqueId,
-        fileType: session.fileData?.fileType || 'document',
-        fileName,
-        fileSize: session.fileData?.fileSize || 0,
-        mimeType: session.fileData?.mimeType || 'application/octet-stream',
-        caption: session.caption || undefined,
-        replyMessage: session.caption || undefined,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        status: 'active',
-        deliveryCount: 0,
-        retentionType,
-        retentionDays,
-        expiresAt,
-        hasSetupVideo,
-        setupVideoUrl,
-        setupVideoTelegramFileId,
-        setupVideoType,
-        setupVideoFileName,
-        setupVideoButtonText,
-        setupResourceButtonText
-      };
+      const nameCounts = new Map<string, number>();
+      for (const f of collectedFiles) {
+        const key = (f.fileName || 'Uploaded File').trim();
+        nameCounts.set(key, (nameCounts.get(key) || 0) + 1);
+      }
+      const seenNames = new Map<string, number>();
+
+      for (let i = 0; i < collectedFiles.length; i++) {
+        const entry = collectedFiles[i];
+        const baseName = (entry.fileName || 'Uploaded File').trim();
+        const totalWithSameName = nameCounts.get(baseName) || 1;
+        const seenIdx = (seenNames.get(baseName) || 0) + 1;
+        seenNames.set(baseName, seenIdx);
+        const itemName = totalWithSameName > 1 ? `${baseName} (${seenIdx})` : baseName;
+
+        const itemKeyword = collectedFiles.length > 1 && i > 0 ? `${rawKeyword}${i + 1}` : rawKeyword;
+        const itemTrigger = formatTrigger(itemKeyword);
+        const itemId = collectedFiles.length > 1 ? `f_${baseTimestamp}_${i + 1}` : `f_${baseTimestamp}`;
+        const itemCaption = entry.caption || session.caption || undefined;
+
+        const newItem: ItemRecord = {
+          id: itemId,
+          type: 'file',
+          name: itemName,
+          triggers: [itemTrigger],
+          triggerType,
+          rawKeyword: itemKeyword,
+          inFiltersList,
+          isTextOnly: false,
+          fileEnabled: true,
+          telegramFileId: entry.fileId,
+          telegramFileUniqueId: entry.fileUniqueId,
+          fileType: entry.fileType || 'document',
+          fileName: entry.fileName || itemName,
+          fileSize: entry.fileSize || 0,
+          mimeType: entry.mimeType || 'application/octet-stream',
+          caption: itemCaption,
+          replyMessage: itemCaption,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          status: 'active',
+          deliveryCount: 0,
+          retentionType,
+          retentionDays,
+          expiresAt,
+          hasSetupVideo,
+          setupVideoUrl,
+          setupVideoTelegramFileId,
+          setupVideoType,
+          setupVideoFileName,
+          setupVideoButtonText,
+          setupResourceButtonText
+        };
+        await storage.saveItem(newItem);
+        savedItems.push(newItem);
+      }
     } else {
       const url = session.linkData?.url || 'https://';
       const name = session.linkData?.name || `Link (${rawKeyword})`;
@@ -8779,8 +8929,8 @@ export class TelegramService {
       const buttonText = (rawBtn && rawBtn.trim()) ? rawBtn.trim() : defaultBtn;
       const defaultReply = `🔗 Here is your requested link: ${url}`;
       const replyMessage = session.replyMessage || session.linkData?.replyMessage || session.caption || defaultReply;
-      newItem = {
-        id,
+      const newItem: ItemRecord = {
+        id: `l_${baseTimestamp}`,
         type: 'link',
         name,
         url,
@@ -8807,14 +8957,12 @@ export class TelegramService {
         setupVideoButtonText,
         setupResourceButtonText
       };
+      await storage.saveItem(newItem);
+      savedItems.push(newItem);
     }
-
-    await storage.saveItem(newItem);
 
     const botUsername = await this.getBotUsername();
     const cleanBot = botUsername.replace(/^@/, '');
-    const payload = getItemPayload(newItem);
-    const deepLink = `https://t.me/${cleanBot}?start=${payload}`;
 
     const retentionDesc = retentionType === 'temporary'
       ? `Temporary (${retentionDays} days — auto-deleted upon expiry)`
@@ -8824,7 +8972,9 @@ export class TelegramService {
       ? 'Yes (Visible in /filters list)'
       : 'No (Hidden from public /filters)';
 
-    const typeDesc = isFile ? (isTextOnly ? '💬 Text Response' : '📁 File') : '🔗 Web Link';
+    const typeDesc = isFile
+      ? (isTextOnly ? '💬 Text Response' : savedItems.length > 1 ? `📦 Batch (${savedItems.length} Files)` : '📁 File')
+      : '🔗 Web Link';
 
     const deliveryDesc = isFile
       ? (isTextOnly ? 'Direct Text Message Response' : 'Direct Telegram Document / Media File')
@@ -8834,23 +8984,56 @@ export class TelegramService {
       ? `🎬 Enabled (${setupVideoType === 'url' ? 'URL Link' : 'Uploaded Video'})`
       : 'None (Direct Delivery)';
 
-    const successText =
-      `✅ <b>Saved Successfully</b>\n` +
-      `━━━━━━━━━━━━━━━━━━━━\n` +
-      `• 🏷️ <b>Type:</b> <code>${this.escapeHtml(typeDesc)}</code>\n` +
-      `• 📦 <b>Name:</b> <code>${this.escapeHtml(newItem.name)}</code>\n` +
-      `• 🎯 <b>Trigger:</b> <code>${this.escapeHtml(primaryTrigger)}</code> (<code>${this.escapeHtml(triggerType)}</code>)\n` +
-      `• 📁 <b>Public Filters:</b> <code>${this.escapeHtml(filterStatus)}</code>\n` +
-      `• 📡 <b>Delivery Mode:</b> <code>${this.escapeHtml(deliveryDesc)}</code>\n` +
-      `• ⏳ <b>Retention:</b> <code>${this.escapeHtml(retentionDesc)}</code>\n` +
-      `• 🎬 <b>Setup Video:</b> <code>${this.escapeHtml(setupVideoDesc)}</code>\n\n` +
-      `🔗 <b>Direct Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
-      `💡 <i>Type <code>${this.escapeHtml(primaryTrigger)}</code> in any group or here to test delivery!</i>`;
+    const primarySaved = savedItems[0];
+    let successText: string;
+
+    if (savedItems.length === 1) {
+      const payload = getItemPayload(primarySaved);
+      const deepLink = `https://t.me/${cleanBot}?start=${payload}`;
+      successText =
+        `✅ <b>Saved Successfully</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• 🏷️ <b>Type:</b> <code>${this.escapeHtml(typeDesc)}</code>\n` +
+        `• 📦 <b>Name:</b> <code>${this.escapeHtml(primarySaved.name)}</code>\n` +
+        `• 🎯 <b>Trigger:</b> <code>${this.escapeHtml(primaryTrigger)}</code> (<code>${this.escapeHtml(triggerType)}</code>)\n` +
+        `• 📁 <b>Public Filters:</b> <code>${this.escapeHtml(filterStatus)}</code>\n` +
+        `• 📡 <b>Delivery Mode:</b> <code>${this.escapeHtml(deliveryDesc)}</code>\n` +
+        `• ⏳ <b>Retention:</b> <code>${this.escapeHtml(retentionDesc)}</code>\n` +
+        `• 🎬 <b>Setup Video:</b> <code>${this.escapeHtml(setupVideoDesc)}</code>\n\n` +
+        `🔗 <b>Direct Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
+        `💡 <i>Type <code>${this.escapeHtml(primaryTrigger)}</code> in any group or here to test delivery!</i>`;
+    } else {
+      const maxSummaryItems = 12;
+      const itemLines = savedItems.slice(0, maxSummaryItems).map((it, idx) => {
+        const p = getItemPayload(it);
+        const link = `https://t.me/${cleanBot}?start=${p}`;
+        const trig = it.triggers?.[0] || primaryTrigger;
+        return `${idx + 1}. ${this.getFileTypeEmoji(it.fileType)} <code>${this.escapeHtml(it.name)}</code> — <code>${this.escapeHtml(trig)}</code>\n   🔗 <code>${this.escapeHtml(link)}</code>`;
+      });
+      const overflowNote = savedItems.length > maxSummaryItems
+        ? `\n<i>...and ${savedItems.length - maxSummaryItems} more saved files (view all via /allfile or Admin Panel)</i>`
+        : '';
+
+      successText =
+        `✅ <b>Saved ${savedItems.length} Files Successfully</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• 🏷️ <b>Type:</b> <code>${this.escapeHtml(typeDesc)}</code>\n` +
+        `• 🎯 <b>Triggers:</b> <code>${this.escapeHtml(primaryTrigger)}</code> → <code>${this.escapeHtml(savedItems[savedItems.length - 1].triggers?.[0] || '')}</code> (<code>${this.escapeHtml(triggerType)}</code>)\n` +
+        `• 📁 <b>Public Filters:</b> <code>${this.escapeHtml(filterStatus)}</code>\n` +
+        `• ⏳ <b>Retention:</b> <code>${this.escapeHtml(retentionDesc)}</code>\n` +
+        `• 🎬 <b>Setup Video:</b> <code>${this.escapeHtml(setupVideoDesc)}</code>\n\n` +
+        `${itemLines.join('\n')}${overflowNote}\n\n` +
+        `💡 <i>Type any trigger above in group/DM or check /allfile!</i>`;
+    }
 
     const successMarkup = {
       inline_keyboard: [
         [
-          { text: 'Test Delivery', callback_data: `test_delivery_${newItem.id}`, style: 'primary' }
+          {
+            text: savedItems.length > 1 ? 'Test First Delivery' : 'Test Delivery',
+            callback_data: `test_delivery_${primarySaved.id}`,
+            style: 'primary'
+          }
         ]
       ]
     };
@@ -9458,29 +9641,84 @@ export class TelegramService {
 
     // PATH Selection Callbacks: Add File or Add Link
     if (data === 'add_choose_file') {
-      if (session) {
-        session.type = 'file';
-        session.stage = 'awaiting_file_content';
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        curSession.type = 'file';
+        curSession.isTextOnly = false;
+        curSession.filesData = curSession.filesData || [];
+        curSession.stage = 'awaiting_file_content';
+        activeAddSessions.set(fromId, curSession);
+        await storage.saveAddSession(fromId, curSession);
 
         if (chatId) {
+          const collector = this.buildMultiFileCollectorPrompt(curSession);
           const promptId = await TelegramService.sendOrEditSetupPrompt(
             chatId,
-            '📤 Please send the <b>File</b> you want to add (Document, Photo, Video, or Audio):\n\n<i>Or send /cancel to abort.</i>',
-            {
-              inline_keyboard: [
-                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-              ]
-            },
-            session
+            collector.text,
+            collector.replyMarkup,
+            curSession
           );
           if (promptId) {
-            session.lastPromptMessageId = promptId;
-            await storage.saveAddSession(fromId, session);
+            curSession.lastPromptMessageId = promptId;
+            await storage.saveAddSession(fromId, curSession);
           }
         }
-      }
+      });
+      return;
+    }
+
+    if (data === 'add_files_done') {
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        const files = Array.isArray(curSession.filesData) && curSession.filesData.length > 0
+          ? curSession.filesData
+          : (curSession.fileData ? [curSession.fileData] : []);
+        if (files.length === 0) {
+          if (chatId) {
+            const collector = this.buildMultiFileCollectorPrompt(curSession);
+            await TelegramService.sendOrEditSetupPrompt(
+              chatId,
+              collector.text,
+              collector.replyMarkup,
+              curSession
+            );
+          }
+          return;
+        }
+        if (chatId) {
+          await this.promptTriggerTypeStep(fromId, chatId, curSession);
+        }
+      });
+      return;
+    }
+
+    if (data === 'add_files_pop') {
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        if (Array.isArray(curSession.filesData) && curSession.filesData.length > 0) {
+          curSession.filesData.pop();
+        }
+        curSession.fileData = curSession.filesData?.[0];
+        activeAddSessions.set(fromId, curSession);
+        await storage.saveAddSession(fromId, curSession);
+
+        if (chatId) {
+          const collector = this.buildMultiFileCollectorPrompt(curSession);
+          const promptId = await TelegramService.sendOrEditSetupPrompt(
+            chatId,
+            collector.text,
+            collector.replyMarkup,
+            curSession
+          );
+          if (promptId) {
+            curSession.lastPromptMessageId = promptId;
+            await storage.saveAddSession(fromId, curSession);
+          }
+        }
+      });
       return;
     }
 

@@ -478,7 +478,7 @@
   border-radius: 99px;
   display: flex;
   align-items: center;
-  touch-action: none;
+  touch-action: manipulation;
   user-select: none;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.04) 55%, rgba(255, 255, 255, 0.09)),

@@ -143,6 +143,9 @@ async function startServer() {
   const app = express();
   app.set('trust proxy', 1);
   const httpServer = http.createServer(app);
+  httpServer.requestTimeout = 30 * 60 * 1000; // 30 minutes for large uploads
+  httpServer.headersTimeout = 5 * 60 * 1000;  // 5 minutes
+  httpServer.keepAliveTimeout = 65 * 1000;    // 65 seconds
   activeHttpServer = httpServer;
 
   const PORT = Number(process.env.PORT) || 3000;

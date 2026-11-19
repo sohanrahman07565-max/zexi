@@ -294,11 +294,48 @@ export default function App() {
   // Smooth horizontal touch swipe gestures across main screen area
   const touchStartPos = React.useRef<{ x: number; y: number } | null>(null);
 
-  const handleTouchStart = (e: React.TouchEvent) => {
+  const isInsideHorizontalScrollOrInteractive = (
+    target: EventTarget | null,
+    boundary: HTMLElement | null
+  ): boolean => {
+    let el = target as HTMLElement | null;
+    while (el && el !== boundary) {
+      if (el.hasAttribute('data-no-tab-swipe')) {
+        return true;
+      }
+      const tag = el.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'OPTION' || tag === 'VIDEO' || tag === 'AUDIO') {
+        return true;
+      }
+      try {
+        const style = window.getComputedStyle(el);
+        const ox = style.overflowX;
+        if ((ox === 'auto' || ox === 'scroll') && el.scrollWidth > el.clientWidth + 2) {
+          return true;
+        }
+      } catch {}
+      el = el.parentElement;
+    }
+    return false;
+  };
+
+  const handleTouchStart = (e: React.TouchEvent<HTMLElement>) => {
+    if (e.touches.length !== 1) {
+      touchStartPos.current = null;
+      return;
+    }
+    if (isInsideHorizontalScrollOrInteractive(e.target, e.currentTarget)) {
+      touchStartPos.current = null;
+      return;
+    }
     touchStartPos.current = {
       x: e.touches[0].clientX,
       y: e.touches[0].clientY
     };
+  };
+
+  const handleTouchCancel = () => {
+    touchStartPos.current = null;
   };
 
   const handleTouchEnd = (e: React.TouchEvent) => {
@@ -528,6 +565,7 @@ export default function App() {
         <main
           onTouchStart={handleTouchStart}
           onTouchEnd={handleTouchEnd}
+          onTouchCancel={handleTouchCancel}
           className="flex-1 w-full min-w-0"
         >
           {/* Dashboard Tab */}
