@@ -6959,23 +6959,12 @@ export class TelegramService {
       }
     }
 
-    const sourceVal = [apiData?.source, p?.source, rawObj?.source].find(
-      (v) => typeof v === 'string' && this.isPresentValue(v)
-    ) as string | undefined;
     const fetchedAtVal = [apiData?.fetched_at, p?.fetched_at, rawObj?.fetched_at, apiData?.last_updated, p?.last_updated].find(
       (v) => typeof v === 'string' && this.isPresentValue(v)
     ) as string | undefined;
 
-    if (sourceVal || fetchedAtVal) {
-      const parts: string[] = [];
-      if (sourceVal) {
-        const isCached = apiData?.cached === true || p?.cached === true;
-        parts.push(`📡 Source: ${this.escapeHtml(sourceVal.trim())}${isCached ? ' (Cached)' : ''}`);
-      }
-      if (fetchedAtVal) {
-        parts.push(`🕒 ${this.escapeHtml(fetchedAtVal.trim())}`);
-      }
-      return parts.join(' • ');
+    if (fetchedAtVal) {
+      return `🕒 ${this.escapeHtml(fetchedAtVal.trim())}`;
     }
 
     return '✨ Powered by Dark Team';
@@ -7046,6 +7035,27 @@ export class TelegramService {
     const accountTier = this.isPresentValue(valuation?.rarity_tier)
       ? String(valuation.rarity_tier)
       : (this.isPresentValue(p?.tier || apiData?.tier) ? String(p?.tier || apiData?.tier) : 'Standard');
+    const formatBdt = (val: any): string => {
+      if (!this.isPresentValue(val)) return '';
+      if (typeof val === 'number') return `${val.toLocaleString('en-US')} BDT`;
+      const s = String(val).trim();
+      return /bdt/i.test(s) ? s : `${s} BDT`;
+    };
+    const formatUsd = (val: any): string => {
+      if (!this.isPresentValue(val)) return '';
+      if (typeof val === 'number') return `$${val.toFixed(2)} USD`;
+      const s = String(val).trim();
+      if (s.startsWith('$') && /usd/i.test(s)) return s;
+      if (s.startsWith('$')) return `${s} USD`;
+      return /usd/i.test(s) ? `$${s}` : `$${s} USD`;
+    };
+    const valBdt = formatBdt(valuation?.bdt);
+    const valUsd = formatUsd(valuation?.usd);
+    const valuationParts = [valBdt, valUsd].filter(Boolean);
+    const valuationDisplay = valuationParts.length === 2
+      ? `${valuationParts[0]} (${valuationParts[1]})`
+      : (valuationParts[0] || '');
+
     const gameVersion = this.isPresentValue(p?.release_version || apiData?.release_version || apiData?.most_recent_ob)
       ? String(p?.release_version || apiData?.release_version || apiData?.most_recent_ob)
       : 'Unknown';
@@ -7077,6 +7087,7 @@ export class TelegramService {
       `🟢 <b>Status:</b> ${this.escapeHtml(accountStatus)}`,
       `🛡 <b>Honer score:</b> ${this.escapeHtml(String(honorScoreRaw))}/100`,
       `💠 <b>Account Tier:</b> ${this.escapeHtml(accountTier)}`,
+      ...(valuationDisplay ? [`💰 <b>Account Price:</b> ${this.escapeHtml(valuationDisplay)}`] : []),
       `📦 <b>Game Version:</b> ${this.escapeHtml(gameVersion)}`,
       '━━━━━━━━━━━━━━━━━━━━',
       `📅 <b>Created:</b> ${this.escapeHtml(createdAt)}`,
