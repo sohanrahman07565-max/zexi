@@ -92,7 +92,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
       return;
     }
     if (!cloneMode) {
-      setCloneError('Please choose a Bot Mode (Post Bot or Image URL Bot) before cloning.');
+      setCloneError('Please choose a Bot Mode (File Bot, Post Bot, or Image URL Bot) before cloning.');
       return;
     }
 
@@ -685,7 +685,33 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                       </span>
                     )}
                   </label>
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCloneMode('file_bot');
+                        if (cloneError.includes('Bot Mode')) setCloneError('');
+                      }}
+                      className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                        cloneMode === 'file_bot'
+                          ? 'bg-sky-500/20 border-sky-400/60 text-white shadow-[0_0_15px_rgba(56,189,248,0.2)]'
+                          : 'bg-black/40 hover:bg-white/[0.06] border-white/15 text-zinc-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-xs font-bold flex items-center gap-1.5">
+                          <FolderOpen className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                          <span>File Bot</span>
+                        </span>
+                        {cloneMode === 'file_bot' && (
+                          <Check className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                        )}
+                      </div>
+                      <p className="text-[10px] text-zinc-400 mt-1 leading-snug">
+                        File delivery &amp; indexing mode
+                      </p>
+                    </button>
+
                     <button
                       type="button"
                       onClick={() => {
@@ -708,7 +734,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                         )}
                       </div>
                       <p className="text-[10px] text-zinc-400 mt-1 leading-snug">
-                        Channel post &amp; inline button mode
+                        Channel post &amp; inline buttons
                       </p>
                     </button>
 
@@ -734,7 +760,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
                         )}
                       </div>
                       <p className="text-[10px] text-zinc-400 mt-1 leading-snug">
-                        Photo-to-URL converter &amp; auto-expiry
+                        Photo-to-URL &amp; auto-expiry
                       </p>
                     </button>
                   </div>

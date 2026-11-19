@@ -3206,7 +3206,7 @@ export class TelegramService {
             if (!tokenArg) {
               await this.callTelegramApi('sendMessage', {
                 chat_id: fromId,
-                text: `ℹ️ <b>How to Clone Telegram Bot</b>\n\n1. Open <code>@BotFather</code> on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>You will then choose Post Bot or Image URL Bot to launch your bot immediately.</i>`,
+                text: `ℹ️ <b>How to Clone Telegram Bot</b>\n\n1. Open <code>@BotFather</code> on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>You will then choose File Bot, Post Bot, or Image URL Bot to launch your bot.</i>`,
                 parse_mode: 'HTML'
               });
               return;
@@ -3239,13 +3239,17 @@ export class TelegramService {
               text:
                 `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(check.info.username || check.info.first_name || 'Bot')}</code>\n\n` +
                 `⚙️ <b>Choose Bot Mode for this clone:</b>\n\n` +
+                `• 📁 <b>File Bot</b> — Standard file delivery, filters &amp; indexing mode\n` +
                 `• 📝 <b>Post Bot</b> — Channel post maker, inline buttons &amp; post editing mode\n` +
                 `• 🖼️ <b>Image URL Bot</b> — Photo-to-URL converter with link manager &amp; auto-expiry`,
               parse_mode: 'HTML',
               reply_markup: {
                 inline_keyboard: [
                   [
-                    { text: '📝 Post Bot', callback_data: `clone_mode:${fromId}:post_bot`, style: 'primary' },
+                    { text: '📁 File Bot', callback_data: `clone_mode:${fromId}:file_bot`, style: 'primary' },
+                    { text: '📝 Post Bot', callback_data: `clone_mode:${fromId}:post_bot`, style: 'primary' }
+                  ],
+                  [
                     { text: '🖼️ Image URL Bot', callback_data: `clone_mode:${fromId}:image_url_bot`, style: 'success' }
                   ],
                   [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
@@ -4401,15 +4405,17 @@ export class TelegramService {
     if (session.stage === 'awaiting_mode') {
       const lower = trimmed.toLowerCase();
       let selectedMode: BotOperationalMode | null = null;
-      if (/^(?:1|post|post\s*bot)$/i.test(lower)) {
+      if (/^(?:1|file|file\s*bot)$/i.test(lower)) {
+        selectedMode = 'file_bot';
+      } else if (/^(?:2|post|post\s*bot)$/i.test(lower)) {
         selectedMode = 'post_bot';
-      } else if (/^(?:2|image|img|url|image\s*url|image\s*url\s*bot|img\s*url)$/i.test(lower)) {
+      } else if (/^(?:3|image|img|url|image\s*url|image\s*url\s*bot|img\s*url)$/i.test(lower)) {
         selectedMode = 'image_url_bot';
       }
       if (!selectedMode) {
         const modePrompt =
           `⚙️ <b>Select Bot Mode First</b>\n\n` +
-          `Tap one of the buttons below or reply with <code>Post Bot</code> or <code>Image URL Bot</code>:`;
+          `Tap one of the buttons below or reply with <code>File Bot</code>, <code>Post Bot</code>, or <code>Image URL Bot</code>:`;
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
           text: modePrompt,
@@ -4417,7 +4423,10 @@ export class TelegramService {
           reply_markup: {
             inline_keyboard: [
               [
-                { text: '📝 Post Bot', callback_data: `clone_mode:${fromId}:post_bot`, style: 'primary' },
+                { text: '📁 File Bot', callback_data: `clone_mode:${fromId}:file_bot`, style: 'primary' },
+                { text: '📝 Post Bot', callback_data: `clone_mode:${fromId}:post_bot`, style: 'primary' }
+              ],
+              [
                 { text: '🖼️ Image URL Bot', callback_data: `clone_mode:${fromId}:image_url_bot`, style: 'success' }
               ],
               [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
@@ -4572,7 +4581,7 @@ export class TelegramService {
       if (!tokenArg) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: `ℹ️ <b>How to Clone Telegram Bot</b>\n\n1. Open <code>@BotFather</code> on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>You will then choose Post Bot or Image URL Bot to launch your bot immediately.</i>`,
+          text: `ℹ️ <b>How to Clone Telegram Bot</b>\n\n1. Open <code>@BotFather</code> on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>You will then choose File Bot, Post Bot, or Image URL Bot to launch your bot.</i>`,
           parse_mode: 'HTML'
         });
         return;
@@ -4605,13 +4614,17 @@ export class TelegramService {
         text:
           `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(check.info.username || check.info.first_name || 'Bot')}</code>\n\n` +
           `⚙️ <b>Choose Bot Mode for this clone:</b>\n\n` +
+          `• 📁 <b>File Bot</b> — Standard file delivery, filters &amp; indexing mode\n` +
           `• 📝 <b>Post Bot</b> — Channel post maker, inline buttons &amp; post editing mode\n` +
           `• 🖼️ <b>Image URL Bot</b> — Photo-to-URL converter with link manager &amp; auto-expiry`,
         parse_mode: 'HTML',
         reply_markup: {
           inline_keyboard: [
             [
-              { text: '📝 Post Bot', callback_data: `clone_mode:${fromId}:post_bot`, style: 'primary' },
+              { text: '📁 File Bot', callback_data: `clone_mode:${fromId}:file_bot`, style: 'primary' },
+              { text: '📝 Post Bot', callback_data: `clone_mode:${fromId}:post_bot`, style: 'primary' }
+            ],
+            [
               { text: '🖼️ Image URL Bot', callback_data: `clone_mode:${fromId}:image_url_bot`, style: 'success' }
             ],
             [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
