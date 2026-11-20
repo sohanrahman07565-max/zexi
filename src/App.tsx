@@ -440,7 +440,7 @@ export default function App() {
       <SplashScreen
         onComplete={handleSplashComplete}
         logoSymbol={design.loginLogoSymbol || '惡'}
-        logoUrl={(!design.loginLogoUrl || design.loginLogoUrl.includes('4fae5ca52db64590')) ? DEFAULT_LOGO_URL : design.loginLogoUrl}
+        logoUrl={(!design.loginLogoUrl || design.loginLogoUrl.includes('4fae5ca52db64590') || design.loginLogoUrl.includes('df6c9e167caf42c6')) ? DEFAULT_LOGO_URL : design.loginLogoUrl}
         title={design.loginTitle || 'ADMIN PANEL'}
         accentColor={design.loginAccentColor || '#ef4444'}
       />

@@ -156,6 +156,8 @@ export class ImageUrlBotEngine {
     const existing = await storage.getImageUrlBotData();
     return {
       nextLinkId: Number(existing?.nextLinkId) > 0 ? Number(existing?.nextLinkId) : 1,
+      adminTelegramId: existing?.adminTelegramId,
+      adminUsername: existing?.adminUsername,
       users: existing?.users && typeof existing.users === 'object' ? existing.users : {},
       links: Array.isArray(existing?.links) ? existing.links : [],
       userSettings: existing?.userSettings && typeof existing.userSettings === 'object' ? existing.userSettings : {},
@@ -226,6 +228,7 @@ export class ImageUrlBotEngine {
     deps: {
       callTelegramApi: CallTelegramApiFn;
       getBotToken: () => Promise<string>;
+      isAuthorizedAdmin?: (uid: string, uname?: string) => Promise<boolean>;
     }
   ): Promise<void> {
     const { callTelegramApi, getBotToken } = deps;

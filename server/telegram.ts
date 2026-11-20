@@ -1179,6 +1179,26 @@ export class TelegramService {
     }
 
     try {
+      // Operational Mode Isolation Gate:
+      // Post Bot & Image URL Bot run purely as isolated Telegram bots BEFORE any File Bot
+      // middlewares (whitelist, force-sub, scheduled file deletion, join requests, ban checks, maintenance).
+      const settings = await storage.getSettings();
+      if (settings.botMode === 'post_bot') {
+        await PostBotEngine.handleUpdate(update, canonicalBotId, {
+          callTelegramApi: (method, body, tkn) => this.callTelegramApi(method, body, tkn),
+          isAuthorizedAdmin: (uid, uname) => this.isAuthorizedAdmin(uid, uname)
+        });
+        return;
+      }
+      if (settings.botMode === 'image_url_bot') {
+        await ImageUrlBotEngine.handleUpdate(update, canonicalBotId, {
+          callTelegramApi: (method, body, tkn) => this.callTelegramApi(method, body, tkn),
+          getBotToken: () => this.getBotToken(),
+          isAuthorizedAdmin: (uid, uname) => this.isAuthorizedAdmin(uid, uname)
+        });
+        return;
+      }
+
       // Ignore edited messages for commands and general replies to prevent double replies on edit
       if (update.edited_message && !update.message) {
         const fromId = String(update.edited_message.from?.id || '');
@@ -1297,7 +1317,6 @@ export class TelegramService {
         // When Maintenance Mode is ON, block responses to general commands, trigger keywords, and /start command.
         // Immediately reply with customized notice supporting dynamic variables (@username, {user_id}, {bot_name}, {name}).
         // Ensure admins can still access and use admin triggers/commands if needed.
-        const settings = await storage.getSettings();
         if (settings.maintenanceMode) {
           const isAdmin = await this.isAuthorizedAdmin(fromId, senderUname);
           if (!isAdmin) {
@@ -1332,22 +1351,6 @@ export class TelegramService {
             }
             return;
           }
-        }
-
-        // Operational Mode Dispatch: Post Bot & Image URL Bot modes run purely as Telegram bots
-        if (settings.botMode === 'post_bot') {
-          await PostBotEngine.handleUpdate(update, botId, {
-            callTelegramApi: (method, body, tkn) => this.callTelegramApi(method, body, tkn),
-            isAuthorizedAdmin: (uid, uname) => this.isAuthorizedAdmin(uid, uname)
-          });
-          return;
-        }
-        if (settings.botMode === 'image_url_bot') {
-          await ImageUrlBotEngine.handleUpdate(update, botId, {
-            callTelegramApi: (method, body, tkn) => this.callTelegramApi(method, body, tkn),
-            getBotToken: () => this.getBotToken()
-          });
-          return;
         }
 
         // Handle Inline Button Clicks (Callback queries from /add flow and setup video navigation)
@@ -4311,12 +4314,16 @@ export class TelegramService {
     let successText: string;
 
     if (isBotOnly) {
+      const assignedAdmin = bot.ownerUsername && bot.ownerId && bot.ownerId !== bot.ownerUsername
+        ? `<code>@${this.escapeHtml(bot.ownerUsername)}</code> (<code>${this.escapeHtml(bot.ownerId)}</code>)`
+        : (bot.ownerUsername ? `<code>@${this.escapeHtml(bot.ownerUsername)}</code>` : `<code>${this.escapeHtml(bot.ownerId || options?.ownerId || fromId)}</code>`);
       successText =
         `✅ <b>Telegram Bot Successfully Cloned</b>\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
         `• 🤖 <b>Bot Name:</b> <code>${this.escapeHtml(bot.name)}</code>\n` +
         `• 🔗 <b>Bot Username:</b> <code>@${this.escapeHtml(bot.username)}</code>\n` +
         `• ⚙️ <b>Mode:</b> <code>${this.escapeHtml(modeDisplay)}</code>\n` +
+        `• 👤 <b>Bot Admin:</b> ${assignedAdmin}\n` +
         `• 📡 <b>Status:</b> <code>Active &amp; Polling</code> 🟢\n\n` +
         `<i>Running cleanly as a standalone Telegram bot.</i>`;
     } else {
@@ -4429,6 +4436,29 @@ export class TelegramService {
               [
                 { text: '🖼️ Image URL Bot', callback_data: `clone_mode:${fromId}:image_url_bot`, style: 'success' }
               ],
+              [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
+            ]
+          }
+        });
+        return;
+      }
+
+      if (selectedMode === 'post_bot' || selectedMode === 'image_url_bot') {
+        session.botMode = selectedMode;
+        session.stage = 'awaiting_owner';
+        activeCloneSessions.set(fromId, session);
+        const modeLabel = this.formatBotModeDisplay(selectedMode);
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text:
+            `✅ <b>Mode Selected:</b> <code>${this.escapeHtml(modeLabel)}</code>\n\n` +
+            `👤 <b>Assign Bot Admin</b>\n` +
+            `<i>Send the Telegram User ID (or <code>@username</code>) of who should be the Admin of this cloned bot, or tap Assign Myself below.</i>\n\n` +
+            `• <b>Examples:</b> <code>123456789</code> or <code>@username</code>`,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${fromId}`, style: 'primary' }],
               [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
             ]
           }
@@ -9419,8 +9449,80 @@ export class TelegramService {
         text: `Mode selected: ${modeShortLabel}`
       });
 
+      if (chosenMode === 'post_bot' || chosenMode === 'image_url_bot') {
+        session.botMode = chosenMode;
+        session.stage = 'awaiting_owner';
+        activeCloneSessions.set(targetAdminId, session);
+        const modeLabel = this.formatBotModeDisplay(chosenMode);
+        if (chatId && cb.message?.message_id) {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text:
+              `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(session.botInfo?.username || session.botInfo?.first_name || 'Bot')}</code>\n` +
+              `⚙️ <b>Selected Mode:</b> <code>${this.escapeHtml(modeLabel)}</code>\n\n` +
+              `👤 <b>Assign Bot Admin</b>\n` +
+              `<i>Reply with the Telegram User ID (or <code>@username</code>) of who should be assigned as the Admin of this cloned bot, or tap Assign Myself below.</i>\n\n` +
+              `• <b>Examples:</b> <code>123456789</code> or <code>@username</code>`,
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${targetAdminId}`, style: 'primary' }],
+                [{ text: '❌ Cancel', callback_data: `clone_cancel:${targetAdminId}`, style: 'danger' }]
+              ]
+            }
+          }).catch(() => {});
+        }
+        return;
+      }
+
       if (chatId) {
         await this.finalizeBotCloneWithMode(chatId, targetAdminId, session, chosenMode, {
+          senderUsername: cb.from?.username,
+          editMessageId: cb.message?.message_id
+        });
+      }
+      return;
+    }
+
+    // ASSIGN SELF AS BOT ADMIN DURING /clone FOR POST BOT / IMAGE URL BOT
+    if (data && data.startsWith('clone_admin_self:')) {
+      if (!this.isMainBotContext()) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Cloning is only available on the main primary bot.',
+          show_alert: true
+        });
+        return;
+      }
+      const targetAdminId = data.slice('clone_admin_self:'.length).trim() || fromId;
+      if (targetAdminId !== fromId && !(await this.isAuthorizedAdmin(fromId, cb.from?.username))) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Only the admin who started cloning can assign the bot admin.',
+          show_alert: true
+        });
+        return;
+      }
+      const session = activeCloneSessions.get(targetAdminId) || activeCloneSessions.get(fromId);
+      if (!session) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Clone session expired. Send /clone <token> again.',
+          show_alert: true
+        });
+        return;
+      }
+      const selectedMode: BotOperationalMode =
+        session.botMode === 'image_url_bot' ? 'image_url_bot' : (session.botMode === 'post_bot' ? 'post_bot' : 'file_bot');
+      await this.callTelegramApi('answerCallbackQuery', {
+        callback_query_id: cb.id,
+        text: `Assigned Bot Admin: ${fromId}`
+      });
+      if (chatId) {
+        await this.finalizeBotCloneWithMode(chatId, targetAdminId, session, selectedMode, {
+          ownerId: fromId,
+          ownerUsername: cb.from?.username,
           senderUsername: cb.from?.username,
           editMessageId: cb.message?.message_id
         });
@@ -10766,6 +10868,10 @@ export class TelegramService {
 
   public static async processDueScheduledDeletions(): Promise<number> {
     try {
+      const currentSettings = await storage.getSettings().catch(() => null);
+      if (currentSettings?.botMode && currentSettings.botMode !== 'file_bot') {
+        return 0;
+      }
       const due = await storage.popDueScheduledDeletions();
       let count = 0;
       for (const sched of due) {
@@ -12259,8 +12365,8 @@ export class TelegramBotManager {
       botMode: normalizedMode,
       createdAt: new Date().toISOString(),
       createdBy: createdBy || 'admin',
-      ownerId: isBotOnlyMode ? undefined : resolvedOwnerTelegramId,
-      ownerUsername: isBotOnlyMode ? undefined : (ownerUsername || undefined),
+      ownerId: resolvedOwnerTelegramId,
+      ownerUsername: ownerUsername || undefined,
       filesCount: 0,
       usersCount: 0,
       ...(isBotOnlyMode ? {} : {
@@ -12272,7 +12378,7 @@ export class TelegramBotManager {
 
     await mainStorage.saveClonedBot(newBot);
 
-    // 3. Initialize isolated storage for this cloned bot & persist operational mode
+    // 3. Initialize isolated storage for this cloned bot & persist operational mode + assigned Bot Admin
     const botStorage = StorageManager.getStorage(botId);
     await botStorage.init();
     await botStorage.updateSettings({
@@ -12281,6 +12387,19 @@ export class TelegramBotManager {
       rootAdminId: resolvedOwnerTelegramId,
       botMode: normalizedMode
     });
+
+    if (normalizedMode === 'image_url_bot') {
+      const existingImgData = await botStorage.getImageUrlBotData().catch(() => undefined);
+      await botStorage.saveImageUrlBotData({
+        nextLinkId: Number(existingImgData?.nextLinkId) > 0 ? Number(existingImgData?.nextLinkId) : 1,
+        adminTelegramId: resolvedOwnerTelegramId,
+        adminUsername: ownerUsername || undefined,
+        users: existingImgData?.users || {},
+        links: Array.isArray(existingImgData?.links) ? existingImgData.links : [],
+        userSettings: existingImgData?.userSettings || {},
+        sessions: existingImgData?.sessions || {}
+      });
+    }
 
     if (!isBotOnlyMode && adminPassword && panelUrl) {
       // 4. Register official Owner strictly inside isolated File Bot storage with full administrative permissions
@@ -12352,7 +12471,7 @@ export class TelegramBotManager {
     }
 
     this.startBotInstance(newBot).catch(() => {});
-    console.info(`[TelegramBotManager] Cloned bot @${newBot.username} (${newBot.id}) started in ${normalizedMode} mode!`);
+    console.info(`[TelegramBotManager] Cloned bot @${newBot.username} (${newBot.id}) started in ${normalizedMode} mode! Admin: ${resolvedOwnerTelegramId}`);
     return { success: true, bot: newBot };
   }
 

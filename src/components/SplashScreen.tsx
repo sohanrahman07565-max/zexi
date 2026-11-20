@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 
-export const DEFAULT_LOGO_URL = 'https://host.tscv.workers.dev/img/df6c9e167caf42c6';
+export const DEFAULT_LOGO_URL = 'https://host.tscv.workers.dev/img/27e97803c2bf4c39';
 
 interface SplashScreenProps {
   onComplete: () => void;

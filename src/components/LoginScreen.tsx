@@ -39,7 +39,15 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
   const [targetBotId, setTargetBotId] = useState<string | null>(null);
   const resolveLogo = (rawUrl?: string) => {
     const clean = rawUrl ? String(rawUrl).trim() : '';
-    if (!clean || clean === DEFAULT_LOGO_URL) return EMBEDDED_ZEXI_LOGO;
+    if (
+      !clean ||
+      clean === DEFAULT_LOGO_URL ||
+      clean.includes('df6c9e167caf42c6') ||
+      clean.includes('4fae5ca52db64590') ||
+      clean.includes('f61e20b6c71945c4')
+    ) {
+      return DEFAULT_LOGO_URL;
+    }
     return clean;
   };
 

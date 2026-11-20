@@ -178,6 +178,8 @@ export interface ImageUrlBotLinkRecord {
 
 export interface ImageUrlBotStoreData {
   nextLinkId: number;
+  adminTelegramId?: string;
+  adminUsername?: string;
   users: Record<string, {
     telegramId: number;
     username: string | null;
@@ -535,7 +537,7 @@ export const DEFAULT_DESIGN: DesignConfig = {
   borderRadius: 'rounded',
   loginTitle: 'ADMIN PANEL',
   loginSubtitle: 'SECURE ACCESS',
-  loginLogoUrl: 'https://host.tscv.workers.dev/img/df6c9e167caf42c6',
+  loginLogoUrl: 'https://host.tscv.workers.dev/img/27e97803c2bf4c39',
   loginLogoSymbol: '惡',
   loginIdLabel: 'ADMIN NAME',
   loginIdPlaceholder: 'Enter admin name',
@@ -2280,8 +2282,13 @@ export class SharedStorageService {
   public async getDesign(): Promise<DesignConfig> {
     await this.loadLatest(false);
     // Auto-migrate legacy default logo asset if still stored
-    if (!this.db.design.loginLogoUrl || this.db.design.loginLogoUrl.includes('4fae5ca52db64590') || this.db.design.loginLogoUrl.includes('f61e20b6c71945c4')) {
-      this.db.design.loginLogoUrl = 'https://host.tscv.workers.dev/img/df6c9e167caf42c6';
+    if (
+      !this.db.design.loginLogoUrl ||
+      this.db.design.loginLogoUrl.includes('4fae5ca52db64590') ||
+      this.db.design.loginLogoUrl.includes('f61e20b6c71945c4') ||
+      this.db.design.loginLogoUrl.includes('df6c9e167caf42c6')
+    ) {
+      this.db.design.loginLogoUrl = 'https://host.tscv.workers.dev/img/27e97803c2bf4c39';
     }
     return this.db.design;
   }

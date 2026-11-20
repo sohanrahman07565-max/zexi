@@ -1,7 +1,7 @@
 {
   "id": "/",
-  "name": "Dark Tools Bot",
-  "short_name": "Dark Tools",
+  "name": "Dark Files Bot",
+  "short_name": "Dark Files",
   "description": "Mobile-first Telegram group file and link delivery system with exact trigger matching, deep-link private delivery, and Render Web Service administration.",
   "start_url": "/",
   "scope": "/",
@@ -11,22 +11,16 @@
   "theme_color": "#05060d",
   "icons": [
     {
-      "src": "/pwa-192x192.png",
+      "src": "https://host.tscv.workers.dev/img/27e97803c2bf4c39",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/pwa-512x512.png",
+      "src": "https://host.tscv.workers.dev/img/27e97803c2bf4c39",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
-    },
-    {
-      "src": "/pwa-maskable-512x512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "maskable"
     }
   ]
 }
