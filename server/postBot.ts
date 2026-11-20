@@ -128,6 +128,387 @@ function styleKeyboard(markup: any) {
   return markup;
 }
 
+const PASSIVE_AUTO_ENTITY_TYPES = new Set([
+  'url',
+  'mention',
+  'hashtag',
+  'cashtag',
+  'bot_command',
+  'email',
+  'phone_number'
+]);
+
+const PROTECTED_ENTITY_TYPES = new Set(['code', 'pre', 'text_link']);
+
+function sanitizeTelegramEntities(entities: any): any[] {
+  if (!Array.isArray(entities)) return [];
+  return entities
+    .filter((e) => e && typeof e.type === 'string' && Number.isFinite(Number(e.offset)) && Number(e.length) > 0)
+    .map((e) => {
+      const clean: any = {
+        type: String(e.type),
+        offset: Number(e.offset),
+        length: Number(e.length)
+      };
+      if (typeof e.url === 'string' && e.url.trim()) clean.url = e.url.trim();
+      if (typeof e.language === 'string' && e.language.trim()) clean.language = e.language.trim();
+      if (typeof e.custom_emoji_id === 'string' && e.custom_emoji_id.trim()) clean.custom_emoji_id = e.custom_emoji_id.trim();
+      if (e.user && typeof e.user === 'object') clean.user = e.user;
+      return clean;
+    });
+}
+
+function decodeBasicHtmlEntities(s: string): string {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+function isAllowedEntityUrl(raw: string): boolean {
+  const s = String(raw || '').trim();
+  if (!s) return false;
+  if (/^tg:\/\//i.test(s)) return true;
+  return validUrl(s);
+}
+
+interface ParsedFormattedPost {
+  text: string;
+  entities: any[];
+}
+
+function parsePlainSegmentWithMarkup(
+  raw: string,
+  allowHtmlAndMarkdown: boolean
+): ParsedFormattedPost {
+  if (!raw || !allowHtmlAndMarkdown) {
+    return { text: raw, entities: [] };
+  }
+
+  const hasAnyHtmlTags = /<\/?(?:a|code|pre|b|strong|i|em|u|ins|s|strike|del|tg-spoiler|blockquote)\b[^>]*>/i.test(raw);
+
+  // Recursive inline/block parser that emits plain text + exact UTF-16 Telegram MessageEntity offsets.
+  const parseSpan = (input: string, startOffset: number): { text: string; entities: any[] } => {
+    let out = '';
+    const ents: any[] = [];
+    let i = 0;
+
+    while (i < input.length) {
+      const rest = input.slice(i);
+
+      // 1. Fenced triple-backtick code block: ```lang\n...\n``` or ```...```
+      const preFenceMatch = rest.match(/^```(?:([a-zA-Z0-9_+-]+)[ \t]*\n)?([\s\S]+?)```/);
+      if (preFenceMatch) {
+        const lang = preFenceMatch[1] ? preFenceMatch[1].trim() : undefined;
+        let codeBody = preFenceMatch[2];
+        if (codeBody.startsWith('\n') && !lang) codeBody = codeBody.slice(1);
+        if (codeBody.endsWith('\n')) codeBody = codeBody.slice(0, -1);
+        const offset = startOffset + out.length;
+        out += codeBody;
+        if (codeBody.length > 0) {
+          ents.push({
+            type: 'pre',
+            offset,
+            length: codeBody.length,
+            ...(lang ? { language: lang } : {})
+          });
+        }
+        i += preFenceMatch[0].length;
+        continue;
+      }
+
+      // 2. Inline code backticks: `code`
+      const inlineCodeMatch = rest.match(/^`([^`\n]+)`/);
+      if (inlineCodeMatch) {
+        const body = inlineCodeMatch[1];
+        const offset = startOffset + out.length;
+        out += body;
+        if (body.length > 0) {
+          ents.push({ type: 'code', offset, length: body.length });
+        }
+        i += inlineCodeMatch[0].length;
+        continue;
+      }
+
+      // 3. HTML <pre>...</pre> and <code>...</code> (non-nested inside code)
+      const htmlPreMatch = rest.match(/^<pre(?:\s+class=(?:"language-([^"]+)"|'language-([^']+)'))?\s*>([\s\S]*?)<\/pre>/i);
+      if (htmlPreMatch) {
+        const lang = (htmlPreMatch[1] || htmlPreMatch[2] || '').trim() || undefined;
+        const inner = decodeBasicHtmlEntities(htmlPreMatch[3].replace(/^<code>([\s\S]*)<\/code>$/i, '$1'));
+        const offset = startOffset + out.length;
+        out += inner;
+        if (inner.length > 0) {
+          ents.push({
+            type: 'pre',
+            offset,
+            length: inner.length,
+            ...(lang ? { language: lang } : {})
+          });
+        }
+        i += htmlPreMatch[0].length;
+        continue;
+      }
+
+      const htmlCodeMatch = rest.match(/^<code\s*>([\s\S]*?)<\/code>/i);
+      if (htmlCodeMatch) {
+        const inner = decodeBasicHtmlEntities(htmlCodeMatch[1]);
+        const offset = startOffset + out.length;
+        out += inner;
+        if (inner.length > 0) {
+          ents.push({ type: 'code', offset, length: inner.length });
+        }
+        i += htmlCodeMatch[0].length;
+        continue;
+      }
+
+      // 4. HTML <a href="...">Click Here</a>
+      const htmlLinkMatch = rest.match(/^<a\s+href=(?:"([^"]+)"|'([^']+)')\s*>([\s\S]*?)<\/a>/i);
+      if (htmlLinkMatch) {
+        const rawHref = decodeBasicHtmlEntities((htmlLinkMatch[1] || htmlLinkMatch[2] || '').trim());
+        if (isAllowedEntityUrl(rawHref)) {
+          const offset = startOffset + out.length;
+          const nested = parseSpan(htmlLinkMatch[3], offset);
+          out += nested.text;
+          ents.push(...nested.entities);
+          if (nested.text.length > 0) {
+            ents.push({ type: 'text_link', offset, length: nested.text.length, url: rawHref });
+          }
+          i += htmlLinkMatch[0].length;
+          continue;
+        }
+      }
+
+      // 5. Other HTML formatting tags (<b>, <strong>, <i>, <em>, <u>, <ins>, <s>, <strike>, <del>, <tg-spoiler>, <blockquote>)
+      const htmlTagMatch = rest.match(
+        /^<(b|strong|i|em|u|ins|s|strike|del|tg-spoiler|blockquote)\s*>([\s\S]*?)<\/\1\s*>/i
+      );
+      if (htmlTagMatch) {
+        const tag = htmlTagMatch[1].toLowerCase();
+        const typeMap: Record<string, string> = {
+          b: 'bold',
+          strong: 'bold',
+          i: 'italic',
+          em: 'italic',
+          u: 'underline',
+          ins: 'underline',
+          s: 'strikethrough',
+          strike: 'strikethrough',
+          del: 'strikethrough',
+          'tg-spoiler': 'spoiler',
+          blockquote: 'blockquote'
+        };
+        const entityType = typeMap[tag];
+        const offset = startOffset + out.length;
+        const nested = parseSpan(htmlTagMatch[2], offset);
+        out += nested.text;
+        ents.push(...nested.entities);
+        if (entityType && nested.text.length > 0) {
+          ents.push({ type: entityType, offset, length: nested.text.length });
+        }
+        i += htmlTagMatch[0].length;
+        continue;
+      }
+
+      // 6. Markdown hyperlink: [Click Here](https://...)
+      const mdLinkMatch = rest.match(/^\[([^\]\n]+)\]\(((?:https?:\/\/|tg:\/\/)[^\s)]+)\)/);
+      if (mdLinkMatch && isAllowedEntityUrl(mdLinkMatch[2])) {
+        const offset = startOffset + out.length;
+        const nested = parseSpan(mdLinkMatch[1], offset);
+        out += nested.text;
+        ents.push(...nested.entities);
+        if (nested.text.length > 0) {
+          ents.push({ type: 'text_link', offset, length: nested.text.length, url: mdLinkMatch[2].trim() });
+        }
+        i += mdLinkMatch[0].length;
+        continue;
+      }
+
+      // 7. Markdown inline styles: **bold**, __italic__, ~~strike~~, ||spoiler||
+      const mdBoldMatch = rest.match(/^\*\*([^\n*](?:[\s\S]*?[^\n*])?)\*\*/);
+      if (mdBoldMatch) {
+        const offset = startOffset + out.length;
+        const nested = parseSpan(mdBoldMatch[1], offset);
+        out += nested.text;
+        ents.push(...nested.entities);
+        if (nested.text.length > 0) {
+          ents.push({ type: 'bold', offset, length: nested.text.length });
+        }
+        i += mdBoldMatch[0].length;
+        continue;
+      }
+
+      const mdItalicMatch = rest.match(/^__([^\n_](?:[\s\S]*?[^\n_])?)__/);
+      if (mdItalicMatch) {
+        const offset = startOffset + out.length;
+        const nested = parseSpan(mdItalicMatch[1], offset);
+        out += nested.text;
+        ents.push(...nested.entities);
+        if (nested.text.length > 0) {
+          ents.push({ type: 'italic', offset, length: nested.text.length });
+        }
+        i += mdItalicMatch[0].length;
+        continue;
+      }
+
+      const mdStrikeMatch = rest.match(/^~~([^\n~](?:[\s\S]*?[^\n~])?)~~/);
+      if (mdStrikeMatch) {
+        const offset = startOffset + out.length;
+        const nested = parseSpan(mdStrikeMatch[1], offset);
+        out += nested.text;
+        ents.push(...nested.entities);
+        if (nested.text.length > 0) {
+          ents.push({ type: 'strikethrough', offset, length: nested.text.length });
+        }
+        i += mdStrikeMatch[0].length;
+        continue;
+      }
+
+      const mdSpoilerMatch = rest.match(/^\|\|([^\n|](?:[\s\S]*?[^\n|])?)\|\|/);
+      if (mdSpoilerMatch) {
+        const offset = startOffset + out.length;
+        const nested = parseSpan(mdSpoilerMatch[1], offset);
+        out += nested.text;
+        ents.push(...nested.entities);
+        if (nested.text.length > 0) {
+          ents.push({ type: 'spoiler', offset, length: nested.text.length });
+        }
+        i += mdSpoilerMatch[0].length;
+        continue;
+      }
+
+      if (hasAnyHtmlTags) {
+        const htmlCharRef = rest.match(/^(&amp;|&lt;|&gt;|&quot;|&#39;)/);
+        if (htmlCharRef) {
+          out += decodeBasicHtmlEntities(htmlCharRef[1]);
+          i += htmlCharRef[1].length;
+          continue;
+        }
+      }
+
+      out += input[i];
+      i += 1;
+    }
+
+    return { text: out, entities: ents };
+  };
+
+  return parseSpan(raw, 0);
+}
+
+export function normalizePostFormatting(rawText: string, incomingEntities?: any[]): ParsedFormattedPost {
+  const cleanText = typeof rawText === 'string' ? rawText : '';
+  const cleanIncoming = sanitizeTelegramEntities(incomingEntities);
+
+  const hasMarkupSyntax =
+    /`[^`\n]+`|```[\s\S]+?```|\[[^\]\n]+\]\((?:https?:\/\/|tg:\/\/)[^\s)]+\)|<(?:a\s+href=|code>|pre(?:\s+class=|\/?>)|b>|strong>|i>|em>|u>|ins>|s>|strike>|del>|tg-spoiler>|blockquote>)/i.test(
+      cleanText
+    );
+
+  // If no markup syntax is present at all, preserve native Telegram entities as-is cleanly.
+  if (!hasMarkupSyntax) {
+    return {
+      text: cleanText,
+      entities: cleanIncoming
+    };
+  }
+
+  // Keep only non-passive native entities that might coexist (excluding passive auto-detected URLs
+  // that Telegram creates on raw [Click Here](https://...) or <a href="..."> inputs).
+  const richIncoming = cleanIncoming.filter((e) => !PASSIVE_AUTO_ENTITY_TYPES.has(e.type));
+
+  if (richIncoming.length === 0) {
+    const parsed = parsePlainSegmentWithMarkup(cleanText, true);
+    return {
+      text: parsed.text,
+      entities: sanitizeTelegramEntities(parsed.entities)
+    };
+  }
+
+  // If the incoming message ALREADY uses native Telegram code/pre/text_link entities covering the
+  // rich sections, do not strip backticks/tags inside those protected entities; only parse outside them.
+  const protectedRanges = richIncoming
+    .filter((e) => PROTECTED_ENTITY_TYPES.has(e.type))
+    .map((e) => ({ start: e.offset, end: e.offset + e.length }))
+    .sort((a, b) => a.start - b.start);
+
+  // Merge overlapping protected ranges
+  const mergedProtected: Array<{ start: number; end: number }> = [];
+  for (const r of protectedRanges) {
+    const last = mergedProtected[mergedProtected.length - 1];
+    if (last && r.start <= last.end) {
+      last.end = Math.max(last.end, r.end);
+    } else {
+      mergedProtected.push({ ...r });
+    }
+  }
+
+  // Split text into protected (verbatim) and unprotected (parse markup) chunks, mapping UTF-16 offsets
+  const chunks: Array<{ start: number; end: number; protected: boolean }> = [];
+  let cursor = 0;
+  for (const pr of mergedProtected) {
+    if (pr.start > cursor) chunks.push({ start: cursor, end: pr.start, protected: false });
+    chunks.push({ start: pr.start, end: pr.end, protected: true });
+    cursor = pr.end;
+  }
+  if (cursor < cleanText.length) {
+    chunks.push({ start: cursor, end: cleanText.length, protected: false });
+  }
+
+  // Fallback safely if richIncoming includes inline styles (bold/italic/etc.) over unprotected markup:
+  // preserve native rich entities cleanly if unprotected markup overlaps them awkwardly; otherwise parse!
+  if (chunks.length === 1 && !chunks[0].protected) {
+    // Check whether native bold/italic entities are inside plain text without conflicting delimiters
+    const parsed = parsePlainSegmentWithMarkup(cleanText, true);
+    if (parsed.entities.length > 0 && parsed.text !== cleanText) {
+      // Shift/reconcile non-protected native entities only when length didn't shift them, else keep parsed + non-overlapping
+      const mergedEntities = sanitizeTelegramEntities([...parsed.entities]);
+      return { text: parsed.text, entities: mergedEntities };
+    }
+    return { text: cleanText, entities: cleanIncoming };
+  }
+
+  let builtText = '';
+  const builtEntities: any[] = [];
+  const origToNewStart = new Map<number, number>();
+  const origToNewEnd = new Map<number, number>();
+
+  for (const ch of chunks) {
+    const slice = cleanText.slice(ch.start, ch.end);
+    const outStart = builtText.length;
+    if (ch.protected) {
+      origToNewStart.set(ch.start, outStart);
+      builtText += slice;
+      origToNewEnd.set(ch.end, builtText.length);
+    } else {
+      const parsed = parsePlainSegmentWithMarkup(slice, true);
+      builtText += parsed.text;
+      for (const e of parsed.entities) {
+        builtEntities.push({ ...e, offset: e.offset + outStart });
+      }
+    }
+  }
+
+  // Re-attach protected rich entities with exact remapped offsets
+  for (const e of richIncoming) {
+    if (PROTECTED_ENTITY_TYPES.has(e.type)) {
+      const mappedStart = origToNewStart.get(e.offset);
+      const mappedEnd = origToNewEnd.get(e.offset + e.length);
+      if (mappedStart !== undefined && mappedEnd !== undefined && mappedEnd > mappedStart) {
+        builtEntities.push({ ...e, offset: mappedStart, length: mappedEnd - mappedStart });
+      } else if (builtText.slice(e.offset, e.offset + e.length) === cleanText.slice(e.offset, e.offset + e.length)) {
+        builtEntities.push({ ...e });
+      }
+    }
+  }
+
+  return {
+    text: builtText,
+    entities: sanitizeTelegramEntities(builtEntities)
+  };
+}
+
 export class PostBotEngine {
   public static async handleUpdate(
     update: any,
@@ -181,10 +562,19 @@ export class PostBotEngine {
       d.userIds = failed;
     };
 
-    const wizard = async (chat: string | number, d: PostDraft, text: string, markup: any = baseKeys()) => {
+    const wizard = async (
+      chat: string | number,
+      d: PostDraft,
+      text: string,
+      markup: any = baseKeys(),
+      entities?: any[]
+    ) => {
       markup = styleKeyboard(markup);
+      const cleanEntities = sanitizeTelegramEntities(entities);
+      const entityOpt = cleanEntities.length ? { entities: cleanEntities } : {};
       if (!d.wizardId) {
         const m = await sendMessage(chat, text, {
+          ...entityOpt,
           reply_markup: markup,
           link_preview_options: { is_disabled: true }
         });
@@ -194,6 +584,7 @@ export class PostBotEngine {
       const opts = {
         chat_id: chat,
         message_id: d.wizardId,
+        ...entityOpt,
         reply_markup: markup,
         link_preview_options: { is_disabled: true }
       };
@@ -203,6 +594,7 @@ export class PostBotEngine {
         const message = String(e?.message || '').toLowerCase();
         if (message.includes('message is not modified')) return;
         const m = await sendMessage(chat, text, {
+          ...entityOpt,
           reply_markup: markup,
           link_preview_options: { is_disabled: true }
         });
@@ -334,7 +726,15 @@ export class PostBotEngine {
         text: 'Text'
       };
       const type = typeMap[d.type] || 'Attachment';
-      const text = `POST PREVIEW\n\nType: ${type}\n\nCaption / text:\n${d.caption || '(Empty)'}\n\nButtons:\n${listButtons(d)}\n\nConfirm to publish or edit any part.`;
+      const headerPrefix = `POST PREVIEW\n\nType: ${type}\n\nCaption / text:\n`;
+      const captionText = d.caption || '(Empty)';
+      const previewEntities = d.caption
+        ? sanitizeTelegramEntities(d.entities).map((e) => ({
+            ...e,
+            offset: e.offset + headerPrefix.length
+          }))
+        : [];
+      const text = `${headerPrefix}${captionText}\n\nButtons:\n${listButtons(d)}\n\nConfirm to publish or edit any part.`;
       const rows = grouped(d.buttons);
       rows.push([{ text: 'CONFIRM & PUBLISH', callback_data: 'publish' }]);
       rows.push([
@@ -345,7 +745,7 @@ export class PostBotEngine {
         { text: 'Delete draft', callback_data: 'delete_draft', style: 'danger' },
         { text: 'Cancel', callback_data: 'cancel', style: 'danger' }
       ]);
-      await wizard(chat, d, text, { inline_keyboard: rows });
+      await wizard(chat, d, text, { inline_keyboard: rows }, previewEntities);
     };
 
     const getActiveChannel = async (): Promise<{ activeChannel: string; legacyChannelId: string }> => {
@@ -381,7 +781,8 @@ export class PostBotEngine {
 
       await answerCallback(qid, { text: d.targetMessageId ? 'Updating post...' : 'Publishing...' });
       const markup = d.buttons.length ? { inline_keyboard: grouped(d.buttons) } : undefined;
-      const entities = Array.isArray(d.entities) && d.entities.length ? d.entities : undefined;
+      const cleanEntities = sanitizeTelegramEntities(d.entities);
+      const entities = cleanEntities.length ? cleanEntities : undefined;
       let sent: any;
       let postId = d.targetMessageId;
 
@@ -539,11 +940,17 @@ export class PostBotEngine {
       const text = typeof m.text === 'string' ? m.text : null;
 
       // Forwarded channel post handler for /setchannel
+      // Only treat as channel connect when not actively composing/editing a post draft
+      const currentDraft = getDraft(botId, fromId);
+      const isDraftTextOrMediaInput =
+        currentDraft.phase === 'media' ||
+        currentDraft.phase === 'caption' ||
+        currentDraft.phase === 'edit_caption';
       const forwardedChannel =
         (m.forward_from_chat && m.forward_from_chat.type === 'channel' ? m.forward_from_chat : null) ||
         (m.forward_origin?.type === 'channel' && m.forward_origin?.chat ? m.forward_origin.chat : null);
 
-      if (forwardedChannel && isAllowed) {
+      if (forwardedChannel && isAllowed && !isDraftTextOrMediaInput) {
         const channelId = String(forwardedChannel.id);
         try {
           const meRes = await callTelegramApi('getMe', {});
@@ -557,6 +964,9 @@ export class PostBotEngine {
             return;
           }
           await storage.updateSettings({ postBotChannelId: channelId });
+          if (currentDraft.phase === 'awaiting_channel_forward') {
+            currentDraft.phase = 'idle';
+          }
           await sendMessage(
             chat,
             `✅ Private channel connected!\nName: ${forwardedChannel.title || 'Private channel'}\nID: ${channelId}\n\nএখন থেকে পোস্ট এই চ্যানেলে যাবে।\n⚠️ Render restart হলে সংযোগ আবার করতে হবে, অথবা Render Environment-এ CHANNEL_ID=${channelId} সেট করো।`
@@ -574,6 +984,7 @@ export class PostBotEngine {
 
         if (/^\/setchannel(?:@\w+)?$/i.test(trimmed)) {
           if (!isAllowed) return;
+          getDraft(botId, fromId).phase = 'awaiting_channel_forward';
           await sendMessage(
             chat,
             '🔗 প্রাইভেট চ্যানেল Connect করতে:\n\n1) চ্যানেলে এই বটকে Admin করো (Post Messages permission চালু রাখো)।\n2) চ্যানেলের যেকোনো একটি পোস্ট সরাসরি এই বটের ইনবক্সে Forward করো।\n3) বট চ্যানেল শনাক্ত করে Connect করবে।\n\nআগের CHANNEL_ID সিস্টেমও থাকবে।'
@@ -724,50 +1135,56 @@ Set BOT_TOKEN from @BotFather, CHANNEL_ID to your channel username or private nu
       try {
         if (d.phase === 'media') {
           if (m.photo) {
+            const parsed = normalizePostFormatting(m.caption || '', m.caption_entities);
             d.type = 'photo';
             d.fileId = m.photo[m.photo.length - 1].file_id;
-            d.caption = m.caption || '';
-            d.entities = Array.isArray(m.caption_entities) ? m.caption_entities : [];
+            d.caption = parsed.text;
+            d.entities = parsed.entities;
             await clearReplies(chat, d);
             return d.targetMessageId ? preview(chat, d) : d.caption ? askButtonText(chat, d) : askCaption(chat, d);
           }
           if (m.video) {
+            const parsed = normalizePostFormatting(m.caption || '', m.caption_entities);
             d.type = 'video';
             d.fileId = m.video.file_id;
-            d.caption = m.caption || '';
-            d.entities = Array.isArray(m.caption_entities) ? m.caption_entities : [];
+            d.caption = parsed.text;
+            d.entities = parsed.entities;
             await clearReplies(chat, d);
             return d.targetMessageId ? preview(chat, d) : d.caption ? askButtonText(chat, d) : askCaption(chat, d);
           }
           if (m.document) {
+            const parsed = normalizePostFormatting(m.caption || '', m.caption_entities);
             d.type = 'document';
             d.fileId = m.document.file_id;
             d.fileName = m.document.file_name || 'attachment';
-            d.caption = m.caption || '';
-            d.entities = Array.isArray(m.caption_entities) ? m.caption_entities : [];
+            d.caption = parsed.text;
+            d.entities = parsed.entities;
             await clearReplies(chat, d);
             return d.targetMessageId ? preview(chat, d) : d.caption ? askButtonText(chat, d) : askCaption(chat, d);
           }
           if (m.audio) {
+            const parsed = normalizePostFormatting(m.caption || '', m.caption_entities);
             d.type = 'audio';
             d.fileId = m.audio.file_id;
-            d.caption = m.caption || '';
-            d.entities = Array.isArray(m.caption_entities) ? m.caption_entities : [];
+            d.caption = parsed.text;
+            d.entities = parsed.entities;
             await clearReplies(chat, d);
             return d.targetMessageId ? preview(chat, d) : d.caption ? askButtonText(chat, d) : askCaption(chat, d);
           }
           if (m.animation) {
+            const parsed = normalizePostFormatting(m.caption || '', m.caption_entities);
             d.type = 'animation';
             d.fileId = m.animation.file_id;
-            d.caption = m.caption || '';
-            d.entities = Array.isArray(m.caption_entities) ? m.caption_entities : [];
+            d.caption = parsed.text;
+            d.entities = parsed.entities;
             await clearReplies(chat, d);
             return d.targetMessageId ? preview(chat, d) : d.caption ? askButtonText(chat, d) : askCaption(chat, d);
           }
           if (text && text.trim()) {
+            const parsed = normalizePostFormatting(text, m.entities);
             d.type = 'text';
-            d.caption = text;
-            d.entities = Array.isArray(m.entities) ? m.entities : [];
+            d.caption = parsed.text;
+            d.entities = parsed.entities;
             await clearReplies(chat, d);
             return d.targetMessageId ? preview(chat, d) : askButtonText(chat, d);
           }
@@ -776,12 +1193,14 @@ Set BOT_TOKEN from @BotFather, CHANNEL_ID to your channel username or private nu
         }
 
         if (d.phase === 'caption') {
-          if (!text || text.length > 1024) {
+          const parsed = text ? normalizePostFormatting(text, m.entities) : { text: '', entities: [] };
+          const maxLen = d.type === 'text' ? 4096 : 1024;
+          if (!parsed.text || parsed.text.length > maxLen) {
             await clearReplies(chat, d);
-            return wizard(chat, d, 'STEP 2 — CAPTION\n\nSend caption text up to 1024 characters, or use /skip.');
+            return wizard(chat, d, `STEP 2 — CAPTION\n\nSend caption text up to ${maxLen} characters, or use /skip.`);
           }
-          d.caption = text;
-          d.entities = Array.isArray(m.entities) ? m.entities : [];
+          d.caption = parsed.text;
+          d.entities = parsed.entities;
           await clearReplies(chat, d);
           return askButtonText(chat, d);
         }
@@ -811,12 +1230,13 @@ Set BOT_TOKEN from @BotFather, CHANNEL_ID to your channel username or private nu
 
         if (d.phase === 'edit_caption') {
           const limit = d.type === 'text' ? 4096 : 1024;
-          if (!text || text.length > limit) {
+          const parsed = text ? normalizePostFormatting(text, m.entities) : { text: '', entities: [] };
+          if (!parsed.text || parsed.text.length > limit) {
             await clearReplies(chat, d);
             return wizard(chat, d, `EDIT CAPTION / TEXT\n\nSend text up to ${limit} characters.`);
           }
-          d.caption = text;
-          d.entities = Array.isArray(m.entities) ? m.entities : [];
+          d.caption = parsed.text;
+          d.entities = parsed.entities;
           await clearReplies(chat, d);
           return preview(chat, d);
         }

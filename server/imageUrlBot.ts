@@ -46,6 +46,11 @@ function boldUiText(text: string): string {
 function buttonIcon(text: string, style: string): string {
   const value = String(text).toLowerCase();
   const matches: Array<[RegExp, string]> = [
+    [/admin/, '🛡️'],
+    [/user/, '👥'],
+    [/broadcast/, '📢'],
+    [/clean/, '🧹'],
+    [/all links/, '🗂️'],
     [/upload/, '📤'],
     [/my links|link/, '🔗'],
     [/setting/, '⚙️'],
@@ -63,6 +68,13 @@ function buttonIcon(text: string, style: string): string {
     [/next/, '▶️']
   ];
   return matches.find(([pattern]) => pattern.test(value))?.[1] || ({ success: '✅', danger: '❌', primary: '▫️' }[style] || '▫️');
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 function btn(text: string, callbackData: string, style: 'primary' | 'success' | 'danger' = 'primary') {
@@ -308,27 +320,68 @@ export class ImageUrlBotEngine {
       }
     };
 
+    const isAdminUser = async (from: any): Promise<boolean> => {
+      if (!from?.id) return false;
+      const uid = String(from.id).trim();
+      const uname = String(from.username || '').replace(/^@+/, '').trim().toLowerCase();
+
+      const storedIdRaw = String(store.adminTelegramId || '').trim();
+      const storedUname = String(store.adminUsername || '').replace(/^@+/, '').trim().toLowerCase();
+
+      if (storedIdRaw && storedIdRaw === uid) {
+        if (uname && !store.adminUsername) {
+          store.adminUsername = uname;
+          storeDirty = true;
+        }
+        return true;
+      }
+
+      if (uname && ((storedUname && storedUname === uname) || (storedIdRaw && !/^\d+$/.test(storedIdRaw) && storedIdRaw.replace(/^@+/, '').toLowerCase() === uname))) {
+        if (/^\d+$/.test(uid) && store.adminTelegramId !== uid) {
+          store.adminTelegramId = uid;
+          storeDirty = true;
+        }
+        if (store.adminUsername !== uname) {
+          store.adminUsername = uname;
+          storeDirty = true;
+        }
+        return true;
+      }
+
+      if (deps.isAuthorizedAdmin) {
+        try {
+          if (await deps.isAuthorizedAdmin(uid, from.username)) {
+            return true;
+          }
+        } catch {}
+      }
+
+      return false;
+    };
+
     const mainMenuText = (from: any) => {
       const name = escapeHtml(from?.first_name || 'there');
       return `<b>🖼️ ImageLink Bot</b>\n\n👋 Welcome, ${name}!\n\n✨ Turn any Telegram photo into a clean, shareable URL.\n\n📦 Your uploads stay organized here, with optional expiry controls.`;
     };
 
-    const mainMenuRows = () => [
+    const mainMenuRows = (isAdmin = false) => [
       [btn('Upload Image', 'upload:start', 'success')],
       [btn('My Links', 'links:0')],
-      [btn('Settings', 'settings'), btn('Help', 'help')]
+      [btn('Settings', 'settings'), btn('Help', 'help')],
+      ...(isAdmin ? [[btn('Admin Panel', 'admin:panel')]] : [])
     ];
 
     const showMain = async (chatId: string | number, from: any, opts: { fresh?: boolean; incomingMsg?: any } = {}) => {
       this.clearSession(store, chatId);
       storeDirty = true;
+      const isAdmin = await isAdminUser(from);
       if (opts.fresh && opts.incomingMsg) {
         await deleteIncoming(opts.incomingMsg);
       }
       if (opts.fresh) {
-        await sendFreshScreen(chatId, mainMenuText(from), mainMenuRows());
+        await sendFreshScreen(chatId, mainMenuText(from), mainMenuRows(isAdmin));
       } else {
-        await sendScreen(chatId, mainMenuText(from), mainMenuRows());
+        await sendScreen(chatId, mainMenuText(from), mainMenuRows(isAdmin));
       }
     };
 
@@ -460,6 +513,126 @@ export class ImageUrlBotEngine {
         chatId,
         '<b>💡 Help</b>\n\n📤 <b>Upload:</b> tap Upload Image, then send a photo.\n📝 <b>Caption:</b> add a label to each image if you want.\n⏳ <b>Expiry:</b> every image gets its own independent expiry choice.\n\n✨ The bot keeps your interface in one edited card so your chat stays clean.',
         [[btn('Back to Menu', 'menu')]]
+      );
+    };
+
+    const showAdminPanel = async (chatId: string | number) => {
+      const totalUsers = Object.keys(store.users).length;
+      const activeLinks = store.links.filter((l) => !l.isDeleted);
+      const deletedLinks = store.links.filter((l) => l.isDeleted);
+      const expiringLinks = activeLinks.filter((l) => Boolean(l.expiresAt));
+      const totalBytes = activeLinks.reduce((acc, l) => acc + (Number(l.fileSize) || 0), 0);
+      const assignedAdmin = store.adminUsername
+        ? `@${escapeHtml(store.adminUsername)}`
+        : store.adminTelegramId
+        ? `<code>${escapeHtml(store.adminTelegramId)}</code>`
+        : 'Assigned Admin';
+
+      await sendScreen(
+        chatId,
+        `<b>🛡️ ImageLink Admin Panel</b>\n\n` +
+          `👤 <b>Assigned Admin:</b> ${assignedAdmin}\n` +
+          `👥 <b>Total Users:</b> ${totalUsers}\n` +
+          `🔗 <b>Active Links:</b> ${activeLinks.length}\n` +
+          `⏳ <b>Expiring Links:</b> ${expiringLinks.length}\n` +
+          `🗑️ <b>Deleted / Expired:</b> ${deletedLinks.length}\n` +
+          `💾 <b>Active Storage:</b> ${formatBytes(totalBytes)}`,
+        [
+          [btn('All Links', 'admin:links:0'), btn('Users List', 'admin:users:0')],
+          [btn('Clean Expired', 'admin:cleanup'), btn('Broadcast', 'admin:broadcast', 'success')],
+          [btn('Refresh', 'admin:panel'), btn('Back to Menu', 'menu')]
+        ]
+      );
+    };
+
+    const showAdminLinks = async (chatId: string | number, page = 0) => {
+      const activeLinks = store.links
+        .filter((l) => !l.isDeleted)
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+      const count = activeLinks.length;
+      const items = activeLinks.slice(page * 5, page * 5 + 5);
+      const rows: any[][] = items.map((link) => {
+        const owner = store.users[String(link.ownerTelegramId)];
+        const ownerTag = owner?.username ? `@${owner.username}` : String(link.ownerTelegramId);
+        return [
+          btn(`#${link.id} · ${(link.caption || 'Untitled').slice(0, 16)} · ${ownerTag}`, `admin:link:${link.id}`)
+        ];
+      });
+      const nav: any[] = [];
+      if (page > 0) nav.push(btn('Prev', `admin:links:${page - 1}`));
+      if ((page + 1) * 5 < count) nav.push(btn('Next', `admin:links:${page + 1}`));
+      if (nav.length) rows.push(nav);
+      rows.push([btn('Admin Panel', 'admin:panel'), btn('Back to Menu', 'menu')]);
+
+      await sendScreen(
+        chatId,
+        `<b>🗂️ All Active Links (${count})</b>\n\n${count ? '📌 Select any link to inspect or delete it.' : '📭 No active links exist yet.'}`,
+        rows
+      );
+    };
+
+    const showAdminLinkDetail = async (chatId: string | number, id: number) => {
+      const link = store.links.find((l) => l.id === id && !l.isDeleted);
+      if (!link) {
+        await sendScreen(
+          chatId,
+          '<b>⚠️ Link unavailable</b>\n\n🗑️ It may have already been deleted.',
+          [[btn('Back to All Links', 'admin:links:0')]]
+        );
+        return;
+      }
+      const owner = store.users[String(link.ownerTelegramId)];
+      const ownerLabel = owner?.username
+        ? `@${escapeHtml(owner.username)} (<code>${escapeHtml(link.ownerTelegramId)}</code>)`
+        : `<code>${escapeHtml(link.ownerTelegramId)}</code>`;
+
+      await sendScreen(
+        chatId,
+        `<b>🛡️ Link #${link.id} Details</b>\n\n` +
+          `👤 <b>Owner:</b> ${ownerLabel}\n` +
+          `🔗 <b>URL</b>\n<code>${escapeHtml(link.url)}</code>\n\n` +
+          `📝 <b>Caption:</b> ${escapeHtml(link.caption || 'None')}\n` +
+          `📅 <b>Uploaded:</b> ${formatDate(link.createdAt)}\n` +
+          `⏳ <b>Expires:</b> ${expiryLabel(link.expiresAt)}`,
+        [
+          [btn('Delete Link', `admin:del:${link.id}`, 'danger')],
+          [btn('Back to All Links', 'admin:links:0'), btn('Admin Panel', 'admin:panel')]
+        ]
+      );
+    };
+
+    const showAdminUsers = async (chatId: string | number, page = 0) => {
+      const users = Object.values(store.users).sort((a, b) =>
+        String(b.lastActiveAt || b.joinedAt || '').localeCompare(String(a.lastActiveAt || a.joinedAt || ''))
+      );
+      const count = users.length;
+      const items = users.slice(page * 8, page * 8 + 8);
+      const linkCounts = new Map<string, number>();
+      for (const l of store.links) {
+        if (!l.isDeleted) {
+          const k = String(l.ownerTelegramId);
+          linkCounts.set(k, (linkCounts.get(k) || 0) + 1);
+        }
+      }
+
+      const lines = items.map((u, idx) => {
+        const serial = page * 8 + idx + 1;
+        const uname = u.username ? `@${escapeHtml(u.username)}` : escapeHtml(u.firstName || 'User');
+        const uploads = linkCounts.get(String(u.telegramId)) || 0;
+        return `${serial}. ${uname} (<code>${escapeHtml(u.telegramId)}</code>) · <b>${uploads}</b> links`;
+      });
+
+      const nav: any[] = [];
+      if (page > 0) nav.push(btn('Prev', `admin:users:${page - 1}`));
+      if ((page + 1) * 8 < count) nav.push(btn('Next', `admin:users:${page + 1}`));
+      const rows: any[][] = [];
+      if (nav.length) rows.push(nav);
+      rows.push([btn('Admin Panel', 'admin:panel'), btn('Back to Menu', 'menu')]);
+
+      await sendScreen(
+        chatId,
+        `<b>👥 Registered Users (${count})</b>\n\n${lines.length ? lines.join('\n') : '📭 No users have interacted with this bot yet.'}`,
+        rows
       );
     };
 
@@ -664,6 +837,72 @@ export class ImageUrlBotEngine {
             '<b>⏳ Default expiry</b>\n\n⌛ Send <code>never</code>, <code>1d</code>, <code>3d</code>, or another duration.',
             [[btn('Cancel', 'settings')]]
           );
+        } else if (data === 'admin:panel' || data.startsWith('admin:')) {
+          if (!(await isAdminUser(q.from))) {
+            await sendScreen(
+              chatId,
+              `<b>⛔ Access Denied</b>\n\n🔒 Only the assigned bot admin/owner can access the Admin Panel.\n\n🆔 Your ID: <code>${escapeHtml(q.from?.id || chatId)}</code>`,
+              [[btn('Back to Menu', 'menu')]]
+            );
+          } else if (data === 'admin:panel') {
+            this.clearSession(store, chatId);
+            storeDirty = true;
+            await showAdminPanel(chatId);
+          } else if (/^admin:links:(\d+)$/.test(data)) {
+            const page = Number(data.match(/^admin:links:(\d+)$/)![1]);
+            await showAdminLinks(chatId, page);
+          } else if (/^admin:link:(\d+)$/.test(data)) {
+            const id = Number(data.match(/^admin:link:(\d+)$/)![1]);
+            await showAdminLinkDetail(chatId, id);
+          } else if (/^admin:del:(\d+)$/.test(data)) {
+            const id = Number(data.match(/^admin:del:(\d+)$/)![1]);
+            const link = store.links.find((l) => l.id === id && !l.isDeleted);
+            if (link) {
+              try {
+                await deleteRemoteImage(link.imageId);
+              } catch {}
+              link.isDeleted = true;
+              storeDirty = true;
+            }
+            await sendScreen(
+              chatId,
+              `<b>🗑️ Link #${id} Deleted</b>\n\n✅ The image record has been removed.`,
+              [[btn('Back to All Links', 'admin:links:0'), btn('Admin Panel', 'admin:panel')]]
+            );
+          } else if (/^admin:users:(\d+)$/.test(data)) {
+            const page = Number(data.match(/^admin:users:(\d+)$/)![1]);
+            await showAdminUsers(chatId, page);
+          } else if (data === 'admin:cleanup') {
+            const nowMs = Date.now();
+            let removed = 0;
+            for (const link of store.links) {
+              if (!link.isDeleted && link.expiresAt) {
+                const expMs = new Date(link.expiresAt).getTime();
+                if (Number.isFinite(expMs) && expMs <= nowMs) {
+                  try {
+                    await deleteRemoteImage(link.imageId);
+                  } catch {}
+                  link.isDeleted = true;
+                  storeDirty = true;
+                  removed++;
+                }
+              }
+            }
+            await sendScreen(
+              chatId,
+              `<b>🧹 Cleanup Complete</b>\n\n✅ Removed <b>${removed}</b> expired ${removed === 1 ? 'link' : 'links'}.`,
+              [[btn('Admin Panel', 'admin:panel')]]
+            );
+          } else if (data === 'admin:broadcast') {
+            this.setSession(store, chatId, { state: 'awaiting_admin_broadcast' });
+            storeDirty = true;
+            const userCount = Object.keys(store.users).length;
+            await sendScreen(
+              chatId,
+              `<b>📢 Broadcast Message</b>\n\n👥 Recipients: <b>${userCount}</b> users\n\n✍️ Send the text message you want to broadcast to all bot users.`,
+              [[btn('Cancel', 'admin:panel', 'danger')]]
+            );
+          }
         }
 
         await commit();
@@ -701,6 +940,19 @@ export class ImageUrlBotEngine {
         const cmd = cmdMatch[1].toLowerCase();
         if (cmd === 'start') {
           await showMain(chatId, msg.from, { fresh: true, incomingMsg: msg });
+        } else if (cmd === 'admin') {
+          await deleteIncoming(msg);
+          if (await isAdminUser(msg.from)) {
+            this.clearSession(store, chatId);
+            storeDirty = true;
+            await showAdminPanel(chatId);
+          } else {
+            await sendScreen(
+              chatId,
+              `<b>⛔ Access Denied</b>\n\n🔒 Only the assigned bot admin/owner can open the Admin Panel.\n\n🆔 Your ID: <code>${escapeHtml(msg.from?.id || chatId)}</code>`,
+              [[btn('Back to Menu', 'menu')]]
+            );
+          }
         } else if (cmd === 'upload') {
           await deleteIncoming(msg);
           await showUploadPhoto(chatId);
@@ -714,7 +966,6 @@ export class ImageUrlBotEngine {
           await deleteIncoming(msg);
           await showHelp(chatId);
         } else {
-          // Unknown slash commands (no /admin panel exposure) return cleanly to main menu
           await deleteIncoming(msg);
           await showMain(chatId, msg.from);
         }
@@ -780,6 +1031,33 @@ export class ImageUrlBotEngine {
           this.clearSession(store, chatId);
           storeDirty = true;
           await showSettings(chatId);
+        }
+      } else if (session.state === 'awaiting_admin_broadcast') {
+        if (await isAdminUser(msg.from)) {
+          const userIds = Object.keys(store.users);
+          let sent = 0;
+          let failed = 0;
+          for (const targetUid of userIds) {
+            try {
+              const r = await callTelegramApi('sendMessage', {
+                chat_id: targetUid,
+                text: rawText
+              });
+              if (r?.ok) sent++;
+              else failed++;
+            } catch {
+              failed++;
+            }
+          }
+          this.clearSession(store, chatId);
+          storeDirty = true;
+          await sendScreen(
+            chatId,
+            `<b>📢 Broadcast Complete</b>\n\n✅ <b>Delivered:</b> ${sent}\n⚠️ <b>Failed:</b> ${failed}`,
+            [[btn('Admin Panel', 'admin:panel'), btn('Back to Menu', 'menu')]]
+          );
+        } else {
+          await showMain(chatId, msg.from);
         }
       } else {
         await showMain(chatId, msg.from);

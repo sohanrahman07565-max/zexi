@@ -237,7 +237,7 @@ export interface BotInstance {
   panelUrl?: string;
 }
 
-export type KeyPoolMode = 'pool' | 'generator';
+export type KeyPoolMode = 'pool' | 'generator' | 'shared';
 export type KeyGeneratorCharType = 'numbers' | 'letters_upper' | 'letters_mixed' | 'alphanumeric';
 
 export interface KeyGeneratorConfig {
@@ -259,6 +259,7 @@ export interface KeyPoolRecord {
   id: string;
   mode?: KeyPoolMode;
   generatorConfig?: KeyGeneratorConfig | null;
+  sharedText?: string;
   title: string;
   keys: KeyPoolEntry[];
   createdAt: string;
@@ -1360,10 +1361,11 @@ export const api = {
   async createKeyPool(payload: {
     mode?: KeyPoolMode;
     generatorConfig?: KeyGeneratorConfig;
+    sharedText?: string;
     title?: string;
     keysText?: string;
     durationValue?: number;
-    durationUnit?: 'never' | 'minutes' | 'hours' | 'days';
+    durationUnit?: 'never' | 'unlimited' | 'minutes' | 'hours' | 'days';
     expiresAt?: string | null;
     status?: 'active' | 'disabled';
   }): Promise<{ success: boolean; pool: KeyPoolRecord }> {
@@ -1383,9 +1385,10 @@ export const api = {
       title?: string;
       keysText?: string;
       addKeysText?: string;
+      sharedText?: string;
       generatorConfig?: Partial<KeyGeneratorConfig>;
       durationValue?: number;
-      durationUnit?: 'never' | 'minutes' | 'hours' | 'days';
+      durationUnit?: 'never' | 'unlimited' | 'minutes' | 'hours' | 'days';
       expiresAt?: string | null;
       status?: 'active' | 'disabled';
       resetClaims?: boolean;

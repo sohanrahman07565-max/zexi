@@ -358,7 +358,7 @@ export interface ClonedBotRecord {
   panelUrl?: string;
 }
 
-export type KeyPoolMode = 'pool' | 'generator';
+export type KeyPoolMode = 'pool' | 'generator' | 'shared';
 export type KeyGeneratorCharType = 'numbers' | 'letters_upper' | 'letters_mixed' | 'alphanumeric';
 
 export interface KeyGeneratorConfig {
@@ -380,6 +380,7 @@ export interface KeyPoolRecord {
   id: string;
   mode?: KeyPoolMode;
   generatorConfig?: KeyGeneratorConfig | null;
+  sharedText?: string;
   title: string;
   keys: KeyPoolEntry[];
   createdAt: string;
@@ -4346,20 +4347,30 @@ export class SharedStorageService {
     return this.checkAndCleanExpiredKeyPoolsSync(graceMs);
   }
 
+  private static normalizeKeyPoolMode(rawMode?: string | null): KeyPoolMode {
+    if (rawMode === 'generator') return 'generator';
+    if (rawMode === 'shared') return 'shared';
+    return 'pool';
+  }
+
   public async getKeyPools(): Promise<KeyPoolRecord[]> {
     await this.loadLatest(false);
     this.checkAndCleanExpiredKeyPoolsSync();
     const list = Array.isArray(this.db.keyPools) ? this.db.keyPools : [];
     return [...list]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-      .map((pool) => ({
-        ...pool,
-        mode: pool.mode === 'generator' ? 'generator' : 'pool',
-        generatorConfig: pool.mode === 'generator' && pool.generatorConfig
-          ? SharedStorageService.normalizeGeneratorConfig(pool.generatorConfig)
-          : null,
-        keys: Array.isArray(pool.keys) ? pool.keys.map((k) => ({ ...k })) : []
-      }));
+      .map((pool) => {
+        const mode = SharedStorageService.normalizeKeyPoolMode(pool.mode);
+        return {
+          ...pool,
+          mode,
+          generatorConfig: mode === 'generator' && pool.generatorConfig
+            ? SharedStorageService.normalizeGeneratorConfig(pool.generatorConfig)
+            : null,
+          ...(mode === 'shared' ? { sharedText: String(pool.sharedText ?? '') } : {}),
+          keys: Array.isArray(pool.keys) ? pool.keys.map((k) => ({ ...k })) : []
+        };
+      });
   }
 
   public async getKeyPool(id: string): Promise<KeyPoolRecord | null> {
@@ -4369,12 +4380,14 @@ export class SharedStorageService {
     if (!cleanId || !Array.isArray(this.db.keyPools)) return null;
     const found = this.db.keyPools.find((p) => p.id === cleanId);
     if (!found) return null;
+    const mode = SharedStorageService.normalizeKeyPoolMode(found.mode);
     return {
       ...found,
-      mode: found.mode === 'generator' ? 'generator' : 'pool',
-      generatorConfig: found.mode === 'generator' && found.generatorConfig
+      mode,
+      generatorConfig: mode === 'generator' && found.generatorConfig
         ? SharedStorageService.normalizeGeneratorConfig(found.generatorConfig)
         : null,
+      ...(mode === 'shared' ? { sharedText: String(found.sharedText ?? '') } : {}),
       keys: Array.isArray(found.keys) ? found.keys.map((k) => ({ ...k })) : []
     };
   }
@@ -4382,6 +4395,7 @@ export class SharedStorageService {
   public async createKeyPool(input: {
     mode?: KeyPoolMode;
     generatorConfig?: Partial<KeyGeneratorConfig> | null;
+    sharedText?: string;
     title?: string;
     keyLines?: string[];
     expiresAt?: string | null;
@@ -4393,10 +4407,11 @@ export class SharedStorageService {
       this.db.keyPools = [];
     }
 
-    const mode: KeyPoolMode = input.mode === 'generator' ? 'generator' : 'pool';
+    const mode: KeyPoolMode = SharedStorageService.normalizeKeyPoolMode(input.mode);
     const generatorConfig = mode === 'generator'
       ? SharedStorageService.normalizeGeneratorConfig(input.generatorConfig)
       : null;
+    const cleanSharedText = mode === 'shared' ? String(input.sharedText ?? '').trim() : undefined;
 
     const lines = mode === 'pool' ? SharedStorageService.normalizeKeyLines(input.keyLines || []) : [];
     const nowIso = new Date().toISOString();
@@ -4422,9 +4437,12 @@ export class SharedStorageService {
       }
     }
 
+    const sharedFirstLine = (cleanSharedText || '').split(/\r?\n/)[0]?.trim() || 'Shared Key';
     const defaultTitle =
       mode === 'generator' && generatorConfig
         ? `Key Generator (${generatorConfig.prefix ? `${generatorConfig.prefix} · ` : ''}${generatorConfig.length} chars)`
+        : mode === 'shared'
+        ? `Shared Key (${sharedFirstLine.slice(0, 24)}${sharedFirstLine.length > 24 ? '…' : ''})`
         : `Key Batch (${keys.length} ${keys.length === 1 ? 'Key' : 'Keys'})`;
     const cleanTitle = (input.title || '').trim() || defaultTitle;
 
@@ -4432,6 +4450,7 @@ export class SharedStorageService {
       id,
       mode,
       generatorConfig,
+      ...(mode === 'shared' ? { sharedText: cleanSharedText } : {}),
       title: cleanTitle,
       keys,
       createdAt: nowIso,
@@ -4457,6 +4476,7 @@ export class SharedStorageService {
       keyLines?: string[];
       addKeyLines?: string[];
       generatorConfig?: Partial<KeyGeneratorConfig> | null;
+      sharedText?: string;
       expiresAt?: string | null;
       status?: 'active' | 'disabled';
       resetClaims?: boolean;
@@ -4468,7 +4488,7 @@ export class SharedStorageService {
     if (idx < 0) return null;
 
     const existing = this.db.keyPools[idx];
-    const effectiveMode: KeyPoolMode = existing.mode === 'generator' ? 'generator' : 'pool';
+    const effectiveMode: KeyPoolMode = SharedStorageService.normalizeKeyPoolMode(existing.mode);
     const nowIso = new Date().toISOString();
 
     if (updates.title !== undefined) {
@@ -4497,6 +4517,17 @@ export class SharedStorageService {
           ...(existing.generatorConfig || {}),
           ...updates.generatorConfig
         });
+      }
+      if (updates.resetClaims) {
+        existing.keys = [];
+        existing.totalClaims = 0;
+      }
+    } else if (effectiveMode === 'shared') {
+      if (updates.sharedText !== undefined) {
+        const trimmed = String(updates.sharedText).trim();
+        if (trimmed) {
+          existing.sharedText = trimmed;
+        }
       }
       if (updates.resetClaims) {
         existing.keys = [];
@@ -4552,7 +4583,8 @@ export class SharedStorageService {
       ...existing,
       mode: effectiveMode,
       generatorConfig: existing.generatorConfig ? SharedStorageService.normalizeGeneratorConfig(existing.generatorConfig) : null,
-      keys: existing.keys.map((k) => ({ ...k }))
+      ...(effectiveMode === 'shared' ? { sharedText: String(existing.sharedText ?? '') } : {}),
+      keys: (existing.keys || []).map((k) => ({ ...k }))
     };
   }
 
@@ -4593,16 +4625,18 @@ export class SharedStorageService {
       return { status: 'not_found' };
     }
 
-    const isGeneratorMode = pool.mode === 'generator';
+    const effectiveMode = SharedStorageService.normalizeKeyPoolMode(pool.mode);
+    const isGeneratorMode = effectiveMode === 'generator';
+    const isSharedMode = effectiveMode === 'shared';
     const totalCount = Array.isArray(pool.keys) ? pool.keys.length : 0;
-    const remainingCountBefore = isGeneratorMode
+    const remainingCountBefore = (isGeneratorMode || isSharedMode)
       ? -1
       : (Array.isArray(pool.keys) ? pool.keys.filter((k) => !k.claimedBy).length : 0);
 
     if (pool.status === 'disabled') {
       return {
         status: 'disabled',
-        pool: { ...pool, keys: pool.keys.map((k) => ({ ...k })) },
+        pool: { ...pool, mode: effectiveMode, keys: (pool.keys || []).map((k) => ({ ...k })) },
         remainingCount: remainingCountBefore,
         totalCount
       };
@@ -4613,11 +4647,65 @@ export class SharedStorageService {
       if (Number.isFinite(expTs) && Date.now() >= expTs) {
         return {
           status: 'expired',
-          pool: { ...pool, keys: pool.keys.map((k) => ({ ...k })) },
+          pool: { ...pool, mode: effectiveMode, keys: (pool.keys || []).map((k) => ({ ...k })) },
           remainingCount: remainingCountBefore,
           totalCount
         };
       }
+    }
+
+    if (isSharedMode) {
+      const sharedVal = String(pool.sharedText ?? '').trim();
+      if (!sharedVal) {
+        return { status: 'not_found' };
+      }
+      if (!Array.isArray(pool.keys)) {
+        pool.keys = [];
+      }
+      const claimedAtIso = new Date().toISOString();
+      const targetUser = cleanUserId || 'unknown';
+      const existingEntry = pool.keys.find((k) => String(k.claimedBy || '').trim() === targetUser);
+      let entrySnapshot: KeyPoolEntry;
+      if (existingEntry) {
+        existingEntry.value = sharedVal;
+        existingEntry.claimedAt = claimedAtIso;
+        if (cleanUsername) existingEntry.claimedByUsername = cleanUsername;
+        entrySnapshot = { ...existingEntry };
+      } else {
+        const newEntry: KeyPoolEntry = {
+          id: `${pool.id}_${pool.keys.length}_${Math.random().toString(36).substring(2, 5)}`,
+          value: sharedVal,
+          index: pool.keys.length,
+          claimedBy: targetUser,
+          ...(cleanUsername ? { claimedByUsername: cleanUsername } : {}),
+          claimedAt: claimedAtIso
+        };
+        if (pool.keys.length < 500) {
+          pool.keys.push(newEntry);
+        }
+        entrySnapshot = { ...newEntry };
+      }
+
+      pool.totalClaims = (pool.totalClaims || 0) + 1;
+      pool.updatedAt = claimedAtIso;
+
+      const snapshotPool: KeyPoolRecord = {
+        ...pool,
+        mode: 'shared',
+        generatorConfig: null,
+        sharedText: sharedVal,
+        keys: pool.keys.map((k) => ({ ...k }))
+      };
+
+      await this.persist(false);
+
+      return {
+        status: 'claimed',
+        key: entrySnapshot,
+        pool: snapshotPool,
+        remainingCount: -1,
+        totalCount: pool.keys.length
+      };
     }
 
     if (cleanUserId && Array.isArray(pool.keys)) {
@@ -4626,7 +4714,7 @@ export class SharedStorageService {
         return {
           status: 'already_claimed',
           key: { ...existingClaim },
-          pool: { ...pool, keys: pool.keys.map((k) => ({ ...k })) },
+          pool: { ...pool, mode: effectiveMode, keys: pool.keys.map((k) => ({ ...k })) },
           remainingCount: remainingCountBefore,
           totalCount
         };

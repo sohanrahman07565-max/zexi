@@ -8316,12 +8316,13 @@ export class TelegramService {
     }
 
     if (result.status === 'expired') {
+      const label = result.pool?.mode === 'shared' ? 'Link' : 'Batch';
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
         text:
           `⏰ <b>Key Link Expired</b>\n\n` +
-          `<b>Batch:</b> ${this.escapeHtml(result.pool?.title || 'Key Batch')}\n` +
-          `<i>This key distribution link has expired and is no longer accepting claims.</i>`,
+          `<b>${label}:</b> ${this.escapeHtml(result.pool?.title || 'Key Link')}\n` +
+          `<i>This key distribution link has expired and is no longer active.</i>`,
         parse_mode: 'HTML'
       });
       return;
@@ -8341,10 +8342,18 @@ export class TelegramService {
 
     if ((result.status === 'already_claimed' || result.status === 'claimed') && result.key) {
       const keyValue = String(result.key.value || '');
-      const isRepeatClaim = result.status === 'already_claimed';
+      const isSharedMode = result.pool?.mode === 'shared';
+      const isRepeatClaim = !isSharedMode && result.status === 'already_claimed';
+      const usePreBlock = keyValue.includes('\n') || keyValue.length > 256;
+      const renderedKeyHtml = usePreBlock
+        ? `<pre>${this.escapeHtml(keyValue)}</pre>`
+        : `<code>${this.escapeHtml(keyValue)}</code>`;
+
       const msgText = isRepeatClaim
-        ? `🔑 <b>Your Key</b>\n<code>${this.escapeHtml(keyValue)}</code>\n\nℹ️ <i>You have already claimed your key from this link (1 key per user).</i>`
-        : `🔑 <b>Your Key</b>\n<code>${this.escapeHtml(keyValue)}</code>\n\n<i>Tap the key or button below to copy. Do not share it!</i>`;
+        ? `🔑 <b>Your Key</b>\n${renderedKeyHtml}\n\nℹ️ <i>You have already claimed your key from this link (1 key per user).</i>`
+        : isSharedMode
+        ? `🔑 <b>Your Key</b>\n${renderedKeyHtml}\n\n<i>Tap the key or button below to copy.</i>`
+        : `🔑 <b>Your Key</b>\n${renderedKeyHtml}\n\n<i>Tap the key or button below to copy. Do not share it!</i>`;
 
       const buttonStyle = isRepeatClaim ? 'primary' : 'success';
       const targetPoolId = result.pool?.id || poolId;
@@ -10731,12 +10740,15 @@ export class TelegramService {
       const targetPoolId = data.slice('copy_key:'.length).trim();
       try {
         const pool = targetPoolId ? await storage.getKeyPool(targetPoolId) : null;
-        const entry = pool?.keys?.find((k) => String(k.claimedBy || '').trim() === fromId);
-        if (entry?.value) {
-          if (entry.value.length <= 180) {
+        const entryValue =
+          pool?.mode === 'shared'
+            ? String(pool.sharedText || '').trim()
+            : String(pool?.keys?.find((k) => String(k.claimedBy || '').trim() === fromId)?.value || '');
+        if (entryValue) {
+          if (entryValue.length <= 180 && !entryValue.includes('\n')) {
             await this.callTelegramApi('answerCallbackQuery', {
               callback_query_id: cb.id,
-              text: `🔑 Your Key:\n${entry.value}`,
+              text: `🔑 Your Key:\n${entryValue}`,
               show_alert: true
             }).catch(() => {});
           } else {
@@ -10745,9 +10757,13 @@ export class TelegramService {
               text: '🔑 Key sent below for copying.'
             }).catch(() => {});
             if (chatId) {
+              const formatted =
+                entryValue.includes('\n') || entryValue.length > 256
+                  ? `<pre>${this.escapeHtml(entryValue)}</pre>`
+                  : `<code>${this.escapeHtml(entryValue)}</code>`;
               await this.callTelegramApi('sendMessage', {
                 chat_id: chatId,
-                text: `🔑 <b>Your Key</b>\n<code>${this.escapeHtml(entry.value)}</code>`,
+                text: `🔑 <b>Your Key</b>\n${formatted}`,
                 parse_mode: 'HTML'
               }).catch(() => {});
             }

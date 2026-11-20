@@ -115,6 +115,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [keyGenMode, setKeyGenMode] = useState<KeyPoolMode>('pool');
   const [keyGenTitle, setKeyGenTitle] = useState<string>('');
   const [keyGenText, setKeyGenText] = useState<string>('');
+  const [keyGenSharedText, setKeyGenSharedText] = useState<string>('');
   const [keyGenPrefix, setKeyGenPrefix] = useState<string>('DARK-');
   const [keyGenLength, setKeyGenLength] = useState<number>(12);
   const [keyGenCharType, setKeyGenCharType] = useState<KeyGeneratorCharType>('alphanumeric');
@@ -125,6 +126,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [editingKeyPool, setEditingKeyPool] = useState<KeyPoolRecord | null>(null);
   const [editKeyTitle, setEditKeyTitle] = useState<string>('');
   const [editKeyText, setEditKeyText] = useState<string>('');
+  const [editSharedText, setEditSharedText] = useState<string>('');
   const [editKeyPrefix, setEditKeyPrefix] = useState<string>('');
   const [editKeyLength, setEditKeyLength] = useState<number>(12);
   const [editKeyCharType, setEditKeyCharType] = useState<KeyGeneratorCharType>('alphanumeric');
@@ -5120,9 +5122,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     };
 
     const formatRemainingTime = (expiresAt?: string | null) => {
-      if (!expiresAt) return 'Permanent (No Expiry)';
+      if (!expiresAt) return 'Unlimited (No Expiry)';
       const expMs = Date.parse(expiresAt);
-      if (!Number.isFinite(expMs)) return 'Permanent';
+      if (!Number.isFinite(expMs)) return 'Unlimited';
       const diffMs = expMs - Date.now();
       if (diffMs <= 0) return 'Expired (Auto-deleting...)';
       const totalMins = Math.ceil(diffMs / 60000);
@@ -5139,11 +5141,16 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
     const addKeyPools = keyPoolsList.filter((p) => (p.mode || 'pool') === 'pool').sort(sortSerialAsc);
     const generatorKeyPools = keyPoolsList.filter((p) => p.mode === 'generator').sort(sortSerialAsc);
+    const sharedKeyPools = keyPoolsList.filter((p) => p.mode === 'shared').sort(sortSerialAsc);
 
     const handleCreateKeyPool = async (e: React.FormEvent) => {
       e.preventDefault();
       if (keyGenMode === 'pool' && parsedNewKeyLines.length === 0) {
         toast.error('Please enter at least one key (one key per line).');
+        return;
+      }
+      if (keyGenMode === 'shared' && keyGenSharedText.trim().length === 0) {
+        toast.error('Please enter the key or custom text for the Shared Key link.');
         return;
       }
       setKeyGenCreating(true);
@@ -5161,6 +5168,14 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 durationUnit: keyGenDurationUnit,
                 durationValue: keyGenDurationUnit === 'never' ? undefined : Math.max(1, Number(keyGenDurationValue) || 1)
               }
+            : keyGenMode === 'shared'
+            ? {
+                mode: 'shared',
+                title: keyGenTitle.trim() || undefined,
+                sharedText: keyGenSharedText.trim(),
+                durationUnit: keyGenDurationUnit,
+                durationValue: keyGenDurationUnit === 'never' ? undefined : Math.max(1, Number(keyGenDurationValue) || 1)
+              }
             : {
                 mode: 'pool',
                 title: keyGenTitle.trim() || undefined,
@@ -5171,18 +5186,27 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         );
         setKeyGenTitle('');
         if (keyGenMode === 'pool') setKeyGenText('');
+        if (keyGenMode === 'shared') setKeyGenSharedText('');
         setKeyGenDurationUnit('never');
         await loadKeyPools();
         if (res.pool?.deepLink) {
           const okMsg =
             keyGenMode === 'generator'
               ? 'Generated dynamic key link & copied to clipboard!'
+              : keyGenMode === 'shared'
+              ? 'Generated shared key link & copied to clipboard!'
               : `Generated key link (${res.pool.totalKeys} keys) & copied to clipboard!`;
           try {
             await navigator.clipboard?.writeText(res.pool.deepLink);
             toast.success(okMsg);
           } catch {
-            toast.success(keyGenMode === 'generator' ? 'Dynamic key link created!' : `Generated key link with ${res.pool.totalKeys} keys!`);
+            toast.success(
+              keyGenMode === 'generator'
+                ? 'Dynamic key link created!'
+                : keyGenMode === 'shared'
+                ? 'Shared key link created!'
+                : `Generated key link with ${res.pool.totalKeys} keys!`
+            );
           }
         }
       } catch (err: any) {
@@ -5196,6 +5220,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       setEditingKeyPool(pool);
       setEditKeyTitle(pool.title || '');
       setEditKeyText((pool.keys || []).map((k) => k.value).join('\n'));
+      setEditSharedText(pool.sharedText || '');
       setEditKeyPrefix(pool.generatorConfig?.prefix || '');
       setEditKeyLength(pool.generatorConfig?.length || 12);
       setEditKeyCharType(pool.generatorConfig?.charType || 'alphanumeric');
@@ -5209,7 +5234,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       e.preventDefault();
       if (!editingKeyPool) return;
       const isGenPool = editingKeyPool.mode === 'generator';
-      if (!isGenPool) {
+      const isSharedPool = editingKeyPool.mode === 'shared';
+      if (isSharedPool) {
+        if (!editSharedText.trim()) {
+          toast.error('Shared key / text cannot be empty.');
+          return;
+        }
+      } else if (!isGenPool) {
         const lines = editKeyText
           .split(/\r?\n/)
           .map((l) => l.trim())
@@ -5232,6 +5263,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             length: Math.max(4, Math.min(64, Number(editKeyLength) || 12)),
             charType: editKeyCharType
           };
+        } else if (isSharedPool) {
+          payload.sharedText = editSharedText.trim();
         } else {
           payload.keysText = editKeyText;
         }
@@ -5265,7 +5298,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     };
 
     const handleDeleteKeyPool = async (pool: KeyPoolRecord) => {
-      const countNote = pool.mode === 'generator' ? `${pool.claimedKeys} generated claims` : `${pool.totalKeys} keys`;
+      const countNote =
+        pool.mode === 'generator'
+          ? `${pool.claimedKeys} generated claims`
+          : pool.mode === 'shared'
+          ? `${pool.totalClaims || 0} claims`
+          : `${pool.totalKeys} keys`;
       if (!window.confirm(`Delete key link "${pool.title}" (${countNote})? This cannot be undone.`)) {
         return;
       }
@@ -5291,7 +5329,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 <span className="truncate">Key Generator</span>
               </h2>
               <p className="text-[11px] text-zinc-400 truncate">
-                Switch between pre-loaded serial keys or dynamic on-demand key links
+                Pre-loaded key pools, dynamic rule links, or shared reusable keys
               </p>
             </div>
           </div>
@@ -5308,15 +5346,15 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
         {/* Mode Switcher + Create Key Link Form */}
         <form onSubmit={handleCreateKeyPool} className="p-4 rounded-2xl glass-panel border border-emerald-500/25 space-y-3.5">
-          {/* Two Distinct Modes Switcher */}
-          <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-zinc-950 border border-zinc-800">
+          {/* Three Distinct Modes Switcher */}
+          <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-zinc-950 border border-zinc-800">
             <button
               type="button"
               onClick={() => {
                 setKeyGenMode('pool');
                 setExpandedKeyPoolId(null);
               }}
-              className={`py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+              className={`py-2 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 whitespace-nowrap transition-all cursor-pointer tabular-nums ${
                 keyGenMode === 'pool'
                   ? 'bg-emerald-500 text-zinc-950 shadow'
                   : 'text-zinc-400 hover:text-white'
@@ -5331,14 +5369,29 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 setKeyGenMode('generator');
                 setExpandedKeyPoolId(null);
               }}
-              className={`py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+              className={`py-2 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 whitespace-nowrap transition-all cursor-pointer tabular-nums ${
                 keyGenMode === 'generator'
                   ? 'bg-cyan-400 text-zinc-950 shadow'
                   : 'text-zinc-400 hover:text-white'
               }`}
             >
               <Sparkles className="w-3.5 h-3.5 shrink-0" />
-              <span>Generate Key ({generatorKeyPools.length})</span>
+              <span>Generate ({generatorKeyPools.length})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setKeyGenMode('shared');
+                setExpandedKeyPoolId(null);
+              }}
+              className={`py-2 px-2 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 whitespace-nowrap transition-all cursor-pointer tabular-nums ${
+                keyGenMode === 'shared'
+                  ? 'bg-amber-400 text-zinc-950 shadow'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <Link2 className="w-3.5 h-3.5 shrink-0" />
+              <span>Shared ({sharedKeyPools.length})</span>
             </button>
           </div>
 
@@ -5349,10 +5402,15 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   <Key className="w-3.5 h-3.5 text-emerald-400" />
                   <span>Mode 1: Add Key (Pre-Loaded Serial List)</span>
                 </>
-              ) : (
+              ) : keyGenMode === 'generator' ? (
                 <>
                   <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
                   <span>Mode 2: Key Generator (Dynamic Rules)</span>
+                </>
+              ) : (
+                <>
+                  <Link2 className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Mode 3: Shared Key (Reusable Key / Text)</span>
                 </>
               )}
             </div>
@@ -5360,9 +5418,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               <span className="text-[10px] px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 font-mono font-semibold tabular-nums">
                 {parsedNewKeyLines.length} {parsedNewKeyLines.length === 1 ? 'Key' : 'Keys'} Ready
               </span>
-            ) : (
+            ) : keyGenMode === 'generator' ? (
               <span className="text-[10px] px-2 py-0.5 rounded-md bg-cyan-500/15 text-cyan-300 border border-cyan-500/25 font-mono font-semibold">
                 On-Demand
+              </span>
+            ) : (
+              <span className="text-[10px] px-2 py-0.5 rounded-md bg-amber-500/15 text-amber-300 border border-amber-500/25 font-mono font-semibold">
+                Reusable · Multi-User
               </span>
             )}
           </div>
@@ -5375,7 +5437,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               type="text"
               value={keyGenTitle}
               onChange={(e) => setKeyGenTitle(e.target.value)}
-              placeholder={keyGenMode === 'pool' ? 'e.g. Premium Access Keys Wave #1' : 'e.g. VIP Auto-Generated Access'}
+              placeholder={
+                keyGenMode === 'pool'
+                  ? 'e.g. Premium Access Keys Wave #1'
+                  : keyGenMode === 'generator'
+                  ? 'e.g. VIP Auto-Generated Access'
+                  : 'e.g. Universal Event Key / Pass'
+              }
               className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white focus:outline-none focus:border-emerald-500"
             />
           </div>
@@ -5396,6 +5464,28 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 className="w-full px-3 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-emerald-500 resize-y"
                 required
               />
+            </div>
+          ) : keyGenMode === 'shared' ? (
+            <div className="space-y-2 p-3 rounded-xl bg-zinc-950/70 border border-amber-500/20">
+              <div className="flex items-center justify-between gap-2">
+                <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+                  Single Key or Custom Text
+                </label>
+                <span className="text-[10px] text-amber-300/80">
+                  Same text sent to every user
+                </span>
+              </div>
+              <textarea
+                rows={4}
+                value={keyGenSharedText}
+                onChange={(e) => setKeyGenSharedText(e.target.value)}
+                placeholder={'e.g. DARK-VIP-ACCESS-2025\nor enter multi-line activation text / license instructions'}
+                className="w-full px-3 py-2.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-amber-400 resize-y"
+                required
+              />
+              <p className="text-[10px] text-zinc-400">
+                Every user opening this link receives this exact key/text repeatedly until the link expires or is paused.
+              </p>
             </div>
           ) : (
             <div className="space-y-3 p-3 rounded-xl bg-zinc-950/70 border border-cyan-500/20">
@@ -5477,7 +5567,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 <span>Link Expiry Timer</span>
               </span>
               <span className="text-[10px] text-zinc-400">
-                {keyGenDurationUnit === 'never' ? 'Never Expires' : `Expires in ${keyGenDurationValue} ${keyGenDurationUnit}`}
+                {keyGenDurationUnit === 'never' ? 'Unlimited (No Expiry)' : `Expires in ${keyGenDurationValue} ${keyGenDurationUnit}`}
               </span>
             </div>
 
@@ -5487,7 +5577,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 onChange={(e) => setKeyGenDurationUnit(e.target.value as any)}
                 className="px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-white focus:outline-none focus:border-emerald-500"
               >
-                <option value="never">Permanent (No Timer)</option>
+                <option value="never">Unlimited (No Expiry)</option>
                 <option value="minutes">Minutes</option>
                 <option value="hours">Hours</option>
                 <option value="days">Days</option>
@@ -5506,7 +5596,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
               <div className="flex flex-wrap items-center gap-1">
                 {[
-                  { label: 'No Limit', unit: 'never' as const, val: 24 },
+                  { label: 'Unlimited', unit: 'never' as const, val: 24 },
                   { label: '30m', unit: 'minutes' as const, val: 30 },
                   { label: '1h', unit: 'hours' as const, val: 1 },
                   { label: '24h', unit: 'hours' as const, val: 24 },
@@ -5519,7 +5609,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                       setKeyGenDurationUnit(preset.unit);
                       setKeyGenDurationValue(preset.val);
                     }}
-                    className={`px-2 py-1 rounded-lg text-[10px] font-semibold border transition-colors cursor-pointer ${
+                    className={`px-2 py-1 rounded-lg text-[10px] font-semibold border transition-colors cursor-pointer whitespace-nowrap ${
                       keyGenDurationUnit === preset.unit && (preset.unit === 'never' || keyGenDurationValue === preset.val)
                         ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                         : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-white'
@@ -5534,36 +5624,60 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
           <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
             <span className="text-[10px] text-zinc-400">
-              Bot shortcut: <code className="text-emerald-300">{keyGenMode === 'pool' ? '/addkey' : '/genkey'}</code>
+              {keyGenMode === 'shared' ? (
+                <span>Reusable link · Delivers same key/text</span>
+              ) : (
+                <span>
+                  Bot shortcut: <code className="text-emerald-300">{keyGenMode === 'pool' ? '/addkey' : '/genkey'}</code>
+                </span>
+              )}
             </span>
             <button
               type="submit"
-              disabled={keyGenCreating || (keyGenMode === 'pool' && parsedNewKeyLines.length === 0)}
+              disabled={
+                keyGenCreating ||
+                (keyGenMode === 'pool' && parsedNewKeyLines.length === 0) ||
+                (keyGenMode === 'shared' && keyGenSharedText.trim().length === 0)
+              }
               className={`px-4 py-2 rounded-xl text-zinc-950 text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
                 keyGenMode === 'generator'
                   ? 'bg-cyan-400 hover:bg-cyan-300'
+                  : keyGenMode === 'shared'
+                  ? 'bg-amber-400 hover:bg-amber-300'
                   : 'bg-emerald-500 hover:bg-emerald-400'
               }`}
             >
               {keyGenCreating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
-              <span>{keyGenMode === 'generator' ? 'Generate Dynamic Link' : 'Generate Key Link'}</span>
+              <span>
+                {keyGenMode === 'generator'
+                  ? 'Generate Dynamic Link'
+                  : keyGenMode === 'shared'
+                  ? 'Generate Link'
+                  : 'Generate Key Link'}
+              </span>
             </button>
           </div>
         </form>
 
         {/* Strictly Isolated Created Links Section (Only Active Mode Shown, Serial Order) */}
         {(() => {
-          const activeList = keyGenMode === 'generator' ? generatorKeyPools : addKeyPools;
+          const activeList =
+            keyGenMode === 'generator'
+              ? generatorKeyPools
+              : keyGenMode === 'shared'
+              ? sharedKeyPools
+              : addKeyPools;
 
           const renderKeyPoolCard = (pool: KeyPoolRecord, serialIndex: number) => {
             const isGenPool = pool.mode === 'generator';
+            const isSharedPool = pool.mode === 'shared';
             const isExpanded = expandedKeyPoolId === pool.id;
             const statusBadge =
               pool.status === 'disabled'
                 ? { label: 'Disabled', cls: 'bg-zinc-800 text-zinc-300 border-zinc-700' }
                 : pool.isExpired
                 ? { label: 'Expired', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/30' }
-                : !isGenPool && pool.isSoldOut
+                : !isGenPool && !isSharedPool && pool.isSoldOut
                 ? { label: 'Sold Out', cls: 'bg-rose-500/20 text-rose-300 border-rose-500/30' }
                 : { label: 'Active', cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' };
 
@@ -5576,6 +5690,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                         className={`text-[10px] px-1.5 py-0.5 rounded-md font-mono font-bold border tabular-nums ${
                           isGenPool
                             ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                            : isSharedPool
+                            ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
                             : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
                         }`}
                       >
@@ -5588,6 +5704,10 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                       {isGenPool ? (
                         <span className="text-[10px] px-2 py-0.5 rounded-md bg-white/10 text-cyan-200 font-mono tabular-nums">
                           {pool.claimedKeys} Generated
+                        </span>
+                      ) : isSharedPool ? (
+                        <span className="text-[10px] px-2 py-0.5 rounded-md bg-white/10 text-amber-200 font-mono tabular-nums">
+                          {pool.totalClaims || 0} Claims
                         </span>
                       ) : (
                         <span className="text-[10px] px-2 py-0.5 rounded-md bg-white/10 text-white/85 font-mono tabular-nums">
@@ -5606,12 +5726,20 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                       </div>
                     )}
 
+                    {isSharedPool && pool.sharedText && (
+                      <div className="px-2.5 py-1.5 rounded-xl bg-zinc-950/80 border border-amber-500/20 text-[11px] font-mono text-amber-200 whitespace-pre-wrap break-all line-clamp-3">
+                        {pool.sharedText}
+                      </div>
+                    )}
+
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-zinc-400">
                       <span className="flex items-center gap-1">
                         <Clock className="w-3 h-3 text-amber-400" />
                         {formatRemainingTime(pool.expiresAt)}
                       </span>
-                      <span>Claimed: {pool.claimedKeys}</span>
+                      <span className="tabular-nums">
+                        {isSharedPool ? `Total Claims: ${pool.totalClaims || 0} (${pool.keys?.length || 0} users)` : `Claimed: ${pool.claimedKeys}`}
+                      </span>
                       <span>Created {new Date(pool.createdAt).toLocaleDateString()}</span>
                     </div>
                   </div>
@@ -5652,7 +5780,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 <div className="flex items-center gap-2 p-2 rounded-xl bg-zinc-950 border border-zinc-800">
                   <code
                     className={`text-[11px] font-mono truncate flex-1 select-all ${
-                      isGenPool ? 'text-cyan-300' : 'text-emerald-300'
+                      isGenPool ? 'text-cyan-300' : isSharedPool ? 'text-amber-300' : 'text-emerald-300'
                     }`}
                   >
                     {pool.deepLink}
@@ -5666,6 +5794,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     className={`px-2.5 py-1 rounded-lg border text-[10px] font-bold flex items-center gap-1 shrink-0 cursor-pointer ${
                       isGenPool
                         ? 'bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border-cyan-500/30'
+                        : isSharedPool
+                        ? 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border-amber-500/30'
                         : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border-emerald-500/30'
                     }`}
                   >
@@ -5695,9 +5825,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     <ChevronRight className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
                     <span>
                       {isExpanded
-                        ? 'Hide Keys Log'
+                        ? isSharedPool
+                          ? 'Hide Claimers Log'
+                          : 'Hide Keys Log'
                         : isGenPool
                         ? `Inspect ${pool.totalKeys} Generated Keys`
+                        : isSharedPool
+                        ? `Inspect ${pool.keys?.length || 0} Claimers`
                         : `Inspect ${pool.totalKeys} Keys & Claims`}
                     </span>
                   </button>
@@ -5706,7 +5840,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     <div className="mt-2 max-h-56 overflow-y-auto space-y-1.5 pr-1">
                       {(pool.keys || []).length === 0 ? (
                         <div className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 text-[11px] text-zinc-400 text-center">
-                          No keys generated yet. Users opening the link will generate unique keys automatically.
+                          {isSharedPool
+                            ? 'No users have claimed this shared key link yet.'
+                            : 'No keys generated yet. Users opening the link will generate unique keys automatically.'}
                         </div>
                       ) : (
                         (pool.keys || []).map((k, idx) => (
@@ -5752,17 +5888,25 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 <div className="flex items-center gap-2">
                   {keyGenMode === 'generator' ? (
                     <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                  ) : keyGenMode === 'shared' ? (
+                    <Link2 className="w-3.5 h-3.5 text-amber-400" />
                   ) : (
                     <Key className="w-3.5 h-3.5 text-emerald-400" />
                   )}
                   <span className="text-xs font-bold text-white tabular-nums">
                     {keyGenMode === 'generator'
                       ? `Generate Key Links (${activeList.length})`
+                      : keyGenMode === 'shared'
+                      ? `Shared Key Links (${activeList.length})`
                       : `Add Key Links (${activeList.length})`}
                   </span>
                 </div>
                 <span className="text-[10px] text-zinc-400">
-                  {keyGenMode === 'generator' ? 'Serial Order · Dynamic Rules' : 'Serial Order · One-by-One Pool'}
+                  {keyGenMode === 'generator'
+                    ? 'Serial Order · Dynamic Rules'
+                    : keyGenMode === 'shared'
+                    ? 'Serial Order · Reusable Multi-User'
+                    : 'Serial Order · One-by-One Pool'}
                 </span>
               </div>
 
@@ -5774,6 +5918,14 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                       <div className="text-xs font-semibold text-white">No Generate Key links yet</div>
                       <p className="text-[11px] text-zinc-400">
                         Configure prefix, length &amp; format above or run <code>/genkey</code> in the bot.
+                      </p>
+                    </>
+                  ) : keyGenMode === 'shared' ? (
+                    <>
+                      <Link2 className="w-6 h-6 text-amber-400/70 mx-auto" />
+                      <div className="text-xs font-semibold text-white">No Shared Key links yet</div>
+                      <p className="text-[11px] text-zinc-400">
+                        Enter a single key or custom text above and choose Unlimited or an expiry timer.
                       </p>
                     </>
                   ) : (
@@ -5810,7 +5962,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 <div className="flex items-center gap-2 min-w-0">
                   <Edit2 className="w-4 h-4 text-emerald-400 shrink-0" />
                   <h3 className="text-sm font-bold text-white truncate">
-                    {editingKeyPool.mode === 'generator' ? 'Edit Key Generator Link' : 'Edit Add Key Link'}
+                    {editingKeyPool.mode === 'generator'
+                      ? 'Edit Key Generator Link'
+                      : editingKeyPool.mode === 'shared'
+                      ? 'Edit Shared Key Link'
+                      : 'Edit Add Key Link'}
                   </h3>
                 </div>
                 <button
@@ -5888,6 +6044,22 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     </code>
                   </div>
                 </div>
+              ) : editingKeyPool.mode === 'shared' ? (
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                    Shared Key or Custom Text
+                  </label>
+                  <textarea
+                    rows={5}
+                    value={editSharedText}
+                    onChange={(e) => setEditSharedText(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-amber-400 resize-y"
+                    required
+                  />
+                  <p className="text-[10px] text-zinc-400 mt-1">
+                    Updated text applies immediately to everyone claiming this link.
+                  </p>
+                </div>
               ) : (
                 <div>
                   <div className="flex items-center justify-between mb-1">
@@ -5936,7 +6108,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white focus:outline-none focus:border-emerald-500"
                   >
                     <option value="keep">Keep Current Timer</option>
-                    <option value="never">Permanent (No Timer)</option>
+                    <option value="never">Unlimited (No Expiry)</option>
                     <option value="minutes">Reset: Minutes</option>
                     <option value="hours">Reset: Hours</option>
                     <option value="days">Reset: Days</option>
@@ -5970,6 +6142,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 <span className="text-[11px] text-zinc-300">
                   {editingKeyPool.mode === 'generator'
                     ? 'Clear generated key history (allow users to claim again)'
+                    : editingKeyPool.mode === 'shared'
+                    ? 'Clear claimers history & reset total claims counter'
                     : 'Reset claim history (mark all keys unclaimed again)'}
                 </span>
               </label>

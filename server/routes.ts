@@ -1935,7 +1935,7 @@ function resolveKeyPoolExpiryIso(body: any): string | null | undefined {
   const unit = typeof body.durationUnit === 'string' ? body.durationUnit.trim().toLowerCase() : '';
   const val = Number(body.durationValue);
 
-  if (unit === 'never' || unit === 'permanent' || body.expiresAt === null || body.expiresAt === '') {
+  if (unit === 'never' || unit === 'permanent' || unit === 'unlimited' || body.expiresAt === null || body.expiresAt === '') {
     return null;
   }
 
@@ -1956,14 +1956,14 @@ function resolveKeyPoolExpiryIso(body: any): string | null | undefined {
 
 function enrichKeyPoolResponse(pool: KeyPoolRecord, botUsername: string) {
   const cleanBotUsername = (botUsername || '').replace(/^@/, '').trim();
-  const mode = pool.mode === 'generator' ? 'generator' : 'pool';
+  const mode = pool.mode === 'generator' ? 'generator' : pool.mode === 'shared' ? 'shared' : 'pool';
   const keys = Array.isArray(pool.keys) ? pool.keys : [];
   const totalKeys = keys.length;
   const claimedKeys = keys.filter((k) => Boolean(k.claimedBy)).length;
-  const remainingKeys = mode === 'generator' ? -1 : Math.max(0, totalKeys - claimedKeys);
+  const remainingKeys = mode === 'generator' || mode === 'shared' ? -1 : Math.max(0, totalKeys - claimedKeys);
   const expTs = pool.expiresAt ? Date.parse(pool.expiresAt) : NaN;
   const isExpired = Boolean(pool.expiresAt && Number.isFinite(expTs) && Date.now() >= expTs);
-  const isSoldOut = mode === 'generator' ? false : remainingKeys === 0;
+  const isSoldOut = mode === 'generator' || mode === 'shared' ? false : remainingKeys === 0;
   const deepLink = cleanBotUsername
     ? `https://t.me/${cleanBotUsername}?start=k_${pool.id}`
     : `?start=k_${pool.id}`;
@@ -1972,6 +1972,7 @@ function enrichKeyPoolResponse(pool: KeyPoolRecord, botUsername: string) {
     ...pool,
     mode,
     generatorConfig: mode === 'generator' ? SharedStorageService.normalizeGeneratorConfig(pool.generatorConfig) : null,
+    ...(mode === 'shared' ? { sharedText: String(pool.sharedText ?? '') } : {}),
     totalKeys,
     claimedKeys,
     remainingKeys,
@@ -2012,8 +2013,8 @@ apiRouter.post('/keys', authenticate, async (req: Request, res: Response) => {
       return res.status(403).json({ error: 'Insufficient permissions to generate key links' });
     }
 
-    const { title, keysText, keys, status, mode, generatorConfig, prefix, keyLength, length, charType } = req.body || {};
-    const effectiveMode = mode === 'generator' ? 'generator' : 'pool';
+    const { title, keysText, keys, sharedText, keyText, status, mode, generatorConfig, prefix, keyLength, length, charType } = req.body || {};
+    const effectiveMode = mode === 'generator' ? 'generator' : mode === 'shared' ? 'shared' : 'pool';
     const expiresAt = resolveKeyPoolExpiryIso(req.body);
 
     if (effectiveMode === 'generator') {
@@ -2027,6 +2028,26 @@ apiRouter.post('/keys', authenticate, async (req: Request, res: Response) => {
       const created = await storage.createKeyPool({
         mode: 'generator',
         generatorConfig: normalizedConfig,
+        title: typeof title === 'string' ? title.trim() : undefined,
+        expiresAt: expiresAt ?? null,
+        createdBy: admin.telegramId || admin.id,
+        status: status === 'disabled' ? 'disabled' : 'active'
+      });
+      const botUsername = await TelegramService.getBotUsername().catch(() => '');
+      return res.json({
+        success: true,
+        pool: enrichKeyPoolResponse(created, botUsername)
+      });
+    }
+
+    if (effectiveMode === 'shared') {
+      const cleanShared = String(sharedText ?? keyText ?? keysText ?? '').trim();
+      if (!cleanShared) {
+        return res.status(400).json({ error: 'Please provide a key or custom text for the shared key link.' });
+      }
+      const created = await storage.createKeyPool({
+        mode: 'shared',
+        sharedText: cleanShared,
         title: typeof title === 'string' ? title.trim() : undefined,
         expiresAt: expiresAt ?? null,
         createdBy: admin.telegramId || admin.id,
@@ -2077,7 +2098,7 @@ apiRouter.put('/keys/:id', authenticate, async (req: Request, res: Response) => 
     }
 
     const { id } = req.params;
-    const { title, keysText, keys, addKeysText, generatorConfig, prefix, keyLength, length, charType, status, resetClaims } = req.body || {};
+    const { title, keysText, keys, addKeysText, sharedText, keyText, generatorConfig, prefix, keyLength, length, charType, status, resetClaims } = req.body || {};
 
     const existingPool = await storage.getKeyPool(id);
     if (!existingPool) {
@@ -2085,13 +2106,24 @@ apiRouter.put('/keys/:id', authenticate, async (req: Request, res: Response) => 
     }
 
     const isGenerator = existingPool.mode === 'generator';
-    const hasKeysUpdate = !isGenerator && (keysText !== undefined || keys !== undefined);
+    const isShared = existingPool.mode === 'shared';
+
+    let nextSharedText: string | undefined;
+    if (isShared && (sharedText !== undefined || keyText !== undefined || keysText !== undefined)) {
+      const candidate = String(sharedText ?? keyText ?? keysText ?? '').trim();
+      if (!candidate) {
+        return res.status(400).json({ error: 'Shared key / text cannot be empty.' });
+      }
+      nextSharedText = candidate;
+    }
+
+    const hasKeysUpdate = !isGenerator && !isShared && (keysText !== undefined || keys !== undefined);
     const parsedLines = hasKeysUpdate ? parseKeyLinesInput(keysText, keys) : undefined;
     if (hasKeysUpdate && (!parsedLines || parsedLines.length === 0)) {
       return res.status(400).json({ error: 'Key list cannot be empty when updating keys.' });
     }
 
-    const parsedAddLines = !isGenerator && addKeysText !== undefined ? parseKeyLinesInput(addKeysText) : undefined;
+    const parsedAddLines = !isGenerator && !isShared && addKeysText !== undefined ? parseKeyLinesInput(addKeysText) : undefined;
     const expiresAt = resolveKeyPoolExpiryIso(req.body);
     const nextGeneratorConfig = isGenerator && (generatorConfig || prefix !== undefined || keyLength !== undefined || length !== undefined || charType !== undefined)
       ? SharedStorageService.normalizeGeneratorConfig({
@@ -2108,6 +2140,7 @@ apiRouter.put('/keys/:id', authenticate, async (req: Request, res: Response) => 
       keyLines: parsedLines,
       addKeyLines: parsedAddLines,
       generatorConfig: nextGeneratorConfig,
+      sharedText: nextSharedText,
       expiresAt,
       status: status === 'active' || status === 'disabled' ? status : undefined,
       resetClaims: Boolean(resetClaims)
