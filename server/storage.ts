@@ -358,6 +358,38 @@ export interface ClonedBotRecord {
   panelUrl?: string;
 }
 
+export type KeyPoolMode = 'pool' | 'generator';
+export type KeyGeneratorCharType = 'numbers' | 'letters_upper' | 'letters_mixed' | 'alphanumeric';
+
+export interface KeyGeneratorConfig {
+  prefix: string;
+  length: number;
+  charType: KeyGeneratorCharType;
+}
+
+export interface KeyPoolEntry {
+  id: string;
+  value: string;
+  index: number;
+  claimedBy?: string;
+  claimedByUsername?: string;
+  claimedAt?: string;
+}
+
+export interface KeyPoolRecord {
+  id: string;
+  mode?: KeyPoolMode;
+  generatorConfig?: KeyGeneratorConfig | null;
+  title: string;
+  keys: KeyPoolEntry[];
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: string;
+  expiresAt?: string | null;
+  status: 'active' | 'disabled';
+  totalClaims: number;
+}
+
 export interface AppDatabase {
   items: ItemRecord[];
   templates: Record<string, MessageTemplate>;
@@ -380,6 +412,7 @@ export interface AppDatabase {
   joinRequests?: Record<string, JoinRequestRecord>;
   postBotPublishedPosts?: Record<string, any>;
   imageUrlBotData?: ImageUrlBotStoreData;
+  keyPools?: KeyPoolRecord[];
   uploadedFilesIndex?: Record<string, {
     id: string;
     fileName: string;
@@ -620,6 +653,7 @@ export class SharedStorageService {
       detectedChannels: [],
       joinRequests: {},
       postBotPublishedPosts: {},
+      keyPools: [],
       design: { ...DEFAULT_DESIGN },
       settings: { ...DEFAULT_SETTINGS },
       backupServer: { ...DEFAULT_BACKUP_SERVER_CONFIG }
@@ -931,6 +965,8 @@ export class SharedStorageService {
           detectedChannels: this.db.detectedChannels,
           joinRequests: this.db.joinRequests,
           postBotPublishedPosts: this.db.postBotPublishedPosts || {},
+          imageUrlBotData: this.db.imageUrlBotData,
+          keyPools: this.db.keyPools || [],
           trackedMessages: this.db.trackedMessages,
           scheduledDeletions: this.db.scheduledDeletions,
           chatDeliveryMessages: this.db.chatDeliveryMessages,
@@ -1286,6 +1322,9 @@ export class SharedStorageService {
       })(),
       postBotPublishedPosts: { ...(loadedData.postBotPublishedPosts || {}), ...(this.db.postBotPublishedPosts || {}) },
       imageUrlBotData: loadedData.imageUrlBotData || this.db.imageUrlBotData,
+      keyPools: Array.isArray(loadedData.keyPools)
+        ? loadedData.keyPools
+        : (Array.isArray(this.db.keyPools) ? this.db.keyPools : []),
       design: { ...DEFAULT_DESIGN, ...(loadedData.design || {}) },
       settings: {
         ...DEFAULT_SETTINGS,
@@ -4209,6 +4248,416 @@ export class SharedStorageService {
 
     await this.persist(true);
     return removedLocally || candidateIds.length > 0;
+  }
+
+  // =========================================================================
+  // KEY POOL BATCH STORAGE & SEQUENTIAL ONE-BY-ONE CLAIMING
+  // =========================================================================
+
+  private static normalizeKeyLines(rawLines: string[]): string[] {
+    return (Array.isArray(rawLines) ? rawLines : [])
+      .map((line) => String(line ?? '').trim())
+      .filter((line) => line.length > 0);
+  }
+
+  public static normalizeGeneratorConfig(raw?: Partial<KeyGeneratorConfig> | null): KeyGeneratorConfig {
+    const prefix = String(raw?.prefix ?? '').trim().slice(0, 32);
+    const parsedLength = Math.round(Number(raw?.length) || 12);
+    const length = Math.max(4, Math.min(64, Number.isFinite(parsedLength) ? parsedLength : 12));
+    const rawType = String(raw?.charType ?? 'alphanumeric').trim().toLowerCase();
+    const charType: KeyGeneratorCharType =
+      rawType === 'numbers' || rawType === 'numeric' || rawType === 'digits'
+        ? 'numbers'
+        : rawType === 'letters_upper' || rawType === 'letters' || rawType === 'alpha' || rawType === 'uppercase'
+        ? 'letters_upper'
+        : rawType === 'letters_mixed' || rawType === 'mixed_letters'
+        ? 'letters_mixed'
+        : 'alphanumeric';
+    return { prefix, length, charType };
+  }
+
+  private static generateRandomKeyBody(length: number, charType: KeyGeneratorCharType): string {
+    const alphabets: Record<KeyGeneratorCharType, string> = {
+      numbers: '0123456789',
+      letters_upper: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+      letters_mixed: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz',
+      alphanumeric: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+    };
+    const chars = alphabets[charType] || alphabets.alphanumeric;
+    let out = '';
+    for (let i = 0; i < length; i++) {
+      out += chars[crypto.randomInt(0, chars.length)];
+    }
+    return out;
+  }
+
+  private static generateUniqueKeyForPool(pool: KeyPoolRecord): string {
+    const cfg = SharedStorageService.normalizeGeneratorConfig(pool.generatorConfig);
+    const existingSet = new Set((pool.keys || []).map((k) => k.value));
+    for (let attempt = 0; attempt < 30; attempt++) {
+      const candidate = `${cfg.prefix}${SharedStorageService.generateRandomKeyBody(cfg.length, cfg.charType)}`;
+      if (!existingSet.has(candidate)) {
+        return candidate;
+      }
+    }
+    const extraSuffix = SharedStorageService.generateRandomKeyBody(4, cfg.charType);
+    return `${cfg.prefix}${SharedStorageService.generateRandomKeyBody(cfg.length, cfg.charType)}${extraSuffix}`;
+  }
+
+  public async getKeyPools(): Promise<KeyPoolRecord[]> {
+    await this.loadLatest(false);
+    const list = Array.isArray(this.db.keyPools) ? this.db.keyPools : [];
+    return [...list]
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .map((pool) => ({
+        ...pool,
+        mode: pool.mode === 'generator' ? 'generator' : 'pool',
+        generatorConfig: pool.generatorConfig ? SharedStorageService.normalizeGeneratorConfig(pool.generatorConfig) : null,
+        keys: Array.isArray(pool.keys) ? pool.keys.map((k) => ({ ...k })) : []
+      }));
+  }
+
+  public async getKeyPool(id: string): Promise<KeyPoolRecord | null> {
+    await this.loadLatest(false);
+    const cleanId = String(id || '').trim();
+    if (!cleanId || !Array.isArray(this.db.keyPools)) return null;
+    const found = this.db.keyPools.find((p) => p.id === cleanId);
+    if (!found) return null;
+    return {
+      ...found,
+      mode: found.mode === 'generator' ? 'generator' : 'pool',
+      generatorConfig: found.generatorConfig ? SharedStorageService.normalizeGeneratorConfig(found.generatorConfig) : null,
+      keys: Array.isArray(found.keys) ? found.keys.map((k) => ({ ...k })) : []
+    };
+  }
+
+  public async createKeyPool(input: {
+    mode?: KeyPoolMode;
+    generatorConfig?: Partial<KeyGeneratorConfig> | null;
+    title?: string;
+    keyLines?: string[];
+    expiresAt?: string | null;
+    createdBy?: string;
+    status?: 'active' | 'disabled';
+  }): Promise<KeyPoolRecord> {
+    await this.loadLatest(false);
+    if (!Array.isArray(this.db.keyPools)) {
+      this.db.keyPools = [];
+    }
+
+    const mode: KeyPoolMode = input.mode === 'generator' ? 'generator' : 'pool';
+    const generatorConfig = mode === 'generator'
+      ? SharedStorageService.normalizeGeneratorConfig(input.generatorConfig)
+      : null;
+
+    const lines = mode === 'pool' ? SharedStorageService.normalizeKeyLines(input.keyLines || []) : [];
+    const nowIso = new Date().toISOString();
+
+    let id = '';
+    do {
+      const rand = Math.random().toString(36).substring(2, 7);
+      const timePart = Date.now().toString(36).slice(-4);
+      id = `${rand}${timePart}`;
+    } while (this.db.keyPools.some((p) => p.id === id));
+
+    const keys: KeyPoolEntry[] = lines.map((val, idx) => ({
+      id: `${id}_${idx}_${Math.random().toString(36).substring(2, 5)}`,
+      value: val,
+      index: idx
+    }));
+
+    let parsedExpiresAt: string | null = null;
+    if (input.expiresAt) {
+      const ts = Date.parse(String(input.expiresAt));
+      if (Number.isFinite(ts)) {
+        parsedExpiresAt = new Date(ts).toISOString();
+      }
+    }
+
+    const defaultTitle =
+      mode === 'generator' && generatorConfig
+        ? `Key Generator (${generatorConfig.prefix ? `${generatorConfig.prefix} · ` : ''}${generatorConfig.length} chars)`
+        : `Key Batch (${keys.length} ${keys.length === 1 ? 'Key' : 'Keys'})`;
+    const cleanTitle = (input.title || '').trim() || defaultTitle;
+
+    const record: KeyPoolRecord = {
+      id,
+      mode,
+      generatorConfig,
+      title: cleanTitle,
+      keys,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+      createdBy: input.createdBy ? String(input.createdBy).trim() : undefined,
+      expiresAt: parsedExpiresAt,
+      status: input.status === 'disabled' ? 'disabled' : 'active',
+      totalClaims: 0
+    };
+
+    this.db.keyPools.unshift(record);
+    await this.persist(true);
+    return {
+      ...record,
+      keys: record.keys.map((k) => ({ ...k }))
+    };
+  }
+
+  public async updateKeyPool(
+    id: string,
+    updates: {
+      title?: string;
+      keyLines?: string[];
+      addKeyLines?: string[];
+      generatorConfig?: Partial<KeyGeneratorConfig> | null;
+      expiresAt?: string | null;
+      status?: 'active' | 'disabled';
+      resetClaims?: boolean;
+    }
+  ): Promise<KeyPoolRecord | null> {
+    await this.loadLatest(false);
+    if (!Array.isArray(this.db.keyPools)) return null;
+    const idx = this.db.keyPools.findIndex((p) => p.id === String(id || '').trim());
+    if (idx < 0) return null;
+
+    const existing = this.db.keyPools[idx];
+    const effectiveMode: KeyPoolMode = existing.mode === 'generator' ? 'generator' : 'pool';
+    const nowIso = new Date().toISOString();
+
+    if (updates.title !== undefined) {
+      const t = String(updates.title).trim();
+      if (t) existing.title = t;
+    }
+
+    if (updates.status === 'active' || updates.status === 'disabled') {
+      existing.status = updates.status;
+    }
+
+    if (updates.expiresAt !== undefined) {
+      if (updates.expiresAt === null || updates.expiresAt === '') {
+        existing.expiresAt = null;
+      } else {
+        const ts = Date.parse(String(updates.expiresAt));
+        if (Number.isFinite(ts)) {
+          existing.expiresAt = new Date(ts).toISOString();
+        }
+      }
+    }
+
+    if (effectiveMode === 'generator') {
+      if (updates.generatorConfig) {
+        existing.generatorConfig = SharedStorageService.normalizeGeneratorConfig({
+          ...(existing.generatorConfig || {}),
+          ...updates.generatorConfig
+        });
+      }
+      if (updates.resetClaims) {
+        existing.keys = [];
+        existing.totalClaims = 0;
+      }
+    } else {
+      if (Array.isArray(updates.keyLines)) {
+        const nextLines = SharedStorageService.normalizeKeyLines(updates.keyLines);
+        const claimedPool = updates.resetClaims
+          ? []
+          : (Array.isArray(existing.keys) ? existing.keys.filter((k) => Boolean(k.claimedBy)) : []);
+        const usedClaimIds = new Set<string>();
+
+        existing.keys = nextLines.map((val, newIdx) => {
+          const matchedClaim = claimedPool.find((c) => !usedClaimIds.has(c.id) && c.value === val);
+          if (matchedClaim) {
+            usedClaimIds.add(matchedClaim.id);
+            return {
+              ...matchedClaim,
+              index: newIdx
+            };
+          }
+          return {
+            id: `${existing.id}_${newIdx}_${Math.random().toString(36).substring(2, 5)}`,
+            value: val,
+            index: newIdx
+          };
+        });
+      } else if (updates.resetClaims && Array.isArray(existing.keys)) {
+        existing.keys = existing.keys.map((k, newIdx) => ({
+          id: k.id,
+          value: k.value,
+          index: newIdx
+        }));
+        existing.totalClaims = 0;
+      }
+
+      if (Array.isArray(updates.addKeyLines) && updates.addKeyLines.length > 0) {
+        const appendLines = SharedStorageService.normalizeKeyLines(updates.addKeyLines);
+        const baseIndex = Array.isArray(existing.keys) ? existing.keys.length : 0;
+        const newEntries: KeyPoolEntry[] = appendLines.map((val, offset) => ({
+          id: `${existing.id}_${baseIndex + offset}_${Math.random().toString(36).substring(2, 5)}`,
+          value: val,
+          index: baseIndex + offset
+        }));
+        existing.keys = [...(existing.keys || []), ...newEntries];
+      }
+    }
+
+    existing.updatedAt = nowIso;
+    await this.persist(true);
+    return {
+      ...existing,
+      mode: effectiveMode,
+      generatorConfig: existing.generatorConfig ? SharedStorageService.normalizeGeneratorConfig(existing.generatorConfig) : null,
+      keys: existing.keys.map((k) => ({ ...k }))
+    };
+  }
+
+  public async deleteKeyPool(id: string): Promise<boolean> {
+    await this.loadLatest(false);
+    if (!Array.isArray(this.db.keyPools)) return false;
+    const cleanId = String(id || '').trim();
+    const prevLen = this.db.keyPools.length;
+    this.db.keyPools = this.db.keyPools.filter((p) => p.id !== cleanId);
+    if (this.db.keyPools.length === prevLen) return false;
+    await this.persist(true);
+    return true;
+  }
+
+  public async claimNextKeyFromPool(
+    poolId: string,
+    userId: string,
+    username?: string
+  ): Promise<{
+    status: 'claimed' | 'already_claimed' | 'sold_out' | 'expired' | 'disabled' | 'not_found';
+    key?: KeyPoolEntry;
+    pool?: KeyPoolRecord;
+    remainingCount?: number;
+    totalCount?: number;
+  }> {
+    await this.loadLatest(false);
+    const cleanPoolId = String(poolId || '').trim();
+    const cleanUserId = String(userId || '').trim();
+    const cleanUsername = username ? String(username).replace(/^@/, '').trim() : undefined;
+
+    if (!cleanPoolId || !Array.isArray(this.db.keyPools)) {
+      return { status: 'not_found' };
+    }
+
+    const pool = this.db.keyPools.find((p) => p.id === cleanPoolId);
+    if (!pool) {
+      return { status: 'not_found' };
+    }
+
+    const isGeneratorMode = pool.mode === 'generator';
+    const totalCount = Array.isArray(pool.keys) ? pool.keys.length : 0;
+    const remainingCountBefore = isGeneratorMode
+      ? -1
+      : (Array.isArray(pool.keys) ? pool.keys.filter((k) => !k.claimedBy).length : 0);
+
+    if (pool.status === 'disabled') {
+      return {
+        status: 'disabled',
+        pool: { ...pool, keys: pool.keys.map((k) => ({ ...k })) },
+        remainingCount: remainingCountBefore,
+        totalCount
+      };
+    }
+
+    if (pool.expiresAt) {
+      const expTs = Date.parse(pool.expiresAt);
+      if (Number.isFinite(expTs) && Date.now() >= expTs) {
+        return {
+          status: 'expired',
+          pool: { ...pool, keys: pool.keys.map((k) => ({ ...k })) },
+          remainingCount: remainingCountBefore,
+          totalCount
+        };
+      }
+    }
+
+    if (cleanUserId && Array.isArray(pool.keys)) {
+      const existingClaim = pool.keys.find((k) => String(k.claimedBy || '').trim() === cleanUserId);
+      if (existingClaim) {
+        return {
+          status: 'already_claimed',
+          key: { ...existingClaim },
+          pool: { ...pool, keys: pool.keys.map((k) => ({ ...k })) },
+          remainingCount: remainingCountBefore,
+          totalCount
+        };
+      }
+    }
+
+    if (isGeneratorMode) {
+      if (!Array.isArray(pool.keys)) {
+        pool.keys = [];
+      }
+      const generatedValue = SharedStorageService.generateUniqueKeyForPool(pool);
+      const claimedAtIso = new Date().toISOString();
+      const newEntry: KeyPoolEntry = {
+        id: `${pool.id}_${pool.keys.length}_${Math.random().toString(36).substring(2, 5)}`,
+        value: generatedValue,
+        index: pool.keys.length,
+        claimedBy: cleanUserId || 'unknown',
+        ...(cleanUsername ? { claimedByUsername: cleanUsername } : {}),
+        claimedAt: claimedAtIso
+      };
+      pool.keys.push(newEntry);
+      pool.totalClaims = (pool.totalClaims || 0) + 1;
+      pool.updatedAt = claimedAtIso;
+
+      const snapshotKey = { ...newEntry };
+      const snapshotPool: KeyPoolRecord = {
+        ...pool,
+        mode: 'generator',
+        generatorConfig: pool.generatorConfig ? SharedStorageService.normalizeGeneratorConfig(pool.generatorConfig) : null,
+        keys: pool.keys.map((k) => ({ ...k }))
+      };
+
+      await this.persist(false);
+
+      return {
+        status: 'claimed',
+        key: snapshotKey,
+        pool: snapshotPool,
+        remainingCount: -1,
+        totalCount: snapshotPool.keys.length
+      };
+    }
+
+    const nextKey = Array.isArray(pool.keys) ? pool.keys.find((k) => !k.claimedBy) : undefined;
+    if (!nextKey) {
+      return {
+        status: 'sold_out',
+        pool: { ...pool, keys: pool.keys.map((k) => ({ ...k })) },
+        remainingCount: 0,
+        totalCount
+      };
+    }
+
+    // Mutate synchronously BEFORE awaiting persist() to prevent concurrent double-dispensing
+    const claimedAtIso = new Date().toISOString();
+    nextKey.claimedBy = cleanUserId || 'unknown';
+    if (cleanUsername) {
+      nextKey.claimedByUsername = cleanUsername;
+    }
+    nextKey.claimedAt = claimedAtIso;
+    pool.totalClaims = (pool.totalClaims || 0) + 1;
+    pool.updatedAt = claimedAtIso;
+
+    const remainingCountAfter = pool.keys.filter((k) => !k.claimedBy).length;
+    const snapshotKey = { ...nextKey };
+    const snapshotPool: KeyPoolRecord = {
+      ...pool,
+      mode: 'pool',
+      keys: pool.keys.map((k) => ({ ...k }))
+    };
+
+    await this.persist(false);
+
+    return {
+      status: 'claimed',
+      key: snapshotKey,
+      pool: snapshotPool,
+      remainingCount: remainingCountAfter,
+      totalCount
+    };
   }
 }
 

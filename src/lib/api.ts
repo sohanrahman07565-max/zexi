@@ -237,6 +237,44 @@ export interface BotInstance {
   panelUrl?: string;
 }
 
+export type KeyPoolMode = 'pool' | 'generator';
+export type KeyGeneratorCharType = 'numbers' | 'letters_upper' | 'letters_mixed' | 'alphanumeric';
+
+export interface KeyGeneratorConfig {
+  prefix: string;
+  length: number;
+  charType: KeyGeneratorCharType;
+}
+
+export interface KeyPoolEntry {
+  id: string;
+  value: string;
+  index: number;
+  claimedBy?: string;
+  claimedByUsername?: string;
+  claimedAt?: string;
+}
+
+export interface KeyPoolRecord {
+  id: string;
+  mode?: KeyPoolMode;
+  generatorConfig?: KeyGeneratorConfig | null;
+  title: string;
+  keys: KeyPoolEntry[];
+  createdAt: string;
+  updatedAt: string;
+  createdBy?: string;
+  expiresAt?: string | null;
+  status: 'active' | 'disabled';
+  totalClaims: number;
+  totalKeys: number;
+  claimedKeys: number;
+  remainingKeys: number;
+  isExpired: boolean;
+  isSoldOut: boolean;
+  deepLink: string;
+}
+
 const TOKEN_KEY = 'tg_admin_token';
 const BOT_ID_KEY = 'tg_active_bot_id';
 let memoryTokenFallback: string | null = null;
@@ -1308,6 +1346,67 @@ export const api = {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to clean bot memory');
+    return data;
+  },
+
+  // Key Generator & Batch Key Links
+  async getKeyPools(): Promise<{ success: boolean; botUsername: string; pools: KeyPoolRecord[] }> {
+    const res = await authFetch('/api/keys');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load key links');
+    return data;
+  },
+
+  async createKeyPool(payload: {
+    mode?: KeyPoolMode;
+    generatorConfig?: KeyGeneratorConfig;
+    title?: string;
+    keysText?: string;
+    durationValue?: number;
+    durationUnit?: 'never' | 'minutes' | 'hours' | 'days';
+    expiresAt?: string | null;
+    status?: 'active' | 'disabled';
+  }): Promise<{ success: boolean; pool: KeyPoolRecord }> {
+    const res = await authFetch('/api/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to create key link');
+    return data;
+  },
+
+  async updateKeyPool(
+    id: string,
+    payload: {
+      title?: string;
+      keysText?: string;
+      addKeysText?: string;
+      generatorConfig?: Partial<KeyGeneratorConfig>;
+      durationValue?: number;
+      durationUnit?: 'never' | 'minutes' | 'hours' | 'days';
+      expiresAt?: string | null;
+      status?: 'active' | 'disabled';
+      resetClaims?: boolean;
+    }
+  ): Promise<{ success: boolean; pool: KeyPoolRecord }> {
+    const res = await authFetch(`/api/keys/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to update key link');
+    return data;
+  },
+
+  async deleteKeyPool(id: string): Promise<{ success: boolean }> {
+    const res = await authFetch(`/api/keys/${encodeURIComponent(id)}`, {
+      method: 'DELETE'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to delete key link');
     return data;
   }
 };

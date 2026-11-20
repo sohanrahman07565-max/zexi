@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import multer from 'multer';
 import dotenv from 'dotenv';
-import { storage, StorageManager, storageContext, AdminUser, ItemRecord, TriggerType, OpenMode, ClonedBotRecord, SharedStorageService } from './storage';
+import { storage, StorageManager, storageContext, AdminUser, ItemRecord, TriggerType, OpenMode, ClonedBotRecord, SharedStorageService, KeyPoolRecord } from './storage';
 import { TelegramService, TelegramBotManager, BotSingletonLock, getItemPayload } from './telegram';
 import { hashPassword, verifyPassword, signSessionToken, verifySessionToken } from './auth';
 
@@ -1908,6 +1908,245 @@ apiRouter.delete('/fraud-rules/:id', authenticate, requirePermission('settings_e
     return res.json({ success });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to delete fraud rule' });
+  }
+});
+
+// ============================================================================
+// KEY GENERATOR & SEQUENTIAL KEY LINK MANAGEMENT
+// ============================================================================
+
+function parseKeyLinesInput(keysText?: unknown, keysArray?: unknown): string[] {
+  if (typeof keysText === 'string') {
+    return keysText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  }
+  if (Array.isArray(keysArray)) {
+    return keysArray
+      .map((line) => String(line ?? '').trim())
+      .filter((line) => line.length > 0);
+  }
+  return [];
+}
+
+function resolveKeyPoolExpiryIso(body: any): string | null | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const unit = typeof body.durationUnit === 'string' ? body.durationUnit.trim().toLowerCase() : '';
+  const val = Number(body.durationValue);
+
+  if (unit === 'never' || unit === 'permanent' || body.expiresAt === null || body.expiresAt === '') {
+    return null;
+  }
+
+  if (Number.isFinite(val) && val > 0 && (unit === 'minutes' || unit === 'hours' || unit === 'days')) {
+    const mult = unit === 'days' ? 86400000 : unit === 'hours' ? 3600000 : 60000;
+    return new Date(Date.now() + val * mult).toISOString();
+  }
+
+  if (typeof body.expiresAt === 'string' && body.expiresAt.trim()) {
+    const ts = Date.parse(body.expiresAt.trim());
+    if (Number.isFinite(ts)) {
+      return new Date(ts).toISOString();
+    }
+  }
+
+  return undefined;
+}
+
+function enrichKeyPoolResponse(pool: KeyPoolRecord, botUsername: string) {
+  const cleanBotUsername = (botUsername || '').replace(/^@/, '').trim();
+  const mode = pool.mode === 'generator' ? 'generator' : 'pool';
+  const keys = Array.isArray(pool.keys) ? pool.keys : [];
+  const totalKeys = keys.length;
+  const claimedKeys = keys.filter((k) => Boolean(k.claimedBy)).length;
+  const remainingKeys = mode === 'generator' ? -1 : Math.max(0, totalKeys - claimedKeys);
+  const expTs = pool.expiresAt ? Date.parse(pool.expiresAt) : NaN;
+  const isExpired = Boolean(pool.expiresAt && Number.isFinite(expTs) && Date.now() >= expTs);
+  const isSoldOut = mode === 'generator' ? false : remainingKeys === 0;
+  const deepLink = cleanBotUsername
+    ? `https://t.me/${cleanBotUsername}?start=k_${pool.id}`
+    : `?start=k_${pool.id}`;
+
+  return {
+    ...pool,
+    mode,
+    generatorConfig: mode === 'generator' ? SharedStorageService.normalizeGeneratorConfig(pool.generatorConfig) : null,
+    totalKeys,
+    claimedKeys,
+    remainingKeys,
+    isExpired,
+    isSoldOut,
+    deepLink
+  };
+}
+
+// GET /api/keys
+apiRouter.get('/keys', authenticate, async (_req: Request, res: Response) => {
+  try {
+    const [pools, botUsername] = await Promise.all([
+      storage.getKeyPools(),
+      TelegramService.getBotUsername().catch(() => '')
+    ]);
+    const cleanBotUsername = (botUsername || '').replace(/^@/, '').trim();
+    return res.json({
+      success: true,
+      botUsername: cleanBotUsername,
+      pools: pools.map((p) => enrichKeyPoolResponse(p, cleanBotUsername))
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to load key links' });
+  }
+});
+
+// POST /api/keys
+apiRouter.post('/keys', authenticate, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).admin as AdminUser;
+    const canAdd =
+      admin.role === 'owner' ||
+      admin.permissions?.files_add ||
+      admin.permissions?.links_add ||
+      admin.permissions?.settings_edit;
+    if (!canAdd) {
+      return res.status(403).json({ error: 'Insufficient permissions to generate key links' });
+    }
+
+    const { title, keysText, keys, status, mode, generatorConfig, prefix, keyLength, length, charType } = req.body || {};
+    const effectiveMode = mode === 'generator' ? 'generator' : 'pool';
+    const expiresAt = resolveKeyPoolExpiryIso(req.body);
+
+    if (effectiveMode === 'generator') {
+      const normalizedConfig = SharedStorageService.normalizeGeneratorConfig(
+        generatorConfig || {
+          prefix: prefix ?? '',
+          length: keyLength ?? length ?? 12,
+          charType: charType ?? 'alphanumeric'
+        }
+      );
+      const created = await storage.createKeyPool({
+        mode: 'generator',
+        generatorConfig: normalizedConfig,
+        title: typeof title === 'string' ? title.trim() : undefined,
+        expiresAt: expiresAt ?? null,
+        createdBy: admin.telegramId || admin.id,
+        status: status === 'disabled' ? 'disabled' : 'active'
+      });
+      const botUsername = await TelegramService.getBotUsername().catch(() => '');
+      return res.json({
+        success: true,
+        pool: enrichKeyPoolResponse(created, botUsername)
+      });
+    }
+
+    const parsedLines = parseKeyLinesInput(keysText, keys);
+    if (parsedLines.length === 0) {
+      return res.status(400).json({ error: 'Please provide at least one key (one key per line).' });
+    }
+
+    const created = await storage.createKeyPool({
+      mode: 'pool',
+      title: typeof title === 'string' ? title.trim() : undefined,
+      keyLines: parsedLines,
+      expiresAt: expiresAt ?? null,
+      createdBy: admin.telegramId || admin.id,
+      status: status === 'disabled' ? 'disabled' : 'active'
+    });
+
+    const botUsername = await TelegramService.getBotUsername().catch(() => '');
+    return res.json({
+      success: true,
+      pool: enrichKeyPoolResponse(created, botUsername)
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to generate key link' });
+  }
+});
+
+// PUT /api/keys/:id
+apiRouter.put('/keys/:id', authenticate, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).admin as AdminUser;
+    const canEdit =
+      admin.role === 'owner' ||
+      admin.permissions?.files_edit ||
+      admin.permissions?.links_edit ||
+      admin.permissions?.settings_edit;
+    if (!canEdit) {
+      return res.status(403).json({ error: 'Insufficient permissions to edit key links' });
+    }
+
+    const { id } = req.params;
+    const { title, keysText, keys, addKeysText, generatorConfig, prefix, keyLength, length, charType, status, resetClaims } = req.body || {};
+
+    const existingPool = await storage.getKeyPool(id);
+    if (!existingPool) {
+      return res.status(404).json({ error: 'Key link not found' });
+    }
+
+    const isGenerator = existingPool.mode === 'generator';
+    const hasKeysUpdate = !isGenerator && (keysText !== undefined || keys !== undefined);
+    const parsedLines = hasKeysUpdate ? parseKeyLinesInput(keysText, keys) : undefined;
+    if (hasKeysUpdate && (!parsedLines || parsedLines.length === 0)) {
+      return res.status(400).json({ error: 'Key list cannot be empty when updating keys.' });
+    }
+
+    const parsedAddLines = !isGenerator && addKeysText !== undefined ? parseKeyLinesInput(addKeysText) : undefined;
+    const expiresAt = resolveKeyPoolExpiryIso(req.body);
+    const nextGeneratorConfig = isGenerator && (generatorConfig || prefix !== undefined || keyLength !== undefined || length !== undefined || charType !== undefined)
+      ? SharedStorageService.normalizeGeneratorConfig({
+          ...(existingPool.generatorConfig || {}),
+          ...(generatorConfig || {}),
+          ...(prefix !== undefined ? { prefix } : {}),
+          ...(keyLength !== undefined || length !== undefined ? { length: keyLength ?? length } : {}),
+          ...(charType !== undefined ? { charType } : {})
+        })
+      : undefined;
+
+    const updated = await storage.updateKeyPool(id, {
+      title: title !== undefined ? String(title) : undefined,
+      keyLines: parsedLines,
+      addKeyLines: parsedAddLines,
+      generatorConfig: nextGeneratorConfig,
+      expiresAt,
+      status: status === 'active' || status === 'disabled' ? status : undefined,
+      resetClaims: Boolean(resetClaims)
+    });
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Key link not found' });
+    }
+
+    const botUsername = await TelegramService.getBotUsername().catch(() => '');
+    return res.json({
+      success: true,
+      pool: enrichKeyPoolResponse(updated, botUsername)
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to update key link' });
+  }
+});
+
+// DELETE /api/keys/:id
+apiRouter.delete('/keys/:id', authenticate, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).admin as AdminUser;
+    const canDelete =
+      admin.role === 'owner' ||
+      admin.permissions?.files_delete ||
+      admin.permissions?.links_delete ||
+      admin.permissions?.settings_edit;
+    if (!canDelete) {
+      return res.status(403).json({ error: 'Insufficient permissions to delete key links' });
+    }
+
+    const success = await storage.deleteKeyPool(req.params.id);
+    if (!success) {
+      return res.status(404).json({ error: 'Key link not found' });
+    }
+    return res.json({ success: true });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to delete key link' });
   }
 });
 

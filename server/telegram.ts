@@ -109,6 +109,7 @@ async function withAddSessionLock<T>(fromId: string, fn: () => Promise<T>): Prom
 const activeEditSessions: Map<string, { templateKey: string }> = new Map();
 const activeSetChannelSessions: Map<string, { timestamp: number }> = new Map();
 const activeCloneSessions: Map<string, CloneSession> = new Map();
+const activeAddKeySessions: Map<string, { chatId: string | number; step: 'awaiting_keys'; promptMessageId?: number; createdAt: number }> = new Map();
 
 // Deduplication map to prevent repeated deliveries from retried webhooks
 const recentDeliveries = new Map<string, number>();
@@ -1562,8 +1563,10 @@ export class TelegramService {
       `━━━━━━━━━━━━━━━━━━━━`,
       `📁 <b>CONTENT &amp; FILE MANAGEMENT</b>`,
       `• <code>/add</code> — Start interactive wizard to add Files, Links, or Text`,
+      `• <code>/addkey</code> — Add Key mode (pre-loaded serial keys, 1 per line)`,
+      `• <code>/genkey</code> — Key Generator mode (dynamic unique key link)`,
       `• <code>/allfiles</code> — Browse &amp; copy links for stored files/links`,
-      `• <code>/cancel</code> — Cancel active setup wizard (${isMainBot ? '/add, /clone, /setchannel' : '/add, /setchannel'})`,
+      `• <code>/cancel</code> — Cancel active setup wizard (${isMainBot ? '/add, /addkey, /clone, /setchannel' : '/add, /addkey, /setchannel'})`,
       `• <code>/editthismessage</code> — Reply to a bot message to edit its template`,
       `• <code>/cleanup</code> — Remove tracked old bot messages (24h+)`,
       ``,
@@ -3052,6 +3055,8 @@ export class TelegramService {
     }
 
     // 2. Identify Admin Commands in group (strictly restricted to authorized admins & private DM delivery)
+    const isAddKeyCommand = /^\/addkey(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isGenKeyCommand = /^\/genkey(?:@\w+)?(?:\s+|$)/i.test(text);
     const isAddCommand = /^\/add(?:@\w+)?(?:\s+|$)/i.test(text);
     const isCancelCommand = /^\/cancel(?:@\w+)?(?:\s+|$)/i.test(text);
     const isSetPasswordCommand = /^\/setpassword(?:@\w+)?(?:\s+|$)/i.test(text);
@@ -3313,6 +3318,26 @@ export class TelegramService {
         return;
       }
 
+      if (isAddKeyCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleAddKeyCommand(fromId, fromId, message, text);
+          },
+          `Key batch setup opened in your private messages (<code>${this.escapeHtml(message.from?.username ? `@${message.from.username}` : (message.from?.first_name || 'Admin'))}</code>).`
+        );
+        return;
+      }
+
+      if (isGenKeyCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleGenKeyCommand(fromId, fromId, message, text);
+          },
+          `Key generator link setup opened in your private messages (<code>${this.escapeHtml(message.from?.username ? `@${message.from.username}` : (message.from?.first_name || 'Admin'))}</code>).`
+        );
+        return;
+      }
+
       if (isAddCommand) {
         await executeWithPrivateDelivery(
           async () => {
@@ -3328,6 +3353,7 @@ export class TelegramService {
           async () => {
             const addSession = activeAddSessions.get(fromId) || await storage.getAddSession(fromId);
             activeAddSessions.delete(fromId);
+            activeAddKeySessions.delete(fromId);
             await storage.deleteAddSession(fromId);
             activeEditSessions.delete(fromId);
             activeCloneSessions.delete(fromId);
@@ -4562,8 +4588,11 @@ export class TelegramService {
       }
 
       if (rawPayload) {
-        // Bypass duplicate force-sub check for zero-latency instant file delivery
-        await this.handleDeepLinkDelivery(chatId, rawPayload, { skipForceSubCheck: true });
+        // Bypass duplicate force-sub check for zero-latency instant file/key delivery
+        await this.handleDeepLinkDelivery(chatId, rawPayload, {
+          skipForceSubCheck: true,
+          username: message?.from?.username
+        });
         return;
       } else {
         await this.sendStartWelcomeMessage(chatId, fromId, message);
@@ -5082,7 +5111,19 @@ export class TelegramService {
       return;
     }
 
-    // 6. Command: /add (strictly requires '/' prefix)
+    // 6. Command: /addkey, /genkey & /add (strictly require '/' prefix)
+    const isAddKeyCommand = /^\/addkey(?:@\w+)?(?:\s+|$)/i.test(text);
+    if (isAddKeyCommand) {
+      await this.handleAddKeyCommand(fromId, chatId, message, text);
+      return;
+    }
+
+    const isGenKeyCommand = /^\/genkey(?:@\w+)?(?:\s+|$)/i.test(text);
+    if (isGenKeyCommand) {
+      await this.handleGenKeyCommand(fromId, chatId, message, text);
+      return;
+    }
+
     const isAddCommand = /^\/add(?:@\w+)?(?:\s+|$)/i.test(text);
     if (isAddCommand) {
       await this.handleAddCommand(fromId, chatId, message, text);
@@ -5093,6 +5134,8 @@ export class TelegramService {
     if (text === '/cancel' || text.startsWith('/cancel')) {
       activeSetChannelSessions.delete(fromId);
       activeCloneSessions.delete(fromId);
+      const addKeySession = activeAddKeySessions.get(fromId);
+      activeAddKeySessions.delete(fromId);
       const addSession = activeAddSessions.get(fromId) || await storage.getAddSession(fromId);
       activeAddSessions.delete(fromId);
       await storage.deleteAddSession(fromId);
@@ -5103,11 +5146,12 @@ export class TelegramService {
       const templates = await storage.getTemplates();
       const cancelMsg = templates.CANCEL_MESSAGE?.content || '❌ <b>Operation Cancelled</b>\n<i>Current action has been aborted.</i>';
 
-      if (addSession?.lastPromptMessageId) {
+      const cancelEditId = addSession?.lastPromptMessageId || addKeySession?.promptMessageId;
+      if (cancelEditId) {
         try {
           const editRes = await this.callTelegramApi('editMessageText', {
             chat_id: chatId,
-            message_id: addSession.lastPromptMessageId,
+            message_id: cancelEditId,
             text: cancelMsg,
             parse_mode: 'HTML'
           });
@@ -5128,6 +5172,13 @@ export class TelegramService {
         await this.completeInteractiveClone(chatId, fromId, pendingClone, text, message, false);
         return;
       }
+    }
+
+    // 7a-2. Check if admin is completing an interactive /addkey batch input
+    const pendingAddKey = activeAddKeySessions.get(fromId);
+    if (pendingAddKey) {
+      await this.handleActiveAddKeySessionMessage(message, fromId, chatId, text, pendingAddKey);
+      return;
     }
 
     // 7b. Check if user is inside an interactive /add session
@@ -5816,7 +5867,7 @@ export class TelegramService {
   public static async handleDeepLinkDelivery(
     chatId: string | number,
     rawPayload: string,
-    options: { includeBackButton?: boolean; messageIdToEdit?: number; skipForceSubCheck?: boolean } = {}
+    options: { includeBackButton?: boolean; messageIdToEdit?: number; skipForceSubCheck?: boolean; username?: string } = {}
   ): Promise<void> {
     if (!rawPayload) return;
 
@@ -5834,7 +5885,7 @@ export class TelegramService {
 
     // Mandatory Channel Join (Force Sub) live check (skipped when just verified by /start or forcesub_verify caller)
     if (!options?.skipForceSubCheck) {
-      const forceCheck = await this.checkUserForceSub(chatId, undefined, { forceFresh: true });
+      const forceCheck = await this.checkUserForceSub(chatId, options?.username, { forceFresh: true });
       if (!forceCheck.allJoined) {
         await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, rawPayload);
         return;
@@ -5842,6 +5893,12 @@ export class TelegramService {
     }
 
     const cleanPayload = rawPayload.trim();
+    if (cleanPayload.startsWith('k_')) {
+      const poolId = cleanPayload.slice(2).trim();
+      await this.handleKeyPoolClaim(chatId, strChatId, options?.username, poolId);
+      return;
+    }
+
     const normalizedId = cleanPayload.replace(/^(?:f_|l_)+/, '');
 
     // Super-fast 0ms in-memory item resolution
@@ -8183,6 +8240,368 @@ export class TelegramService {
     await storage.saveAddSession(fromId, session);
   }
 
+  private static async handleKeyPoolClaim(
+    chatId: string | number,
+    userId: string,
+    username: string | undefined,
+    poolId: string
+  ): Promise<void> {
+    const result = await storage.claimNextKeyFromPool(poolId, userId, username);
+
+    if (result.status === 'not_found' || result.status === 'disabled') {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: '❌ <b>Key Link Unavailable</b>\n<i>This key link is disabled or no longer exists.</i>',
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    if (result.status === 'expired') {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text:
+          `⏰ <b>Key Link Expired</b>\n\n` +
+          `<b>Batch:</b> ${this.escapeHtml(result.pool?.title || 'Key Batch')}\n` +
+          `<i>This key distribution link has expired and is no longer accepting claims.</i>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    if (result.status === 'sold_out') {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text:
+          `❌ <b>Sold Out</b>\n\n` +
+          `<b>Batch:</b> ${this.escapeHtml(result.pool?.title || 'Key Batch')}\n` +
+          `<i>All keys from this link have already been claimed (0 keys remaining).</i>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    if ((result.status === 'already_claimed' || result.status === 'claimed') && result.key) {
+      const keyValue = String(result.key.value || '');
+      const isRepeatClaim = result.status === 'already_claimed';
+      const msgText = isRepeatClaim
+        ? `🔑 <b>Your Key</b>\n<code>${this.escapeHtml(keyValue)}</code>\n\nℹ️ <i>You have already claimed your key from this link (1 key per user).</i>`
+        : `🔑 <b>Your Key</b>\n<code>${this.escapeHtml(keyValue)}</code>\n\n<i>Tap the key or button below to copy. Do not share it!</i>`;
+
+      const buttonStyle = isRepeatClaim ? 'primary' : 'success';
+      const targetPoolId = result.pool?.id || poolId;
+      let res: any = null;
+
+      if (keyValue.length >= 1 && keyValue.length <= 256) {
+        res = await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: msgText,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [[{ text: '📋 Copy Key', copy_text: { text: keyValue }, style: buttonStyle }]]
+          }
+        });
+      }
+
+      if (!res?.ok) {
+        const fallbackRes = await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: msgText,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [[{ text: '📋 Copy Key', callback_data: `copy_key:${targetPoolId}`, style: buttonStyle }]]
+          }
+        });
+        if (!fallbackRes?.ok) {
+          await this.callTelegramApi('sendMessage', {
+            chat_id: chatId,
+            text: msgText,
+            parse_mode: 'HTML'
+          });
+        }
+      }
+      return;
+    }
+  }
+
+  private static async finalizeKeyBatchFromLines(
+    chatId: string | number,
+    fromId: string,
+    lines: string[],
+    promptMessageId?: number
+  ): Promise<void> {
+    const pool = await storage.createKeyPool({
+      keyLines: lines,
+      createdBy: fromId
+    });
+
+    const botUsername = await this.getBotUsername();
+    const cleanBotUsername = botUsername.replace(/^@/, '').trim();
+    const deepLink = cleanBotUsername
+      ? `https://t.me/${cleanBotUsername}?start=k_${pool.id}`
+      : `?start=k_${pool.id}`;
+
+    const previewLines = pool.keys
+      .slice(0, 5)
+      .map((k, idx) => `${idx + 1}. <code>${this.escapeHtml(k.value)}</code>`)
+      .join('\n');
+    const extraCount = pool.keys.length > 5 ? `\n<i>…and ${pool.keys.length - 5} more key(s)</i>` : '';
+
+    const summaryText =
+      `✅ <b>Key Batch Created</b>\n\n` +
+      `• <b>Total Keys Added:</b> <code>${pool.keys.length}</code>\n` +
+      `• <b>Remaining:</b> <code>${pool.keys.length} / ${pool.keys.length}</code>\n` +
+      `• <b>Dispense Mode:</b> Sequential (1 key per user)\n\n` +
+      `📋 <b>Serial Order Preview:</b>\n${previewLines}${extraCount}\n\n` +
+      `🔗 <b>Shareable Claim Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
+      `<i>Each user opening this link gets 1 unique key until Sold Out.</i>`;
+
+    const primaryKeyboard: any[][] = cleanBotUsername
+      ? [
+          [{ text: '🔗 Copy Link', copy_text: { text: deepLink }, style: 'success' }],
+          [{ text: '↗️ Open Claim Link', url: deepLink, style: 'primary' }]
+        ]
+      : [];
+
+    const fallbackKeyboard: any[][] = cleanBotUsername
+      ? [[{ text: '↗️ Open Claim Link', url: deepLink, style: 'primary' }]]
+      : [];
+
+    if (promptMessageId) {
+      const editRes = await this.callTelegramApi('editMessageText', {
+        chat_id: chatId,
+        message_id: promptMessageId,
+        text: summaryText,
+        parse_mode: 'HTML',
+        ...(primaryKeyboard.length ? { reply_markup: { inline_keyboard: primaryKeyboard } } : {})
+      });
+      if (editRes?.ok) return;
+      if (fallbackKeyboard.length) {
+        const editFallback = await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: promptMessageId,
+          text: summaryText,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: fallbackKeyboard }
+        });
+        if (editFallback?.ok) return;
+      }
+    }
+
+    const sendRes = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: summaryText,
+      parse_mode: 'HTML',
+      ...(primaryKeyboard.length ? { reply_markup: { inline_keyboard: primaryKeyboard } } : {})
+    });
+    if (!sendRes?.ok && fallbackKeyboard.length) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: summaryText,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: fallbackKeyboard }
+      });
+    }
+  }
+
+  private static async handleAddKeyCommand(
+    fromId: string,
+    chatId: string | number,
+    message?: any,
+    text?: string
+  ): Promise<void> {
+    const isAuthorized = await this.isAuthorizedAdmin(fromId, message?.from?.username);
+    const admin = await storage.getAdmin(fromId);
+    const hasPermission =
+      isAuthorized &&
+      (!admin ||
+        admin.role === 'owner' ||
+        admin.permissions?.files_add !== false ||
+        admin.permissions?.links_add !== false);
+
+    if (!hasPermission) {
+      if (String(chatId).startsWith('-')) return;
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `⛔ <b>Access Denied</b>\n<i>Only authorized administrators can add key batches.</i>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    const rawBody = (text || message?.caption || '').replace(/^\/addkey(?:@\w+)?\s*/i, '');
+    const keyLines = rawBody
+      .split(/\r?\n/)
+      .map((l: string) => l.trim())
+      .filter((l: string) => l.length > 0);
+
+    if (keyLines.length > 0) {
+      activeAddKeySessions.delete(fromId);
+      await this.finalizeKeyBatchFromLines(chatId, fromId, keyLines);
+      return;
+    }
+
+    activeSetChannelSessions.delete(fromId);
+    activeAddSessions.delete(fromId);
+
+    const promptRes = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text:
+        `🔑 <b>Add Multiple Keys (Batch Mode)</b>\n\n` +
+        `Send all your keys in <b>one message</b>, putting <b>one key per line</b> in serial order.\n\n` +
+        `<b>Example:</b>\n<code>KEY-001\nKEY-002\nKEY-003</code>\n\n` +
+        `<i>Tip: You can also paste keys right after <code>/addkey</code> on new lines.\nSend <code>/cancel</code> to abort.</i>`,
+      parse_mode: 'HTML'
+    });
+
+    activeAddKeySessions.set(fromId, {
+      chatId,
+      step: 'awaiting_keys',
+      promptMessageId: promptRes?.result?.message_id,
+      createdAt: Date.now()
+    });
+  }
+
+  private static async handleActiveAddKeySessionMessage(
+    message: any,
+    fromId: string,
+    chatId: string | number,
+    text: string,
+    session: { chatId: string | number; step: 'awaiting_keys'; promptMessageId?: number; createdAt: number }
+  ): Promise<void> {
+    const rawText = (text || message?.text || message?.caption || '').trim();
+    const lines = rawText
+      .split(/\r?\n/)
+      .map((l: string) => l.trim())
+      .filter((l: string) => l.length > 0);
+
+    if (lines.length === 0) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: '⚠️ <b>No keys detected.</b>\n<i>Please send one or more keys (one per line), or send <code>/cancel</code> to abort.</i>',
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    activeAddKeySessions.delete(fromId);
+    await this.finalizeKeyBatchFromLines(chatId, fromId, lines, session.promptMessageId);
+  }
+
+  private static async handleGenKeyCommand(
+    fromId: string,
+    chatId: string | number,
+    message?: any,
+    text?: string
+  ): Promise<void> {
+    const isAuthorized = await this.isAuthorizedAdmin(fromId, message?.from?.username);
+    const admin = await storage.getAdmin(fromId);
+    const hasPermission =
+      isAuthorized &&
+      (!admin ||
+        admin.role === 'owner' ||
+        admin.permissions?.files_add !== false ||
+        admin.permissions?.links_add !== false);
+
+    if (!hasPermission) {
+      if (String(chatId).startsWith('-')) return;
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `⛔ <b>Access Denied</b>\n<i>Only authorized administrators can create Key Generator links.</i>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    const rawArgs = (text || message?.caption || '').replace(/^\/genkey(?:@\w+)?\s*/i, '').trim();
+    if (!rawArgs) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text:
+          `⚡ <b>Key Generator Mode (Dynamic Keys)</b>\n\n` +
+          `Creates a shareable link that dynamically generates a fresh unique key for each user.\n\n` +
+          `<b>Usage:</b>\n` +
+          `<code>/genkey &lt;prefix|none&gt; &lt;length&gt; &lt;format&gt;</code>\n\n` +
+          `<b>Formats:</b> <code>numbers</code> · <code>letters</code> · <code>mixed</code> · <code>alphanumeric</code>\n\n` +
+          `<b>Examples:</b>\n` +
+          `• <code>/genkey DARK- 12 alphanumeric</code>\n` +
+          `• <code>/genkey VIP- 8 numbers</code>\n` +
+          `• <code>/genkey none 16 letters</code>\n\n` +
+          `<i>Tip: You can also configure timers and edit rules in Admin Panel → More → Key Generator.</i>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    const tokens = rawArgs.split(/\s+/).filter(Boolean);
+    const rawPrefix = tokens[0] || '';
+    const prefix = /^(none|null|-|empty)$/i.test(rawPrefix) ? '' : rawPrefix;
+    const rawLength = tokens[1] ? parseInt(tokens[1], 10) : 12;
+    const length = Number.isFinite(rawLength) ? rawLength : 12;
+    const rawFormat = (tokens[2] || 'alphanumeric').toLowerCase();
+    const charType: 'numbers' | 'letters_upper' | 'letters_mixed' | 'alphanumeric' =
+      rawFormat.startsWith('num') || rawFormat === 'digits'
+        ? 'numbers'
+        : rawFormat === 'mixed' || rawFormat === 'letters_mixed'
+        ? 'letters_mixed'
+        : rawFormat.startsWith('let') || rawFormat === 'alpha' || rawFormat === 'letters_upper'
+        ? 'letters_upper'
+        : 'alphanumeric';
+
+    const pool = await storage.createKeyPool({
+      mode: 'generator',
+      generatorConfig: { prefix, length, charType },
+      createdBy: fromId
+    });
+
+    const botUsername = await this.getBotUsername();
+    const cleanBotUsername = botUsername.replace(/^@/, '').trim();
+    const deepLink = cleanBotUsername
+      ? `https://t.me/${cleanBotUsername}?start=k_${pool.id}`
+      : `?start=k_${pool.id}`;
+
+    const formatLabels: Record<string, string> = {
+      numbers: 'Numbers Only (0-9)',
+      letters_upper: 'English Letters (A-Z)',
+      letters_mixed: 'English Letters (Mixed A-z)',
+      alphanumeric: 'Random Alphanumeric (A-Z, 0-9)'
+    };
+
+    const summaryText =
+      `⚡ <b>Key Generator Link Created</b>\n\n` +
+      `• <b>Mode:</b> Dynamic On-Demand Generation\n` +
+      `• <b>Prefix:</b> <code>${this.escapeHtml(pool.generatorConfig?.prefix || 'None')}</code>\n` +
+      `• <b>Key Length:</b> <code>${pool.generatorConfig?.length || length}</code> characters\n` +
+      `• <b>Format:</b> ${this.escapeHtml(formatLabels[charType] || 'Alphanumeric')}\n\n` +
+      `🔗 <b>Shareable Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
+      `<i>Each user opening this link automatically receives a newly generated unique key.</i>`;
+
+    const primaryKeyboard: any[][] = cleanBotUsername
+      ? [
+          [{ text: '🔗 Copy Link', copy_text: { text: deepLink }, style: 'success' }],
+          [{ text: '↗️ Open Claim Link', url: deepLink, style: 'primary' }]
+        ]
+      : [];
+    const fallbackKeyboard: any[][] = cleanBotUsername
+      ? [[{ text: '↗️ Open Claim Link', url: deepLink, style: 'primary' }]]
+      : [];
+
+    const sendRes = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: summaryText,
+      parse_mode: 'HTML',
+      ...(primaryKeyboard.length ? { reply_markup: { inline_keyboard: primaryKeyboard } } : {})
+    });
+    if (!sendRes?.ok && fallbackKeyboard.length) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: summaryText,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: fallbackKeyboard }
+      });
+    }
+  }
+
   private static async handleAddCommand(
     fromId: string,
     chatId: string | number,
@@ -9599,7 +10018,10 @@ export class TelegramService {
       }
 
       if (targetPayload && targetPayload !== 'start') {
-        await this.handleDeepLinkDelivery(chatId, targetPayload, { skipForceSubCheck: true });
+        await this.handleDeepLinkDelivery(chatId, targetPayload, {
+          skipForceSubCheck: true,
+          username: cb.from?.username
+        });
       } else {
         await this.sendStartWelcomeMessage(chatId, fromId, cb.message);
       }
@@ -9691,6 +10113,49 @@ export class TelegramService {
             parse_mode: 'HTML'
           });
         } catch {}
+      }
+      return;
+    }
+
+    // COPY KEY FALLBACK CALLBACK (copy_key:<poolId>)
+    if (data && data.startsWith('copy_key:')) {
+      const targetPoolId = data.slice('copy_key:'.length).trim();
+      try {
+        const pool = targetPoolId ? await storage.getKeyPool(targetPoolId) : null;
+        const entry = pool?.keys?.find((k) => String(k.claimedBy || '').trim() === fromId);
+        if (entry?.value) {
+          if (entry.value.length <= 180) {
+            await this.callTelegramApi('answerCallbackQuery', {
+              callback_query_id: cb.id,
+              text: `🔑 Your Key:\n${entry.value}`,
+              show_alert: true
+            }).catch(() => {});
+          } else {
+            await this.callTelegramApi('answerCallbackQuery', {
+              callback_query_id: cb.id,
+              text: '🔑 Key sent below for copying.'
+            }).catch(() => {});
+            if (chatId) {
+              await this.callTelegramApi('sendMessage', {
+                chat_id: chatId,
+                text: `🔑 <b>Your Key</b>\n<code>${this.escapeHtml(entry.value)}</code>`,
+                parse_mode: 'HTML'
+              }).catch(() => {});
+            }
+          }
+        } else {
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: '❌ Claimed key not found for your account.',
+            show_alert: true
+          }).catch(() => {});
+        }
+      } catch {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: '⚠️ Unable to retrieve key right now.',
+          show_alert: true
+        }).catch(() => {});
       }
       return;
     }
@@ -11192,6 +11657,7 @@ export class TelegramService {
 
     const runtimeCount =
       activeAddSessions.size +
+      activeAddKeySessions.size +
       activeEditSessions.size +
       activeSetChannelSessions.size +
       activeCloneSessions.size +
@@ -11203,6 +11669,7 @@ export class TelegramService {
       this.freeFireGuildCache.size;
 
     activeAddSessions.clear();
+    activeAddKeySessions.clear();
     activeEditSessions.clear();
     activeSetChannelSessions.clear();
     activeCloneSessions.clear();

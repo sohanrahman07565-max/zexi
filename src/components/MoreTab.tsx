@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { 
-  AdminUser, MessageTemplate, BotSettings, UserReportRecord, FraudKeywordRule, JoinRequestRecord, AllowedChatEntry, api 
+  AdminUser, MessageTemplate, BotSettings, UserReportRecord, FraudKeywordRule, JoinRequestRecord, AllowedChatEntry, KeyPoolRecord, KeyPoolMode, KeyGeneratorCharType, api 
 } from '../lib/api';
 import { toast } from '../lib/toast';
 import { 
@@ -40,7 +40,7 @@ interface MoreTabProps {
   onOpenBotSwitcher?: () => void;
 }
 
-type MoreSubView = 'menu' | 'templates' | 'admins' | 'settings' | 'webhook' | 'broadcast' | 'emoji' | 'reports' | 'fraud' | 'whitelist';
+type MoreSubView = 'menu' | 'templates' | 'admins' | 'settings' | 'webhook' | 'broadcast' | 'emoji' | 'reports' | 'fraud' | 'whitelist' | 'key_generator';
 
 export const MoreTab: React.FC<MoreTabProps> = ({
   currentUser,
@@ -108,6 +108,31 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const fraudVideoInputRef = useRef<HTMLInputElement>(null);
   const [newFraudMediaType, setNewFraudMediaType] = useState<'text' | 'photo' | 'video' | 'audio' | 'voice'>('text');
   const [savingFraudRule, setSavingFraudRule] = useState<boolean>(false);
+
+  // Key Generator state
+  const [keyPoolsList, setKeyPoolsList] = useState<KeyPoolRecord[]>([]);
+  const [keyPoolsLoading, setKeyPoolsLoading] = useState<boolean>(false);
+  const [keyGenMode, setKeyGenMode] = useState<KeyPoolMode>('pool');
+  const [keyGenTitle, setKeyGenTitle] = useState<string>('');
+  const [keyGenText, setKeyGenText] = useState<string>('');
+  const [keyGenPrefix, setKeyGenPrefix] = useState<string>('DARK-');
+  const [keyGenLength, setKeyGenLength] = useState<number>(12);
+  const [keyGenCharType, setKeyGenCharType] = useState<KeyGeneratorCharType>('alphanumeric');
+  const [keyGenDurationUnit, setKeyGenDurationUnit] = useState<'never' | 'minutes' | 'hours' | 'days'>('never');
+  const [keyGenDurationValue, setKeyGenDurationValue] = useState<number>(24);
+  const [keyGenCreating, setKeyGenCreating] = useState<boolean>(false);
+  const [expandedKeyPoolId, setExpandedKeyPoolId] = useState<string | null>(null);
+  const [editingKeyPool, setEditingKeyPool] = useState<KeyPoolRecord | null>(null);
+  const [editKeyTitle, setEditKeyTitle] = useState<string>('');
+  const [editKeyText, setEditKeyText] = useState<string>('');
+  const [editKeyPrefix, setEditKeyPrefix] = useState<string>('');
+  const [editKeyLength, setEditKeyLength] = useState<number>(12);
+  const [editKeyCharType, setEditKeyCharType] = useState<KeyGeneratorCharType>('alphanumeric');
+  const [editKeyStatus, setEditKeyStatus] = useState<'active' | 'disabled'>('active');
+  const [editKeyExpiryMode, setEditKeyExpiryMode] = useState<'keep' | 'never' | 'minutes' | 'hours' | 'days'>('keep');
+  const [editKeyDurationValue, setEditKeyDurationValue] = useState<number>(24);
+  const [editKeyResetClaims, setEditKeyResetClaims] = useState<boolean>(false);
+  const [savingKeyPool, setSavingKeyPool] = useState<boolean>(false);
 
 
 
@@ -516,6 +541,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       loadBotRuntimeStatus();
     } else if (subView === 'whitelist') {
       loadChatWhitelist();
+    } else if (subView === 'key_generator') {
+      loadKeyPools();
     }
     // Refresh user count for broadcast
     api.getUsers().then(users => {
@@ -666,10 +693,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     );
   };
 
-  // Initial load for reports and fraud rules
+  // Initial load for reports, fraud rules, and key pools
   useEffect(() => {
     loadReports();
     loadFraudRules();
+    loadKeyPools();
   }, []);
 
   useEffect(() => {
@@ -677,8 +705,22 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       loadReports();
     } else if (subView === 'fraud') {
       loadFraudRules();
+    } else if (subView === 'key_generator') {
+      loadKeyPools();
     }
   }, [subView]);
+
+  const loadKeyPools = async () => {
+    setKeyPoolsLoading(true);
+    try {
+      const res = await api.getKeyPools();
+      setKeyPoolsList(Array.isArray(res.pools) ? res.pools : []);
+    } catch (err: any) {
+      console.warn('Failed to load key pools:', err);
+    } finally {
+      setKeyPoolsLoading(false);
+    }
+  };
 
   const loadReports = async () => {
     setReportsLoading(true);
@@ -1747,6 +1789,27 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     }`}
                   >
                     {chatWhitelistEnabled ? `Strict · ${allowedChats.length}` : `${allowedChats.length} Saved`}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
+          </button>
+
+          {/* Key Generator */}
+          <button
+            onClick={() => setSubView('key_generator')}
+            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #10b981 20%, rgba(255,255,255,.06))' }}>
+                <Key className="w-4 h-4 text-emerald-300" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>Key Generator</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-500/20 text-emerald-200 font-mono font-semibold border border-emerald-400/25 tabular-nums">
+                    {keyPoolsList.length} Links
                   </span>
                 </div>
               </div>
@@ -5010,6 +5073,863 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           <div><code className="text-cyan-300">/ignorechat &lt;chat_id&gt;</code> — Remove chat so bot ignores it</div>
           <div><code className="text-cyan-300">/allowedchats</code> — View current whitelist status in DM</div>
         </div>
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------
+  // SUB-VIEW: KEY GENERATOR
+  // -------------------------------------------------------------
+  if (subView === 'key_generator') {
+    const parsedNewKeyLines = keyGenText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+
+    const CHAR_TYPE_LABELS: Record<KeyGeneratorCharType, string> = {
+      numbers: 'Numbers Only (0-9)',
+      letters_upper: 'English Letters (A-Z)',
+      letters_mixed: 'English Letters (Mixed A-z)',
+      alphanumeric: 'Random Alphanumeric (A-Z, 0-9)'
+    };
+
+    const buildSampleKeyPreview = (prefix: string, length: number, charType: KeyGeneratorCharType) => {
+      const safeLen = Math.max(4, Math.min(64, Number(length) || 12));
+      const pools: Record<KeyGeneratorCharType, string> = {
+        numbers: '482910573649',
+        letters_upper: 'XKQMRTWPLZVN',
+        letters_mixed: 'XkQmRtWpLzVn',
+        alphanumeric: 'A9F3K8Q2M7X4'
+      };
+      const pattern = pools[charType] || pools.alphanumeric;
+      let body = '';
+      for (let i = 0; i < safeLen; i++) {
+        body += pattern[i % pattern.length];
+      }
+      return `${prefix.trim()}${body}`;
+    };
+
+    const formatRemainingTime = (expiresAt?: string | null) => {
+      if (!expiresAt) return 'Permanent (No Expiry)';
+      const expMs = Date.parse(expiresAt);
+      if (!Number.isFinite(expMs)) return 'Permanent';
+      const diffMs = expMs - Date.now();
+      if (diffMs <= 0) return 'Expired';
+      const totalMins = Math.ceil(diffMs / 60000);
+      if (totalMins < 60) return `Expires in ${totalMins}m`;
+      const hours = Math.floor(totalMins / 60);
+      const mins = totalMins % 60;
+      if (hours < 24) return mins > 0 ? `Expires in ${hours}h ${mins}m` : `Expires in ${hours}h`;
+      const days = Math.floor(hours / 24);
+      const remHours = hours % 24;
+      return remHours > 0 ? `Expires in ${days}d ${remHours}h` : `Expires in ${days}d`;
+    };
+
+    const handleCreateKeyPool = async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (keyGenMode === 'pool' && parsedNewKeyLines.length === 0) {
+        toast.error('Please enter at least one key (one key per line).');
+        return;
+      }
+      setKeyGenCreating(true);
+      try {
+        const res = await api.createKeyPool(
+          keyGenMode === 'generator'
+            ? {
+                mode: 'generator',
+                title: keyGenTitle.trim() || undefined,
+                generatorConfig: {
+                  prefix: keyGenPrefix.trim(),
+                  length: Math.max(4, Math.min(64, Number(keyGenLength) || 12)),
+                  charType: keyGenCharType
+                },
+                durationUnit: keyGenDurationUnit,
+                durationValue: keyGenDurationUnit === 'never' ? undefined : Math.max(1, Number(keyGenDurationValue) || 1)
+              }
+            : {
+                mode: 'pool',
+                title: keyGenTitle.trim() || undefined,
+                keysText: keyGenText,
+                durationUnit: keyGenDurationUnit,
+                durationValue: keyGenDurationUnit === 'never' ? undefined : Math.max(1, Number(keyGenDurationValue) || 1)
+              }
+        );
+        setKeyGenTitle('');
+        if (keyGenMode === 'pool') setKeyGenText('');
+        setKeyGenDurationUnit('never');
+        await loadKeyPools();
+        if (res.pool?.deepLink) {
+          const okMsg =
+            keyGenMode === 'generator'
+              ? 'Generated dynamic key link & copied to clipboard!'
+              : `Generated key link (${res.pool.totalKeys} keys) & copied to clipboard!`;
+          try {
+            await navigator.clipboard?.writeText(res.pool.deepLink);
+            toast.success(okMsg);
+          } catch {
+            toast.success(keyGenMode === 'generator' ? 'Dynamic key link created!' : `Generated key link with ${res.pool.totalKeys} keys!`);
+          }
+        }
+      } catch (err: any) {
+        toast.error(err?.message || 'Failed to generate key link');
+      } finally {
+        setKeyGenCreating(false);
+      }
+    };
+
+    const openEditKeyPoolModal = (pool: KeyPoolRecord) => {
+      setEditingKeyPool(pool);
+      setEditKeyTitle(pool.title || '');
+      setEditKeyText((pool.keys || []).map((k) => k.value).join('\n'));
+      setEditKeyPrefix(pool.generatorConfig?.prefix || '');
+      setEditKeyLength(pool.generatorConfig?.length || 12);
+      setEditKeyCharType(pool.generatorConfig?.charType || 'alphanumeric');
+      setEditKeyStatus(pool.status === 'disabled' ? 'disabled' : 'active');
+      setEditKeyExpiryMode('keep');
+      setEditKeyDurationValue(24);
+      setEditKeyResetClaims(false);
+    };
+
+    const handleSaveEditedKeyPool = async (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!editingKeyPool) return;
+      const isGenPool = editingKeyPool.mode === 'generator';
+      if (!isGenPool) {
+        const lines = editKeyText
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => l.length > 0);
+        if (lines.length === 0) {
+          toast.error('At least one key line is required.');
+          return;
+        }
+      }
+      setSavingKeyPool(true);
+      try {
+        const payload: any = {
+          title: editKeyTitle.trim() || editingKeyPool.title,
+          status: editKeyStatus,
+          resetClaims: editKeyResetClaims
+        };
+        if (isGenPool) {
+          payload.generatorConfig = {
+            prefix: editKeyPrefix.trim(),
+            length: Math.max(4, Math.min(64, Number(editKeyLength) || 12)),
+            charType: editKeyCharType
+          };
+        } else {
+          payload.keysText = editKeyText;
+        }
+        if (editKeyExpiryMode === 'never') {
+          payload.durationUnit = 'never';
+          payload.expiresAt = null;
+        } else if (editKeyExpiryMode !== 'keep') {
+          payload.durationUnit = editKeyExpiryMode;
+          payload.durationValue = Math.max(1, Number(editKeyDurationValue) || 1);
+        }
+        await api.updateKeyPool(editingKeyPool.id, payload);
+        toast.success('Key link updated successfully!');
+        setEditingKeyPool(null);
+        await loadKeyPools();
+      } catch (err: any) {
+        toast.error(err?.message || 'Failed to update key link');
+      } finally {
+        setSavingKeyPool(false);
+      }
+    };
+
+    const handleToggleKeyPoolStatus = async (pool: KeyPoolRecord) => {
+      try {
+        const nextStatus = pool.status === 'disabled' ? 'active' : 'disabled';
+        await api.updateKeyPool(pool.id, { status: nextStatus });
+        toast.success(`Key link ${nextStatus === 'active' ? 'activated' : 'disabled'}`);
+        await loadKeyPools();
+      } catch (err: any) {
+        toast.error(err?.message || 'Failed to toggle key link status');
+      }
+    };
+
+    const handleDeleteKeyPool = async (pool: KeyPoolRecord) => {
+      const countNote = pool.mode === 'generator' ? `${pool.claimedKeys} generated claims` : `${pool.totalKeys} keys`;
+      if (!window.confirm(`Delete key link "${pool.title}" (${countNote})? This cannot be undone.`)) {
+        return;
+      }
+      try {
+        await api.deleteKeyPool(pool.id);
+        toast.success('Key link deleted');
+        if (expandedKeyPoolId === pool.id) setExpandedKeyPoolId(null);
+        await loadKeyPools();
+      } catch (err: any) {
+        toast.error(err?.message || 'Failed to delete key link');
+      }
+    };
+
+    return (
+      <div className="space-y-4 pb-28 animate-tab-fade-in">
+        {/* Header */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            {renderSubViewBackButton('menu', 'Back to More')}
+            <div className="min-w-0">
+              <h2 className="text-base font-bold text-white flex items-center gap-1.5 truncate">
+                <Key className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span className="truncate">Key Generator</span>
+              </h2>
+              <p className="text-[11px] text-zinc-400 truncate">
+                Switch between pre-loaded serial keys or dynamic on-demand key links
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={loadKeyPools}
+            disabled={keyPoolsLoading}
+            className="px-2.5 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${keyPoolsLoading ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
+          </button>
+        </div>
+
+        {/* Mode Switcher + Create Key Link Form */}
+        <form onSubmit={handleCreateKeyPool} className="p-4 rounded-2xl glass-panel border border-emerald-500/25 space-y-3.5">
+          {/* Two Distinct Modes Switcher */}
+          <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-zinc-950 border border-zinc-800">
+            <button
+              type="button"
+              onClick={() => setKeyGenMode('pool')}
+              className={`py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                keyGenMode === 'pool'
+                  ? 'bg-emerald-500 text-zinc-950 shadow'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <Plus className="w-3.5 h-3.5 shrink-0" />
+              <span>Add Key</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setKeyGenMode('generator')}
+              className={`py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                keyGenMode === 'generator'
+                  ? 'bg-cyan-400 text-zinc-950 shadow'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5 shrink-0" />
+              <span>Key Generator</span>
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-bold text-white flex items-center gap-1.5">
+              {keyGenMode === 'pool' ? (
+                <>
+                  <Key className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Mode 1: Add Key (Pre-Loaded Serial List)</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Mode 2: Key Generator (Dynamic Rules)</span>
+                </>
+              )}
+            </div>
+            {keyGenMode === 'pool' ? (
+              <span className="text-[10px] px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 font-mono font-semibold tabular-nums">
+                {parsedNewKeyLines.length} {parsedNewKeyLines.length === 1 ? 'Key' : 'Keys'} Ready
+              </span>
+            ) : (
+              <span className="text-[10px] px-2 py-0.5 rounded-md bg-cyan-500/15 text-cyan-300 border border-cyan-500/25 font-mono font-semibold">
+                On-Demand
+              </span>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+              Link Title / Label (Optional)
+            </label>
+            <input
+              type="text"
+              value={keyGenTitle}
+              onChange={(e) => setKeyGenTitle(e.target.value)}
+              placeholder={keyGenMode === 'pool' ? 'e.g. Premium Access Keys Wave #1' : 'e.g. VIP Auto-Generated Access'}
+              className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+
+          {keyGenMode === 'pool' ? (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+                  Keys List (1 Key Per Line in Serial Order)
+                </label>
+                <span className="text-[10px] text-zinc-500">Sold Out at 0 remaining</span>
+              </div>
+              <textarea
+                rows={5}
+                value={keyGenText}
+                onChange={(e) => setKeyGenText(e.target.value)}
+                placeholder={'KEY-001\nKEY-002\nKEY-003'}
+                className="w-full px-3 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-emerald-500 resize-y"
+                required
+              />
+            </div>
+          ) : (
+            <div className="space-y-3 p-3 rounded-xl bg-zinc-950/70 border border-cyan-500/20">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                    Key Prefix (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={32}
+                    value={keyGenPrefix}
+                    onChange={(e) => setKeyGenPrefix(e.target.value)}
+                    placeholder="e.g. DARK-, VIP-, or blank"
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-cyan-400"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                    Key Body Length (4 – 64 chars)
+                  </label>
+                  <input
+                    type="number"
+                    min={4}
+                    max={64}
+                    value={keyGenLength}
+                    onChange={(e) => setKeyGenLength(Math.max(4, Math.min(64, parseInt(e.target.value, 10) || 12)))}
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-cyan-400"
+                    required
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1.5">
+                  Character / Format Type
+                </label>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {(
+                    [
+                      { value: 'numbers', label: 'Numbers Only (0-9)' },
+                      { value: 'letters_upper', label: 'English Letters (A-Z)' },
+                      { value: 'letters_mixed', label: 'English Letters (Mixed)' },
+                      { value: 'alphanumeric', label: 'Random Alphanumeric' }
+                    ] as { value: KeyGeneratorCharType; label: string }[]
+                  ).map((opt) => (
+                    <button
+                      key={opt.value}
+                      type="button"
+                      onClick={() => setKeyGenCharType(opt.value)}
+                      className={`px-2.5 py-2 rounded-xl text-[11px] font-semibold border text-left transition-colors cursor-pointer ${
+                        keyGenCharType === opt.value
+                          ? 'bg-cyan-500/20 text-cyan-200 border-cyan-400/50'
+                          : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-white'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-2.5 rounded-xl bg-zinc-900/90 border border-zinc-800 flex flex-wrap items-center justify-between gap-2">
+                <span className="text-[10px] uppercase tracking-wider font-semibold text-zinc-400">
+                  Live Format Preview
+                </span>
+                <code className="text-xs font-mono text-cyan-300 break-all">
+                  {buildSampleKeyPreview(keyGenPrefix, keyGenLength, keyGenCharType)}
+                </code>
+              </div>
+            </div>
+          )}
+
+          {/* Link Timer / Expiry Duration */}
+          <div className="p-3 rounded-xl bg-zinc-950/70 border border-zinc-800/80 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-bold text-white flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 text-amber-400" />
+                <span>Link Expiry Timer</span>
+              </span>
+              <span className="text-[10px] text-zinc-400">
+                {keyGenDurationUnit === 'never' ? 'Never Expires' : `Expires in ${keyGenDurationValue} ${keyGenDurationUnit}`}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={keyGenDurationUnit}
+                onChange={(e) => setKeyGenDurationUnit(e.target.value as any)}
+                className="px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-white focus:outline-none focus:border-emerald-500"
+              >
+                <option value="never">Permanent (No Timer)</option>
+                <option value="minutes">Minutes</option>
+                <option value="hours">Hours</option>
+                <option value="days">Days</option>
+              </select>
+
+              {keyGenDurationUnit !== 'never' && (
+                <input
+                  type="number"
+                  min={1}
+                  max={9999}
+                  value={keyGenDurationValue}
+                  onChange={(e) => setKeyGenDurationValue(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                  className="w-24 px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
+                />
+              )}
+
+              <div className="flex flex-wrap items-center gap-1">
+                {[
+                  { label: 'No Limit', unit: 'never' as const, val: 24 },
+                  { label: '30m', unit: 'minutes' as const, val: 30 },
+                  { label: '1h', unit: 'hours' as const, val: 1 },
+                  { label: '24h', unit: 'hours' as const, val: 24 },
+                  { label: '7d', unit: 'days' as const, val: 7 }
+                ].map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    onClick={() => {
+                      setKeyGenDurationUnit(preset.unit);
+                      setKeyGenDurationValue(preset.val);
+                    }}
+                    className={`px-2 py-1 rounded-lg text-[10px] font-semibold border transition-colors cursor-pointer ${
+                      keyGenDurationUnit === preset.unit && (preset.unit === 'never' || keyGenDurationValue === preset.val)
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                        : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-white'
+                    }`}
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+            <span className="text-[10px] text-zinc-400">
+              Bot shortcut: <code className="text-emerald-300">{keyGenMode === 'pool' ? '/addkey' : '/genkey'}</code>
+            </span>
+            <button
+              type="submit"
+              disabled={keyGenCreating || (keyGenMode === 'pool' && parsedNewKeyLines.length === 0)}
+              className={`px-4 py-2 rounded-xl text-zinc-950 text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 ${
+                keyGenMode === 'generator'
+                  ? 'bg-cyan-400 hover:bg-cyan-300'
+                  : 'bg-emerald-500 hover:bg-emerald-400'
+              }`}
+            >
+              {keyGenCreating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Link2 className="w-3.5 h-3.5" />}
+              <span>{keyGenMode === 'generator' ? 'Generate Dynamic Link' : 'Generate Key Link'}</span>
+            </button>
+          </div>
+        </form>
+
+        {/* Generated Key Links List */}
+        <div className="space-y-2.5">
+          <div className="flex items-center justify-between px-1">
+            <span className="text-xs font-bold text-white tabular-nums">
+              Created Key Links ({keyPoolsList.length})
+            </span>
+          </div>
+
+          {keyPoolsLoading && keyPoolsList.length === 0 ? (
+            <div className="p-6 text-center text-xs text-zinc-400 flex items-center justify-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
+              <span>Loading key links...</span>
+            </div>
+          ) : keyPoolsList.length === 0 ? (
+            <div className="p-6 rounded-2xl glass-panel border border-zinc-800 text-center space-y-2">
+              <Key className="w-7 h-7 text-emerald-400 mx-auto" />
+              <div className="text-xs font-semibold text-white">No key links created yet</div>
+              <p className="text-[11px] text-zinc-400">
+                Use <b>Add Key</b> above for pre-loaded serial keys or <b>Key Generator</b> for on-demand dynamic keys.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {keyPoolsList.map((pool) => {
+                const isGenPool = pool.mode === 'generator';
+                const isExpanded = expandedKeyPoolId === pool.id;
+                const statusBadge =
+                  pool.status === 'disabled'
+                    ? { label: 'Disabled', cls: 'bg-zinc-800 text-zinc-300 border-zinc-700' }
+                    : pool.isExpired
+                    ? { label: 'Expired', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/30' }
+                    : !isGenPool && pool.isSoldOut
+                    ? { label: 'Sold Out', cls: 'bg-rose-500/20 text-rose-300 border-rose-500/30' }
+                    : { label: 'Active', cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' };
+
+                return (
+                  <div key={pool.id} className="p-3.5 rounded-2xl glass-panel border border-zinc-800 space-y-3">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xs font-bold text-white truncate">{pool.title}</span>
+                          <span
+                            className={`text-[10px] px-2 py-0.5 rounded-md font-semibold border ${
+                              isGenPool
+                                ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                                : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                            }`}
+                          >
+                            {isGenPool ? 'Key Generator' : 'Add Key Pool'}
+                          </span>
+                          <span className={`text-[10px] px-2 py-0.5 rounded-md font-semibold border ${statusBadge.cls}`}>
+                            {statusBadge.label}
+                          </span>
+                          {isGenPool ? (
+                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-white/10 text-cyan-200 font-mono tabular-nums">
+                              {pool.claimedKeys} Generated
+                            </span>
+                          ) : (
+                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-white/10 text-white/85 font-mono tabular-nums">
+                              {pool.remainingKeys} / {pool.totalKeys} Left
+                            </span>
+                          )}
+                        </div>
+
+                        {isGenPool && pool.generatorConfig && (
+                          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[10px] font-mono text-cyan-200/85">
+                            <span>Prefix: {pool.generatorConfig.prefix || 'None'}</span>
+                            <span>·</span>
+                            <span>Length: {pool.generatorConfig.length}</span>
+                            <span>·</span>
+                            <span>{CHAR_TYPE_LABELS[pool.generatorConfig.charType] || 'Alphanumeric'}</span>
+                          </div>
+                        )}
+
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-zinc-400">
+                          <span className="flex items-center gap-1">
+                            <Clock className="w-3 h-3 text-amber-400" />
+                            {formatRemainingTime(pool.expiresAt)}
+                          </span>
+                          <span>Claimed: {pool.claimedKeys}</span>
+                          <span>Created {new Date(pool.createdAt).toLocaleDateString()}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleKeyPoolStatus(pool)}
+                          className={`px-2 py-1.5 rounded-xl text-[10px] font-bold border cursor-pointer ${
+                            pool.status === 'disabled'
+                              ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
+                              : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:text-white'
+                          }`}
+                          title={pool.status === 'disabled' ? 'Enable Link' : 'Disable Link'}
+                        >
+                          {pool.status === 'disabled' ? 'Enable' : 'Pause'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => openEditKeyPoolModal(pool)}
+                          className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white cursor-pointer"
+                          title="Edit Key Link"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteKeyPool(pool)}
+                          className="p-2 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 hover:bg-rose-500/20 cursor-pointer"
+                          title="Delete Key Link"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Shareable Deep Link Row */}
+                    <div className="flex items-center gap-2 p-2 rounded-xl bg-zinc-950 border border-zinc-800">
+                      <code className="text-[11px] text-emerald-300 font-mono truncate flex-1 select-all">
+                        {pool.deepLink}
+                      </code>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(pool.deepLink);
+                          toast.success('Claim link copied!');
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold flex items-center gap-1 shrink-0 cursor-pointer"
+                      >
+                        <Copy className="w-3 h-3" />
+                        <span>Copy</span>
+                      </button>
+                      {pool.deepLink.startsWith('http') && (
+                        <a
+                          href={pool.deepLink}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="p-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white shrink-0"
+                          title="Open Link"
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      )}
+                    </div>
+
+                    {/* Expand / Collapse Keys Inspection */}
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => setExpandedKeyPoolId(isExpanded ? null : pool.id)}
+                        className="text-[11px] font-semibold text-zinc-400 hover:text-white flex items-center gap-1 cursor-pointer"
+                      >
+                        <ChevronRight className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                        <span>
+                          {isExpanded
+                            ? 'Hide Keys Log'
+                            : isGenPool
+                            ? `Inspect ${pool.totalKeys} Generated Keys`
+                            : `Inspect ${pool.totalKeys} Keys & Claims`}
+                        </span>
+                      </button>
+
+                      {isExpanded && (
+                        <div className="mt-2 max-h-56 overflow-y-auto space-y-1.5 pr-1">
+                          {(pool.keys || []).length === 0 ? (
+                            <div className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 text-[11px] text-zinc-400 text-center">
+                              No keys generated yet. Users opening the link will generate unique keys automatically.
+                            </div>
+                          ) : (
+                            (pool.keys || []).map((k, idx) => (
+                              <div
+                                key={k.id}
+                                className="px-2.5 py-1.5 rounded-xl bg-zinc-950/90 border border-zinc-800/80 flex items-center justify-between gap-2 text-[11px]"
+                              >
+                                <div className="flex items-center gap-2 min-w-0 flex-1">
+                                  <span className="text-zinc-500 font-mono shrink-0">#{idx + 1}</span>
+                                  <code className="font-mono text-white truncate">{k.value}</code>
+                                </div>
+                                {k.claimedBy ? (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-rose-500/15 text-rose-300 border border-rose-500/25 font-mono shrink-0">
+                                    Claimed by {k.claimedByUsername ? `@${k.claimedByUsername}` : k.claimedBy}
+                                  </span>
+                                ) : (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 font-semibold shrink-0">
+                                    Available
+                                  </span>
+                                )}
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {/* Edit Key Pool Modal */}
+        {editingKeyPool && createPortal(
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 bg-black/75 backdrop-blur-md animate-in fade-in duration-200"
+            onClick={() => setEditingKeyPool(null)}
+          >
+            <form
+              onSubmit={handleSaveEditedKeyPool}
+              onClick={(e) => e.stopPropagation()}
+              className="glass-panel w-full max-w-md max-h-[90dvh] overflow-y-auto rounded-[24px] p-4 sm:p-5 text-white space-y-3.5"
+            >
+              <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-white/10">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Edit2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <h3 className="text-sm font-bold text-white truncate">
+                    {editingKeyPool.mode === 'generator' ? 'Edit Key Generator Link' : 'Edit Add Key Link'}
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingKeyPool(null)}
+                  className="p-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white/70 hover:text-white cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                  Link Title
+                </label>
+                <input
+                  type="text"
+                  value={editKeyTitle}
+                  onChange={(e) => setEditKeyTitle(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white focus:outline-none focus:border-emerald-500"
+                  required
+                />
+              </div>
+
+              {editingKeyPool.mode === 'generator' ? (
+                <div className="space-y-3 p-3 rounded-xl bg-zinc-950/70 border border-cyan-500/20">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                        Key Prefix (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        maxLength={32}
+                        value={editKeyPrefix}
+                        onChange={(e) => setEditKeyPrefix(e.target.value)}
+                        placeholder="e.g. DARK-"
+                        className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-cyan-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                        Key Length (4 – 64)
+                      </label>
+                      <input
+                        type="number"
+                        min={4}
+                        max={64}
+                        value={editKeyLength}
+                        onChange={(e) => setEditKeyLength(Math.max(4, Math.min(64, parseInt(e.target.value, 10) || 12)))}
+                        className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-cyan-400"
+                        required
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                      Character / Format Type
+                    </label>
+                    <select
+                      value={editKeyCharType}
+                      onChange={(e) => setEditKeyCharType(e.target.value as KeyGeneratorCharType)}
+                      className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs text-white focus:outline-none focus:border-cyan-400"
+                    >
+                      <option value="numbers">Numbers Only (0-9)</option>
+                      <option value="letters_upper">English Letters Only (A-Z)</option>
+                      <option value="letters_mixed">English Letters Only (Mixed A-z)</option>
+                      <option value="alphanumeric">Random Alphanumeric (A-Z, 0-9)</option>
+                    </select>
+                  </div>
+                  <div className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 flex items-center justify-between gap-2">
+                    <span className="text-[10px] text-zinc-400">Preview:</span>
+                    <code className="text-[11px] font-mono text-cyan-300 truncate">
+                      {buildSampleKeyPreview(editKeyPrefix, editKeyLength, editKeyCharType)}
+                    </code>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400">
+                      Keys (1 Key Per Line)
+                    </label>
+                    <span className="text-[10px] text-zinc-400 font-mono">
+                      {editKeyText.split(/\r?\n/).map(l => l.trim()).filter(Boolean).length} lines
+                    </span>
+                  </div>
+                  <textarea
+                    rows={6}
+                    value={editKeyText}
+                    onChange={(e) => setEditKeyText(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-emerald-500 resize-y"
+                    required
+                  />
+                  <p className="text-[10px] text-zinc-400 mt-1">
+                    Already-claimed keys stay marked as claimed unless you reset claims below.
+                  </p>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                    Status
+                  </label>
+                  <select
+                    value={editKeyStatus}
+                    onChange={(e) => setEditKeyStatus(e.target.value as any)}
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="active">Active</option>
+                    <option value="disabled">Disabled (Paused)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                    Timer Update
+                  </label>
+                  <select
+                    value={editKeyExpiryMode}
+                    onChange={(e) => setEditKeyExpiryMode(e.target.value as any)}
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="keep">Keep Current Timer</option>
+                    <option value="never">Permanent (No Timer)</option>
+                    <option value="minutes">Reset: Minutes</option>
+                    <option value="hours">Reset: Hours</option>
+                    <option value="days">Reset: Days</option>
+                  </select>
+                </div>
+              </div>
+
+              {editKeyExpiryMode !== 'keep' && editKeyExpiryMode !== 'never' && (
+                <div>
+                  <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                    New Duration ({editKeyExpiryMode})
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={9999}
+                    value={editKeyDurationValue}
+                    onChange={(e) => setEditKeyDurationValue(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              )}
+
+              <label className="flex items-center gap-2 p-2.5 rounded-xl bg-zinc-950/70 border border-zinc-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={editKeyResetClaims}
+                  onChange={(e) => setEditKeyResetClaims(e.target.checked)}
+                  className="rounded border-zinc-700"
+                />
+                <span className="text-[11px] text-zinc-300">
+                  {editingKeyPool.mode === 'generator'
+                    ? 'Clear generated key history (allow users to claim again)'
+                    : 'Reset claim history (mark all keys unclaimed again)'}
+                </span>
+              </label>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingKeyPool(null)}
+                  className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-bold text-white cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingKeyPool}
+                  className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {savingKeyPool && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Save Changes</span>
+                </button>
+              </div>
+            </form>
+          </div>,
+          document.body
+        )}
       </div>
     );
   }
