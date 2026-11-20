@@ -5530,205 +5530,262 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </div>
         </form>
 
-        {/* Generated Key Links List */}
-        <div className="space-y-2.5">
-          <div className="flex items-center justify-between px-1">
-            <span className="text-xs font-bold text-white tabular-nums">
-              Created Key Links ({keyPoolsList.length})
-            </span>
-          </div>
+        {/* Separate Created Links Sections (Serial Order) */}
+        {(() => {
+          const sortSerialAsc = (a: KeyPoolRecord, b: KeyPoolRecord) =>
+            new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
+          const addKeyPools = keyPoolsList.filter((p) => p.mode !== 'generator').sort(sortSerialAsc);
+          const generatorKeyPools = keyPoolsList.filter((p) => p.mode === 'generator').sort(sortSerialAsc);
 
-          {keyPoolsLoading && keyPoolsList.length === 0 ? (
-            <div className="p-6 text-center text-xs text-zinc-400 flex items-center justify-center gap-2">
-              <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
-              <span>Loading key links...</span>
-            </div>
-          ) : keyPoolsList.length === 0 ? (
-            <div className="p-6 rounded-2xl glass-panel border border-zinc-800 text-center space-y-2">
-              <Key className="w-7 h-7 text-emerald-400 mx-auto" />
-              <div className="text-xs font-semibold text-white">No key links created yet</div>
-              <p className="text-[11px] text-zinc-400">
-                Use <b>Add Key</b> above for pre-loaded serial keys or <b>Key Generator</b> for on-demand dynamic keys.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-2.5">
-              {keyPoolsList.map((pool) => {
-                const isGenPool = pool.mode === 'generator';
-                const isExpanded = expandedKeyPoolId === pool.id;
-                const statusBadge =
-                  pool.status === 'disabled'
-                    ? { label: 'Disabled', cls: 'bg-zinc-800 text-zinc-300 border-zinc-700' }
-                    : pool.isExpired
-                    ? { label: 'Expired', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/30' }
-                    : !isGenPool && pool.isSoldOut
-                    ? { label: 'Sold Out', cls: 'bg-rose-500/20 text-rose-300 border-rose-500/30' }
-                    : { label: 'Active', cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' };
+          const renderKeyPoolCard = (pool: KeyPoolRecord, serialIndex: number) => {
+            const isGenPool = pool.mode === 'generator';
+            const isExpanded = expandedKeyPoolId === pool.id;
+            const statusBadge =
+              pool.status === 'disabled'
+                ? { label: 'Disabled', cls: 'bg-zinc-800 text-zinc-300 border-zinc-700' }
+                : pool.isExpired
+                ? { label: 'Expired', cls: 'bg-amber-500/20 text-amber-300 border-amber-500/30' }
+                : !isGenPool && pool.isSoldOut
+                ? { label: 'Sold Out', cls: 'bg-rose-500/20 text-rose-300 border-rose-500/30' }
+                : { label: 'Active', cls: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' };
 
-                return (
-                  <div key={pool.id} className="p-3.5 rounded-2xl glass-panel border border-zinc-800 space-y-3">
-                    <div className="flex flex-wrap items-start justify-between gap-2">
-                      <div className="min-w-0 flex-1 space-y-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs font-bold text-white truncate">{pool.title}</span>
-                          <span
-                            className={`text-[10px] px-2 py-0.5 rounded-md font-semibold border ${
-                              isGenPool
-                                ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
-                                : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                            }`}
-                          >
-                            {isGenPool ? 'Key Generator' : 'Add Key Pool'}
-                          </span>
-                          <span className={`text-[10px] px-2 py-0.5 rounded-md font-semibold border ${statusBadge.cls}`}>
-                            {statusBadge.label}
-                          </span>
-                          {isGenPool ? (
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-white/10 text-cyan-200 font-mono tabular-nums">
-                              {pool.claimedKeys} Generated
-                            </span>
-                          ) : (
-                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-white/10 text-white/85 font-mono tabular-nums">
-                              {pool.remainingKeys} / {pool.totalKeys} Left
-                            </span>
-                          )}
-                        </div>
-
-                        {isGenPool && pool.generatorConfig && (
-                          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[10px] font-mono text-cyan-200/85">
-                            <span>Prefix: {pool.generatorConfig.prefix || 'None'}</span>
-                            <span>·</span>
-                            <span>Length: {pool.generatorConfig.length}</span>
-                            <span>·</span>
-                            <span>{CHAR_TYPE_LABELS[pool.generatorConfig.charType] || 'Alphanumeric'}</span>
-                          </div>
-                        )}
-
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-zinc-400">
-                          <span className="flex items-center gap-1">
-                            <Clock className="w-3 h-3 text-amber-400" />
-                            {formatRemainingTime(pool.expiresAt)}
-                          </span>
-                          <span>Claimed: {pool.claimedKeys}</span>
-                          <span>Created {new Date(pool.createdAt).toLocaleDateString()}</span>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => handleToggleKeyPoolStatus(pool)}
-                          className={`px-2 py-1.5 rounded-xl text-[10px] font-bold border cursor-pointer ${
-                            pool.status === 'disabled'
-                              ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
-                              : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:text-white'
-                          }`}
-                          title={pool.status === 'disabled' ? 'Enable Link' : 'Disable Link'}
-                        >
-                          {pool.status === 'disabled' ? 'Enable' : 'Pause'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => openEditKeyPoolModal(pool)}
-                          className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white cursor-pointer"
-                          title="Edit Key Link"
-                        >
-                          <Edit2 className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteKeyPool(pool)}
-                          className="p-2 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 hover:bg-rose-500/20 cursor-pointer"
-                          title="Delete Key Link"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Shareable Deep Link Row */}
-                    <div className="flex items-center gap-2 p-2 rounded-xl bg-zinc-950 border border-zinc-800">
-                      <code className="text-[11px] text-emerald-300 font-mono truncate flex-1 select-all">
-                        {pool.deepLink}
-                      </code>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard?.writeText(pool.deepLink);
-                          toast.success('Claim link copied!');
-                        }}
-                        className="px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold flex items-center gap-1 shrink-0 cursor-pointer"
+            return (
+              <div key={pool.id} className="p-3.5 rounded-2xl glass-panel border border-zinc-800 space-y-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded-md font-mono font-bold border tabular-nums ${
+                          isGenPool
+                            ? 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30'
+                            : 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                        }`}
                       >
-                        <Copy className="w-3 h-3" />
-                        <span>Copy</span>
-                      </button>
-                      {pool.deepLink.startsWith('http') && (
-                        <a
-                          href={pool.deepLink}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="p-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white shrink-0"
-                          title="Open Link"
-                        >
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      )}
-                    </div>
-
-                    {/* Expand / Collapse Keys Inspection */}
-                    <div>
-                      <button
-                        type="button"
-                        onClick={() => setExpandedKeyPoolId(isExpanded ? null : pool.id)}
-                        className="text-[11px] font-semibold text-zinc-400 hover:text-white flex items-center gap-1 cursor-pointer"
-                      >
-                        <ChevronRight className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
-                        <span>
-                          {isExpanded
-                            ? 'Hide Keys Log'
-                            : isGenPool
-                            ? `Inspect ${pool.totalKeys} Generated Keys`
-                            : `Inspect ${pool.totalKeys} Keys & Claims`}
+                        #{serialIndex + 1}
+                      </span>
+                      <span className="text-xs font-bold text-white truncate">{pool.title}</span>
+                      <span className={`text-[10px] px-2 py-0.5 rounded-md font-semibold border ${statusBadge.cls}`}>
+                        {statusBadge.label}
+                      </span>
+                      {isGenPool ? (
+                        <span className="text-[10px] px-2 py-0.5 rounded-md bg-white/10 text-cyan-200 font-mono tabular-nums">
+                          {pool.claimedKeys} Generated
                         </span>
-                      </button>
-
-                      {isExpanded && (
-                        <div className="mt-2 max-h-56 overflow-y-auto space-y-1.5 pr-1">
-                          {(pool.keys || []).length === 0 ? (
-                            <div className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 text-[11px] text-zinc-400 text-center">
-                              No keys generated yet. Users opening the link will generate unique keys automatically.
-                            </div>
-                          ) : (
-                            (pool.keys || []).map((k, idx) => (
-                              <div
-                                key={k.id}
-                                className="px-2.5 py-1.5 rounded-xl bg-zinc-950/90 border border-zinc-800/80 flex items-center justify-between gap-2 text-[11px]"
-                              >
-                                <div className="flex items-center gap-2 min-w-0 flex-1">
-                                  <span className="text-zinc-500 font-mono shrink-0">#{idx + 1}</span>
-                                  <code className="font-mono text-white truncate">{k.value}</code>
-                                </div>
-                                {k.claimedBy ? (
-                                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-rose-500/15 text-rose-300 border border-rose-500/25 font-mono shrink-0">
-                                    Claimed by {k.claimedByUsername ? `@${k.claimedByUsername}` : k.claimedBy}
-                                  </span>
-                                ) : (
-                                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 font-semibold shrink-0">
-                                    Available
-                                  </span>
-                                )}
-                              </div>
-                            ))
-                          )}
-                        </div>
+                      ) : (
+                        <span className="text-[10px] px-2 py-0.5 rounded-md bg-white/10 text-white/85 font-mono tabular-nums">
+                          {pool.remainingKeys} / {pool.totalKeys} Left
+                        </span>
                       )}
+                    </div>
+
+                    {isGenPool && pool.generatorConfig && (
+                      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[10px] font-mono text-cyan-200/85">
+                        <span>Prefix: {pool.generatorConfig.prefix || 'None'}</span>
+                        <span>·</span>
+                        <span>Length: {pool.generatorConfig.length}</span>
+                        <span>·</span>
+                        <span>{CHAR_TYPE_LABELS[pool.generatorConfig.charType] || 'Alphanumeric'}</span>
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-zinc-400">
+                      <span className="flex items-center gap-1">
+                        <Clock className="w-3 h-3 text-amber-400" />
+                        {formatRemainingTime(pool.expiresAt)}
+                      </span>
+                      <span>Claimed: {pool.claimedKeys}</span>
+                      <span>Created {new Date(pool.createdAt).toLocaleDateString()}</span>
                     </div>
                   </div>
-                );
-              })}
+
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleToggleKeyPoolStatus(pool)}
+                      className={`px-2 py-1.5 rounded-xl text-[10px] font-bold border cursor-pointer ${
+                        pool.status === 'disabled'
+                          ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
+                          : 'bg-zinc-900 text-zinc-300 border-zinc-800 hover:text-white'
+                      }`}
+                      title={pool.status === 'disabled' ? 'Enable Link' : 'Disable Link'}
+                    >
+                      {pool.status === 'disabled' ? 'Enable' : 'Pause'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openEditKeyPoolModal(pool)}
+                      className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white cursor-pointer"
+                      title="Edit Key Link"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteKeyPool(pool)}
+                      className="p-2 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 hover:bg-rose-500/20 cursor-pointer"
+                      title="Delete Key Link"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Shareable Deep Link Row */}
+                <div className="flex items-center gap-2 p-2 rounded-xl bg-zinc-950 border border-zinc-800">
+                  <code
+                    className={`text-[11px] font-mono truncate flex-1 select-all ${
+                      isGenPool ? 'text-cyan-300' : 'text-emerald-300'
+                    }`}
+                  >
+                    {pool.deepLink}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard?.writeText(pool.deepLink);
+                      toast.success('Claim link copied!');
+                    }}
+                    className={`px-2.5 py-1 rounded-lg border text-[10px] font-bold flex items-center gap-1 shrink-0 cursor-pointer ${
+                      isGenPool
+                        ? 'bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border-cyan-500/30'
+                        : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border-emerald-500/30'
+                    }`}
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>Copy</span>
+                  </button>
+                  {pool.deepLink.startsWith('http') && (
+                    <a
+                      href={pool.deepLink}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="p-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white shrink-0"
+                      title="Open Link"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  )}
+                </div>
+
+                {/* Expand / Collapse Keys Inspection */}
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setExpandedKeyPoolId(isExpanded ? null : pool.id)}
+                    className="text-[11px] font-semibold text-zinc-400 hover:text-white flex items-center gap-1 cursor-pointer"
+                  >
+                    <ChevronRight className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                    <span>
+                      {isExpanded
+                        ? 'Hide Keys Log'
+                        : isGenPool
+                        ? `Inspect ${pool.totalKeys} Generated Keys`
+                        : `Inspect ${pool.totalKeys} Keys & Claims`}
+                    </span>
+                  </button>
+
+                  {isExpanded && (
+                    <div className="mt-2 max-h-56 overflow-y-auto space-y-1.5 pr-1">
+                      {(pool.keys || []).length === 0 ? (
+                        <div className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 text-[11px] text-zinc-400 text-center">
+                          No keys generated yet. Users opening the link will generate unique keys automatically.
+                        </div>
+                      ) : (
+                        (pool.keys || []).map((k, idx) => (
+                          <div
+                            key={k.id}
+                            className="px-2.5 py-1.5 rounded-xl bg-zinc-950/90 border border-zinc-800/80 flex items-center justify-between gap-2 text-[11px]"
+                          >
+                            <div className="flex items-center gap-2 min-w-0 flex-1">
+                              <span className="text-zinc-500 font-mono shrink-0">#{idx + 1}</span>
+                              <code className="font-mono text-white truncate">{k.value}</code>
+                            </div>
+                            {k.claimedBy ? (
+                              <span className="text-[10px] px-2 py-0.5 rounded-md bg-rose-500/15 text-rose-300 border border-rose-500/25 font-mono shrink-0">
+                                Claimed by {k.claimedByUsername ? `@${k.claimedByUsername}` : k.claimedBy}
+                              </span>
+                            ) : (
+                              <span className="text-[10px] px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 font-semibold shrink-0">
+                                Available
+                              </span>
+                            )}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          };
+
+          if (keyPoolsLoading && keyPoolsList.length === 0) {
+            return (
+              <div className="p-6 text-center text-xs text-zinc-400 flex items-center justify-center gap-2">
+                <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
+                <span>Loading key links...</span>
+              </div>
+            );
+          }
+
+          return (
+            <div className="space-y-5">
+              {/* Section 1: Add Key Links (Serial Order) */}
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between px-1">
+                  <div className="flex items-center gap-2">
+                    <Key className="w-3.5 h-3.5 text-emerald-400" />
+                    <span className="text-xs font-bold text-white tabular-nums">
+                      Add Key Links ({addKeyPools.length})
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-zinc-400">Serial Order · One-by-One Pool</span>
+                </div>
+
+                {addKeyPools.length === 0 ? (
+                  <div className="p-5 rounded-2xl glass-panel border border-zinc-800/80 text-center space-y-1.5">
+                    <Key className="w-6 h-6 text-emerald-400/70 mx-auto" />
+                    <div className="text-xs font-semibold text-white">No Add Key links yet</div>
+                    <p className="text-[11px] text-zinc-400">
+                      Paste pre-loaded keys in <b>Add Key</b> mode or run <code>/addkey</code> in the bot.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    {addKeyPools.map((pool, idx) => renderKeyPoolCard(pool, idx))}
+                  </div>
+                )}
+              </div>
+
+              {/* Section 2: Key Generator Links (Serial Order) */}
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between px-1">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                    <span className="text-xs font-bold text-white tabular-nums">
+                      Key Generator Links ({generatorKeyPools.length})
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-zinc-400">Serial Order · Dynamic Rules</span>
+                </div>
+
+                {generatorKeyPools.length === 0 ? (
+                  <div className="p-5 rounded-2xl glass-panel border border-zinc-800/80 text-center space-y-1.5">
+                    <Sparkles className="w-6 h-6 text-cyan-400/70 mx-auto" />
+                    <div className="text-xs font-semibold text-white">No Key Generator links yet</div>
+                    <p className="text-[11px] text-zinc-400">
+                      Configure prefix, length &amp; format in <b>Key Generator</b> mode or run <code>/genkey</code> in the bot.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    {generatorKeyPools.map((pool, idx) => renderKeyPoolCard(pool, idx))}
+                  </div>
+                )}
+              </div>
             </div>
-          )}
-        </div>
+          );
+        })()}
 
         {/* Edit Key Pool Modal */}
         {editingKeyPool && createPortal(

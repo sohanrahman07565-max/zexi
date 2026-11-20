@@ -106,10 +106,33 @@ async function withAddSessionLock<T>(fromId: string, fn: () => Promise<T>): Prom
   }
 }
 
+type KeyGeneratorFormatType = 'numbers' | 'letters_upper' | 'letters_mixed' | 'alphanumeric';
+
+interface KeyCreationSession {
+  mode: 'pool' | 'generator';
+  chatId: string | number;
+  step:
+    | 'pool_title'
+    | 'pool_keys'
+    | 'pool_timer'
+    | 'gen_title'
+    | 'gen_prefix'
+    | 'gen_length'
+    | 'gen_format'
+    | 'gen_timer';
+  title?: string;
+  keyLines?: string[];
+  prefix?: string;
+  length?: number;
+  charType?: KeyGeneratorFormatType;
+  promptMessageId?: number;
+  createdAt: number;
+}
+
 const activeEditSessions: Map<string, { templateKey: string }> = new Map();
 const activeSetChannelSessions: Map<string, { timestamp: number }> = new Map();
 const activeCloneSessions: Map<string, CloneSession> = new Map();
-const activeAddKeySessions: Map<string, { chatId: string | number; step: 'awaiting_keys'; promptMessageId?: number; createdAt: number }> = new Map();
+const activeAddKeySessions: Map<string, KeyCreationSession> = new Map();
 
 // Deduplication map to prevent repeated deliveries from retried webhooks
 const recentDeliveries = new Map<string, number>();
@@ -1563,10 +1586,10 @@ export class TelegramService {
       `━━━━━━━━━━━━━━━━━━━━`,
       `📁 <b>CONTENT &amp; FILE MANAGEMENT</b>`,
       `• <code>/add</code> — Start interactive wizard to add Files, Links, or Text`,
-      `• <code>/addkey</code> — Add Key mode (pre-loaded serial keys, 1 per line)`,
-      `• <code>/genkey</code> — Key Generator mode (dynamic unique key link)`,
+      `• <code>/addkey</code> — Add Key mode (pre-loaded serial keys + expiry timer)`,
+      `• <code>/genkey</code> — Key Generator mode (prefix, length, format + expiry timer)`,
       `• <code>/allfiles</code> — Browse &amp; copy links for stored files/links`,
-      `• <code>/cancel</code> — Cancel active setup wizard (${isMainBot ? '/add, /addkey, /clone, /setchannel' : '/add, /addkey, /setchannel'})`,
+      `• <code>/cancel</code> — Cancel active setup wizard (${isMainBot ? '/add, /addkey, /genkey, /clone, /setchannel' : '/add, /addkey, /genkey, /setchannel'})`,
       `• <code>/editthismessage</code> — Reply to a bot message to edit its template`,
       `• <code>/cleanup</code> — Remove tracked old bot messages (24h+)`,
       ``,
@@ -8324,14 +8347,269 @@ export class TelegramService {
     }
   }
 
+  private static readonly KEY_FORMAT_LABELS: Record<KeyGeneratorFormatType, string> = {
+    numbers: 'Numbers Only (0-9)',
+    letters_upper: 'English Letters (A-Z)',
+    letters_mixed: 'English Letters (Mixed A-z)',
+    alphanumeric: 'Random Alphanumeric (A-Z, 0-9)'
+  };
+
+  private static buildKeyPreviewSample(
+    prefix: string,
+    length: number,
+    charType: KeyGeneratorFormatType
+  ): string {
+    const safeLen = Math.max(4, Math.min(64, Number(length) || 12));
+    const pools: Record<KeyGeneratorFormatType, string> = {
+      numbers: '482910573649',
+      letters_upper: 'XKQMRTWPLZVN',
+      letters_mixed: 'XkQmRtWpLzVn',
+      alphanumeric: 'A9F3K8Q2M7X4'
+    };
+    const pattern = pools[charType] || pools.alphanumeric;
+    let body = '';
+    for (let i = 0; i < safeLen; i++) {
+      body += pattern[i % pattern.length];
+    }
+    return `${(prefix || '').trim()}${body}`;
+  }
+
+  private static parseKeyWizardDurationInput(raw: string): {
+    valid: boolean;
+    expiresAt: string | null;
+    label: string;
+  } {
+    const clean = String(raw || '').trim().toLowerCase();
+    if (!clean) return { valid: false, expiresAt: null, label: '' };
+
+    if (/^(never|permanent|perm|nolimit|no limit|none|0|infinity|infinite)$/.test(clean)) {
+      return { valid: true, expiresAt: null, label: 'Permanent (No Expiry)' };
+    }
+
+    const match = clean.match(/^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$/);
+    if (!match) {
+      return { valid: false, expiresAt: null, label: '' };
+    }
+
+    const num = parseInt(match[1], 10);
+    if (!Number.isFinite(num) || num <= 0) {
+      return { valid: false, expiresAt: null, label: '' };
+    }
+
+    const unitToken = match[2] || 'm';
+    let ms = 0;
+    let label = '';
+    if (unitToken.startsWith('d')) {
+      const clamped = Math.min(3650, num);
+      ms = clamped * 24 * 60 * 60 * 1000;
+      label = `${clamped} ${clamped === 1 ? 'day' : 'days'}`;
+    } else if (unitToken.startsWith('h')) {
+      const clamped = Math.min(8760, num);
+      ms = clamped * 60 * 60 * 1000;
+      label = `${clamped} ${clamped === 1 ? 'hour' : 'hours'}`;
+    } else {
+      const clamped = Math.min(525600, num);
+      ms = clamped * 60 * 1000;
+      label = `${clamped} ${clamped === 1 ? 'minute' : 'minutes'}`;
+    }
+
+    return {
+      valid: true,
+      expiresAt: new Date(Date.now() + ms).toISOString(),
+      label: `Expires in ${label}`
+    };
+  }
+
+  private static formatKeyWizardExpiryLabel(expiresAt?: string | null): string {
+    if (!expiresAt) return 'Permanent (No Expiry)';
+    const expMs = Date.parse(expiresAt);
+    if (!Number.isFinite(expMs)) return 'Permanent (No Expiry)';
+    const diffMs = expMs - Date.now();
+    if (diffMs <= 0) return 'Expired';
+    const totalMins = Math.ceil(diffMs / 60000);
+    if (totalMins < 60) return `Expires in ${totalMins}m`;
+    const hours = Math.floor(totalMins / 60);
+    const mins = totalMins % 60;
+    if (hours < 24) return mins > 0 ? `Expires in ${hours}h ${mins}m` : `Expires in ${hours}h`;
+    const days = Math.floor(hours / 24);
+    const remHours = hours % 24;
+    return remHours > 0 ? `Expires in ${days}d ${remHours}h` : `Expires in ${days}d`;
+  }
+
+  private static async sendOrEditKeyWizardPrompt(
+    chatId: string | number,
+    text: string,
+    inlineKeyboard: any[][],
+    editMessageId?: number
+  ): Promise<number | undefined> {
+    if (editMessageId) {
+      const editRes = await this.callTelegramApi('editMessageText', {
+        chat_id: chatId,
+        message_id: editMessageId,
+        text,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: inlineKeyboard }
+      });
+      if (editRes?.ok) {
+        return editMessageId;
+      }
+    }
+
+    const sendRes = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: inlineKeyboard }
+    });
+    return sendRes?.result?.message_id;
+  }
+
+  private static async renderKeyWizardStep(
+    chatId: string | number,
+    session: KeyCreationSession,
+    editMessageId?: number
+  ): Promise<void> {
+    let text = '';
+    let keyboard: any[][] = [[{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]];
+
+    if (session.step === 'pool_title') {
+      text =
+        `🔑 <b>Add Key Setup — Step 1 of 3</b>\n\n` +
+        `Send a <b>Title / Label</b> for this key link (optional), or tap <b>Skip</b> to use the default title.\n\n` +
+        `<i>Example: <code>Premium Access Keys Wave #1</code>\nTip: You can also paste your multi-line keys directly here.</i>`;
+      keyboard = [
+        [{ text: '⏭ Skip (Default Title)', callback_data: 'keywiz_skip_title', style: 'primary' }],
+        [{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]
+      ];
+    } else if (session.step === 'pool_keys') {
+      const titleLine = session.title ? `• <b>Title:</b> ${this.escapeHtml(session.title)}\n\n` : '';
+      text =
+        `🔑 <b>Add Key Setup — Step 2 of 3</b>\n\n` +
+        titleLine +
+        `Send all your keys in <b>one message</b>, putting <b>one key per line</b> in serial order.\n\n` +
+        `<b>Example:</b>\n<code>KEY-001\nKEY-002\nKEY-003</code>`;
+      keyboard = [[{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]];
+    } else if (session.step === 'pool_timer') {
+      const count = session.keyLines?.length || 0;
+      const titleLine = session.title ? `• <b>Title:</b> ${this.escapeHtml(session.title)}\n` : '';
+      text =
+        `⏱ <b>Add Key Setup — Step 3 of 3 (Expiry Timer)</b>\n\n` +
+        titleLine +
+        `• <b>Keys Ready:</b> <code>${count} ${count === 1 ? 'Key' : 'Keys'}</code>\n\n` +
+        `Choose a <b>Link Expiry Timer</b> below, or reply with a custom duration (e.g. <code>15m</code>, <code>12h</code>, <code>3d</code>, or <code>never</code>):`;
+      keyboard = [
+        [{ text: '♾ Permanent (No Timer)', callback_data: 'keywiz_timer:never', style: 'success' }],
+        [
+          { text: '⏱ 30m', callback_data: 'keywiz_timer:30m', style: 'primary' },
+          { text: '⏱ 1h', callback_data: 'keywiz_timer:1h', style: 'primary' },
+          { text: '⏱ 24h', callback_data: 'keywiz_timer:24h', style: 'primary' },
+          { text: '⏱ 7d', callback_data: 'keywiz_timer:7d', style: 'primary' }
+        ],
+        [{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]
+      ];
+    } else if (session.step === 'gen_title') {
+      text =
+        `⚡ <b>Key Generator Setup — Step 1 of 5</b>\n\n` +
+        `Send a <b>Title / Label</b> for this dynamic key link (optional), or tap <b>Skip</b> to use an auto-generated title.\n\n` +
+        `<i>Example: <code>VIP Auto-Generated Access</code></i>`;
+      keyboard = [
+        [{ text: '⏭ Skip (Default Title)', callback_data: 'keywiz_skip_title', style: 'primary' }],
+        [{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]
+      ];
+    } else if (session.step === 'gen_prefix') {
+      const titleLine = session.title ? `• <b>Title:</b> ${this.escapeHtml(session.title)}\n\n` : '';
+      text =
+        `⚡ <b>Key Generator Setup — Step 2 of 5</b>\n\n` +
+        titleLine +
+        `Choose a <b>Key Prefix</b> below or send any custom prefix (max 32 chars, e.g. <code>DARK-</code> or <code>VIP-</code>):`;
+      keyboard = [
+        [{ text: '🚫 No Prefix (Blank)', callback_data: 'keywiz_prefix:none', style: 'primary' }],
+        [
+          { text: 'DARK-', callback_data: 'keywiz_prefix:DARK-', style: 'primary' },
+          { text: 'VIP-', callback_data: 'keywiz_prefix:VIP-', style: 'primary' },
+          { text: 'KEY-', callback_data: 'keywiz_prefix:KEY-', style: 'primary' }
+        ],
+        [{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]
+      ];
+    } else if (session.step === 'gen_length') {
+      const titleLine = session.title ? `• <b>Title:</b> ${this.escapeHtml(session.title)}\n` : '';
+      text =
+        `⚡ <b>Key Generator Setup — Step 3 of 5</b>\n\n` +
+        titleLine +
+        `• <b>Prefix:</b> <code>${this.escapeHtml(session.prefix || 'None')}</code>\n\n` +
+        `Select the <b>Key Body Length</b> (4 – 64 characters) or reply with a number:`;
+      keyboard = [
+        [
+          { text: '8 chars', callback_data: 'keywiz_len:8', style: 'primary' },
+          { text: '12 chars', callback_data: 'keywiz_len:12', style: 'success' },
+          { text: '16 chars', callback_data: 'keywiz_len:16', style: 'primary' }
+        ],
+        [
+          { text: '24 chars', callback_data: 'keywiz_len:24', style: 'primary' },
+          { text: '32 chars', callback_data: 'keywiz_len:32', style: 'primary' }
+        ],
+        [{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]
+      ];
+    } else if (session.step === 'gen_format') {
+      const titleLine = session.title ? `• <b>Title:</b> ${this.escapeHtml(session.title)}\n` : '';
+      text =
+        `⚡ <b>Key Generator Setup — Step 4 of 5</b>\n\n` +
+        titleLine +
+        `• <b>Prefix:</b> <code>${this.escapeHtml(session.prefix || 'None')}</code>\n` +
+        `• <b>Body Length:</b> <code>${session.length || 12}</code> chars\n\n` +
+        `Select the <b>Character / Format Type</b>:`;
+      keyboard = [
+        [{ text: '🔢 Numbers Only (0-9)', callback_data: 'keywiz_fmt:numbers', style: 'primary' }],
+        [{ text: '🔠 English Letters (A-Z)', callback_data: 'keywiz_fmt:letters_upper', style: 'primary' }],
+        [{ text: '🔤 English Letters (Mixed A-z)', callback_data: 'keywiz_fmt:letters_mixed', style: 'primary' }],
+        [{ text: '✨ Random Alphanumeric (A-Z, 0-9)', callback_data: 'keywiz_fmt:alphanumeric', style: 'success' }],
+        [{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]
+      ];
+    } else if (session.step === 'gen_timer') {
+      const safeFmt: KeyGeneratorFormatType = session.charType || 'alphanumeric';
+      const safeLen = Math.max(4, Math.min(64, Number(session.length) || 12));
+      const safePrefix = session.prefix || '';
+      const preview = this.buildKeyPreviewSample(safePrefix, safeLen, safeFmt);
+      const titleLine = session.title ? `• <b>Title:</b> ${this.escapeHtml(session.title)}\n` : '';
+      text =
+        `⏱ <b>Key Generator Setup — Step 5 of 5 (Expiry Timer)</b>\n\n` +
+        titleLine +
+        `• <b>Prefix:</b> <code>${this.escapeHtml(safePrefix || 'None')}</code>\n` +
+        `• <b>Length:</b> <code>${safeLen}</code> chars\n` +
+        `• <b>Format:</b> ${this.escapeHtml(this.KEY_FORMAT_LABELS[safeFmt])}\n` +
+        `• <b>Live Preview:</b> <code>${this.escapeHtml(preview)}</code>\n\n` +
+        `Choose a <b>Link Expiry Timer</b> below, or reply with a custom duration (e.g. <code>15m</code>, <code>12h</code>, <code>3d</code>, or <code>never</code>):`;
+      keyboard = [
+        [{ text: '♾ Permanent (No Timer)', callback_data: 'keywiz_timer:never', style: 'success' }],
+        [
+          { text: '⏱ 30m', callback_data: 'keywiz_timer:30m', style: 'primary' },
+          { text: '⏱ 1h', callback_data: 'keywiz_timer:1h', style: 'primary' },
+          { text: '⏱ 24h', callback_data: 'keywiz_timer:24h', style: 'primary' },
+          { text: '⏱ 7d', callback_data: 'keywiz_timer:7d', style: 'primary' }
+        ],
+        [{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]
+      ];
+    }
+
+    const msgId = await this.sendOrEditKeyWizardPrompt(chatId, text, keyboard, editMessageId);
+    if (msgId) session.promptMessageId = msgId;
+  }
+
   private static async finalizeKeyBatchFromLines(
     chatId: string | number,
     fromId: string,
     lines: string[],
-    promptMessageId?: number
+    options?: {
+      title?: string;
+      expiresAt?: string | null;
+      promptMessageId?: number;
+    }
   ): Promise<void> {
     const pool = await storage.createKeyPool({
+      mode: 'pool',
+      title: options?.title,
       keyLines: lines,
+      expiresAt: options?.expiresAt ?? null,
       createdBy: fromId
     });
 
@@ -8346,11 +8624,14 @@ export class TelegramService {
       .map((k, idx) => `${idx + 1}. <code>${this.escapeHtml(k.value)}</code>`)
       .join('\n');
     const extraCount = pool.keys.length > 5 ? `\n<i>…and ${pool.keys.length - 5} more key(s)</i>` : '';
+    const expiryLabel = this.formatKeyWizardExpiryLabel(pool.expiresAt);
 
     const summaryText =
-      `✅ <b>Key Batch Created</b>\n\n` +
+      `✅ <b>Add Key Link Created</b>\n\n` +
+      `• <b>Title:</b> ${this.escapeHtml(pool.title)}\n` +
       `• <b>Total Keys Added:</b> <code>${pool.keys.length}</code>\n` +
       `• <b>Remaining:</b> <code>${pool.keys.length} / ${pool.keys.length}</code>\n` +
+      `• <b>Expiry Timer:</b> ${this.escapeHtml(expiryLabel)}\n` +
       `• <b>Dispense Mode:</b> Sequential (1 key per user)\n\n` +
       `📋 <b>Serial Order Preview:</b>\n${previewLines}${extraCount}\n\n` +
       `🔗 <b>Shareable Claim Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
@@ -8367,6 +8648,7 @@ export class TelegramService {
       ? [[{ text: '↗️ Open Claim Link', url: deepLink, style: 'primary' }]]
       : [];
 
+    const promptMessageId = options?.promptMessageId;
     if (promptMessageId) {
       const editRes = await this.callTelegramApi('editMessageText', {
         chat_id: chatId,
@@ -8380,6 +8662,101 @@ export class TelegramService {
         const editFallback = await this.callTelegramApi('editMessageText', {
           chat_id: chatId,
           message_id: promptMessageId,
+          text: summaryText,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: fallbackKeyboard }
+        });
+        if (editFallback?.ok) return;
+      }
+    }
+
+    const sendRes = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: summaryText,
+      parse_mode: 'HTML',
+      ...(primaryKeyboard.length ? { reply_markup: { inline_keyboard: primaryKeyboard } } : {})
+    });
+    if (!sendRes?.ok && fallbackKeyboard.length) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: summaryText,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: fallbackKeyboard }
+      });
+    }
+  }
+
+  private static async finalizeKeyGeneratorLink(
+    chatId: string | number,
+    fromId: string,
+    config: {
+      title?: string;
+      prefix: string;
+      length: number;
+      charType: KeyGeneratorFormatType;
+      expiresAt?: string | null;
+      promptMessageId?: number;
+    }
+  ): Promise<void> {
+    const pool = await storage.createKeyPool({
+      mode: 'generator',
+      title: config.title,
+      generatorConfig: {
+        prefix: config.prefix,
+        length: config.length,
+        charType: config.charType
+      },
+      expiresAt: config.expiresAt ?? null,
+      createdBy: fromId
+    });
+
+    const botUsername = await this.getBotUsername();
+    const cleanBotUsername = botUsername.replace(/^@/, '').trim();
+    const deepLink = cleanBotUsername
+      ? `https://t.me/${cleanBotUsername}?start=k_${pool.id}`
+      : `?start=k_${pool.id}`;
+
+    const effectiveFmt: KeyGeneratorFormatType = pool.generatorConfig?.charType || config.charType;
+    const effectivePrefix = pool.generatorConfig?.prefix || '';
+    const effectiveLength = pool.generatorConfig?.length || config.length;
+    const expiryLabel = this.formatKeyWizardExpiryLabel(pool.expiresAt);
+    const preview = this.buildKeyPreviewSample(effectivePrefix, effectiveLength, effectiveFmt);
+
+    const summaryText =
+      `⚡ <b>Key Generator Link Created</b>\n\n` +
+      `• <b>Title:</b> ${this.escapeHtml(pool.title)}\n` +
+      `• <b>Mode:</b> Dynamic On-Demand Generation\n` +
+      `• <b>Prefix:</b> <code>${this.escapeHtml(effectivePrefix || 'None')}</code>\n` +
+      `• <b>Key Length:</b> <code>${effectiveLength}</code> characters\n` +
+      `• <b>Format:</b> ${this.escapeHtml(this.KEY_FORMAT_LABELS[effectiveFmt] || 'Random Alphanumeric (A-Z, 0-9)')}\n` +
+      `• <b>Sample Format:</b> <code>${this.escapeHtml(preview)}</code>\n` +
+      `• <b>Expiry Timer:</b> ${this.escapeHtml(expiryLabel)}\n\n` +
+      `🔗 <b>Shareable Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
+      `<i>Each user opening this link automatically receives a newly generated unique key.</i>`;
+
+    const primaryKeyboard: any[][] = cleanBotUsername
+      ? [
+          [{ text: '🔗 Copy Link', copy_text: { text: deepLink }, style: 'success' }],
+          [{ text: '↗️ Open Claim Link', url: deepLink, style: 'primary' }]
+        ]
+      : [];
+    const fallbackKeyboard: any[][] = cleanBotUsername
+      ? [[{ text: '↗️ Open Claim Link', url: deepLink, style: 'primary' }]]
+      : [];
+
+    if (config.promptMessageId) {
+      const editRes = await this.callTelegramApi('editMessageText', {
+        chat_id: chatId,
+        message_id: config.promptMessageId,
+        text: summaryText,
+        parse_mode: 'HTML',
+        ...(primaryKeyboard.length ? { reply_markup: { inline_keyboard: primaryKeyboard } } : {})
+      });
+      if (editRes?.ok) return;
+      if (fallbackKeyboard.length) {
+        const editFallback = await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: config.promptMessageId,
           text: summaryText,
           parse_mode: 'HTML',
           reply_markup: { inline_keyboard: fallbackKeyboard }
@@ -8429,63 +8806,37 @@ export class TelegramService {
       return;
     }
 
+    activeSetChannelSessions.delete(fromId);
+    activeAddSessions.delete(fromId);
+
     const rawBody = (text || message?.caption || '').replace(/^\/addkey(?:@\w+)?\s*/i, '');
     const keyLines = rawBody
       .split(/\r?\n/)
       .map((l: string) => l.trim())
       .filter((l: string) => l.length > 0);
 
+    // If admin pasted keys right after /addkey, jump directly to Step 3 (Link Expiry Timer)
     if (keyLines.length > 0) {
-      activeAddKeySessions.delete(fromId);
-      await this.finalizeKeyBatchFromLines(chatId, fromId, keyLines);
+      const session: KeyCreationSession = {
+        mode: 'pool',
+        chatId,
+        step: 'pool_timer',
+        keyLines,
+        createdAt: Date.now()
+      };
+      activeAddKeySessions.set(fromId, session);
+      await this.renderKeyWizardStep(chatId, session);
       return;
     }
 
-    activeSetChannelSessions.delete(fromId);
-    activeAddSessions.delete(fromId);
-
-    const promptRes = await this.callTelegramApi('sendMessage', {
-      chat_id: chatId,
-      text:
-        `🔑 <b>Add Multiple Keys (Batch Mode)</b>\n\n` +
-        `Send all your keys in <b>one message</b>, putting <b>one key per line</b> in serial order.\n\n` +
-        `<b>Example:</b>\n<code>KEY-001\nKEY-002\nKEY-003</code>\n\n` +
-        `<i>Tip: You can also paste keys right after <code>/addkey</code> on new lines.\nSend <code>/cancel</code> to abort.</i>`,
-      parse_mode: 'HTML'
-    });
-
-    activeAddKeySessions.set(fromId, {
+    const session: KeyCreationSession = {
+      mode: 'pool',
       chatId,
-      step: 'awaiting_keys',
-      promptMessageId: promptRes?.result?.message_id,
+      step: 'pool_title',
       createdAt: Date.now()
-    });
-  }
-
-  private static async handleActiveAddKeySessionMessage(
-    message: any,
-    fromId: string,
-    chatId: string | number,
-    text: string,
-    session: { chatId: string | number; step: 'awaiting_keys'; promptMessageId?: number; createdAt: number }
-  ): Promise<void> {
-    const rawText = (text || message?.text || message?.caption || '').trim();
-    const lines = rawText
-      .split(/\r?\n/)
-      .map((l: string) => l.trim())
-      .filter((l: string) => l.length > 0);
-
-    if (lines.length === 0) {
-      await this.callTelegramApi('sendMessage', {
-        chat_id: chatId,
-        text: '⚠️ <b>No keys detected.</b>\n<i>Please send one or more keys (one per line), or send <code>/cancel</code> to abort.</i>',
-        parse_mode: 'HTML'
-      });
-      return;
-    }
-
-    activeAddKeySessions.delete(fromId);
-    await this.finalizeKeyBatchFromLines(chatId, fromId, lines, session.promptMessageId);
+    };
+    activeAddKeySessions.set(fromId, session);
+    await this.renderKeyWizardStep(chatId, session);
   }
 
   private static async handleGenKeyCommand(
@@ -8513,33 +8864,32 @@ export class TelegramService {
       return;
     }
 
+    activeSetChannelSessions.delete(fromId);
+    activeAddSessions.delete(fromId);
+
     const rawArgs = (text || message?.caption || '').replace(/^\/genkey(?:@\w+)?\s*/i, '').trim();
     if (!rawArgs) {
-      await this.callTelegramApi('sendMessage', {
-        chat_id: chatId,
-        text:
-          `⚡ <b>Key Generator Mode (Dynamic Keys)</b>\n\n` +
-          `Creates a shareable link that dynamically generates a fresh unique key for each user.\n\n` +
-          `<b>Usage:</b>\n` +
-          `<code>/genkey &lt;prefix|none&gt; &lt;length&gt; &lt;format&gt;</code>\n\n` +
-          `<b>Formats:</b> <code>numbers</code> · <code>letters</code> · <code>mixed</code> · <code>alphanumeric</code>\n\n` +
-          `<b>Examples:</b>\n` +
-          `• <code>/genkey DARK- 12 alphanumeric</code>\n` +
-          `• <code>/genkey VIP- 8 numbers</code>\n` +
-          `• <code>/genkey none 16 letters</code>\n\n` +
-          `<i>Tip: You can also configure timers and edit rules in Admin Panel → More → Key Generator.</i>`,
-        parse_mode: 'HTML'
-      });
+      const session: KeyCreationSession = {
+        mode: 'generator',
+        chatId,
+        step: 'gen_title',
+        prefix: 'DARK-',
+        length: 12,
+        charType: 'alphanumeric',
+        createdAt: Date.now()
+      };
+      activeAddKeySessions.set(fromId, session);
+      await this.renderKeyWizardStep(chatId, session);
       return;
     }
 
     const tokens = rawArgs.split(/\s+/).filter(Boolean);
     const rawPrefix = tokens[0] || '';
-    const prefix = /^(none|null|-|empty)$/i.test(rawPrefix) ? '' : rawPrefix;
+    const prefix = /^(none|null|-|empty)$/i.test(rawPrefix) ? '' : rawPrefix.slice(0, 32);
     const rawLength = tokens[1] ? parseInt(tokens[1], 10) : 12;
-    const length = Number.isFinite(rawLength) ? rawLength : 12;
+    const length = Math.max(4, Math.min(64, Number.isFinite(rawLength) ? rawLength : 12));
     const rawFormat = (tokens[2] || 'alphanumeric').toLowerCase();
-    const charType: 'numbers' | 'letters_upper' | 'letters_mixed' | 'alphanumeric' =
+    const charType: KeyGeneratorFormatType =
       rawFormat.startsWith('num') || rawFormat === 'digits'
         ? 'numbers'
         : rawFormat === 'mixed' || rawFormat === 'letters_mixed'
@@ -8548,56 +8898,203 @@ export class TelegramService {
         ? 'letters_upper'
         : 'alphanumeric';
 
-    const pool = await storage.createKeyPool({
+    // If 4th duration argument provided (e.g. `/genkey DARK- 12 alphanumeric 24h [optional title]`), create immediately
+    if (tokens[3]) {
+      const parsedDur = this.parseKeyWizardDurationInput(tokens[3]);
+      if (parsedDur.valid) {
+        activeAddKeySessions.delete(fromId);
+        const inlineTitle = tokens.slice(4).join(' ').trim() || undefined;
+        await this.finalizeKeyGeneratorLink(chatId, fromId, {
+          title: inlineTitle,
+          prefix,
+          length,
+          charType,
+          expiresAt: parsedDur.expiresAt
+        });
+        return;
+      }
+    }
+
+    // Otherwise let admin pick Link Expiry Timer before finalizing
+    const session: KeyCreationSession = {
       mode: 'generator',
-      generatorConfig: { prefix, length, charType },
-      createdBy: fromId
-    });
-
-    const botUsername = await this.getBotUsername();
-    const cleanBotUsername = botUsername.replace(/^@/, '').trim();
-    const deepLink = cleanBotUsername
-      ? `https://t.me/${cleanBotUsername}?start=k_${pool.id}`
-      : `?start=k_${pool.id}`;
-
-    const formatLabels: Record<string, string> = {
-      numbers: 'Numbers Only (0-9)',
-      letters_upper: 'English Letters (A-Z)',
-      letters_mixed: 'English Letters (Mixed A-z)',
-      alphanumeric: 'Random Alphanumeric (A-Z, 0-9)'
+      chatId,
+      step: 'gen_timer',
+      prefix,
+      length,
+      charType,
+      createdAt: Date.now()
     };
+    activeAddKeySessions.set(fromId, session);
+    await this.renderKeyWizardStep(chatId, session);
+  }
 
-    const summaryText =
-      `⚡ <b>Key Generator Link Created</b>\n\n` +
-      `• <b>Mode:</b> Dynamic On-Demand Generation\n` +
-      `• <b>Prefix:</b> <code>${this.escapeHtml(pool.generatorConfig?.prefix || 'None')}</code>\n` +
-      `• <b>Key Length:</b> <code>${pool.generatorConfig?.length || length}</code> characters\n` +
-      `• <b>Format:</b> ${this.escapeHtml(formatLabels[charType] || 'Alphanumeric')}\n\n` +
-      `🔗 <b>Shareable Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
-      `<i>Each user opening this link automatically receives a newly generated unique key.</i>`;
+  private static async handleActiveAddKeySessionMessage(
+    message: any,
+    fromId: string,
+    chatId: string | number,
+    text: string,
+    session: KeyCreationSession
+  ): Promise<void> {
+    const rawText = (text || message?.text || message?.caption || '').trim();
+    const lines = rawText
+      .split(/\r?\n/)
+      .map((l: string) => l.trim())
+      .filter((l: string) => l.length > 0);
 
-    const primaryKeyboard: any[][] = cleanBotUsername
-      ? [
-          [{ text: '🔗 Copy Link', copy_text: { text: deepLink }, style: 'success' }],
-          [{ text: '↗️ Open Claim Link', url: deepLink, style: 'primary' }]
-        ]
-      : [];
-    const fallbackKeyboard: any[][] = cleanBotUsername
-      ? [[{ text: '↗️ Open Claim Link', url: deepLink, style: 'primary' }]]
-      : [];
+    if (session.step === 'pool_title') {
+      if (lines.length > 1) {
+        session.keyLines = lines;
+        session.step = 'pool_timer';
+        activeAddKeySessions.set(fromId, session);
+        await this.renderKeyWizardStep(chatId, session);
+        return;
+      }
+      if (/^(\/skip|skip|default|none|-)$/i.test(rawText)) {
+        session.title = undefined;
+      } else if (rawText) {
+        session.title = rawText.slice(0, 80);
+      }
+      session.step = 'pool_keys';
+      activeAddKeySessions.set(fromId, session);
+      await this.renderKeyWizardStep(chatId, session);
+      return;
+    }
 
-    const sendRes = await this.callTelegramApi('sendMessage', {
-      chat_id: chatId,
-      text: summaryText,
-      parse_mode: 'HTML',
-      ...(primaryKeyboard.length ? { reply_markup: { inline_keyboard: primaryKeyboard } } : {})
-    });
-    if (!sendRes?.ok && fallbackKeyboard.length) {
-      await this.callTelegramApi('sendMessage', {
-        chat_id: chatId,
-        text: summaryText,
-        parse_mode: 'HTML',
-        reply_markup: { inline_keyboard: fallbackKeyboard }
+    if (session.step === 'pool_keys') {
+      if (lines.length === 0) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⚠️ <b>No keys detected.</b>\n<i>Please send one or more keys (one per line), or send <code>/cancel</code> to abort.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      session.keyLines = lines;
+      session.step = 'pool_timer';
+      activeAddKeySessions.set(fromId, session);
+      await this.renderKeyWizardStep(chatId, session);
+      return;
+    }
+
+    if (session.step === 'pool_timer') {
+      const parsedDur = this.parseKeyWizardDurationInput(rawText);
+      if (!parsedDur.valid) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text:
+            '⚠️ <b>Invalid expiry duration.</b>\n' +
+            '<i>Tap one of the timer buttons above or reply like <code>30m</code>, <code>12h</code>, <code>7d</code>, or <code>never</code>.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      const keyLines = session.keyLines || [];
+      if (keyLines.length === 0) {
+        session.step = 'pool_keys';
+        activeAddKeySessions.set(fromId, session);
+        await this.renderKeyWizardStep(chatId, session);
+        return;
+      }
+      activeAddKeySessions.delete(fromId);
+      await this.finalizeKeyBatchFromLines(chatId, fromId, keyLines, {
+        title: session.title,
+        expiresAt: parsedDur.expiresAt
+      });
+      return;
+    }
+
+    if (session.step === 'gen_title') {
+      if (/^(\/skip|skip|default|none|-)$/i.test(rawText)) {
+        session.title = undefined;
+      } else if (rawText) {
+        session.title = rawText.slice(0, 80);
+      }
+      session.step = 'gen_prefix';
+      activeAddKeySessions.set(fromId, session);
+      await this.renderKeyWizardStep(chatId, session);
+      return;
+    }
+
+    if (session.step === 'gen_prefix') {
+      if (/^(\/skip|skip|none|null|empty|blank|-)$/i.test(rawText)) {
+        session.prefix = '';
+      } else {
+        session.prefix = rawText.slice(0, 32);
+      }
+      session.step = 'gen_length';
+      activeAddKeySessions.set(fromId, session);
+      await this.renderKeyWizardStep(chatId, session);
+      return;
+    }
+
+    if (session.step === 'gen_length') {
+      const parsedLen = parseInt(rawText, 10);
+      if (!Number.isFinite(parsedLen) || parsedLen < 4 || parsedLen > 64) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⚠️ <b>Invalid key length.</b>\n<i>Please enter a number between <code>4</code> and <code>64</code>, or tap a preset button above.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      session.length = parsedLen;
+      session.step = 'gen_format';
+      activeAddKeySessions.set(fromId, session);
+      await this.renderKeyWizardStep(chatId, session);
+      return;
+    }
+
+    if (session.step === 'gen_format') {
+      const fmtLower = rawText.toLowerCase();
+      let matchedFmt: KeyGeneratorFormatType | null = null;
+      if (/^(num|numbers|number|digits|0-9)$/.test(fmtLower)) {
+        matchedFmt = 'numbers';
+      } else if (/^(mixed|letters_mixed|a-z\s*mixed|mixed\s*letters)$/.test(fmtLower)) {
+        matchedFmt = 'letters_mixed';
+      } else if (/^(let|letters|letters_upper|alpha|upper|english)$/.test(fmtLower)) {
+        matchedFmt = 'letters_upper';
+      } else if (/^(alnum|alphanumeric|random|all|a-z0-9)$/.test(fmtLower)) {
+        matchedFmt = 'alphanumeric';
+      }
+
+      if (!matchedFmt) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text:
+            '⚠️ <b>Unrecognized format type.</b>\n' +
+            '<i>Tap one of the format buttons above or reply with: <code>numbers</code>, <code>letters</code>, <code>mixed</code>, or <code>alphanumeric</code>.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+
+      session.charType = matchedFmt;
+      session.step = 'gen_timer';
+      activeAddKeySessions.set(fromId, session);
+      await this.renderKeyWizardStep(chatId, session);
+      return;
+    }
+
+    if (session.step === 'gen_timer') {
+      const parsedDur = this.parseKeyWizardDurationInput(rawText);
+      if (!parsedDur.valid) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text:
+            '⚠️ <b>Invalid expiry duration.</b>\n' +
+            '<i>Tap one of the timer buttons above or reply like <code>30m</code>, <code>12h</code>, <code>7d</code>, or <code>never</code>.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      activeAddKeySessions.delete(fromId);
+      await this.finalizeKeyGeneratorLink(chatId, fromId, {
+        title: session.title,
+        prefix: session.prefix || '',
+        length: Math.max(4, Math.min(64, Number(session.length) || 12)),
+        charType: session.charType || 'alphanumeric',
+        expiresAt: parsedDur.expiresAt
       });
     }
   }
@@ -10157,6 +10654,123 @@ export class TelegramService {
           show_alert: true
         }).catch(() => {});
       }
+      return;
+    }
+
+    // INTERACTIVE KEY CREATION WIZARD CALLBACKS (keywiz_*)
+    if (data && data.startsWith('keywiz_')) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, cb.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: '⛔ Access Denied: Key setup is restricted to administrators.',
+          show_alert: true
+        }).catch(() => {});
+        return;
+      }
+
+      const msgId = cb.message?.message_id;
+      const targetChatId = chatId || fromId;
+
+      if (data === 'keywiz_cancel') {
+        activeAddKeySessions.delete(fromId);
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Cancelled' }).catch(() => {});
+        if (msgId) {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: targetChatId,
+            message_id: msgId,
+            text: '❌ <b>Key Creation Cancelled</b>\n<i>Current setup has been aborted.</i>',
+            parse_mode: 'HTML'
+          }).catch(() => {});
+        }
+        return;
+      }
+
+      const session = activeAddKeySessions.get(fromId);
+      if (!session) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: '⚠️ Session expired. Run /addkey or /genkey again.',
+          show_alert: true
+        }).catch(() => {});
+        return;
+      }
+
+      await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+
+      if (data === 'keywiz_skip_title') {
+        session.title = undefined;
+        session.step = session.mode === 'generator' ? 'gen_prefix' : 'pool_keys';
+        activeAddKeySessions.set(fromId, session);
+        await this.renderKeyWizardStep(targetChatId, session, msgId);
+        return;
+      }
+
+      if (data.startsWith('keywiz_prefix:')) {
+        const val = data.slice('keywiz_prefix:'.length);
+        session.prefix = val === 'none' ? '' : val.slice(0, 32);
+        session.step = 'gen_length';
+        activeAddKeySessions.set(fromId, session);
+        await this.renderKeyWizardStep(targetChatId, session, msgId);
+        return;
+      }
+
+      if (data.startsWith('keywiz_len:')) {
+        const parsedLen = parseInt(data.slice('keywiz_len:'.length), 10);
+        session.length = Math.max(4, Math.min(64, Number.isFinite(parsedLen) ? parsedLen : 12));
+        session.step = 'gen_format';
+        activeAddKeySessions.set(fromId, session);
+        await this.renderKeyWizardStep(targetChatId, session, msgId);
+        return;
+      }
+
+      if (data.startsWith('keywiz_fmt:')) {
+        const rawFmt = data.slice('keywiz_fmt:'.length);
+        const safeFmt: KeyGeneratorFormatType =
+          rawFmt === 'numbers' || rawFmt === 'letters_upper' || rawFmt === 'letters_mixed' || rawFmt === 'alphanumeric'
+            ? rawFmt
+            : 'alphanumeric';
+        session.charType = safeFmt;
+        session.step = 'gen_timer';
+        activeAddKeySessions.set(fromId, session);
+        await this.renderKeyWizardStep(targetChatId, session, msgId);
+        return;
+      }
+
+      if (data.startsWith('keywiz_timer:')) {
+        const spec = data.slice('keywiz_timer:'.length);
+        const parsedDur = this.parseKeyWizardDurationInput(spec);
+        if (!parsedDur.valid) return;
+
+        activeAddKeySessions.delete(fromId);
+        if (session.mode === 'generator') {
+          await this.finalizeKeyGeneratorLink(targetChatId, fromId, {
+            title: session.title,
+            prefix: session.prefix || '',
+            length: Math.max(4, Math.min(64, Number(session.length) || 12)),
+            charType: session.charType || 'alphanumeric',
+            expiresAt: parsedDur.expiresAt,
+            promptMessageId: msgId || session.promptMessageId
+          });
+        } else {
+          const lines = session.keyLines || [];
+          if (lines.length === 0) {
+            await this.callTelegramApi('sendMessage', {
+              chat_id: targetChatId,
+              text: '⚠️ <b>No keys found in session.</b> Please run <code>/addkey</code> again.',
+              parse_mode: 'HTML'
+            });
+            return;
+          }
+          await this.finalizeKeyBatchFromLines(targetChatId, fromId, lines, {
+            title: session.title,
+            expiresAt: parsedDur.expiresAt,
+            promptMessageId: msgId || session.promptMessageId
+          });
+        }
+        return;
+      }
+
       return;
     }
 
