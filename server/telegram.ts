@@ -4456,6 +4456,9 @@ export class TelegramService {
     message: any,
     isGroup: boolean
   ): Promise<void> {
+    if (!isGroup && message?.message_id) {
+      await this.deleteUserMessage(chatId, message.message_id);
+    }
     const trimmed = (rawText || '').trim();
 
     if (session.stage === 'awaiting_mode') {
@@ -4470,25 +4473,32 @@ export class TelegramService {
       }
       if (!selectedMode) {
         const modePrompt =
-          `⚙️ <b>Select Bot Mode First</b>\n\n` +
+          `⚠️ <b>Invalid Mode Selection</b>\n\n` +
+          `⚙️ <b>Choose Bot Mode for this clone:</b>\n\n` +
           `Tap one of the buttons below or reply with <code>File Bot</code>, <code>Post Bot</code>, or <code>Image URL Bot</code>:`;
-        await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text: modePrompt,
-          parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: '📁 File Bot', callback_data: `clone_mode:${fromId}:file_bot`, style: 'primary' },
-                { text: '📝 Post Bot', callback_data: `clone_mode:${fromId}:post_bot`, style: 'primary' }
-              ],
-              [
-                { text: '🖼️ Image URL Bot', callback_data: `clone_mode:${fromId}:image_url_bot`, style: 'success' }
-              ],
-              [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
-            ]
-          }
-        });
+        const modeKeyboard = [
+          [
+            { text: '📁 File Bot', callback_data: `clone_mode:${fromId}:file_bot`, style: 'primary' },
+            { text: '📝 Post Bot', callback_data: `clone_mode:${fromId}:post_bot`, style: 'primary' }
+          ],
+          [
+            { text: '🖼️ Image URL Bot', callback_data: `clone_mode:${fromId}:image_url_bot`, style: 'success' }
+          ],
+          [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
+        ];
+        activeCloneSessions.set(fromId, session);
+        if (!isGroup && session.promptMessageId) {
+          const msgId = await this.sendOrEditKeyWizardPrompt(chatId, modePrompt, modeKeyboard, session.promptMessageId);
+          if (msgId) session.promptMessageId = msgId;
+        } else {
+          const sent = await this.callTelegramApi('sendMessage', {
+            chat_id: chatId,
+            text: modePrompt,
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: modeKeyboard }
+          });
+          if (sent?.result?.message_id) session.promptMessageId = sent.result.message_id;
+        }
         return;
       }
 
@@ -4497,27 +4507,37 @@ export class TelegramService {
         session.stage = 'awaiting_owner';
         activeCloneSessions.set(fromId, session);
         const modeLabel = this.formatBotModeDisplay(selectedMode);
-        await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text:
-            `✅ <b>Mode Selected:</b> <code>${this.escapeHtml(modeLabel)}</code>\n\n` +
-            `👤 <b>Assign Bot Admin</b>\n` +
-            `<i>Send the Telegram User ID (or <code>@username</code>) of who should be the Admin of this cloned bot, or tap Assign Myself below.</i>\n\n` +
-            `• <b>Examples:</b> <code>123456789</code> or <code>@username</code>`,
-          parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${fromId}`, style: 'primary' }],
-              [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
-            ]
-          }
-        });
+        const ownerPrompt =
+          `✅ <b>Mode Selected:</b> <code>${this.escapeHtml(modeLabel)}</code>\n\n` +
+          `👤 <b>Assign Bot Admin</b>\n` +
+          `<i>Send the Telegram User ID (or <code>@username</code>) of who should be the Admin of this cloned bot, or tap Assign Myself below.</i>\n\n` +
+          `• <b>Examples:</b> <code>123456789</code> or <code>@username</code>`;
+        const ownerKeyboard = [
+          [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${fromId}`, style: 'primary' }],
+          [
+            { text: '⬅️ Back', callback_data: `clone_back:${fromId}`, style: 'primary' },
+            { text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }
+          ]
+        ];
+        if (!isGroup && session.promptMessageId) {
+          const msgId = await this.sendOrEditKeyWizardPrompt(chatId, ownerPrompt, ownerKeyboard, session.promptMessageId);
+          if (msgId) session.promptMessageId = msgId;
+        } else {
+          const sent = await this.callTelegramApi('sendMessage', {
+            chat_id: chatId,
+            text: ownerPrompt,
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: ownerKeyboard }
+          });
+          if (sent?.result?.message_id) session.promptMessageId = sent.result.message_id;
+        }
         return;
       }
 
       await this.finalizeBotCloneWithMode(chatId, fromId, session, selectedMode, {
         senderUsername: message?.from?.username,
         replyMessageId: message?.message_id,
+        editMessageId: isGroup ? undefined : session.promptMessageId,
         isGroup
       });
       return;
@@ -4547,17 +4567,30 @@ export class TelegramService {
     }
 
     if (!ownerId && !ownerUsername) {
-      const invalidMsg = `⚠️ <b>Invalid Format</b>\n\nPlease reply with a valid <b>Telegram User ID</b> or <b>Username</b>.\n\n<i>Send <code>/cancel</code> to abort.</i>`;
+      activeCloneSessions.set(fromId, session);
+      const invalidMsg =
+        `⚠️ <b>Invalid Format</b>\n\n` +
+        `👤 <b>Assign Bot Admin</b>\n` +
+        `Please reply with a valid <b>Telegram User ID</b> or <b>@username</b>, or tap <b>Assign Myself</b> below.\n\n` +
+        `• <b>Examples:</b> <code>123456789</code> or <code>@username</code>`;
+      const ownerKeyboard = [
+        [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${fromId}`, style: 'primary' }],
+        [
+          { text: '⬅️ Back', callback_data: `clone_back:${fromId}`, style: 'primary' },
+          { text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }
+        ]
+      ];
       if (isGroup) {
         await this.sendAutoDeletingNotice(chatId, invalidMsg, 8000, message?.message_id);
+      } else if (session.promptMessageId) {
+        const msgId = await this.sendOrEditKeyWizardPrompt(chatId, invalidMsg, ownerKeyboard, session.promptMessageId);
+        if (msgId) session.promptMessageId = msgId;
       } else {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
           text: invalidMsg,
           parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [[{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]]
-          }
+          reply_markup: { inline_keyboard: ownerKeyboard }
         });
       }
       return;
@@ -4568,6 +4601,7 @@ export class TelegramService {
       ownerId: ownerId || undefined,
       ownerUsername: ownerUsername || undefined,
       replyMessageId: message?.message_id,
+      editMessageId: isGroup ? undefined : session.promptMessageId,
       isGroup
     });
   }
@@ -5156,6 +5190,7 @@ export class TelegramService {
     // 7. Command: /cancel (strictly requires '/' prefix)
     if (text === '/cancel' || text.startsWith('/cancel')) {
       activeSetChannelSessions.delete(fromId);
+      const cloneSession = activeCloneSessions.get(fromId);
       activeCloneSessions.delete(fromId);
       const addKeySession = activeAddKeySessions.get(fromId);
       activeAddKeySessions.delete(fromId);
@@ -5169,7 +5204,7 @@ export class TelegramService {
       const templates = await storage.getTemplates();
       const cancelMsg = templates.CANCEL_MESSAGE?.content || '❌ <b>Operation Cancelled</b>\n<i>Current action has been aborted.</i>';
 
-      const cancelEditId = addSession?.lastPromptMessageId || addKeySession?.promptMessageId;
+      const cancelEditId = addSession?.lastPromptMessageId || addKeySession?.promptMessageId || cloneSession?.promptMessageId;
       if (cancelEditId) {
         try {
           const editRes = await this.callTelegramApi('editMessageText', {
@@ -8467,10 +8502,15 @@ export class TelegramService {
   private static async renderKeyWizardStep(
     chatId: string | number,
     session: KeyCreationSession,
-    editMessageId?: number
+    editMessageId?: number,
+    validationError?: string
   ): Promise<void> {
     let text = '';
     let keyboard: any[][] = [[{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]];
+    const backCancelRow = [
+      { text: '⬅️ Back', callback_data: 'keywiz_back', style: 'primary' },
+      { text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }
+    ];
 
     if (session.step === 'pool_title') {
       text =
@@ -8488,7 +8528,7 @@ export class TelegramService {
         titleLine +
         `Send all your keys in <b>one message</b>, putting <b>one key per line</b> in serial order.\n\n` +
         `<b>Example:</b>\n<code>KEY-001\nKEY-002\nKEY-003</code>`;
-      keyboard = [[{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]];
+      keyboard = [backCancelRow];
     } else if (session.step === 'pool_timer') {
       const count = session.keyLines?.length || 0;
       const titleLine = session.title ? `• <b>Title:</b> ${this.escapeHtml(session.title)}\n` : '';
@@ -8505,13 +8545,13 @@ export class TelegramService {
           { text: '⏱ 24h', callback_data: 'keywiz_timer:24h', style: 'primary' },
           { text: '⏱ 7d', callback_data: 'keywiz_timer:7d', style: 'primary' }
         ],
-        [{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]
+        backCancelRow
       ];
     } else if (session.step === 'gen_title') {
       text =
         `⚡ <b>Key Generator Setup — Step 1 of 5</b>\n\n` +
         `Send a <b>Title / Label</b> for this dynamic key link (optional), or tap <b>Skip</b> to use an auto-generated title.\n\n` +
-        `<i>Example: <code>VIP Auto-Generated Access</code></i>`;
+        `<i>Example: <code>Auto-Generated Access Wave</code></i>`;
       keyboard = [
         [{ text: '⏭ Skip (Default Title)', callback_data: 'keywiz_skip_title', style: 'primary' }],
         [{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]
@@ -8521,15 +8561,13 @@ export class TelegramService {
       text =
         `⚡ <b>Key Generator Setup — Step 2 of 5</b>\n\n` +
         titleLine +
-        `Choose a <b>Key Prefix</b> below or send any custom prefix (max 32 chars, e.g. <code>DARK-</code> or <code>VIP-</code>):`;
+        `Choose a <b>Key Prefix</b> below or send any custom prefix (max 32 chars, e.g. <code>DARK-</code>):`;
       keyboard = [
-        [{ text: '🚫 No Prefix (Blank)', callback_data: 'keywiz_prefix:none', style: 'primary' }],
         [
-          { text: 'DARK-', callback_data: 'keywiz_prefix:DARK-', style: 'primary' },
-          { text: 'VIP-', callback_data: 'keywiz_prefix:VIP-', style: 'primary' },
-          { text: 'KEY-', callback_data: 'keywiz_prefix:KEY-', style: 'primary' }
+          { text: '🚫 No Prefix (Blank)', callback_data: 'keywiz_prefix:none', style: 'primary' },
+          { text: 'DARK-', callback_data: 'keywiz_prefix:DARK-', style: 'primary' }
         ],
-        [{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]
+        backCancelRow
       ];
     } else if (session.step === 'gen_length') {
       const titleLine = session.title ? `• <b>Title:</b> ${this.escapeHtml(session.title)}\n` : '';
@@ -8548,7 +8586,7 @@ export class TelegramService {
           { text: '24 chars', callback_data: 'keywiz_len:24', style: 'primary' },
           { text: '32 chars', callback_data: 'keywiz_len:32', style: 'primary' }
         ],
-        [{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]
+        backCancelRow
       ];
     } else if (session.step === 'gen_format') {
       const titleLine = session.title ? `• <b>Title:</b> ${this.escapeHtml(session.title)}\n` : '';
@@ -8563,7 +8601,7 @@ export class TelegramService {
         [{ text: '🔠 English Letters (A-Z)', callback_data: 'keywiz_fmt:letters_upper', style: 'primary' }],
         [{ text: '🔤 English Letters (Mixed A-z)', callback_data: 'keywiz_fmt:letters_mixed', style: 'primary' }],
         [{ text: '✨ Random Alphanumeric (A-Z, 0-9)', callback_data: 'keywiz_fmt:alphanumeric', style: 'success' }],
-        [{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]
+        backCancelRow
       ];
     } else if (session.step === 'gen_timer') {
       const safeFmt: KeyGeneratorFormatType = session.charType || 'alphanumeric';
@@ -8587,11 +8625,17 @@ export class TelegramService {
           { text: '⏱ 24h', callback_data: 'keywiz_timer:24h', style: 'primary' },
           { text: '⏱ 7d', callback_data: 'keywiz_timer:7d', style: 'primary' }
         ],
-        [{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]
+        backCancelRow
       ];
     }
 
-    const msgId = await this.sendOrEditKeyWizardPrompt(chatId, text, keyboard, editMessageId);
+    const finalText = validationError ? `⚠️ ${validationError}\n\n${text}` : text;
+    const msgId = await this.sendOrEditKeyWizardPrompt(
+      chatId,
+      finalText,
+      keyboard,
+      editMessageId || session.promptMessageId
+    );
     if (msgId) session.promptMessageId = msgId;
   }
 
@@ -8806,6 +8850,10 @@ export class TelegramService {
       return;
     }
 
+    if (message?.message_id && !String(chatId).startsWith('-')) {
+      await this.deleteUserMessage(chatId, message.message_id);
+    }
+
     activeSetChannelSessions.delete(fromId);
     activeAddSessions.delete(fromId);
 
@@ -8862,6 +8910,10 @@ export class TelegramService {
         parse_mode: 'HTML'
       });
       return;
+    }
+
+    if (message?.message_id && !String(chatId).startsWith('-')) {
+      await this.deleteUserMessage(chatId, message.message_id);
     }
 
     activeSetChannelSessions.delete(fromId);
@@ -8936,6 +8988,10 @@ export class TelegramService {
     text: string,
     session: KeyCreationSession
   ): Promise<void> {
+    if (message?.message_id) {
+      await this.deleteUserMessage(chatId, message.message_id);
+    }
+
     const rawText = (text || message?.text || message?.caption || '').trim();
     const lines = rawText
       .split(/\r?\n/)
@@ -8947,7 +9003,7 @@ export class TelegramService {
         session.keyLines = lines;
         session.step = 'pool_timer';
         activeAddKeySessions.set(fromId, session);
-        await this.renderKeyWizardStep(chatId, session);
+        await this.renderKeyWizardStep(chatId, session, session.promptMessageId);
         return;
       }
       if (/^(\/skip|skip|default|none|-)$/i.test(rawText)) {
@@ -8957,49 +9013,50 @@ export class TelegramService {
       }
       session.step = 'pool_keys';
       activeAddKeySessions.set(fromId, session);
-      await this.renderKeyWizardStep(chatId, session);
+      await this.renderKeyWizardStep(chatId, session, session.promptMessageId);
       return;
     }
 
     if (session.step === 'pool_keys') {
       if (lines.length === 0) {
-        await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text: '⚠️ <b>No keys detected.</b>\n<i>Please send one or more keys (one per line), or send <code>/cancel</code> to abort.</i>',
-          parse_mode: 'HTML'
-        });
+        await this.renderKeyWizardStep(
+          chatId,
+          session,
+          session.promptMessageId,
+          '<b>No keys detected.</b> <i>Please send one or more keys (one per line), or tap Back / Cancel.</i>'
+        );
         return;
       }
       session.keyLines = lines;
       session.step = 'pool_timer';
       activeAddKeySessions.set(fromId, session);
-      await this.renderKeyWizardStep(chatId, session);
+      await this.renderKeyWizardStep(chatId, session, session.promptMessageId);
       return;
     }
 
     if (session.step === 'pool_timer') {
       const parsedDur = this.parseKeyWizardDurationInput(rawText);
       if (!parsedDur.valid) {
-        await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text:
-            '⚠️ <b>Invalid expiry duration.</b>\n' +
-            '<i>Tap one of the timer buttons above or reply like <code>30m</code>, <code>12h</code>, <code>7d</code>, or <code>never</code>.</i>',
-          parse_mode: 'HTML'
-        });
+        await this.renderKeyWizardStep(
+          chatId,
+          session,
+          session.promptMessageId,
+          '<b>Invalid expiry duration.</b> <i>Tap one of the timer buttons below or reply like <code>30m</code>, <code>12h</code>, <code>7d</code>, or <code>never</code>.</i>'
+        );
         return;
       }
       const keyLines = session.keyLines || [];
       if (keyLines.length === 0) {
         session.step = 'pool_keys';
         activeAddKeySessions.set(fromId, session);
-        await this.renderKeyWizardStep(chatId, session);
+        await this.renderKeyWizardStep(chatId, session, session.promptMessageId);
         return;
       }
       activeAddKeySessions.delete(fromId);
       await this.finalizeKeyBatchFromLines(chatId, fromId, keyLines, {
         title: session.title,
-        expiresAt: parsedDur.expiresAt
+        expiresAt: parsedDur.expiresAt,
+        promptMessageId: session.promptMessageId
       });
       return;
     }
@@ -9012,7 +9069,7 @@ export class TelegramService {
       }
       session.step = 'gen_prefix';
       activeAddKeySessions.set(fromId, session);
-      await this.renderKeyWizardStep(chatId, session);
+      await this.renderKeyWizardStep(chatId, session, session.promptMessageId);
       return;
     }
 
@@ -9024,24 +9081,25 @@ export class TelegramService {
       }
       session.step = 'gen_length';
       activeAddKeySessions.set(fromId, session);
-      await this.renderKeyWizardStep(chatId, session);
+      await this.renderKeyWizardStep(chatId, session, session.promptMessageId);
       return;
     }
 
     if (session.step === 'gen_length') {
       const parsedLen = parseInt(rawText, 10);
       if (!Number.isFinite(parsedLen) || parsedLen < 4 || parsedLen > 64) {
-        await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text: '⚠️ <b>Invalid key length.</b>\n<i>Please enter a number between <code>4</code> and <code>64</code>, or tap a preset button above.</i>',
-          parse_mode: 'HTML'
-        });
+        await this.renderKeyWizardStep(
+          chatId,
+          session,
+          session.promptMessageId,
+          '<b>Invalid key length.</b> <i>Please enter a number between <code>4</code> and <code>64</code>, or tap a preset button below.</i>'
+        );
         return;
       }
       session.length = parsedLen;
       session.step = 'gen_format';
       activeAddKeySessions.set(fromId, session);
-      await this.renderKeyWizardStep(chatId, session);
+      await this.renderKeyWizardStep(chatId, session, session.promptMessageId);
       return;
     }
 
@@ -9059,33 +9117,31 @@ export class TelegramService {
       }
 
       if (!matchedFmt) {
-        await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text:
-            '⚠️ <b>Unrecognized format type.</b>\n' +
-            '<i>Tap one of the format buttons above or reply with: <code>numbers</code>, <code>letters</code>, <code>mixed</code>, or <code>alphanumeric</code>.</i>',
-          parse_mode: 'HTML'
-        });
+        await this.renderKeyWizardStep(
+          chatId,
+          session,
+          session.promptMessageId,
+          '<b>Unrecognized format type.</b> <i>Tap one of the format buttons below or reply with <code>numbers</code>, <code>letters</code>, <code>mixed</code>, or <code>alphanumeric</code>.</i>'
+        );
         return;
       }
 
       session.charType = matchedFmt;
       session.step = 'gen_timer';
       activeAddKeySessions.set(fromId, session);
-      await this.renderKeyWizardStep(chatId, session);
+      await this.renderKeyWizardStep(chatId, session, session.promptMessageId);
       return;
     }
 
     if (session.step === 'gen_timer') {
       const parsedDur = this.parseKeyWizardDurationInput(rawText);
       if (!parsedDur.valid) {
-        await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text:
-            '⚠️ <b>Invalid expiry duration.</b>\n' +
-            '<i>Tap one of the timer buttons above or reply like <code>30m</code>, <code>12h</code>, <code>7d</code>, or <code>never</code>.</i>',
-          parse_mode: 'HTML'
-        });
+        await this.renderKeyWizardStep(
+          chatId,
+          session,
+          session.promptMessageId,
+          '<b>Invalid expiry duration.</b> <i>Tap one of the timer buttons below or reply like <code>30m</code>, <code>12h</code>, <code>7d</code>, or <code>never</code>.</i>'
+        );
         return;
       }
       activeAddKeySessions.delete(fromId);
@@ -9094,7 +9150,8 @@ export class TelegramService {
         prefix: session.prefix || '',
         length: Math.max(4, Math.min(64, Number(session.length) || 12)),
         charType: session.charType || 'alphanumeric',
-        expiresAt: parsedDur.expiresAt
+        expiresAt: parsedDur.expiresAt,
+        promptMessageId: session.promptMessageId
       });
     }
   }
@@ -10384,7 +10441,10 @@ export class TelegramService {
             reply_markup: {
               inline_keyboard: [
                 [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${targetAdminId}`, style: 'primary' }],
-                [{ text: '❌ Cancel', callback_data: `clone_cancel:${targetAdminId}`, style: 'danger' }]
+                [
+                  { text: '⬅️ Back', callback_data: `clone_back:${targetAdminId}`, style: 'primary' },
+                  { text: '❌ Cancel', callback_data: `clone_cancel:${targetAdminId}`, style: 'danger' }
+                ]
               ]
             }
           }).catch(() => {});
@@ -10442,6 +10502,58 @@ export class TelegramService {
           senderUsername: cb.from?.username,
           editMessageId: cb.message?.message_id
         });
+      }
+      return;
+    }
+
+    // BACK TO BOT MODE SELECTION DURING INTERACTIVE CLONE WIZARD
+    if (data && data.startsWith('clone_back:')) {
+      const targetAdminId = data.slice('clone_back:'.length).trim() || fromId;
+      if (targetAdminId !== fromId && !(await this.isAuthorizedAdmin(fromId, cb.from?.username))) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Only the admin who started cloning can go back.',
+          show_alert: true
+        });
+        return;
+      }
+      const session = activeCloneSessions.get(targetAdminId) || activeCloneSessions.get(fromId);
+      if (!session) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Clone session expired. Send /clone <token> again.',
+          show_alert: true
+        });
+        return;
+      }
+      session.stage = 'awaiting_mode';
+      session.botMode = undefined;
+      activeCloneSessions.set(targetAdminId, session);
+      await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id });
+      if (chatId && cb.message?.message_id) {
+        await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: cb.message.message_id,
+          text:
+            `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(session.botInfo?.username || session.botInfo?.first_name || 'Bot')}</code>\n\n` +
+            `⚙️ <b>Choose Bot Mode for this clone:</b>\n\n` +
+            `• 📁 <b>File Bot</b> — Standard file delivery, filters &amp; indexing mode\n` +
+            `• 📝 <b>Post Bot</b> — Channel post maker, inline buttons &amp; post editing mode\n` +
+            `• 🖼️ <b>Image URL Bot</b> — Photo-to-URL converter with link manager &amp; auto-expiry`,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '📁 File Bot', callback_data: `clone_mode:${targetAdminId}:file_bot`, style: 'primary' },
+                { text: '📝 Post Bot', callback_data: `clone_mode:${targetAdminId}:post_bot`, style: 'primary' }
+              ],
+              [
+                { text: '🖼️ Image URL Bot', callback_data: `clone_mode:${targetAdminId}:image_url_bot`, style: 'success' }
+              ],
+              [{ text: '❌ Cancel', callback_data: `clone_cancel:${targetAdminId}`, style: 'danger' }]
+            ]
+          }
+        }).catch(() => {});
       }
       return;
     }
@@ -10703,6 +10815,26 @@ export class TelegramService {
         session.step = session.mode === 'generator' ? 'gen_prefix' : 'pool_keys';
         activeAddKeySessions.set(fromId, session);
         await this.renderKeyWizardStep(targetChatId, session, msgId);
+        return;
+      }
+
+      if (data === 'keywiz_back') {
+        const prevStepMap: Record<KeyCreationSession['step'], KeyCreationSession['step'] | null> = {
+          pool_title: null,
+          pool_keys: 'pool_title',
+          pool_timer: 'pool_keys',
+          gen_title: null,
+          gen_prefix: 'gen_title',
+          gen_length: 'gen_prefix',
+          gen_format: 'gen_length',
+          gen_timer: 'gen_format'
+        };
+        const prevStep = prevStepMap[session.step];
+        if (prevStep) {
+          session.step = prevStep;
+          activeAddKeySessions.set(fromId, session);
+          await this.renderKeyWizardStep(targetChatId, session, msgId);
+        }
         return;
       }
 
