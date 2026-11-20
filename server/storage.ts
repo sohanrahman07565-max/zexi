@@ -4304,21 +4304,67 @@ export class SharedStorageService {
     return `${cfg.prefix}${SharedStorageService.generateRandomKeyBody(cfg.length, cfg.charType)}${extraSuffix}`;
   }
 
+  public static readonly EXPIRED_KEY_POOL_GRACE_MS = 30 * 1000;
+
+  public checkAndCleanExpiredKeyPoolsSync(
+    graceMs: number = SharedStorageService.EXPIRED_KEY_POOL_GRACE_MS
+  ): string[] {
+    if (!Array.isArray(this.db.keyPools) || this.db.keyPools.length === 0) {
+      return [];
+    }
+    const now = Date.now();
+    const removedIds: string[] = [];
+    const remaining: KeyPoolRecord[] = [];
+
+    for (const pool of this.db.keyPools) {
+      if (pool && pool.expiresAt) {
+        const expTs = Date.parse(pool.expiresAt);
+        if (Number.isFinite(expTs) && now >= expTs + Math.max(0, graceMs)) {
+          removedIds.push(pool.id);
+          console.info(
+            `[Storage (${this.botId})] Expired key link "${pool.title}" (${pool.id}) passed grace period. Auto-deleted.`
+          );
+          continue;
+        }
+      }
+      if (pool) {
+        remaining.push(pool);
+      }
+    }
+
+    if (removedIds.length > 0) {
+      this.db.keyPools = remaining;
+      this.persist(false).catch(() => {});
+    }
+    return removedIds;
+  }
+
+  public async checkAndCleanExpiredKeyPools(
+    graceMs: number = SharedStorageService.EXPIRED_KEY_POOL_GRACE_MS
+  ): Promise<string[]> {
+    await this.loadLatest(false);
+    return this.checkAndCleanExpiredKeyPoolsSync(graceMs);
+  }
+
   public async getKeyPools(): Promise<KeyPoolRecord[]> {
     await this.loadLatest(false);
+    this.checkAndCleanExpiredKeyPoolsSync();
     const list = Array.isArray(this.db.keyPools) ? this.db.keyPools : [];
     return [...list]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .map((pool) => ({
         ...pool,
         mode: pool.mode === 'generator' ? 'generator' : 'pool',
-        generatorConfig: pool.generatorConfig ? SharedStorageService.normalizeGeneratorConfig(pool.generatorConfig) : null,
+        generatorConfig: pool.mode === 'generator' && pool.generatorConfig
+          ? SharedStorageService.normalizeGeneratorConfig(pool.generatorConfig)
+          : null,
         keys: Array.isArray(pool.keys) ? pool.keys.map((k) => ({ ...k })) : []
       }));
   }
 
   public async getKeyPool(id: string): Promise<KeyPoolRecord | null> {
     await this.loadLatest(false);
+    this.checkAndCleanExpiredKeyPoolsSync();
     const cleanId = String(id || '').trim();
     if (!cleanId || !Array.isArray(this.db.keyPools)) return null;
     const found = this.db.keyPools.find((p) => p.id === cleanId);
@@ -4326,7 +4372,9 @@ export class SharedStorageService {
     return {
       ...found,
       mode: found.mode === 'generator' ? 'generator' : 'pool',
-      generatorConfig: found.generatorConfig ? SharedStorageService.normalizeGeneratorConfig(found.generatorConfig) : null,
+      generatorConfig: found.mode === 'generator' && found.generatorConfig
+        ? SharedStorageService.normalizeGeneratorConfig(found.generatorConfig)
+        : null,
       keys: Array.isArray(found.keys) ? found.keys.map((k) => ({ ...k })) : []
     };
   }
@@ -4531,6 +4579,7 @@ export class SharedStorageService {
     totalCount?: number;
   }> {
     await this.loadLatest(false);
+    this.checkAndCleanExpiredKeyPoolsSync();
     const cleanPoolId = String(poolId || '').trim();
     const cleanUserId = String(userId || '').trim();
     const cleanUsername = username ? String(username).replace(/^@/, '').trim() : undefined;

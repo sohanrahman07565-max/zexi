@@ -710,15 +710,25 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     }
   }, [subView]);
 
-  const loadKeyPools = async () => {
-    setKeyPoolsLoading(true);
+  const hasExpiringKeyPools = keyPoolsList.some((p) => Boolean(p.expiresAt));
+
+  useEffect(() => {
+    if (subView !== 'key_generator' || !hasExpiringKeyPools) return;
+    const timer = window.setInterval(() => {
+      loadKeyPools(true);
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [subView, hasExpiringKeyPools]);
+
+  const loadKeyPools = async (silent = false) => {
+    if (!silent) setKeyPoolsLoading(true);
     try {
       const res = await api.getKeyPools();
       setKeyPoolsList(Array.isArray(res.pools) ? res.pools : []);
     } catch (err: any) {
-      console.warn('Failed to load key pools:', err);
+      if (!silent) console.warn('Failed to load key pools:', err);
     } finally {
-      setKeyPoolsLoading(false);
+      if (!silent) setKeyPoolsLoading(false);
     }
   };
 
@@ -5114,7 +5124,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       const expMs = Date.parse(expiresAt);
       if (!Number.isFinite(expMs)) return 'Permanent';
       const diffMs = expMs - Date.now();
-      if (diffMs <= 0) return 'Expired';
+      if (diffMs <= 0) return 'Expired (Auto-deleting...)';
       const totalMins = Math.ceil(diffMs / 60000);
       if (totalMins < 60) return `Expires in ${totalMins}m`;
       const hours = Math.floor(totalMins / 60);
@@ -5124,6 +5134,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       const remHours = hours % 24;
       return remHours > 0 ? `Expires in ${days}d ${remHours}h` : `Expires in ${days}d`;
     };
+
+    const sortSerialAsc = (a: KeyPoolRecord, b: KeyPoolRecord) =>
+      new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
+    const addKeyPools = keyPoolsList.filter((p) => (p.mode || 'pool') === 'pool').sort(sortSerialAsc);
+    const generatorKeyPools = keyPoolsList.filter((p) => p.mode === 'generator').sort(sortSerialAsc);
 
     const handleCreateKeyPool = async (e: React.FormEvent) => {
       e.preventDefault();
@@ -5282,7 +5297,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </div>
           <button
             type="button"
-            onClick={loadKeyPools}
+            onClick={() => loadKeyPools(false)}
             disabled={keyPoolsLoading}
             className="px-2.5 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
           >
@@ -5297,7 +5312,10 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-zinc-950 border border-zinc-800">
             <button
               type="button"
-              onClick={() => setKeyGenMode('pool')}
+              onClick={() => {
+                setKeyGenMode('pool');
+                setExpandedKeyPoolId(null);
+              }}
               className={`py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
                 keyGenMode === 'pool'
                   ? 'bg-emerald-500 text-zinc-950 shadow'
@@ -5305,11 +5323,14 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               }`}
             >
               <Plus className="w-3.5 h-3.5 shrink-0" />
-              <span>Add Key</span>
+              <span>Add Key ({addKeyPools.length})</span>
             </button>
             <button
               type="button"
-              onClick={() => setKeyGenMode('generator')}
+              onClick={() => {
+                setKeyGenMode('generator');
+                setExpandedKeyPoolId(null);
+              }}
               className={`py-2 px-3 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
                 keyGenMode === 'generator'
                   ? 'bg-cyan-400 text-zinc-950 shadow'
@@ -5317,7 +5338,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               }`}
             >
               <Sparkles className="w-3.5 h-3.5 shrink-0" />
-              <span>Key Generator</span>
+              <span>Generate Key ({generatorKeyPools.length})</span>
             </button>
           </div>
 
@@ -5530,12 +5551,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </div>
         </form>
 
-        {/* Separate Created Links Sections (Serial Order) */}
+        {/* Strictly Isolated Created Links Section (Only Active Mode Shown, Serial Order) */}
         {(() => {
-          const sortSerialAsc = (a: KeyPoolRecord, b: KeyPoolRecord) =>
-            new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
-          const addKeyPools = keyPoolsList.filter((p) => p.mode !== 'generator').sort(sortSerialAsc);
-          const generatorKeyPools = keyPoolsList.filter((p) => p.mode === 'generator').sort(sortSerialAsc);
+          const activeList = keyGenMode === 'generator' ? generatorKeyPools : addKeyPools;
 
           const renderKeyPoolCard = (pool: KeyPoolRecord, serialIndex: number) => {
             const isGenPool = pool.mode === 'generator';
@@ -5729,60 +5747,50 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           }
 
           return (
-            <div className="space-y-5">
-              {/* Section 1: Add Key Links (Serial Order) */}
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between px-1">
-                  <div className="flex items-center gap-2">
-                    <Key className="w-3.5 h-3.5 text-emerald-400" />
-                    <span className="text-xs font-bold text-white tabular-nums">
-                      Add Key Links ({addKeyPools.length})
-                    </span>
-                  </div>
-                  <span className="text-[10px] text-zinc-400">Serial Order · One-by-One Pool</span>
-                </div>
-
-                {addKeyPools.length === 0 ? (
-                  <div className="p-5 rounded-2xl glass-panel border border-zinc-800/80 text-center space-y-1.5">
-                    <Key className="w-6 h-6 text-emerald-400/70 mx-auto" />
-                    <div className="text-xs font-semibold text-white">No Add Key links yet</div>
-                    <p className="text-[11px] text-zinc-400">
-                      Paste pre-loaded keys in <b>Add Key</b> mode or run <code>/addkey</code> in the bot.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-2.5">
-                    {addKeyPools.map((pool, idx) => renderKeyPoolCard(pool, idx))}
-                  </div>
-                )}
-              </div>
-
-              {/* Section 2: Key Generator Links (Serial Order) */}
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between px-1">
-                  <div className="flex items-center gap-2">
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between px-1">
+                <div className="flex items-center gap-2">
+                  {keyGenMode === 'generator' ? (
                     <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-                    <span className="text-xs font-bold text-white tabular-nums">
-                      Key Generator Links ({generatorKeyPools.length})
-                    </span>
-                  </div>
-                  <span className="text-[10px] text-zinc-400">Serial Order · Dynamic Rules</span>
+                  ) : (
+                    <Key className="w-3.5 h-3.5 text-emerald-400" />
+                  )}
+                  <span className="text-xs font-bold text-white tabular-nums">
+                    {keyGenMode === 'generator'
+                      ? `Generate Key Links (${activeList.length})`
+                      : `Add Key Links (${activeList.length})`}
+                  </span>
                 </div>
-
-                {generatorKeyPools.length === 0 ? (
-                  <div className="p-5 rounded-2xl glass-panel border border-zinc-800/80 text-center space-y-1.5">
-                    <Sparkles className="w-6 h-6 text-cyan-400/70 mx-auto" />
-                    <div className="text-xs font-semibold text-white">No Key Generator links yet</div>
-                    <p className="text-[11px] text-zinc-400">
-                      Configure prefix, length &amp; format in <b>Key Generator</b> mode or run <code>/genkey</code> in the bot.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-2.5">
-                    {generatorKeyPools.map((pool, idx) => renderKeyPoolCard(pool, idx))}
-                  </div>
-                )}
+                <span className="text-[10px] text-zinc-400">
+                  {keyGenMode === 'generator' ? 'Serial Order · Dynamic Rules' : 'Serial Order · One-by-One Pool'}
+                </span>
               </div>
+
+              {activeList.length === 0 ? (
+                <div className="p-5 rounded-2xl glass-panel border border-zinc-800/80 text-center space-y-1.5">
+                  {keyGenMode === 'generator' ? (
+                    <>
+                      <Sparkles className="w-6 h-6 text-cyan-400/70 mx-auto" />
+                      <div className="text-xs font-semibold text-white">No Generate Key links yet</div>
+                      <p className="text-[11px] text-zinc-400">
+                        Configure prefix, length &amp; format above or run <code>/genkey</code> in the bot.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <Key className="w-6 h-6 text-emerald-400/70 mx-auto" />
+                      <div className="text-xs font-semibold text-white">No Add Key links yet</div>
+                      <p className="text-[11px] text-zinc-400">
+                        Paste pre-loaded keys above or run <code>/addkey</code> in the bot.
+                      </p>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {activeList.map((pool, idx) => renderKeyPoolCard(pool, idx))}
+                </div>
+              )}
             </div>
           );
         })()}

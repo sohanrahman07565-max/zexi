@@ -11856,10 +11856,15 @@ export class TelegramService {
       // 1. Process any past-due deletions on startup (delivered file auto-destruct)
       await this.processDueScheduledDeletions();
 
-      // Clean up any temporary files whose expiration days have passed
+      // Clean up any temporary files & expired key links whose expiration + grace window has passed
       await storage.checkAndCleanExpiredItems().catch(err => {
         console.warn('[Storage] Startup expired items cleanup error:', err);
       });
+      await Promise.all(
+        StorageManager.getLoadedStorageIds().map((sid) =>
+          StorageManager.getStorage(sid).checkAndCleanExpiredKeyPools().catch(() => [])
+        )
+      );
 
       // 2. Arm timers for all remaining scheduled deletions from persistent storage
       const pending = await storage.getScheduledDeletions();
@@ -11876,6 +11881,9 @@ export class TelegramService {
         storage.checkAndCleanExpiredItems().catch(err => {
           console.warn('[Storage] Interval expired items cleanup error:', err);
         });
+        for (const sid of StorageManager.getLoadedStorageIds()) {
+          StorageManager.getStorage(sid).checkAndCleanExpiredKeyPools().catch(() => {});
+        }
       }, 15 * 1000);
     } catch (err: any) {
       console.warn('[Telegram] Could not initialize scheduled deletion worker:', err);
