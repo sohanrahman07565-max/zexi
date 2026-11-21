@@ -1335,7 +1335,7 @@ export class SharedStorageService {
           : (loadedData.settings?.botToken || this.db.settings?.botToken || ''),
         rootAdminId: isMainBot
           ? (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || loadedData.settings?.rootAdminId || '')
-          : (loadedData.settings?.rootAdminId || ''),
+          : (loadedData.settings?.rootAdminId || this.db.settings?.rootAdminId || ''),
         botMode: (
           loadedData.settings?.botMode === 'post_bot' || loadedData.settings?.botMode === 'image_url_bot'
             ? loadedData.settings.botMode
@@ -4437,12 +4437,12 @@ export class SharedStorageService {
       }
     }
 
-    const sharedFirstLine = (cleanSharedText || '').split(/\r?\n/)[0]?.trim() || 'Shared Key';
+    const sharedFirstLine = (cleanSharedText || '').split(/\r?\n/)[0]?.trim() || 'Text';
     const defaultTitle =
       mode === 'generator' && generatorConfig
         ? `Key Generator (${generatorConfig.prefix ? `${generatorConfig.prefix} · ` : ''}${generatorConfig.length} chars)`
         : mode === 'shared'
-        ? `Shared Key (${sharedFirstLine.slice(0, 24)}${sharedFirstLine.length > 24 ? '…' : ''})`
+        ? `Text (${sharedFirstLine.slice(0, 24)}${sharedFirstLine.length > 24 ? '…' : ''})`
         : `Key Batch (${keys.length} ${keys.length === 1 ? 'Key' : 'Keys'})`;
     const cleanTitle = (input.title || '').trim() || defaultTitle;
 

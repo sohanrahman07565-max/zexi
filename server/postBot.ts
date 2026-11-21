@@ -142,20 +142,27 @@ const PROTECTED_ENTITY_TYPES = new Set(['code', 'pre', 'text_link']);
 
 function sanitizeTelegramEntities(entities: any): any[] {
   if (!Array.isArray(entities)) return [];
-  return entities
-    .filter((e) => e && typeof e.type === 'string' && Number.isFinite(Number(e.offset)) && Number(e.length) > 0)
-    .map((e) => {
-      const clean: any = {
-        type: String(e.type),
-        offset: Number(e.offset),
-        length: Number(e.length)
-      };
-      if (typeof e.url === 'string' && e.url.trim()) clean.url = e.url.trim();
-      if (typeof e.language === 'string' && e.language.trim()) clean.language = e.language.trim();
-      if (typeof e.custom_emoji_id === 'string' && e.custom_emoji_id.trim()) clean.custom_emoji_id = e.custom_emoji_id.trim();
-      if (e.user && typeof e.user === 'object') clean.user = e.user;
-      return clean;
-    });
+  const seen = new Set<string>();
+  const out: any[] = [];
+  for (const e of entities) {
+    if (!e || typeof e.type !== 'string' || !Number.isFinite(Number(e.offset)) || Number(e.length) <= 0) {
+      continue;
+    }
+    const clean: any = {
+      type: String(e.type),
+      offset: Math.max(0, Number(e.offset)),
+      length: Number(e.length)
+    };
+    if (typeof e.url === 'string' && e.url.trim()) clean.url = e.url.trim();
+    if (typeof e.language === 'string' && e.language.trim()) clean.language = e.language.trim();
+    if (typeof e.custom_emoji_id === 'string' && e.custom_emoji_id.trim()) clean.custom_emoji_id = e.custom_emoji_id.trim();
+    if (e.user && typeof e.user === 'object') clean.user = e.user;
+    const key = `${clean.type}:${clean.offset}:${clean.length}:${clean.url || ''}:${clean.language || ''}:${clean.custom_emoji_id || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+  }
+  return out;
 }
 
 function decodeBasicHtmlEntities(s: string): string {
@@ -174,39 +181,80 @@ function isAllowedEntityUrl(raw: string): boolean {
   return validUrl(s);
 }
 
-interface ParsedFormattedPost {
+export interface ParsedFormattedPost {
   text: string;
   entities: any[];
+}
+
+interface ParsedPlainSegment extends ParsedFormattedPost {
+  outPos: number[];
 }
 
 function parsePlainSegmentWithMarkup(
   raw: string,
   allowHtmlAndMarkdown: boolean
-): ParsedFormattedPost {
+): ParsedPlainSegment {
+  const outPos = new Array<number>(raw.length + 1);
   if (!raw || !allowHtmlAndMarkdown) {
-    return { text: raw, entities: [] };
+    for (let k = 0; k <= raw.length; k++) outPos[k] = k;
+    return { text: raw, entities: [], outPos };
   }
 
   const hasAnyHtmlTags = /<\/?(?:a|code|pre|b|strong|i|em|u|ins|s|strike|del|tg-spoiler|blockquote)\b[^>]*>/i.test(raw);
+  outPos[0] = 0;
 
-  // Recursive inline/block parser that emits plain text + exact UTF-16 Telegram MessageEntity offsets.
-  const parseSpan = (input: string, startOffset: number): { text: string; entities: any[] } => {
+  const fillRangeLinear = (rawStart: number, rawEnd: number, outStart: number, outEnd: number) => {
+    const rawLen = Math.max(1, rawEnd - rawStart);
+    const outLen = Math.max(0, outEnd - outStart);
+    for (let p = rawStart; p <= rawEnd; p++) {
+      if (p === rawStart) {
+        outPos[p] = outStart;
+      } else if (p === rawEnd) {
+        outPos[p] = outEnd;
+      } else {
+        outPos[p] = outStart + Math.floor(((p - rawStart) * outLen) / rawLen);
+      }
+    }
+  };
+
+  const fillConst = (rawStart: number, rawEnd: number, outVal: number) => {
+    for (let p = rawStart; p <= rawEnd; p++) {
+      outPos[p] = outVal;
+    }
+  };
+
+  // Recursive inline/block parser that emits plain text, exact UTF-16 Telegram MessageEntity offsets,
+  // and monotonic boundary offset mapping back to `raw`.
+  const parseSpan = (input: string, rawBase: number, startOffset: number): { text: string; entities: any[] } => {
     let out = '';
     const ents: any[] = [];
     let i = 0;
 
     while (i < input.length) {
       const rest = input.slice(i);
+      const tokenRawStart = rawBase + i;
+      const curOut = startOffset + out.length;
 
       // 1. Fenced triple-backtick code block: ```lang\n...\n``` or ```...```
       const preFenceMatch = rest.match(/^```(?:([a-zA-Z0-9_+-]+)[ \t]*\n)?([\s\S]+?)```/);
       if (preFenceMatch) {
         const lang = preFenceMatch[1] ? preFenceMatch[1].trim() : undefined;
         let codeBody = preFenceMatch[2];
-        if (codeBody.startsWith('\n') && !lang) codeBody = codeBody.slice(1);
+        const prefixLen = preFenceMatch[0].indexOf(codeBody);
+        let leadingTrim = 0;
+        if (codeBody.startsWith('\n') && !lang) {
+          codeBody = codeBody.slice(1);
+          leadingTrim = 1;
+        }
         if (codeBody.endsWith('\n')) codeBody = codeBody.slice(0, -1);
-        const offset = startOffset + out.length;
+        const innerRawStart = tokenRawStart + prefixLen + leadingTrim;
+        const innerRawEnd = innerRawStart + codeBody.length;
+        const tokenRawEnd = tokenRawStart + preFenceMatch[0].length;
+        const offset = curOut;
+        fillConst(tokenRawStart, innerRawStart, offset);
         out += codeBody;
+        fillRangeLinear(innerRawStart, innerRawEnd, offset, offset + codeBody.length);
+        fillConst(innerRawEnd, tokenRawEnd, offset + codeBody.length);
         if (codeBody.length > 0) {
           ents.push({
             type: 'pre',
@@ -223,8 +271,12 @@ function parsePlainSegmentWithMarkup(
       const inlineCodeMatch = rest.match(/^`([^`\n]+)`/);
       if (inlineCodeMatch) {
         const body = inlineCodeMatch[1];
-        const offset = startOffset + out.length;
+        const offset = curOut;
+        const tokenRawEnd = tokenRawStart + inlineCodeMatch[0].length;
+        fillConst(tokenRawStart, tokenRawStart + 1, offset);
         out += body;
+        fillRangeLinear(tokenRawStart + 1, tokenRawStart + 1 + body.length, offset, offset + body.length);
+        fillConst(tokenRawStart + 1 + body.length, tokenRawEnd, offset + body.length);
         if (body.length > 0) {
           ents.push({ type: 'code', offset, length: body.length });
         }
@@ -236,9 +288,15 @@ function parsePlainSegmentWithMarkup(
       const htmlPreMatch = rest.match(/^<pre(?:\s+class=(?:"language-([^"]+)"|'language-([^']+)'))?\s*>([\s\S]*?)<\/pre>/i);
       if (htmlPreMatch) {
         const lang = (htmlPreMatch[1] || htmlPreMatch[2] || '').trim() || undefined;
-        const inner = decodeBasicHtmlEntities(htmlPreMatch[3].replace(/^<code>([\s\S]*)<\/code>$/i, '$1'));
-        const offset = startOffset + out.length;
+        const innerRaw = htmlPreMatch[3];
+        const openEnd = htmlPreMatch[0].indexOf(innerRaw);
+        const inner = decodeBasicHtmlEntities(innerRaw.replace(/^<code>([\s\S]*)<\/code>$/i, '$1'));
+        const offset = curOut;
+        const tokenRawEnd = tokenRawStart + htmlPreMatch[0].length;
+        fillConst(tokenRawStart, tokenRawStart + openEnd, offset);
         out += inner;
+        fillRangeLinear(tokenRawStart + openEnd, tokenRawStart + openEnd + innerRaw.length, offset, offset + inner.length);
+        fillConst(tokenRawStart + openEnd + innerRaw.length, tokenRawEnd, offset + inner.length);
         if (inner.length > 0) {
           ents.push({
             type: 'pre',
@@ -253,9 +311,15 @@ function parsePlainSegmentWithMarkup(
 
       const htmlCodeMatch = rest.match(/^<code\s*>([\s\S]*?)<\/code>/i);
       if (htmlCodeMatch) {
-        const inner = decodeBasicHtmlEntities(htmlCodeMatch[1]);
-        const offset = startOffset + out.length;
+        const innerRaw = htmlCodeMatch[1];
+        const openEnd = htmlCodeMatch[0].indexOf(innerRaw);
+        const inner = decodeBasicHtmlEntities(innerRaw);
+        const offset = curOut;
+        const tokenRawEnd = tokenRawStart + htmlCodeMatch[0].length;
+        fillConst(tokenRawStart, tokenRawStart + openEnd, offset);
         out += inner;
+        fillRangeLinear(tokenRawStart + openEnd, tokenRawStart + openEnd + innerRaw.length, offset, offset + inner.length);
+        fillConst(tokenRawStart + openEnd + innerRaw.length, tokenRawEnd, offset + inner.length);
         if (inner.length > 0) {
           ents.push({ type: 'code', offset, length: inner.length });
         }
@@ -268,10 +332,15 @@ function parsePlainSegmentWithMarkup(
       if (htmlLinkMatch) {
         const rawHref = decodeBasicHtmlEntities((htmlLinkMatch[1] || htmlLinkMatch[2] || '').trim());
         if (isAllowedEntityUrl(rawHref)) {
-          const offset = startOffset + out.length;
-          const nested = parseSpan(htmlLinkMatch[3], offset);
+          const offset = curOut;
+          const openTagLen = htmlLinkMatch[0].indexOf('>') + 1;
+          const innerRaw = htmlLinkMatch[3];
+          const tokenRawEnd = tokenRawStart + htmlLinkMatch[0].length;
+          fillConst(tokenRawStart, tokenRawStart + openTagLen, offset);
+          const nested = parseSpan(innerRaw, tokenRawStart + openTagLen, offset);
           out += nested.text;
           ents.push(...nested.entities);
+          fillConst(tokenRawStart + openTagLen + innerRaw.length, tokenRawEnd, offset + nested.text.length);
           if (nested.text.length > 0) {
             ents.push({ type: 'text_link', offset, length: nested.text.length, url: rawHref });
           }
@@ -300,10 +369,15 @@ function parsePlainSegmentWithMarkup(
           blockquote: 'blockquote'
         };
         const entityType = typeMap[tag];
-        const offset = startOffset + out.length;
-        const nested = parseSpan(htmlTagMatch[2], offset);
+        const offset = curOut;
+        const openTagLen = htmlTagMatch[0].indexOf('>') + 1;
+        const innerRaw = htmlTagMatch[2];
+        const tokenRawEnd = tokenRawStart + htmlTagMatch[0].length;
+        fillConst(tokenRawStart, tokenRawStart + openTagLen, offset);
+        const nested = parseSpan(innerRaw, tokenRawStart + openTagLen, offset);
         out += nested.text;
         ents.push(...nested.entities);
+        fillConst(tokenRawStart + openTagLen + innerRaw.length, tokenRawEnd, offset + nested.text.length);
         if (entityType && nested.text.length > 0) {
           ents.push({ type: entityType, offset, length: nested.text.length });
         }
@@ -314,10 +388,14 @@ function parsePlainSegmentWithMarkup(
       // 6. Markdown hyperlink: [Click Here](https://...)
       const mdLinkMatch = rest.match(/^\[([^\]\n]+)\]\(((?:https?:\/\/|tg:\/\/)[^\s)]+)\)/);
       if (mdLinkMatch && isAllowedEntityUrl(mdLinkMatch[2])) {
-        const offset = startOffset + out.length;
-        const nested = parseSpan(mdLinkMatch[1], offset);
+        const offset = curOut;
+        const innerRaw = mdLinkMatch[1];
+        const tokenRawEnd = tokenRawStart + mdLinkMatch[0].length;
+        fillConst(tokenRawStart, tokenRawStart + 1, offset);
+        const nested = parseSpan(innerRaw, tokenRawStart + 1, offset);
         out += nested.text;
         ents.push(...nested.entities);
+        fillConst(tokenRawStart + 1 + innerRaw.length, tokenRawEnd, offset + nested.text.length);
         if (nested.text.length > 0) {
           ents.push({ type: 'text_link', offset, length: nested.text.length, url: mdLinkMatch[2].trim() });
         }
@@ -328,10 +406,14 @@ function parsePlainSegmentWithMarkup(
       // 7. Markdown inline styles: **bold**, __italic__, ~~strike~~, ||spoiler||
       const mdBoldMatch = rest.match(/^\*\*([^\n*](?:[\s\S]*?[^\n*])?)\*\*/);
       if (mdBoldMatch) {
-        const offset = startOffset + out.length;
-        const nested = parseSpan(mdBoldMatch[1], offset);
+        const offset = curOut;
+        const innerRaw = mdBoldMatch[1];
+        const tokenRawEnd = tokenRawStart + mdBoldMatch[0].length;
+        fillConst(tokenRawStart, tokenRawStart + 2, offset);
+        const nested = parseSpan(innerRaw, tokenRawStart + 2, offset);
         out += nested.text;
         ents.push(...nested.entities);
+        fillConst(tokenRawStart + 2 + innerRaw.length, tokenRawEnd, offset + nested.text.length);
         if (nested.text.length > 0) {
           ents.push({ type: 'bold', offset, length: nested.text.length });
         }
@@ -341,10 +423,14 @@ function parsePlainSegmentWithMarkup(
 
       const mdItalicMatch = rest.match(/^__([^\n_](?:[\s\S]*?[^\n_])?)__/);
       if (mdItalicMatch) {
-        const offset = startOffset + out.length;
-        const nested = parseSpan(mdItalicMatch[1], offset);
+        const offset = curOut;
+        const innerRaw = mdItalicMatch[1];
+        const tokenRawEnd = tokenRawStart + mdItalicMatch[0].length;
+        fillConst(tokenRawStart, tokenRawStart + 2, offset);
+        const nested = parseSpan(innerRaw, tokenRawStart + 2, offset);
         out += nested.text;
         ents.push(...nested.entities);
+        fillConst(tokenRawStart + 2 + innerRaw.length, tokenRawEnd, offset + nested.text.length);
         if (nested.text.length > 0) {
           ents.push({ type: 'italic', offset, length: nested.text.length });
         }
@@ -354,10 +440,14 @@ function parsePlainSegmentWithMarkup(
 
       const mdStrikeMatch = rest.match(/^~~([^\n~](?:[\s\S]*?[^\n~])?)~~/);
       if (mdStrikeMatch) {
-        const offset = startOffset + out.length;
-        const nested = parseSpan(mdStrikeMatch[1], offset);
+        const offset = curOut;
+        const innerRaw = mdStrikeMatch[1];
+        const tokenRawEnd = tokenRawStart + mdStrikeMatch[0].length;
+        fillConst(tokenRawStart, tokenRawStart + 2, offset);
+        const nested = parseSpan(innerRaw, tokenRawStart + 2, offset);
         out += nested.text;
         ents.push(...nested.entities);
+        fillConst(tokenRawStart + 2 + innerRaw.length, tokenRawEnd, offset + nested.text.length);
         if (nested.text.length > 0) {
           ents.push({ type: 'strikethrough', offset, length: nested.text.length });
         }
@@ -367,10 +457,14 @@ function parsePlainSegmentWithMarkup(
 
       const mdSpoilerMatch = rest.match(/^\|\|([^\n|](?:[\s\S]*?[^\n|])?)\|\|/);
       if (mdSpoilerMatch) {
-        const offset = startOffset + out.length;
-        const nested = parseSpan(mdSpoilerMatch[1], offset);
+        const offset = curOut;
+        const innerRaw = mdSpoilerMatch[1];
+        const tokenRawEnd = tokenRawStart + mdSpoilerMatch[0].length;
+        fillConst(tokenRawStart, tokenRawStart + 2, offset);
+        const nested = parseSpan(innerRaw, tokenRawStart + 2, offset);
         out += nested.text;
         ents.push(...nested.entities);
+        fillConst(tokenRawStart + 2 + innerRaw.length, tokenRawEnd, offset + nested.text.length);
         if (nested.text.length > 0) {
           ents.push({ type: 'spoiler', offset, length: nested.text.length });
         }
@@ -381,20 +475,26 @@ function parsePlainSegmentWithMarkup(
       if (hasAnyHtmlTags) {
         const htmlCharRef = rest.match(/^(&amp;|&lt;|&gt;|&quot;|&#39;)/);
         if (htmlCharRef) {
-          out += decodeBasicHtmlEntities(htmlCharRef[1]);
+          const decoded = decodeBasicHtmlEntities(htmlCharRef[1]);
+          out += decoded;
+          fillRangeLinear(tokenRawStart, tokenRawStart + htmlCharRef[1].length, curOut, curOut + decoded.length);
           i += htmlCharRef[1].length;
           continue;
         }
       }
 
+      outPos[tokenRawStart] = curOut;
       out += input[i];
+      outPos[tokenRawStart + 1] = curOut + 1;
       i += 1;
     }
 
     return { text: out, entities: ents };
   };
 
-  return parseSpan(raw, 0);
+  const result = parseSpan(raw, 0, 0);
+  outPos[raw.length] = result.text.length;
+  return { ...result, outPos };
 }
 
 export function normalizePostFormatting(rawText: string, incomingEntities?: any[]): ParsedFormattedPost {
@@ -406,7 +506,7 @@ export function normalizePostFormatting(rawText: string, incomingEntities?: any[
       cleanText
     );
 
-  // If no markup syntax is present at all, preserve native Telegram entities as-is cleanly.
+  // If no markup syntax is present at all, preserve ALL native Telegram entities as-is cleanly.
   if (!hasMarkupSyntax) {
     return {
       text: cleanText,
@@ -414,7 +514,7 @@ export function normalizePostFormatting(rawText: string, incomingEntities?: any[
     };
   }
 
-  // Keep only non-passive native entities that might coexist (excluding passive auto-detected URLs
+  // Keep non-passive native entities that might coexist (excluding passive auto-detected URLs
   // that Telegram creates on raw [Click Here](https://...) or <a href="..."> inputs).
   const richIncoming = cleanIncoming.filter((e) => !PASSIVE_AUTO_ENTITY_TYPES.has(e.type));
 
@@ -430,7 +530,8 @@ export function normalizePostFormatting(rawText: string, incomingEntities?: any[
   // rich sections, do not strip backticks/tags inside those protected entities; only parse outside them.
   const protectedRanges = richIncoming
     .filter((e) => PROTECTED_ENTITY_TYPES.has(e.type))
-    .map((e) => ({ start: e.offset, end: e.offset + e.length }))
+    .map((e) => ({ start: Math.max(0, e.offset), end: Math.min(cleanText.length, e.offset + e.length) }))
+    .filter((r) => r.end > r.start)
     .sort((a, b) => a.start - b.start);
 
   // Merge overlapping protected ranges
@@ -456,50 +557,39 @@ export function normalizePostFormatting(rawText: string, incomingEntities?: any[
     chunks.push({ start: cursor, end: cleanText.length, protected: false });
   }
 
-  // Fallback safely if richIncoming includes inline styles (bold/italic/etc.) over unprotected markup:
-  // preserve native rich entities cleanly if unprotected markup overlaps them awkwardly; otherwise parse!
-  if (chunks.length === 1 && !chunks[0].protected) {
-    // Check whether native bold/italic entities are inside plain text without conflicting delimiters
-    const parsed = parsePlainSegmentWithMarkup(cleanText, true);
-    if (parsed.entities.length > 0 && parsed.text !== cleanText) {
-      // Shift/reconcile non-protected native entities only when length didn't shift them, else keep parsed + non-overlapping
-      const mergedEntities = sanitizeTelegramEntities([...parsed.entities]);
-      return { text: parsed.text, entities: mergedEntities };
-    }
-    return { text: cleanText, entities: cleanIncoming };
-  }
-
   let builtText = '';
   const builtEntities: any[] = [];
-  const origToNewStart = new Map<number, number>();
-  const origToNewEnd = new Map<number, number>();
+  const globalOutPos = new Array<number>(cleanText.length + 1).fill(0);
 
   for (const ch of chunks) {
     const slice = cleanText.slice(ch.start, ch.end);
     const outStart = builtText.length;
     if (ch.protected) {
-      origToNewStart.set(ch.start, outStart);
       builtText += slice;
-      origToNewEnd.set(ch.end, builtText.length);
+      for (let p = 0; p <= slice.length; p++) {
+        globalOutPos[ch.start + p] = outStart + p;
+      }
     } else {
       const parsed = parsePlainSegmentWithMarkup(slice, true);
       builtText += parsed.text;
+      for (let p = 0; p <= slice.length; p++) {
+        globalOutPos[ch.start + p] = outStart + (parsed.outPos[p] ?? parsed.text.length);
+      }
       for (const e of parsed.entities) {
         builtEntities.push({ ...e, offset: e.offset + outStart });
       }
     }
   }
+  globalOutPos[cleanText.length] = builtText.length;
 
-  // Re-attach protected rich entities with exact remapped offsets
+  // Remap ALL native rich entities (text_link, code, pre, bold, italic, custom_emoji, blockquote, etc.)
   for (const e of richIncoming) {
-    if (PROTECTED_ENTITY_TYPES.has(e.type)) {
-      const mappedStart = origToNewStart.get(e.offset);
-      const mappedEnd = origToNewEnd.get(e.offset + e.length);
-      if (mappedStart !== undefined && mappedEnd !== undefined && mappedEnd > mappedStart) {
-        builtEntities.push({ ...e, offset: mappedStart, length: mappedEnd - mappedStart });
-      } else if (builtText.slice(e.offset, e.offset + e.length) === cleanText.slice(e.offset, e.offset + e.length)) {
-        builtEntities.push({ ...e });
-      }
+    const rawStart = Math.max(0, Math.min(cleanText.length, e.offset));
+    const rawEnd = Math.max(rawStart, Math.min(cleanText.length, e.offset + e.length));
+    const mappedStart = globalOutPos[rawStart];
+    const mappedEnd = globalOutPos[rawEnd];
+    if (mappedStart !== undefined && mappedEnd !== undefined && mappedEnd > mappedStart) {
+      builtEntities.push({ ...e, offset: mappedStart, length: mappedEnd - mappedStart });
     }
   }
 
@@ -524,6 +614,7 @@ export class PostBotEngine {
       const res = await callTelegramApi('sendMessage', {
         chat_id: chatId,
         text,
+        parse_mode: null,
         ...opts
       });
       if (!res?.ok) {
@@ -535,6 +626,7 @@ export class PostBotEngine {
     const editMessageText = async (text: string, opts: any = {}) => {
       const res = await callTelegramApi('editMessageText', {
         text,
+        parse_mode: null,
         ...opts
       });
       if (!res?.ok) {
@@ -727,14 +819,23 @@ export class PostBotEngine {
       };
       const type = typeMap[d.type] || 'Attachment';
       const headerPrefix = `POST PREVIEW\n\nType: ${type}\n\nCaption / text:\n`;
-      const captionText = d.caption || '(Empty)';
+      const footerSuffix = `\n\nButtons:\n${listButtons(d)}\n\nConfirm to publish or edit any part.`;
+      let captionDisplay = d.caption || '(Empty)';
+      const maxCaptionDisplayLen = Math.max(80, 4050 - headerPrefix.length - footerSuffix.length);
+      if (d.caption && captionDisplay.length > maxCaptionDisplayLen) {
+        captionDisplay = `${captionDisplay.slice(0, maxCaptionDisplayLen - 1)}…`;
+      }
+      const visibleCaptionLen = d.caption ? Math.min(d.caption.length, captionDisplay.endsWith('…') && d.caption.length > captionDisplay.length ? captionDisplay.length - 1 : captionDisplay.length) : 0;
       const previewEntities = d.caption
-        ? sanitizeTelegramEntities(d.entities).map((e) => ({
-            ...e,
-            offset: e.offset + headerPrefix.length
-          }))
+        ? sanitizeTelegramEntities(d.entities)
+            .map((e) => {
+              const clampedEnd = Math.min(e.offset + e.length, visibleCaptionLen);
+              const clampedLen = clampedEnd - e.offset;
+              return clampedLen > 0 ? { ...e, offset: e.offset + headerPrefix.length, length: clampedLen } : null;
+            })
+            .filter(Boolean)
         : [];
-      const text = `${headerPrefix}${captionText}\n\nButtons:\n${listButtons(d)}\n\nConfirm to publish or edit any part.`;
+      const text = `${headerPrefix}${captionDisplay}${footerSuffix}`;
       const rows = grouped(d.buttons);
       rows.push([{ text: 'CONFIRM & PUBLISH', callback_data: 'publish' }]);
       rows.push([
@@ -792,6 +893,7 @@ export class PostBotEngine {
             chat_id: activeChannel,
             message_id: postId,
             text: d.caption,
+            parse_mode: null,
             entities,
             reply_markup: markup,
             link_preview_options: { is_disabled: true }
@@ -817,6 +919,7 @@ export class PostBotEngine {
               chat_id: activeChannel,
               message_id: postId,
               caption: d.caption || '',
+              parse_mode: null,
               caption_entities: entities,
               reply_markup: markup
             });
@@ -844,6 +947,7 @@ export class PostBotEngine {
             chat_id: activeChannel,
             photo: d.fileId,
             caption: d.caption || undefined,
+            parse_mode: null,
             caption_entities: entities,
             reply_markup: markup
           });
@@ -854,6 +958,7 @@ export class PostBotEngine {
             chat_id: activeChannel,
             video: d.fileId,
             caption: d.caption || undefined,
+            parse_mode: null,
             caption_entities: entities,
             reply_markup: markup
           });
@@ -864,6 +969,7 @@ export class PostBotEngine {
             chat_id: activeChannel,
             document: d.fileId,
             caption: d.caption || undefined,
+            parse_mode: null,
             caption_entities: entities,
             reply_markup: markup
           });
@@ -874,6 +980,7 @@ export class PostBotEngine {
             chat_id: activeChannel,
             audio: d.fileId,
             caption: d.caption || undefined,
+            parse_mode: null,
             caption_entities: entities,
             reply_markup: markup
           });
@@ -884,6 +991,7 @@ export class PostBotEngine {
             chat_id: activeChannel,
             animation: d.fileId,
             caption: d.caption || undefined,
+            parse_mode: null,
             caption_entities: entities,
             reply_markup: markup
           });
@@ -893,6 +1001,7 @@ export class PostBotEngine {
           const res = await callTelegramApi('sendMessage', {
             chat_id: activeChannel,
             text: d.caption,
+            parse_mode: null,
             entities,
             reply_markup: markup,
             link_preview_options: { is_disabled: true }
@@ -1117,11 +1226,13 @@ Set BOT_TOKEN from @BotFather, CHANNEL_ID to your channel username or private nu
             d.type = 'text';
             d.fileId = null;
             d.caption = '';
+            d.entities = [];
             return askCaption(chat, d);
           }
           if (d.phase !== 'caption') return;
           await clearReplies(chat, d);
           d.caption = '';
+          d.entities = [];
           return askButtonText(chat, d);
         }
 

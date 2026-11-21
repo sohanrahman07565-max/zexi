@@ -109,7 +109,7 @@ async function withAddSessionLock<T>(fromId: string, fn: () => Promise<T>): Prom
 type KeyGeneratorFormatType = 'numbers' | 'letters_upper' | 'letters_mixed' | 'alphanumeric';
 
 interface KeyCreationSession {
-  mode: 'pool' | 'generator';
+  mode: 'pool' | 'generator' | 'shared';
   chatId: string | number;
   step:
     | 'pool_title'
@@ -119,9 +119,12 @@ interface KeyCreationSession {
     | 'gen_prefix'
     | 'gen_length'
     | 'gen_format'
-    | 'gen_timer';
+    | 'gen_timer'
+    | 'text_value'
+    | 'text_timer';
   title?: string;
   keyLines?: string[];
+  sharedText?: string;
   prefix?: string;
   length?: number;
   charType?: KeyGeneratorFormatType;
@@ -770,9 +773,26 @@ export class TelegramService {
       return { ok: false, description: 'No bot token configured' };
     }
 
-    // Ensure HTML parse mode by default for text/message methods if not explicitly specified
-    if (!payload.parse_mode && (method === 'sendMessage' || method === 'editMessageText' || method === 'sendPhoto' || method === 'sendVideo' || method === 'sendDocument' || method === 'sendAudio' || method === 'sendAnimation' || method === 'sendVoice')) {
-      payload.parse_mode = 'HTML';
+    const sanitizedPayload: Record<string, any> = { ...payload };
+    const hasExplicitEntities =
+      (Array.isArray(sanitizedPayload.entities) && sanitizedPayload.entities.length > 0) ||
+      (Array.isArray(sanitizedPayload.caption_entities) && sanitizedPayload.caption_entities.length > 0) ||
+      (Array.isArray(sanitizedPayload.media?.caption_entities) && sanitizedPayload.media.caption_entities.length > 0);
+
+    if (sanitizedPayload.parse_mode === null || hasExplicitEntities) {
+      delete sanitizedPayload.parse_mode;
+    } else if (
+      !sanitizedPayload.parse_mode &&
+      (method === 'sendMessage' ||
+        method === 'editMessageText' ||
+        method === 'sendPhoto' ||
+        method === 'sendVideo' ||
+        method === 'sendDocument' ||
+        method === 'sendAudio' ||
+        method === 'sendAnimation' ||
+        method === 'sendVoice')
+    ) {
+      sanitizedPayload.parse_mode = 'HTML';
     }
 
     // Adaptive timeout: for long-polling (getUpdates), allow payload.timeout + 15s. Standard calls allow 15s.
@@ -808,7 +828,7 @@ export class TelegramService {
     };
 
     try {
-      let currentPayload: Record<string, any> = { ...payload };
+      let currentPayload: Record<string, any> = { ...sanitizedPayload };
       let data = await executeRequest(currentPayload);
 
       // Chained error-resilient fallback retries (handles combined parse_mode, reply_to_message_id, thread_id, and inline style rejections)
@@ -1588,8 +1608,9 @@ export class TelegramService {
       `• <code>/add</code> — Start interactive wizard to add Files, Links, or Text`,
       `• <code>/addkey</code> — Add Key mode (pre-loaded serial keys + expiry timer)`,
       `• <code>/genkey</code> — Key Generator mode (prefix, length, format + expiry timer)`,
+      `• <code>/textlink</code> — Text link (single reusable key/text + Unlimited or timer)`,
       `• <code>/allfiles</code> — Browse &amp; copy links for stored files/links`,
-      `• <code>/cancel</code> — Cancel active setup wizard (${isMainBot ? '/add, /addkey, /genkey, /clone, /setchannel' : '/add, /addkey, /genkey, /setchannel'})`,
+      `• <code>/cancel</code> — Cancel active setup wizard (${isMainBot ? '/add, /addkey, /genkey, /textlink, /clone, /setchannel' : '/add, /addkey, /genkey, /textlink, /setchannel'})`,
       `• <code>/editthismessage</code> — Reply to a bot message to edit its template`,
       `• <code>/cleanup</code> — Remove tracked old bot messages (24h+)`,
       ``,
@@ -3080,6 +3101,7 @@ export class TelegramService {
     // 2. Identify Admin Commands in group (strictly restricted to authorized admins & private DM delivery)
     const isAddKeyCommand = /^\/addkey(?:@\w+)?(?:\s+|$)/i.test(text);
     const isGenKeyCommand = /^\/genkey(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isTextLinkCommand = /^\/(?:textlink|textkey)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isAddCommand = /^\/add(?:@\w+)?(?:\s+|$)/i.test(text);
     const isCancelCommand = /^\/cancel(?:@\w+)?(?:\s+|$)/i.test(text);
     const isSetPasswordCommand = /^\/setpassword(?:@\w+)?(?:\s+|$)/i.test(text);
@@ -3102,6 +3124,9 @@ export class TelegramService {
     const isHelpCommand = /^\/help(?:@\w+)?(?:\s+|$)/i.test(text);
 
     const isAdminCommand =
+      isAddKeyCommand ||
+      isGenKeyCommand ||
+      isTextLinkCommand ||
       isAddCommand ||
       isCancelCommand ||
       isSetPasswordCommand ||
@@ -3357,6 +3382,16 @@ export class TelegramService {
             await this.handleGenKeyCommand(fromId, fromId, message, text);
           },
           `Key generator link setup opened in your private messages (<code>${this.escapeHtml(message.from?.username ? `@${message.from.username}` : (message.from?.first_name || 'Admin'))}</code>).`
+        );
+        return;
+      }
+
+      if (isTextLinkCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleTextLinkCommand(fromId, fromId, message, text);
+          },
+          `Text link setup opened in your private messages (<code>${this.escapeHtml(message.from?.username ? `@${message.from.username}` : (message.from?.first_name || 'Admin'))}</code>).`
         );
         return;
       }
@@ -5168,7 +5203,7 @@ export class TelegramService {
       return;
     }
 
-    // 6. Command: /addkey, /genkey & /add (strictly require '/' prefix)
+    // 6. Command: /addkey, /genkey, /textlink & /add (strictly require '/' prefix)
     const isAddKeyCommand = /^\/addkey(?:@\w+)?(?:\s+|$)/i.test(text);
     if (isAddKeyCommand) {
       await this.handleAddKeyCommand(fromId, chatId, message, text);
@@ -5178,6 +5213,12 @@ export class TelegramService {
     const isGenKeyCommand = /^\/genkey(?:@\w+)?(?:\s+|$)/i.test(text);
     if (isGenKeyCommand) {
       await this.handleGenKeyCommand(fromId, chatId, message, text);
+      return;
+    }
+
+    const isTextLinkCommand = /^\/(?:textlink|textkey)(?:@\w+)?(?:\s+|$)/i.test(text);
+    if (isTextLinkCommand) {
+      await this.handleTextLinkCommand(fromId, chatId, message, text);
       return;
     }
 
@@ -8426,8 +8467,8 @@ export class TelegramService {
     const clean = String(raw || '').trim().toLowerCase();
     if (!clean) return { valid: false, expiresAt: null, label: '' };
 
-    if (/^(never|permanent|perm|nolimit|no limit|none|0|infinity|infinite)$/.test(clean)) {
-      return { valid: true, expiresAt: null, label: 'Permanent (No Expiry)' };
+    if (/^(never|permanent|perm|unlimited|nolimit|no limit|none|0|infinity|infinite)$/.test(clean)) {
+      return { valid: true, expiresAt: null, label: 'Unlimited (No Expiry)' };
     }
 
     const match = clean.match(/^(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$/);
@@ -8636,6 +8677,28 @@ export class TelegramService {
         ],
         backCancelRow
       ];
+    } else if (session.step === 'text_value') {
+      text =
+        `📝 <b>Text Link Setup — Step 1 of 2</b>\n\n` +
+        `Send the <b>key or text</b> you want to deliver via this link.`;
+      keyboard = [[{ text: '❌ Cancel', callback_data: 'keywiz_cancel', style: 'danger' }]];
+    } else if (session.step === 'text_timer') {
+      const rawPreview = (session.sharedText || '').trim();
+      const previewClip = rawPreview.length > 160 ? `${rawPreview.slice(0, 157)}…` : rawPreview;
+      text =
+        `⏱ <b>Text Link Setup — Step 2 of 2</b>\n\n` +
+        `• <b>Text:</b>\n<code>${this.escapeHtml(previewClip)}</code>\n\n` +
+        `Choose <b>Unlimited</b> or an <b>Expiry Timer</b> (or reply e.g. <code>30m</code>, <code>12h</code>, <code>7d</code>, <code>unlimited</code>):`;
+      keyboard = [
+        [{ text: '♾ Unlimited (No Expiry)', callback_data: 'keywiz_timer:never', style: 'success' }],
+        [
+          { text: '⏱ 30m', callback_data: 'keywiz_timer:30m', style: 'primary' },
+          { text: '⏱ 1h', callback_data: 'keywiz_timer:1h', style: 'primary' },
+          { text: '⏱ 24h', callback_data: 'keywiz_timer:24h', style: 'primary' },
+          { text: '⏱ 7d', callback_data: 'keywiz_timer:7d', style: 'primary' }
+        ],
+        backCancelRow
+      ];
     }
 
     const finalText = validationError ? `⚠️ ${validationError}\n\n${text}` : text;
@@ -8832,6 +8895,141 @@ export class TelegramService {
         reply_markup: { inline_keyboard: fallbackKeyboard }
       });
     }
+  }
+
+  private static async finalizeTextKeyLink(
+    chatId: string | number,
+    fromId: string,
+    config: {
+      sharedText: string;
+      expiresAt?: string | null;
+      promptMessageId?: number;
+    }
+  ): Promise<void> {
+    const pool = await storage.createKeyPool({
+      mode: 'shared',
+      sharedText: config.sharedText,
+      expiresAt: config.expiresAt ?? null,
+      createdBy: fromId
+    });
+
+    const botUsername = await this.getBotUsername();
+    const cleanBotUsername = botUsername.replace(/^@/, '').trim();
+    const deepLink = cleanBotUsername
+      ? `https://t.me/${cleanBotUsername}?start=k_${pool.id}`
+      : `?start=k_${pool.id}`;
+
+    const expiryLabel = pool.expiresAt ? this.formatKeyWizardExpiryLabel(pool.expiresAt) : 'Unlimited';
+    const rawPreview = (pool.sharedText || config.sharedText || '').trim();
+    const previewClip = rawPreview.length > 200 ? `${rawPreview.slice(0, 197)}…` : rawPreview;
+
+    const summaryText =
+      `✅ <b>Text Link Created</b>\n\n` +
+      `• <b>Text:</b>\n<code>${this.escapeHtml(previewClip)}</code>\n` +
+      `• <b>Expiry:</b> ${this.escapeHtml(expiryLabel)}\n\n` +
+      `🔗 <b>Shareable Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>`;
+
+    const primaryKeyboard: any[][] = cleanBotUsername
+      ? [
+          [{ text: '🔗 Copy Link', copy_text: { text: deepLink }, style: 'success' }],
+          [{ text: '↗️ Open Link', url: deepLink, style: 'primary' }]
+        ]
+      : [];
+    const fallbackKeyboard: any[][] = cleanBotUsername
+      ? [[{ text: '↗️ Open Link', url: deepLink, style: 'primary' }]]
+      : [];
+
+    if (config.promptMessageId) {
+      const editRes = await this.callTelegramApi('editMessageText', {
+        chat_id: chatId,
+        message_id: config.promptMessageId,
+        text: summaryText,
+        parse_mode: 'HTML',
+        ...(primaryKeyboard.length ? { reply_markup: { inline_keyboard: primaryKeyboard } } : {})
+      });
+      if (editRes?.ok) return;
+      if (fallbackKeyboard.length) {
+        const editFallback = await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: config.promptMessageId,
+          text: summaryText,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: fallbackKeyboard }
+        });
+        if (editFallback?.ok) return;
+      }
+    }
+
+    const sendRes = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: summaryText,
+      parse_mode: 'HTML',
+      ...(primaryKeyboard.length ? { reply_markup: { inline_keyboard: primaryKeyboard } } : {})
+    });
+    if (!sendRes?.ok && fallbackKeyboard.length) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: summaryText,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: fallbackKeyboard }
+      });
+    }
+  }
+
+  private static async handleTextLinkCommand(
+    fromId: string,
+    chatId: string | number,
+    message?: any,
+    text?: string
+  ): Promise<void> {
+    const isAuthorized = await this.isAuthorizedAdmin(fromId, message?.from?.username);
+    const admin = await storage.getAdmin(fromId);
+    const hasPermission =
+      isAuthorized &&
+      (!admin ||
+        admin.role === 'owner' ||
+        admin.permissions?.files_add !== false ||
+        admin.permissions?.links_add !== false);
+
+    if (!hasPermission) {
+      if (String(chatId).startsWith('-')) return;
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `⛔ <b>Access Denied</b>\n<i>Only authorized administrators can create text links.</i>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    if (message?.message_id && !String(chatId).startsWith('-')) {
+      await this.deleteUserMessage(chatId, message.message_id);
+    }
+
+    activeSetChannelSessions.delete(fromId);
+    activeAddSessions.delete(fromId);
+
+    const rawBody = (text || message?.caption || '').replace(/^\/(?:textlink|textkey)(?:@\w+)?\s*/i, '').trim();
+    if (rawBody) {
+      const session: KeyCreationSession = {
+        mode: 'shared',
+        chatId,
+        step: 'text_timer',
+        sharedText: rawBody,
+        createdAt: Date.now()
+      };
+      activeAddKeySessions.set(fromId, session);
+      await this.renderKeyWizardStep(chatId, session);
+      return;
+    }
+
+    const session: KeyCreationSession = {
+      mode: 'shared',
+      chatId,
+      step: 'text_value',
+      createdAt: Date.now()
+    };
+    activeAddKeySessions.set(fromId, session);
+    await this.renderKeyWizardStep(chatId, session);
   }
 
   private static async handleAddKeyCommand(
@@ -9159,6 +9357,50 @@ export class TelegramService {
         prefix: session.prefix || '',
         length: Math.max(4, Math.min(64, Number(session.length) || 12)),
         charType: session.charType || 'alphanumeric',
+        expiresAt: parsedDur.expiresAt,
+        promptMessageId: session.promptMessageId
+      });
+      return;
+    }
+
+    if (session.step === 'text_value') {
+      if (!rawText) {
+        await this.renderKeyWizardStep(
+          chatId,
+          session,
+          session.promptMessageId,
+          '<b>Text cannot be empty.</b> <i>Please send the key or text you want to share.</i>'
+        );
+        return;
+      }
+      session.sharedText = rawText;
+      session.step = 'text_timer';
+      activeAddKeySessions.set(fromId, session);
+      await this.renderKeyWizardStep(chatId, session, session.promptMessageId);
+      return;
+    }
+
+    if (session.step === 'text_timer') {
+      const parsedDur = this.parseKeyWizardDurationInput(rawText);
+      if (!parsedDur.valid) {
+        await this.renderKeyWizardStep(
+          chatId,
+          session,
+          session.promptMessageId,
+          '<b>Invalid expiry duration.</b> <i>Tap Unlimited or a timer preset below, or reply like <code>30m</code>, <code>12h</code>, <code>7d</code>, or <code>unlimited</code>.</i>'
+        );
+        return;
+      }
+      const sharedVal = (session.sharedText || '').trim();
+      if (!sharedVal) {
+        session.step = 'text_value';
+        activeAddKeySessions.set(fromId, session);
+        await this.renderKeyWizardStep(chatId, session, session.promptMessageId);
+        return;
+      }
+      activeAddKeySessions.delete(fromId);
+      await this.finalizeTextKeyLink(chatId, fromId, {
+        sharedText: sharedVal,
         expiresAt: parsedDur.expiresAt,
         promptMessageId: session.promptMessageId
       });
@@ -10828,7 +11070,7 @@ export class TelegramService {
 
       if (data === 'keywiz_skip_title') {
         session.title = undefined;
-        session.step = session.mode === 'generator' ? 'gen_prefix' : 'pool_keys';
+        session.step = session.mode === 'generator' ? 'gen_prefix' : session.mode === 'shared' ? 'text_value' : 'pool_keys';
         activeAddKeySessions.set(fromId, session);
         await this.renderKeyWizardStep(targetChatId, session, msgId);
         return;
@@ -10843,7 +11085,9 @@ export class TelegramService {
           gen_prefix: 'gen_title',
           gen_length: 'gen_prefix',
           gen_format: 'gen_length',
-          gen_timer: 'gen_format'
+          gen_timer: 'gen_format',
+          text_value: null,
+          text_timer: 'text_value'
         };
         const prevStep = prevStepMap[session.step];
         if (prevStep) {
@@ -10897,6 +11141,21 @@ export class TelegramService {
             prefix: session.prefix || '',
             length: Math.max(4, Math.min(64, Number(session.length) || 12)),
             charType: session.charType || 'alphanumeric',
+            expiresAt: parsedDur.expiresAt,
+            promptMessageId: msgId || session.promptMessageId
+          });
+        } else if (session.mode === 'shared') {
+          const sharedVal = (session.sharedText || '').trim();
+          if (!sharedVal) {
+            await this.callTelegramApi('sendMessage', {
+              chat_id: targetChatId,
+              text: '⚠️ <b>No text found in session.</b> Please run <code>/textlink</code> again.',
+              parse_mode: 'HTML'
+            });
+            return;
+          }
+          await this.finalizeTextKeyLink(targetChatId, fromId, {
+            sharedText: sharedVal,
             expiresAt: parsedDur.expiresAt,
             promptMessageId: msgId || session.promptMessageId
           });
@@ -13740,7 +13999,23 @@ export class TelegramBotManager {
 
     const botStorage = StorageManager.getStorage(target.id);
     await botStorage.init().catch(() => {});
-    await botStorage.updateSettings({ botMode: nextMode });
+    const curSettings = await botStorage.updateSettings({ botMode: nextMode });
+    if (nextMode === 'image_url_bot') {
+      const existingImgData = await botStorage.getImageUrlBotData().catch(() => undefined);
+      const fallbackOwner = String(target.ownerId || curSettings.rootAdminId || '').trim();
+      const fallbackUname = String(target.ownerUsername || '').replace(/^@+/, '').trim() || undefined;
+      if (!existingImgData || (!existingImgData.adminTelegramId && fallbackOwner)) {
+        await botStorage.saveImageUrlBotData({
+          nextLinkId: Number(existingImgData?.nextLinkId) > 0 ? Number(existingImgData?.nextLinkId) : 1,
+          adminTelegramId: existingImgData?.adminTelegramId || fallbackOwner || undefined,
+          adminUsername: existingImgData?.adminUsername || fallbackUname,
+          users: existingImgData?.users || {},
+          links: Array.isArray(existingImgData?.links) ? existingImgData.links : [],
+          userSettings: existingImgData?.userSettings || {},
+          sessions: existingImgData?.sessions || {}
+        }).catch(() => {});
+      }
+    }
 
     console.info(`[TelegramBotManager] Bot ${target.id} (@${target.username}) switched mode to ${nextMode}`);
     return { ok: true, botMode: nextMode };

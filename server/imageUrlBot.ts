@@ -328,30 +328,68 @@ export class ImageUrlBotEngine {
       const storedIdRaw = String(store.adminTelegramId || '').trim();
       const storedUname = String(store.adminUsername || '').replace(/^@+/, '').trim().toLowerCase();
 
-      if (storedIdRaw && storedIdRaw === uid) {
-        if (uname && !store.adminUsername) {
-          store.adminUsername = uname;
-          storeDirty = true;
-        }
-        return true;
-      }
-
-      if (uname && ((storedUname && storedUname === uname) || (storedIdRaw && !/^\d+$/.test(storedIdRaw) && storedIdRaw.replace(/^@+/, '').toLowerCase() === uname))) {
+      const hydrateStoreAdmin = (matchedUsername?: string) => {
         if (/^\d+$/.test(uid) && store.adminTelegramId !== uid) {
           store.adminTelegramId = uid;
           storeDirty = true;
         }
-        if (store.adminUsername !== uname) {
-          store.adminUsername = uname;
+        const effectiveUname = uname || (matchedUsername || '').replace(/^@+/, '').trim().toLowerCase();
+        if (effectiveUname && store.adminUsername !== effectiveUname) {
+          store.adminUsername = effectiveUname;
           storeDirty = true;
         }
+      };
+
+      if (storedIdRaw && storedIdRaw === uid) {
+        hydrateStoreAdmin(storedUname);
+        return true;
+      }
+
+      if (uname && ((storedUname && storedUname === uname) || (storedIdRaw && !/^\d+$/.test(storedIdRaw) && storedIdRaw.replace(/^@+/, '').toLowerCase() === uname))) {
+        hydrateStoreAdmin(uname);
         return true;
       }
 
       if (deps.isAuthorizedAdmin) {
         try {
           if (await deps.isAuthorizedAdmin(uid, from.username)) {
+            if (!storedIdRaw || (!/^\d+$/.test(storedIdRaw) && uname)) {
+              hydrateStoreAdmin(uname);
+            }
             return true;
+          }
+        } catch {}
+      }
+
+      // Direct fallback check against bot settings.rootAdminId and cloned bot record ownerId/ownerUsername
+      try {
+        const botSettings = await storage.getSettings();
+        const rootRaw = String(botSettings?.rootAdminId || '').trim();
+        if (rootRaw) {
+          const rootEntries = rootRaw.split(',').map((s) => s.trim().replace(/^@+/, '').toLowerCase()).filter(Boolean);
+          if (rootEntries.includes(uid.toLowerCase()) || (uname && rootEntries.includes(uname))) {
+            hydrateStoreAdmin(uname);
+            return true;
+          }
+        }
+      } catch {}
+
+      if (_botId && _botId !== 'main') {
+        try {
+          const mainStorage = StorageManager.getMainStorage();
+          const cloned = await mainStorage.getClonedBots();
+          const cleanBotKey = String(_botId).replace(/^clone_/i, '').replace(/[:_-]/g, '');
+          const record = cloned.find((b) => String(b.id) === String(_botId) || String(b.id).replace(/^clone_/i, '').replace(/[:_-]/g, '') === cleanBotKey);
+          if (record) {
+            const recOwnerId = String(record.ownerId || '').trim();
+            const recOwnerUname = String(record.ownerUsername || '').replace(/^@+/, '').trim().toLowerCase();
+            if (
+              (recOwnerId && recOwnerId === uid) ||
+              (uname && ((recOwnerUname && recOwnerUname === uname) || (recOwnerId && recOwnerId.replace(/^@+/, '').toLowerCase() === uname)))
+            ) {
+              hydrateStoreAdmin(recOwnerUname || uname);
+              return true;
+            }
           }
         } catch {}
       }
@@ -516,7 +554,7 @@ export class ImageUrlBotEngine {
       );
     };
 
-    const showAdminPanel = async (chatId: string | number) => {
+    const showAdminPanel = async (chatId: string | number, fresh = false) => {
       const totalUsers = Object.keys(store.users).length;
       const activeLinks = store.links.filter((l) => !l.isDeleted);
       const deletedLinks = store.links.filter((l) => l.isDeleted);
@@ -528,21 +566,24 @@ export class ImageUrlBotEngine {
         ? `<code>${escapeHtml(store.adminTelegramId)}</code>`
         : 'Assigned Admin';
 
-      await sendScreen(
-        chatId,
+      const panelText =
         `<b>🛡️ ImageLink Admin Panel</b>\n\n` +
-          `👤 <b>Assigned Admin:</b> ${assignedAdmin}\n` +
-          `👥 <b>Total Users:</b> ${totalUsers}\n` +
-          `🔗 <b>Active Links:</b> ${activeLinks.length}\n` +
-          `⏳ <b>Expiring Links:</b> ${expiringLinks.length}\n` +
-          `🗑️ <b>Deleted / Expired:</b> ${deletedLinks.length}\n` +
-          `💾 <b>Active Storage:</b> ${formatBytes(totalBytes)}`,
-        [
-          [btn('All Links', 'admin:links:0'), btn('Users List', 'admin:users:0')],
-          [btn('Clean Expired', 'admin:cleanup'), btn('Broadcast', 'admin:broadcast', 'success')],
-          [btn('Refresh', 'admin:panel'), btn('Back to Menu', 'menu')]
-        ]
-      );
+        `👤 <b>Assigned Admin:</b> ${assignedAdmin}\n` +
+        `👥 <b>Total Users:</b> ${totalUsers}\n` +
+        `🔗 <b>Active Links:</b> ${activeLinks.length}\n` +
+        `⏳ <b>Expiring Links:</b> ${expiringLinks.length}\n` +
+        `🗑️ <b>Deleted / Expired:</b> ${deletedLinks.length}\n` +
+        `💾 <b>Active Storage:</b> ${formatBytes(totalBytes)}`;
+      const panelRows = [
+        [btn('All Links', 'admin:links:0'), btn('Users List', 'admin:users:0')],
+        [btn('Clean Expired', 'admin:cleanup'), btn('Broadcast', 'admin:broadcast', 'success')],
+        [btn('Refresh', 'admin:panel'), btn('Back to Menu', 'menu')]
+      ];
+      if (fresh) {
+        await sendFreshScreen(chatId, panelText, panelRows);
+      } else {
+        await sendScreen(chatId, panelText, panelRows);
+      }
     };
 
     const showAdminLinks = async (chatId: string | number, page = 0) => {
@@ -945,9 +986,9 @@ export class ImageUrlBotEngine {
           if (await isAdminUser(msg.from)) {
             this.clearSession(store, chatId);
             storeDirty = true;
-            await showAdminPanel(chatId);
+            await showAdminPanel(chatId, true);
           } else {
-            await sendScreen(
+            await sendFreshScreen(
               chatId,
               `<b>⛔ Access Denied</b>\n\n🔒 Only the assigned bot admin/owner can open the Admin Panel.\n\n🆔 Your ID: <code>${escapeHtml(msg.from?.id || chatId)}</code>`,
               [[btn('Back to Menu', 'menu')]]
