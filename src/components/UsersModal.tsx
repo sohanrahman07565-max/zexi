@@ -24,6 +24,7 @@ interface UsersModalProps {
   onUserUpdated?: () => void;
   currentUserRole?: 'owner' | 'subadmin';
   currentUserTelegramId?: string;
+  initialTab?: 'active' | 'banned';
 }
 
 type AdminPreset = 'editor' | 'moderator' | 'full';
@@ -63,11 +64,12 @@ export const UsersModal: React.FC<UsersModalProps> = ({
   onUserUpdated,
   currentUserRole,
   currentUserTelegramId,
+  initialTab = 'active',
 }) => {
   const [users, setUsers] = useState<BotUserRecord[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [userTab, setUserTab] = useState<'active' | 'banned'>('active');
+  const [userTab, setUserTab] = useState<'active' | 'banned'>(initialTab);
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
@@ -102,11 +104,12 @@ export const UsersModal: React.FC<UsersModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
+      setUserTab(initialTab);
       fetchUsers();
       setGrantingUser(null);
       setIssuedCredentials(null);
     }
-  }, [isOpen]);
+  }, [isOpen, initialTab]);
 
   // Close on Escape key
   useEffect(() => {

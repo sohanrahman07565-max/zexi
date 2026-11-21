@@ -1137,19 +1137,100 @@ export class TelegramService {
     return `${icon} <b>${this.escapeHtml(title)}</b>${body ? `\n<i>${this.escapeHtml(body)}</i>` : ''}`;
   }
 
+  public static formatUserProfileLink(name?: string, username?: string, id?: string | number): string {
+    const cleanName = (name || '').trim();
+    const cleanUsername = (username || '').replace(/^@+/, '').trim();
+    const cleanId = id !== undefined && id !== null ? String(id).trim() : '';
+    const displayLabel =
+      cleanName && cleanName !== cleanId
+        ? cleanName
+        : cleanUsername
+          ? `@${cleanUsername}`
+          : cleanId || 'User';
+
+    if (/^\d+$/.test(cleanId)) {
+      return `<a href="tg://user?id=${cleanId}">${this.escapeHtml(displayLabel)}</a>`;
+    }
+    if (cleanUsername) {
+      return `<a href="https://t.me/${this.escapeHtml(cleanUsername)}">${this.escapeHtml(displayLabel)}</a>`;
+    }
+    return `<b>${this.escapeHtml(displayLabel)}</b>`;
+  }
+
   public static formatUserIdentity(name?: string, username?: string, id?: string | number): string {
     const cleanName = (name || '').trim();
     const cleanUsername = (username || '').replace(/^@+/, '').trim();
     const cleanId = id !== undefined && id !== null ? String(id).trim() : '';
-    const primary = cleanName ? `<code>${this.escapeHtml(cleanName)}</code>` : (cleanUsername ? `<code>@${this.escapeHtml(cleanUsername)}</code>` : '<code>User</code>');
+    const primary = this.formatUserProfileLink(cleanName, cleanUsername, cleanId);
     const extras: string[] = [];
     if (cleanUsername && (!cleanName || cleanName.replace(/^@+/, '').toLowerCase() !== cleanUsername.toLowerCase())) {
       extras.push(`@${this.escapeHtml(cleanUsername)}`);
     }
-    if (cleanId) {
+    if (cleanId && /^\d+$/.test(cleanId)) {
       extras.push(`<b>ID:</b> <code>${this.escapeHtml(cleanId)}</code>`);
     }
     return extras.length > 0 ? `${primary} (${extras.join(' | ')})` : primary;
+  }
+
+  public static buildItemMaintenanceMessage(): string {
+    return `🛠️ <b>This file is currently under maintenance.</b>\nPlease wait for update`;
+  }
+
+  private static async resolveModerationTarget(
+    chatId: number | string | null,
+    message: any,
+    rawQuery?: string
+  ): Promise<{ id: string; name: string; username: string }> {
+    let targetId = '';
+    let targetName = '';
+    let targetUsername = '';
+
+    if (message?.reply_to_message?.from) {
+      const targetUser = message.reply_to_message.from;
+      targetId = String(targetUser.id);
+      const fullName = [targetUser.first_name, targetUser.last_name].filter(Boolean).join(' ').trim();
+      targetName = fullName || targetUser.username || `User ${targetId}`;
+      targetUsername = targetUser.username ? `@${String(targetUser.username).replace(/^@/, '')}` : '';
+      return { id: targetId, name: targetName, username: targetUsername };
+    }
+
+    const query = (rawQuery || '').trim();
+    if (!query) return { id: '', name: '', username: '' };
+
+    const found = await storage.findUserByIdOrUsername(query);
+    if (found) {
+      targetId = String(found.id);
+      const fullName = [found.firstName, found.lastName].filter(Boolean).join(' ').trim();
+      targetName = fullName || found.username || `User ${targetId}`;
+      targetUsername = found.username ? `@${String(found.username).replace(/^@/, '')}` : '';
+    } else {
+      targetId = query.replace(/^@/, '');
+      targetName = query.startsWith('@') ? query : '';
+      targetUsername = query.startsWith('@') ? query : '';
+    }
+
+    if (chatId && /^\d+$/.test(targetId) && (!targetName || targetName === targetId)) {
+      try {
+        const memRes = await this.callTelegramApi('getChatMember', {
+          chat_id: chatId,
+          user_id: Number(targetId)
+        });
+        const u = memRes?.ok ? memRes.result?.user : null;
+        if (u) {
+          const fullName = [u.first_name, u.last_name].filter(Boolean).join(' ').trim();
+          if (fullName) targetName = fullName;
+          if (!targetUsername && u.username) {
+            targetUsername = `@${String(u.username).replace(/^@/, '')}`;
+          }
+        }
+      } catch {}
+    }
+
+    if (!targetName) {
+      targetName = targetUsername || `User ${targetId}`;
+    }
+
+    return { id: targetId, name: targetName, username: targetUsername };
   }
 
   // Dynamically resolve placeholders inside Maintenance Notice:
@@ -1268,23 +1349,9 @@ export class TelegramService {
       if (targetChat && targetChat.id !== undefined && targetChat.type !== 'private') {
         const isAllowed = await storage.isChatWhitelisted(targetChat.id, targetChat.type);
         if (!isAllowed) {
-          // Never drop incoming chat_join_request or chat_member updates when Force Sub is active or chat matches a Force Sub channel
-          let allowForceSubEvent = false;
-          if (update.chat_join_request || update.chat_member) {
-            const s = await storage.getSettings().catch(() => null);
-            const targetIdStr = String(targetChat.id || '').trim();
-            const targetUname = String(targetChat.username || '').replace(/^@+/, '').toLowerCase().trim();
-            const inRequired = (s?.requiredChannels || []).some((ch) => {
-              const cId = String(ch.chatId || '').trim();
-              const cUname = String(ch.username || '').replace(/^@+/, '').toLowerCase().trim();
-              return cId === targetIdStr || (targetUname && (cUname === targetUname || cId.replace(/^@+/, '').toLowerCase() === targetUname));
-            });
-            allowForceSubEvent = Boolean(s?.forceSubEnabled || inRequired);
-          }
-          if (!allowForceSubEvent) {
-            // Strict silent ignore: zero replies, zero auto-detection, zero force-sub prompts, even for admins
-            return;
-          }
+          // Strict Allow Chat / Whitelist guard: block un-whitelisted group/channel updates,
+          // including auto-detection and Sub Force events until permission is granted via Allow Chat.
+          return;
         }
       }
 
@@ -1628,6 +1695,8 @@ export class TelegramService {
       `• <code>/linkdelete [on|off]</code> — Toggle unauthorized link deletion in groups`,
       `• <code>/ban &lt;id_or_@user&gt;</code> — Ban user (or reply <code>/ban</code> in group)`,
       `• <code>/unban &lt;id_or_@user&gt;</code> — Unban user &amp; clear warnings`,
+      `• <code>/mute &lt;id_or_@user&gt; [10m|1h|1d]</code> — Mute user in group (or reply <code>/mute</code>)`,
+      `• <code>/unmute &lt;id_or_@user&gt;</code> — Unmute user in group (or reply <code>/unmute</code>)`,
       `• <code>/grantadmin &lt;id_or_@user&gt; [full|editor|moderator]</code> — <i>(Owner)</i> Promote user to Admin &amp; issue token`,
       `• <code>/revokeadmin &lt;id_or_@user&gt;</code> — <i>(Owner)</i> Revoke Admin permissions`,
       `• <code>/admins</code> — View admin count, root ID &amp; total bot users`,
@@ -1769,15 +1838,22 @@ export class TelegramService {
     const newMember = myChatMember.new_chat_member;
     if (!chat || !chat.id) return;
 
+    const isAllowed = await storage.isChatWhitelisted(chat.id, chat.type);
+    if (!isAllowed) {
+      return;
+    }
+
     const status = newMember?.status;
     const isAdmin = status === 'administrator' || status === 'creator';
 
     if (isAdmin || status === 'member') {
       await this.registerDetectedChat(chat, isAdmin);
+      this.invalidateForceSubCache();
       console.info(`[Telegram] Bot added/promoted in ${chat.type} "${chat.title}" (${chat.id})`);
     } else if (status === 'left' || status === 'kicked') {
       console.info(`[Telegram] Bot left/removed from ${chat.type} "${chat.title}" (${chat.id})`);
       await storage.removeForceSubChannel(String(chat.id));
+      this.invalidateForceSubCache();
     }
   }
 
@@ -2065,6 +2141,12 @@ export class TelegramService {
         const chatRes = await this.callTelegramApi('getChat', { chat_id: targetChat });
         if (chatRes && chatRes.ok && chatRes.result) {
           const chat = chatRes.result;
+          if (settings.chatWhitelistEnabled) {
+            const isAllowed = await storage.isChatWhitelisted(chat.id, chat.type);
+            if (!isAllowed) {
+              continue;
+            }
+          }
           let isAdmin = false;
 
           if (botId) {
@@ -2186,6 +2268,23 @@ export class TelegramService {
     const chatType = forwardChat.type || (rawChatId.startsWith('-100') ? 'channel' : 'group');
     const username = forwardChat.username ? `@${forwardChat.username.replace(/^@/, '')}` : undefined;
 
+    const currentSettings = await storage.getSettings();
+    if (currentSettings.chatWhitelistEnabled) {
+      const isAllowed = await storage.isChatWhitelisted(rawChatId, chatType);
+      if (!isAllowed) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: replyChatId,
+          text:
+            `⛔ <b>Allow Chat Permission Required</b>\n\n` +
+            `• 📢 <b>Channel:</b> <code>${this.escapeHtml(chatTitle)}</code>\n` +
+            `• 🆔 <b>Chat ID:</b> <code>${this.escapeHtml(rawChatId)}</code>\n\n` +
+            `Strict Chat Whitelist Guard is active. Grant permission first with:\n<code>/allowchat ${this.escapeHtml(rawChatId)}</code>\nor approve it in <b>More → Chat Ignore / Whitelist</b>.`,
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+    }
+
     // Send processing status
     const statusMsg = await this.callTelegramApi('sendMessage', {
       chat_id: replyChatId,
@@ -2228,8 +2327,9 @@ export class TelegramService {
       enabled: true
     });
 
-    // Ensure forceSubEnabled is turned on
+    // Ensure forceSubEnabled is turned on and invalidate cache
     await storage.updateSettings({ forceSubEnabled: true });
+    this.invalidateForceSubCache();
 
     const responseText = 
       `✅ <b>Private Channel Connected via Forward</b>\n\n` +
@@ -2241,7 +2341,7 @@ export class TelegramService {
         ? `• 👑 <b>Bot Status:</b> <code>Administrator (Active &amp; Verified)</code> ✅\n`
         : `\n⚠️ <b>Important Note:</b> Please add this bot as an <b>Administrator</b> in this channel with invite permissions so force-subscription checks and auto-approvals succeed.\n`
       ) +
-      `\n✨ <i>Added to Force Sub channels with toggle ON. Manage anytime in the Admin Panel or run <code>/disconnect ${this.escapeHtml(channelRecord.chatId)}</code>.</i>`;
+      `\n✨ <i>Added to Sub Force channels with toggle ON. Manage anytime in the Admin Panel or run <code>/disconnect ${this.escapeHtml(channelRecord.chatId)}</code>.</i>`;
 
     if (statusMsg?.result?.message_id) {
       try {
@@ -2262,7 +2362,7 @@ export class TelegramService {
     });
   }
 
-  // Admin /connect Command: Connect channel/group by ID or Username
+  // Admin /connect Command: Connect channel/group by ID or Username (+ optional invite link)
   public static async handleConnectCommand(
     fromId: string,
     replyChatId: string | number,
@@ -2280,7 +2380,13 @@ export class TelegramService {
     }
 
     const match = text.match(/^\/(?:connect|addchannel|setchannel)(?:@\w+)?(?:\s+(.+))?$/i);
-    const rawTarget = match?.[1]?.trim() || (fallbackChatId ? String(fallbackChatId) : '');
+    const rawArgs = match?.[1]?.trim() || '';
+    const argParts = rawArgs ? rawArgs.split(/\s+/).filter(Boolean) : [];
+    const rawTarget = argParts[0] || (fallbackChatId ? String(fallbackChatId) : '');
+    const explicitInviteArg = argParts[1] && /^https?:\/\/|^t\.me\//i.test(argParts[1])
+      ? (argParts[1].startsWith('http') ? argParts[1] : `https://${argParts[1]}`)
+      : '';
+
     if (!rawTarget) {
       activeSetChannelSessions.set(fromId, { timestamp: Date.now() });
       const botName = await this.getBotUsername();
@@ -2290,7 +2396,7 @@ export class TelegramService {
               `• <b>Please now forward any post or message from your private channel directly here!</b>\n` +
               `• <i>(Ensure @${botName || 'this bot'} is added as an <b>Administrator</b> in that channel first!)</i>\n` +
               `• The bot will automatically detect the chat ID, title, and create a fresh invite link for force-subscription.\n\n` +
-              `💡 <i>Or connect by channel ID/username directly: <code>/setchannel -1001234567890</code> or <code>/setchannel @mychannel</code></i>\n\n` +
+              `💡 <i>Or connect by channel ID/username directly: <code>/setchannel -1001234567890</code> or <code>/setchannel -1001234567890 https://t.me/+invite</code></i>\n\n` +
               `Type <code>/cancel</code> to abort.`,
         parse_mode: 'HTML'
       });
@@ -2300,16 +2406,16 @@ export class TelegramService {
     activeSetChannelSessions.delete(fromId);
 
     let target = rawTarget;
-    let inviteLink = '';
+    let inviteLink = explicitInviteArg;
     if (target.startsWith('https://t.me/')) {
       if (target.includes('/+')) {
-        inviteLink = target;
+        inviteLink = inviteLink || target;
       } else {
         target = '@' + target.replace('https://t.me/', '').replace(/\/.*$/, '');
       }
     } else if (target.startsWith('t.me/')) {
       if (target.includes('/+')) {
-        inviteLink = 'https://' + target;
+        inviteLink = inviteLink || ('https://' + target);
       } else {
         target = '@' + target.replace('t.me/', '').replace(/\/.*$/, '');
       }
@@ -2320,7 +2426,7 @@ export class TelegramService {
     const queryChat = /^-?\d+$/.test(target) ? Number(target) : target;
 
     let chatTitle = String(rawTarget);
-    let chatType: 'channel' | 'supergroup' | 'group' = String(target).startsWith('-100') ? 'supergroup' : 'channel';
+    let chatType: 'channel' | 'supergroup' | 'group' = String(target).startsWith('-100') ? 'channel' : 'supergroup';
     let username = target.startsWith('@') ? target : undefined;
     let resolvedChatId = String(target);
 
@@ -2332,13 +2438,30 @@ export class TelegramService {
         chatType = c.type || chatType;
         if (c.username) username = `@${c.username.replace(/^@/, '')}`;
         resolvedChatId = String(c.id);
-        if (c.invite_link) inviteLink = c.invite_link;
+        if (!inviteLink && c.invite_link) inviteLink = c.invite_link;
         if (!inviteLink && username) {
           inviteLink = `https://t.me/${username.replace(/^@/, '')}`;
         }
       }
     } catch (err: any) {
       console.warn('[Telegram] /connect getChat error:', err?.message);
+    }
+
+    const currentSettings = await storage.getSettings();
+    if (currentSettings.chatWhitelistEnabled) {
+      const isAllowed = await storage.isChatWhitelisted(resolvedChatId, chatType);
+      if (!isAllowed) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: replyChatId,
+          text:
+            `⛔ <b>Allow Chat Permission Required</b>\n\n` +
+            `• 📢 <b>Channel:</b> <code>${this.escapeHtml(chatTitle)}</code>\n` +
+            `• 🆔 <b>Chat ID:</b> <code>${this.escapeHtml(resolvedChatId)}</code>\n\n` +
+            `Strict Chat Whitelist Guard is enabled. Grant permission via:\n<code>/allowchat ${this.escapeHtml(resolvedChatId)}</code>\nand then retry <code>/connect ${this.escapeHtml(resolvedChatId)}</code>.`,
+          parse_mode: 'HTML'
+        });
+        return;
+      }
     }
 
     // If still no invite link, try auto-generating or exporting
@@ -2365,8 +2488,9 @@ export class TelegramService {
       enabled: true
     });
 
-    // Ensure forceSubEnabled is turned on
+    // Ensure forceSubEnabled is turned on and invalidate cache
     await storage.updateSettings({ forceSubEnabled: true });
+    this.invalidateForceSubCache();
 
     await this.callTelegramApi('sendMessage', {
       chat_id: replyChatId,
@@ -2375,7 +2499,7 @@ export class TelegramService {
             `• 🆔 <b>Chat ID:</b> <code>${this.escapeHtml(channelRecord.chatId)}</code>\n` +
             `• 🏷️ <b>Type:</b> <code>${this.escapeHtml(channelRecord.type || 'channel')}</code>\n` +
             (channelRecord.inviteLink ? `• 🔗 <b>Invite Link:</b> <code>${this.escapeHtml(channelRecord.inviteLink)}</code>\n` : '') +
-            `\n✨ <i>Added to Force Sub channels with toggle ON. Manage anytime in the Admin Panel or run <code>/disconnect ${this.escapeHtml(channelRecord.chatId)}</code>.</i>`,
+            `\n✨ <i>Added to Sub Force channels with toggle ON. Manage anytime in the Admin Panel or run <code>/disconnect ${this.escapeHtml(channelRecord.chatId)}</code>.</i>`,
       parse_mode: 'HTML'
     });
   }
@@ -2410,10 +2534,11 @@ export class TelegramService {
 
     const cleanTarget = rawTarget.replace(/^https:\/\/t\.me\//, '@').replace(/^t\.me\//, '@');
     await storage.removeForceSubChannel(cleanTarget);
+    this.invalidateForceSubCache();
 
     await this.callTelegramApi('sendMessage', {
       chat_id: replyChatId,
-      text: `🗑️ <b>Channel Disconnected!</b>\n\nThe channel/group <code>${this.escapeHtml(cleanTarget)}</code> has been removed from Force Sub.`,
+      text: `🗑️ <b>Channel Disconnected!</b>\n\nThe channel/group <code>${this.escapeHtml(cleanTarget)}</code> has been removed from Sub Force.`,
       parse_mode: 'HTML'
     });
   }
@@ -2520,6 +2645,20 @@ export class TelegramService {
         }
 
         const targetChat = /^-?\d+$/.test(rawChatId) ? Number(rawChatId) : rawChatId;
+        if (settings.chatWhitelistEnabled) {
+          let allowed = await storage.isChatWhitelisted(String(targetChat), channel.type);
+          if (!allowed && typeof targetChat === 'string' && targetChat.startsWith('@')) {
+            try {
+              const infoRes = await this.callTelegramApi('getChat', { chat_id: targetChat });
+              if (infoRes?.ok && infoRes.result?.id) {
+                allowed = await storage.isChatWhitelisted(String(infoRes.result.id), infoRes.result.type || channel.type);
+              }
+            } catch {}
+          }
+          if (!allowed) {
+            return null;
+          }
+        }
         let isMember = false;
         let memberStatus = '';
 
@@ -2980,6 +3119,7 @@ export class TelegramService {
         }
 
         if (fromId) {
+          const warningLimit = Math.max(1, Math.min(100, Math.round(Number(groupSettings.groupWarningLimit) || 3)));
           // Increment strike warning counter in storage
           const warningCount = await storage.incrementUserLinkWarning(message.chat.id, fromId);
 
@@ -2987,66 +3127,72 @@ export class TelegramService {
           const firstName = (userObj.first_name || '').trim();
           const lastName = (userObj.last_name || '').trim();
           const realName = (firstName + (lastName ? ' ' + lastName : '')).trim() || userObj.username || 'User';
-          const userMention = userObj.username ? `<code>@${this.escapeHtml(userObj.username)}</code>` : `<code>${this.escapeHtml(realName)}</code>`;
+          const userProfileLink = this.formatUserProfileLink(realName, userObj.username, fromId);
 
           const violationType = (containsLink && isForwarded)
             ? 'links and forwarded messages'
             : containsLink
               ? 'links'
-              : 'forwarded messages from external sources';
+              : 'forwarded messages';
 
-          if (warningCount === 1) {
-            // 1st violation: Warning 1/3
-            const warningText = `⚠️ <b>Strike [<code>1/3</code>] Warning</b> | ${userMention}\n\n` +
-              `🚫 <b>Violation:</b> Sharing <code>${violationType}</code> is strictly prohibited in this group.\n` +
-              `📌 <i>Your message has been deleted. You have <code>2</code> warnings remaining before an automatic ban.</i>`;
-            await this.callTelegramApi('sendMessage', {
-              chat_id: message.chat.id,
-              text: warningText,
-              parse_mode: 'HTML'
-            });
-          } else if (warningCount === 2) {
-            // 2nd violation: Warning 2/3 (Final warning)
-            const warningText = `⚠️ <b>Strike [<code>2/3</code>] Warning — FINAL WARNING</b> | ${userMention}\n\n` +
-              `🚫 <b>Violation:</b> Sharing <code>${violationType}</code> is prohibited!\n` +
-              `🚨 <b>CRITICAL:</b> You have <code>1</code> warning remaining. Your NEXT violation will result in an <b>IMMEDIATE AUTO-BAN</b>!`;
+          if (warningCount < warningLimit) {
+            const remaining = warningLimit - warningCount;
+            const warningText =
+              `⚠️ <b>Warning ${warningCount}/${warningLimit}</b>\n\n` +
+              `👤 <b>User:</b> ${userProfileLink}\n` +
+              `🚫 <b>Reason:</b> Sharing ${this.escapeHtml(violationType)} is not allowed.\n` +
+              (remaining === 1
+                ? `🚨 <i>Final warning — next violation will result in an automatic ban.</i>`
+                : `📌 <i>${remaining} warnings remaining before automatic ban.</i>`);
             await this.callTelegramApi('sendMessage', {
               chat_id: message.chat.id,
               text: warningText,
               parse_mode: 'HTML'
             });
           } else {
-            // 3rd violation: Auto-ban user
-            try {
-              await this.callTelegramApi('banChatMember', {
+            // Reached configured warning limit: auto-ban if Ban / Unban is enabled
+            if (groupSettings.banEnabled !== false) {
+              try {
+                await this.callTelegramApi('banChatMember', {
+                  chat_id: message.chat.id,
+                  user_id: Number(fromId) || fromId
+                });
+              } catch (banErr) {
+                console.warn('[Anti-Spam] banChatMember error on warning limit:', banErr);
+              }
+
+              await storage.setBotUserBanned(fromId, true);
+              await storage.resetUserLinkWarning(message.chat.id, fromId);
+
+              const templates = await storage.getTemplates();
+              const banTemplate = templates.BAN_NOTICE?.content ||
+                '🚫 <b>Banned permanently</b>\n\n👤 <b>User:</b> {name}\n⚠️ <b>Reason:</b> Reached warning limit ({strikes}/{strikes}).';
+
+              const cleanUsername = userObj.username ? userObj.username.replace(/^@+/, '') : '';
+              const banNotice = banTemplate
+                .replace(/<code>\s*{(?:name|user_name)}\s*<\/code>/gi, userProfileLink)
+                .replace(/{name}/g, userProfileLink)
+                .replace(/{user_name}/g, userProfileLink)
+                .replace(/{username}/g, cleanUsername ? TelegramService.escapeHtml(cleanUsername) : 'N/A')
+                .replace(/{user_id}/g, TelegramService.escapeHtml(String(fromId)))
+                .replace(/{strikes}/g, String(warningLimit));
+
+              await this.callTelegramApi('sendMessage', {
                 chat_id: message.chat.id,
-                user_id: Number(fromId) || fromId
+                text: banNotice,
+                parse_mode: 'HTML'
               });
-            } catch (banErr) {
-              console.warn('[Anti-Spam] banChatMember error on 3rd strike:', banErr);
+            } else {
+              await storage.resetUserLinkWarning(message.chat.id, fromId);
+              await this.callTelegramApi('sendMessage', {
+                chat_id: message.chat.id,
+                text:
+                  `⚠️ <b>Warning ${warningLimit}/${warningLimit}</b>\n\n` +
+                  `👤 <b>User:</b> ${userProfileLink}\n` +
+                  `🚫 <b>Reason:</b> Sharing ${this.escapeHtml(violationType)} is not allowed.`,
+                parse_mode: 'HTML'
+              });
             }
-
-            await storage.setBotUserBanned(fromId, true);
-            await storage.resetUserLinkWarning(message.chat.id, fromId);
-
-            // Dynamic customizable Ban Notice template (supports {name}, {username}, {user_id}, {strikes})
-            const templates = await storage.getTemplates();
-            const banTemplate = templates.BAN_NOTICE?.content ||
-              '🚫 <b>USER AUTO-BANNED (Strike <code>{strikes}/{strikes}</code>)</b>\n\n👤 <b>User:</b> <code>{name}</code> (@{username} | <b>ID:</b> <code>{user_id}</code>)\n⚠️ <b>Reason:</b> Exceeded maximum <code>{strikes}</code>-strike warnings for unauthorized links / external forward spam.';
-
-            const cleanUsername = userObj.username ? userObj.username.replace(/^@+/, '') : '';
-            const banNotice = banTemplate
-              .replace(/{name}/g, TelegramService.escapeHtml(realName))
-              .replace(/{user_name}/g, TelegramService.escapeHtml(realName))
-              .replace(/{username}/g, cleanUsername ? TelegramService.escapeHtml(cleanUsername) : 'N/A')
-              .replace(/{user_id}/g, TelegramService.escapeHtml(String(fromId)))
-              .replace(/{strikes}/g, '3');
-
-            await this.callTelegramApi('sendMessage', {
-              chat_id: message.chat.id,
-              text: banNotice,
-              parse_mode: 'HTML'
-            });
           }
         }
         return;
@@ -3594,52 +3740,48 @@ export class TelegramService {
         if (!isOfficial && message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
         return;
       }
-      let targetId = '';
-      let targetName = '';
-      let targetUsername = '';
-
-      if (message.reply_to_message?.from) {
-        const targetUser = message.reply_to_message.from;
-        targetId = String(targetUser.id);
-        targetName = targetUser.first_name || targetUser.username || 'User';
-        targetUsername = targetUser.username ? `@${targetUser.username.replace(/^@/, '')}` : '';
-      } else if (banMatch[1]?.trim()) {
-        const query = banMatch[1].trim();
-        const found = await storage.findUserByIdOrUsername(query);
-        if (found) {
-          targetId = String(found.id);
-          targetName = found.firstName || found.username || 'User';
-          targetUsername = found.username ? `@${found.username.replace(/^@/, '')}` : '';
-        } else {
-          targetId = query.replace(/^@/, '');
-          targetName = query;
-          targetUsername = query.startsWith('@') ? query : '';
-        }
-      }
-
-      if (targetId) {
-        try {
-          await this.callTelegramApi('banChatMember', {
-            chat_id: message.chat.id,
-            user_id: Number(targetId) || targetId
-          });
-        } catch (e) {
-          console.warn('[Telegram] banChatMember error:', e);
-        }
-        await storage.setBotUserBanned(targetId, true);
-
-        const userIdentity = this.formatUserIdentity(targetName, targetUsername, targetId);
+      if (groupSettings.banEnabled === false) {
         await this.callTelegramApi('sendMessage', {
           chat_id: message.chat.id,
-          text: `🚫 <b>User Banned</b>\n\n• 👤 <b>User:</b> ${userIdentity}\n<i>Access revoked by administrator.</i>`,
+          text: '⛔ <b>Ban / Unban Disabled</b>\n<i>Ban / Unban moderation is currently turned OFF in Group Management.</i>',
           parse_mode: 'HTML',
           reply_to_message_id: message.message_id
         });
-        if (!isOfficial && message.message_id) {
-          setTimeout(() => {
-            TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
-          }, 3000);
-        }
+        return;
+      }
+
+      const target = await this.resolveModerationTarget(message.chat.id, message, banMatch[1]);
+      if (!target.id) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: `ℹ️ <b>How to Ban</b>\nReply to any user's message with <code>/ban</code>, or run <code>/ban &lt;user_id_or_username&gt;</code>.`,
+          parse_mode: 'HTML',
+          reply_to_message_id: message.message_id
+        });
+        return;
+      }
+
+      try {
+        await this.callTelegramApi('banChatMember', {
+          chat_id: message.chat.id,
+          user_id: Number(target.id) || target.id
+        });
+      } catch (e) {
+        console.warn('[Telegram] banChatMember error:', e);
+      }
+      await storage.setBotUserBanned(target.id, true);
+
+      const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
+      await this.callTelegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: `🚫 <b>Banned permanently</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
+        parse_mode: 'HTML',
+        reply_to_message_id: message.message_id
+      });
+      if (!isOfficial && message.message_id) {
+        setTimeout(() => {
+          TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
+        }, 3000);
       }
       return;
     }
@@ -3652,58 +3794,18 @@ export class TelegramService {
         if (!isOfficial && message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
         return;
       }
-      let targetId = '';
-      let targetName = '';
-      let targetUsername = '';
-
-      if (message.reply_to_message?.from) {
-        const targetUser = message.reply_to_message.from;
-        targetId = String(targetUser.id);
-        targetName = targetUser.first_name || targetUser.username || 'User';
-        targetUsername = targetUser.username ? `@${targetUser.username.replace(/^@/, '')}` : '';
-      } else if (unbanMatch[1]?.trim()) {
-        const query = unbanMatch[1].trim();
-        const found = await storage.findUserByIdOrUsername(query);
-        if (found) {
-          targetId = String(found.id);
-          targetName = found.firstName || found.username || 'User';
-          targetUsername = found.username ? `@${found.username.replace(/^@/, '')}` : '';
-        } else {
-          targetId = query.replace(/^@/, '');
-          targetName = query;
-          targetUsername = query.startsWith('@') ? query : '';
-        }
-      }
-
-      if (targetId) {
-        try {
-          await this.callTelegramApi('unbanChatMember', {
-            chat_id: message.chat.id,
-            user_id: Number(targetId) || targetId,
-            only_if_banned: true
-          });
-        } catch (e) {
-          console.warn('[Telegram] unbanChatMember error in group:', e);
-        }
-        await storage.setBotUserBanned(targetId, false);
-        await storage.resetUserLinkWarning(message.chat.id, targetId);
-        await storage.resetUserFraudWarning(message.chat.id, targetId);
-        TelegramService.unbanUserInConnectedChats(targetId).catch(() => {});
-
-        const userIdentity = this.formatUserIdentity(targetName, targetUsername, targetId);
+      if (groupSettings.banEnabled === false) {
         await this.callTelegramApi('sendMessage', {
           chat_id: message.chat.id,
-          text: `✅ <b>User Unbanned</b>\n\n• 👤 <b>User:</b> ${userIdentity}\n<i>Warnings cleared and access restored.</i>`,
+          text: '⛔ <b>Ban / Unban Disabled</b>\n<i>Ban / Unban moderation is currently turned OFF in Group Management.</i>',
           parse_mode: 'HTML',
           reply_to_message_id: message.message_id
         });
-        if (!isOfficial && message.message_id) {
-          setTimeout(() => {
-            TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
-          }, 3000);
-        }
         return;
-      } else {
+      }
+
+      const target = await this.resolveModerationTarget(message.chat.id, message, unbanMatch[1]);
+      if (!target.id) {
         await this.callTelegramApi('sendMessage', {
           chat_id: message.chat.id,
           text: `ℹ️ <b>How to Unban</b>\nReply to any user's message with <code>/unban</code>, or run <code>/unban &lt;user_id_or_username&gt;</code>.`,
@@ -3712,6 +3814,230 @@ export class TelegramService {
         });
         return;
       }
+
+      try {
+        await this.callTelegramApi('unbanChatMember', {
+          chat_id: message.chat.id,
+          user_id: Number(target.id) || target.id,
+          only_if_banned: true
+        });
+      } catch (e) {
+        console.warn('[Telegram] unbanChatMember error in group:', e);
+      }
+      await storage.setBotUserBanned(target.id, false);
+      await storage.resetUserLinkWarning(message.chat.id, target.id);
+      await storage.resetUserFraudWarning(message.chat.id, target.id);
+      TelegramService.unbanUserInConnectedChats(target.id).catch(() => {});
+
+      const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
+      await this.callTelegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: `✅ <b>User unbanned</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
+        parse_mode: 'HTML',
+        reply_to_message_id: message.message_id
+      });
+      if (!isOfficial && message.message_id) {
+        setTimeout(() => {
+          TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
+        }, 3000);
+      }
+      return;
+    }
+
+    // 2b. /mute Command (Admins Only): Reply /mute [duration] or /mute <user_id_or_@username> [duration]
+    const muteMatch = text.match(/^\/mute(?:@\w+)?(?:\s+(.+))?$/i);
+    if (muteMatch) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        if (!isOfficial && message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
+        return;
+      }
+      if (groupSettings.muteEnabled === false) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: '🔇 <b>Mute / Unmute Disabled</b>\n<i>Mute / Unmute moderation is currently turned OFF in Group Management.</i>',
+          parse_mode: 'HTML',
+          reply_to_message_id: message.message_id
+        });
+        return;
+      }
+
+      const rawArg = (muteMatch[1] || '').trim();
+      let targetQuery = '';
+      let durationRaw = '';
+
+      if (message.reply_to_message?.from) {
+        durationRaw = rawArg;
+      } else if (rawArg) {
+        const parts = rawArg.split(/\s+/);
+        const firstPart = parts[0].trim();
+        const looksLikeDurationOnly =
+          /^\d+(?:\.\d+)?\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/i.test(firstPart) ||
+          /^(?:permanent|forever)$/i.test(firstPart);
+        if (looksLikeDurationOnly) {
+          targetQuery = '';
+        } else {
+          targetQuery = firstPart;
+          durationRaw = parts.slice(1).join(' ').trim();
+        }
+      }
+
+      const target = await this.resolveModerationTarget(message.chat.id, message, targetQuery);
+      if (!target.id) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: `ℹ️ <b>How to Mute</b>\nReply to any user's message with <code>/mute</code> or <code>/mute [duration]</code>, or run <code>/mute &lt;user_id_or_@username&gt; [duration]</code>.`,
+          parse_mode: 'HTML',
+          reply_to_message_id: message.message_id
+        });
+        return;
+      }
+
+      const targetIsAdmin = await this.isGroupAdminOrCreator(message.chat.id, target.id);
+      if (targetIsAdmin) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: '⚠️ <b>Action Skipped</b>\n<i>Administrators cannot be muted.</i>',
+          parse_mode: 'HTML',
+          reply_to_message_id: message.message_id
+        });
+        return;
+      }
+
+      let durationSec = 0;
+      let totalMinutes = 0;
+      const durLower = durationRaw.toLowerCase();
+      if (durLower && durLower !== 'permanent' && durLower !== 'forever') {
+        const durMatch = durLower.match(/^(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$/);
+        if (durMatch) {
+          const val = parseFloat(durMatch[1]);
+          const unit = durMatch[2] || 'm';
+          if (unit.startsWith('h')) {
+            totalMinutes = val * 60;
+            durationSec = Math.round(totalMinutes * 60);
+          } else if (unit.startsWith('d')) {
+            totalMinutes = val * 1440;
+            durationSec = Math.round(totalMinutes * 60);
+          } else if (unit.startsWith('s')) {
+            durationSec = Math.max(30, Math.round(val));
+            totalMinutes = Math.max(1, Math.round(val / 60));
+          } else {
+            totalMinutes = val;
+            durationSec = Math.round(val * 60);
+          }
+        }
+      }
+
+      const untilDate = durationSec >= 30 ? Math.floor(Date.now() / 1000) + durationSec : undefined;
+
+      try {
+        await this.callTelegramApi('restrictChatMember', {
+          chat_id: message.chat.id,
+          user_id: Number(target.id) || target.id,
+          permissions: {
+            can_send_messages: false,
+            can_send_audios: false,
+            can_send_documents: false,
+            can_send_photos: false,
+            can_send_videos: false,
+            can_send_video_notes: false,
+            can_send_voice_notes: false,
+            can_send_polls: false,
+            can_send_other_messages: false,
+            can_add_web_page_previews: false
+          },
+          ...(untilDate ? { until_date: untilDate } : {})
+        });
+      } catch (e) {
+        console.warn('[Telegram] restrictChatMember (/mute) error:', e);
+      }
+
+      const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
+      let statusLine = 'Muted permanently';
+      if (untilDate && totalMinutes > 0) {
+        const displayMins = Number.isInteger(totalMinutes) ? totalMinutes : Number(totalMinutes.toFixed(1));
+        statusLine = `Muted for ${displayMins} ${displayMins === 1 ? 'minute' : 'minutes'}`;
+      }
+      await this.callTelegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: `🔇 <b>${this.escapeHtml(statusLine)}</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
+        parse_mode: 'HTML',
+        reply_to_message_id: message.message_id
+      });
+      if (!isOfficial && message.message_id) {
+        setTimeout(() => {
+          TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
+        }, 3000);
+      }
+      return;
+    }
+
+    // 2c. /unmute Command (Admins Only): Reply /unmute or /unmute <user_id_or_@username>
+    const unmuteMatch = text.match(/^\/unmute(?:@\w+)?(?:\s+(.+))?$/i);
+    if (unmuteMatch) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        if (!isOfficial && message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
+        return;
+      }
+      if (groupSettings.muteEnabled === false) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: '🔇 <b>Mute / Unmute Disabled</b>\n<i>Mute / Unmute moderation is currently turned OFF in Group Management.</i>',
+          parse_mode: 'HTML',
+          reply_to_message_id: message.message_id
+        });
+        return;
+      }
+
+      const target = await this.resolveModerationTarget(message.chat.id, message, unmuteMatch[1]);
+      if (!target.id) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: `ℹ️ <b>How to Unmute</b>\nReply to any user's message with <code>/unmute</code>, or run <code>/unmute &lt;user_id_or_username&gt;</code>.`,
+          parse_mode: 'HTML',
+          reply_to_message_id: message.message_id
+        });
+        return;
+      }
+
+      try {
+        await this.callTelegramApi('restrictChatMember', {
+          chat_id: message.chat.id,
+          user_id: Number(target.id) || target.id,
+          permissions: {
+            can_send_messages: true,
+            can_send_audios: true,
+            can_send_documents: true,
+            can_send_photos: true,
+            can_send_videos: true,
+            can_send_video_notes: true,
+            can_send_voice_notes: true,
+            can_send_polls: true,
+            can_send_other_messages: true,
+            can_add_web_page_previews: true
+          }
+        });
+      } catch (e) {
+        console.warn('[Telegram] restrictChatMember (/unmute) error:', e);
+      }
+
+      await storage.resetUserLinkWarning(message.chat.id, target.id);
+      await storage.resetUserFraudWarning(message.chat.id, target.id);
+
+      const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
+      await this.callTelegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: `🔊 <b>User unmuted</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
+        parse_mode: 'HTML',
+        reply_to_message_id: message.message_id
+      });
+      if (!isOfficial && message.message_id) {
+        setTimeout(() => {
+          TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
+        }, 3000);
+      }
+      return;
     }
 
     // 3. /report Command: User replies to a message with /report <reason>, or sends /report <@username_or_id> <reason>
@@ -3966,9 +4292,12 @@ export class TelegramService {
                 : (templates.FRAUD_KEYWORD_DEFAULT_REPLY?.content ||
                   '⚠️ <b>Warning (<code>{warning_count}/{max_warnings}</code>):</b> Prohibited content detected.\n• 👤 <b>User:</b> <code>{user_name}</code> (<b>ID:</b> <code>{user_id}</code>)\n• 🛡️ <b>Action:</b> <code>{action}</code>');
 
+              const fraudUserName = [message.from?.first_name, message.from?.last_name].filter(Boolean).join(' ').trim() || message.from?.username || 'User';
+              const fraudUserLink = this.formatUserProfileLink(fraudUserName, message.from?.username, fromId);
               const rawMessage = customMsgRaw || defaultTpl;
               const formattedReply = rawMessage
-                .replace(/\{user_name\}/g, this.escapeHtml(message.from?.first_name || 'User'))
+                .replace(/<code>\s*\{user_name\}\s*<\/code>/gi, fraudUserLink)
+                .replace(/\{user_name\}/g, fraudUserLink)
                 .replace(/\{user_id\}/g, this.escapeHtml(fromId))
                 .replace(/\{keyword\}/g, this.escapeHtml(rule.keyword))
                 .replace(/\{warning_count\}/g, String(currentWarnings))
@@ -4672,6 +5001,24 @@ export class TelegramService {
     if (startMatch) {
       const rawPayload = startMatch[1]?.trim();
 
+      // If payload targets a specific file/link that is disabled (Off) or under Maintenance, handle before Force Sub
+      if (rawPayload && rawPayload !== 'start' && !rawPayload.startsWith('k_')) {
+        const directItem = await storage.resolveItemAnyStatus(rawPayload);
+        if (directItem) {
+          if (directItem.status === 'disabled') {
+            return;
+          }
+          if (directItem.maintenance === true) {
+            await this.callTelegramApi('sendMessage', {
+              chat_id: chatId,
+              text: this.buildItemMaintenanceMessage(),
+              parse_mode: 'HTML'
+            });
+            return;
+          }
+        }
+      }
+
       // Mandatory Channel Join (Force Sub) live check
       const forceCheck = await this.checkUserForceSub(fromId, message?.from?.username, { forceFresh: true });
       if (!forceCheck.allJoined) {
@@ -4801,6 +5148,15 @@ export class TelegramService {
         });
         return;
       }
+      const modSettings = await storage.getSettings();
+      if (modSettings.banEnabled === false) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <b>Ban / Unban Disabled</b>\n<i>Ban / Unban is currently turned OFF in Group Management.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
       if (!privBanMatch[1]?.trim()) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
@@ -4809,16 +5165,12 @@ export class TelegramService {
         });
         return;
       }
-      const query = privBanMatch[1].trim();
-      const found = await storage.findUserByIdOrUsername(query);
-      const targetId = found ? String(found.id) : query.replace(/^@/, '');
-      const targetName = found ? (found.firstName || found.username || 'User') : query;
-      const targetUsername = found?.username ? `@${found.username.replace(/^@/, '')}` : (query.startsWith('@') ? query : '');
-      await storage.setBotUserBanned(targetId, true);
-      const userIdentity = this.formatUserIdentity(targetName, targetUsername, targetId);
+      const target = await this.resolveModerationTarget(null, message, privBanMatch[1]);
+      await storage.setBotUserBanned(target.id, true);
+      const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `🚫 <b>User Banned</b>\n\n• 👤 <b>User:</b> ${userIdentity}\n<i>Access revoked by administrator.</i>`,
+        text: `🚫 <b>Banned permanently</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
         parse_mode: 'HTML'
       });
       return;
@@ -4836,6 +5188,15 @@ export class TelegramService {
         });
         return;
       }
+      const modSettings = await storage.getSettings();
+      if (modSettings.banEnabled === false) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <b>Ban / Unban Disabled</b>\n<i>Ban / Unban is currently turned OFF in Group Management.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
       const query = privUnbanMatch[1]?.trim();
       if (!query) {
         await this.callTelegramApi('sendMessage', {
@@ -4846,20 +5207,49 @@ export class TelegramService {
         return;
       }
 
-      const found = await storage.findUserByIdOrUsername(query);
-      const targetId = found ? String(found.id) : query.replace(/^@/, '');
-      const targetName = found ? (found.firstName || found.username || 'User') : query;
-      const targetUsername = found?.username ? `@${found.username.replace(/^@/, '')}` : (query.startsWith('@') ? query : '');
+      const target = await this.resolveModerationTarget(null, message, query);
       
-      await storage.setBotUserBanned(targetId, false);
-      await storage.resetUserLinkWarning(targetId);
-      await storage.resetUserFraudWarning(targetId);
-      TelegramService.unbanUserInConnectedChats(targetId).catch(() => {});
+      await storage.setBotUserBanned(target.id, false);
+      await storage.resetUserLinkWarning(target.id);
+      await storage.resetUserFraudWarning(target.id);
+      TelegramService.unbanUserInConnectedChats(target.id).catch(() => {});
 
-      const userIdentity = this.formatUserIdentity(targetName, targetUsername, targetId);
+      const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `✅ <b>User Unbanned</b>\n\n• 👤 <b>User:</b> ${userIdentity}\n<i>Warnings cleared and access restored.</i>`,
+        text: `✅ <b>User unbanned</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    // Admin /mute and /unmute command guidance in private chat
+    if (/^\/(?:mute|unmute)(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <b>Access Denied</b>\n<i>Only authorized administrators can use mute commands.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      const modSettings = await storage.getSettings();
+      if (modSettings.muteEnabled === false) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '🔇 <b>Mute / Unmute Disabled</b>\n<i>Mute / Unmute is currently turned OFF in Group Management.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text:
+          `ℹ️ <b>Group Mute / Unmute Usage</b>\n\n` +
+          `Use these inside any connected group chat:\n` +
+          `• Reply to a member with <code>/mute [10m|1h|1d]</code> or run <code>/mute &lt;user_id_or_@username&gt; [duration]</code>\n` +
+          `• Reply to a member with <code>/unmute</code> or run <code>/unmute &lt;user_id_or_@username&gt;</code>`,
         parse_mode: 'HTML'
       });
       return;
@@ -5295,6 +5685,18 @@ export class TelegramService {
 
     // 8. If text matches a configured trigger in private chat: deliver directly!
     if (text) {
+      const anyMatchedItem = await storage.findItemByTriggerAnyStatus(text);
+      if (anyMatchedItem && anyMatchedItem.status === 'disabled') {
+        return;
+      }
+      if (anyMatchedItem && anyMatchedItem.maintenance === true) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: this.buildItemMaintenanceMessage(),
+          parse_mode: 'HTML'
+        });
+        return;
+      }
       const matchedItem = await storage.findItemByTrigger(text);
       if (matchedItem) {
         const payload = getItemPayload(matchedItem);
@@ -5998,28 +6400,44 @@ export class TelegramService {
       return;
     }
 
-    const normalizedId = cleanPayload.replace(/^(?:f_|l_)+/, '');
-
-    // Super-fast 0ms in-memory item resolution
+    // Super-fast 0ms in-memory item resolution (active items) + full lookup for disabled/maintenance items
     let item: ItemRecord | null = (storage as any).resolveItemFast ? (storage as any).resolveItemFast(cleanPayload) : null;
     if (!item) {
-      const allItems = await storage.getItems();
-      const lowerClean = cleanPayload.toLowerCase();
-      item = allItems.find(i =>
-        i.id === cleanPayload ||
-        i.id === normalizedId ||
-        i.id === `f_${normalizedId}` ||
-        i.id === `l_${normalizedId}` ||
-        (i.rawKeyword && i.rawKeyword.toLowerCase() === lowerClean) ||
-        (Array.isArray(i.triggers) && i.triggers.some(t => t.trim().toLowerCase() === lowerClean || t.trim().toLowerCase() === `#${lowerClean}` || t.trim().toLowerCase() === `/${lowerClean}`))
-      ) || null;
+      item = await storage.resolveItemAnyStatus(cleanPayload);
     }
 
-    if (!item || item.status !== 'active') {
-      console.warn('[Telegram] Item not found or inactive for payload:', cleanPayload);
+    if (!item) {
+      console.warn('[Telegram] Item not found for payload:', cleanPayload);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
         text: '❌ <b>Item Not Found</b>\n<i>The requested file or link is no longer active.</i>',
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    // If file/item is toggled OFF (disabled), give zero response
+    if (item.status === 'disabled') {
+      return;
+    }
+
+    // If file/item is under Maintenance, inform the user in Bengali + "Please wait for update"
+    if (item.maintenance === true) {
+      const maintText = this.buildItemMaintenanceMessage();
+      if (options?.messageIdToEdit) {
+        try {
+          const edited = await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: options.messageIdToEdit,
+            text: maintText,
+            parse_mode: 'HTML'
+          });
+          if (edited?.ok) return;
+        } catch {}
+      }
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: maintText,
         parse_mode: 'HTML'
       });
       return;
@@ -7988,6 +8406,7 @@ export class TelegramService {
       fromId,
       true
     );
+    this.invalidateForceSubCache();
     const list = Array.isArray(updatedSettings.allowedChats) ? updatedSettings.allowedChats : [];
 
     await this.callTelegramApi('sendMessage', {
@@ -8034,6 +8453,7 @@ export class TelegramService {
     }
 
     const removal = await storage.removeAllowedChat(targetChatId);
+    this.invalidateForceSubCache();
     const remainingList = Array.isArray(removal.settings?.allowedChats) ? removal.settings.allowedChats : [];
     await this.callTelegramApi('sendMessage', {
       chat_id: replyChatId,
@@ -11323,7 +11743,16 @@ export class TelegramService {
     if (data?.startsWith('sv_vid_')) {
       const itemId = data.replace('sv_vid_', '').trim();
       const item = await storage.getItem(itemId);
-      if (item && chatId) {
+      if (!item || item.status === 'disabled') return;
+      if (item.maintenance === true && chatId) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: this.buildItemMaintenanceMessage(),
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      if (chatId) {
         await this.deliverSetupVideo(chatId, item, cb.message?.message_id);
       }
       return;
@@ -11345,7 +11774,16 @@ export class TelegramService {
     if (data?.startsWith('sv_menu_')) {
       const itemId = data.replace('sv_menu_', '').trim();
       const item = await storage.getItem(itemId);
-      if (item && chatId) {
+      if (!item || item.status === 'disabled') return;
+      if (item.maintenance === true && chatId) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: this.buildItemMaintenanceMessage(),
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      if (chatId) {
         await this.sendSetupVideoMenu(chatId, item, cb.message?.message_id);
       }
       return;

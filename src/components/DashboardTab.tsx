@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { ItemRecord, BotSettings, AdminUser, api } from '../lib/api';
-import { FileText, Link2, Hash, Users, Sparkles } from 'lucide-react';
+import { FileText, FilePlus2, Link2, Hash, Users, UserPlus, Sparkles, Ban } from 'lucide-react';
 import { UsersModal } from './UsersModal';
 import { useCountUp } from '../hooks/useCountUp';
 
@@ -12,6 +12,10 @@ interface DashboardTabProps {
   totalUsers?: number;
   onlineUsers?: number;
   offlineUsers?: number;
+  todayJoinedUsers?: number;
+  bannedUsers?: number;
+  todayDeliveries?: number;
+  filesAddedToday?: number;
   settings: BotSettings | null;
   onNavigate: (tab: string) => void;
   onRefresh?: () => void;
@@ -23,21 +27,44 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
   totalUsers = 0,
   onlineUsers = 0,
   offlineUsers = 0,
+  todayJoinedUsers = 0,
+  bannedUsers = 0,
+  todayDeliveries = 0,
+  filesAddedToday = 0,
   onNavigate,
   onRefresh,
 }) => {
   const [showUsersModal, setShowUsersModal] = useState<boolean>(false);
+  const [usersModalTab, setUsersModalTab] = useState<'active' | 'banned'>('active');
   const [liveTotal, setLiveTotal] = useState<number>(totalUsers);
   const [liveOnline, setLiveOnline] = useState<number>(onlineUsers);
   const [liveOffline, setLiveOffline] = useState<number>(offlineUsers);
+  const [liveTodayJoined, setLiveTodayJoined] = useState<number>(todayJoinedUsers);
+  const [liveBannedUsers, setLiveBannedUsers] = useState<number>(bannedUsers);
+  const [liveTodayDeliveries, setLiveTodayDeliveries] = useState<number>(todayDeliveries);
+  const [liveFilesToday, setLiveFilesToday] = useState<number>(filesAddedToday);
+
+  const fileItems = useMemo(() => items.filter((i) => i.type === 'file'), [items]);
+  const linkItems = useMemo(() => items.filter((i) => i.type === 'link'), [items]);
+  const totalTriggers = useMemo(() => items.reduce((acc, i) => acc + (i.triggers?.length || 1), 0), [items]);
+  const itemsTotalDeliveries = useMemo(() => items.reduce((acc, i) => acc + (i.deliveryCount || 0), 0), [items]);
+  const [liveTotalDeliveries, setLiveTotalDeliveries] = useState<number>(itemsTotalDeliveries);
 
   useEffect(() => {
     setLiveTotal(totalUsers);
     setLiveOnline(onlineUsers);
     setLiveOffline(offlineUsers);
-  }, [totalUsers, onlineUsers, offlineUsers]);
+    setLiveTodayJoined(todayJoinedUsers);
+    setLiveBannedUsers(bannedUsers);
+    setLiveTodayDeliveries(todayDeliveries);
+    setLiveFilesToday(filesAddedToday);
+  }, [totalUsers, onlineUsers, offlineUsers, todayJoinedUsers, bannedUsers, todayDeliveries, filesAddedToday]);
 
-  // Real-time automatic polling every 4 seconds for live user activity
+  useEffect(() => {
+    setLiveTotalDeliveries(itemsTotalDeliveries);
+  }, [itemsTotalDeliveries]);
+
+  // Real-time automatic polling every 4 seconds for live stats
   useEffect(() => {
     let isMounted = true;
 
@@ -48,6 +75,11 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
           setLiveTotal(stats.totalUsers || 0);
           setLiveOnline(stats.onlineUsers || 0);
           setLiveOffline(stats.offlineUsers || 0);
+          setLiveTodayJoined(stats.todayJoinedUsers || 0);
+          setLiveBannedUsers(stats.bannedUsers || 0);
+          setLiveTotalDeliveries(stats.totalDeliveries || 0);
+          setLiveTodayDeliveries(stats.todayDeliveries || 0);
+          setLiveFilesToday(stats.filesAddedToday || 0);
         }
       } catch {
         // Silently continue on background poll
@@ -63,29 +95,33 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
     };
   }, []);
 
-  const fileItems = useMemo(() => items.filter((i) => i.type === 'file'), [items]);
-  const linkItems = useMemo(() => items.filter((i) => i.type === 'link'), [items]);
-  const totalTriggers = useMemo(() => items.reduce((acc, i) => acc + (i.triggers?.length || 1), 0), [items]);
-  const totalDeliveries = useMemo(() => items.reduce((acc, i) => acc + (i.deliveryCount || 0), 0), [items]);
-
   const targetOnlinePercent = liveTotal > 0 ? Math.min(100, Math.round((liveOnline / liveTotal) * 100)) : 0;
 
   // Animated count-up values
-  const animatedTotal = useCountUp(liveTotal, 620);
+  const animatedTotalUsers = useCountUp(liveTotal, 620);
+  const animatedTodayJoined = useCountUp(liveTodayJoined, 620);
   const animatedOnline = useCountUp(liveOnline, 620);
   const animatedOffline = useCountUp(liveOffline, 620);
   const animatedPercent = useCountUp(targetOnlinePercent, 700);
   const animatedFiles = useCountUp(fileItems.length, 550);
   const animatedLinks = useCountUp(linkItems.length, 550);
   const animatedTriggers = useCountUp(totalTriggers, 550);
-  const animatedDeliveries = useCountUp(totalDeliveries, 650);
+  const animatedDeliveries = useCountUp(liveTotalDeliveries, 650);
+  const animatedTodayDeliveries = useCountUp(liveTodayDeliveries, 620);
+  const animatedFilesToday = useCountUp(liveFilesToday, 550);
+  const animatedBannedUsers = useCountUp(liveBannedUsers, 550);
 
   const ringCircumference = 276.46;
   const ringOffset = ringCircumference * (1 - targetOnlinePercent / 100);
 
+  const openUsers = (tab: 'active' | 'banned') => {
+    setUsersModalTab(tab);
+    setShowUsersModal(true);
+  };
+
   return (
     <div className="space-y-4 pb-28">
-      {/* Liquid Glass Hero Telemetry Card + Circular SVG Ring + Live Marquee */}
+      {/* Bot Users Hero Card */}
       <div
         className="glass lg-hero lg-rise space-y-3.5 text-white"
         style={{ '--i': 0 } as React.CSSProperties}
@@ -93,7 +129,7 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
         <div className="flex items-center justify-between gap-2">
           <button
             type="button"
-            onClick={() => setShowUsersModal(true)}
+            onClick={() => openUsers('active')}
             className="lg-chip tap cursor-pointer hover:bg-white/15"
             title="Open Users Management"
           >
@@ -103,23 +139,23 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
 
           <button
             type="button"
-            onClick={() => setShowUsersModal(true)}
+            onClick={() => openUsers('active')}
             className="lg-badge tap cursor-pointer hover:bg-white/15"
-            title="Real-time live user activity"
+            title="Live user activity"
           >
             <span className="lg-dot" />
             <span className="text-white">Live</span>
           </button>
         </div>
 
-        {/* Split Stats + Circular SVG Online Progress Ring */}
+        {/* Total Users + Circular Online Ring */}
         <div
-          onClick={() => setShowUsersModal(true)}
+          onClick={() => openUsers('active')}
           className="flex items-center justify-between gap-2.5 sm:gap-3 cursor-pointer"
-          title="Tap to inspect active and offline bot users"
+          title="Tap to inspect bot users"
         >
           <div className="min-w-0 flex-1">
-            <div className="lg-big">{animatedTotal.toLocaleString()}</div>
+            <div className="lg-big">{animatedTotalUsers.toLocaleString()}</div>
             <div className="text-[11px] font-bold uppercase tracking-wider text-white/60 mt-1.5">
               Total Users
             </div>
@@ -172,9 +208,10 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
         onUserUpdated={onRefresh}
         currentUserRole={currentUser?.role}
         currentUserTelegramId={currentUser?.telegramId}
+        initialTab={usersModalTab}
       />
 
-      {/* KPI 2x2 Grid */}
+      {/* KPI Grid */}
       <div className="grid grid-cols-1 min-[300px]:grid-cols-2 gap-2.5">
         {/* Files */}
         <button
@@ -249,19 +286,24 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
           </div>
         </button>
 
-        {/* Deliveries */}
+        {/* File Deliveries + Today Corner Indicator */}
         <div
           className="glass tap lg-rise rounded-[22px] p-4 text-left flex flex-col gap-1.5"
           style={{ '--i': 4 } as React.CSSProperties}
         >
-          <div
-            className="lg-tile"
-            style={{
-              background: 'color-mix(in srgb, #34d3ee 22%, rgba(255,255,255,.06))',
-              '--c': 'rgba(52,211,238,0.45)',
-            } as React.CSSProperties}
-          >
-            <Sparkles className="w-4 h-4 text-cyan-300" />
+          <div className="flex items-start justify-between gap-2 w-full">
+            <div
+              className="lg-tile shrink-0"
+              style={{
+                background: 'color-mix(in srgb, #34d3ee 22%, rgba(255,255,255,.06))',
+                '--c': 'rgba(52,211,238,0.45)',
+              } as React.CSSProperties}
+            >
+              <Sparkles className="w-4 h-4 text-cyan-300" />
+            </div>
+            <span className="text-[10.5px] font-bold text-cyan-300 tabular-nums whitespace-nowrap px-2 py-0.5 rounded-lg bg-cyan-500/15 border border-cyan-400/25">
+              +{animatedTodayDeliveries.toLocaleString()} today
+            </span>
           </div>
           <div className="text-[24px] font-extrabold tracking-tight text-white tabular-nums leading-tight mt-0.5">
             {animatedDeliveries.toLocaleString()}
@@ -270,6 +312,80 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
             Deliveries
           </div>
         </div>
+
+        {/* Files Added Today */}
+        <button
+          type="button"
+          onClick={() => onNavigate('files')}
+          className="glass tap lg-rise rounded-[22px] p-4 text-left flex flex-col gap-1.5 cursor-pointer"
+          style={{ '--i': 5 } as React.CSSProperties}
+        >
+          <div
+            className="lg-tile"
+            style={{
+              background: 'color-mix(in srgb, #34d399 22%, rgba(255,255,255,.06))',
+              '--c': 'rgba(52,211,153,0.45)',
+            } as React.CSSProperties}
+          >
+            <FilePlus2 className="w-4 h-4 text-emerald-300" />
+          </div>
+          <div className="text-[24px] font-extrabold tracking-tight text-white tabular-nums leading-tight mt-0.5">
+            {animatedFilesToday.toLocaleString()}
+          </div>
+          <div className="text-[11px] font-bold uppercase tracking-wider text-white/60">
+            Files Added Today
+          </div>
+        </button>
+
+        {/* Banned Users */}
+        <button
+          type="button"
+          onClick={() => openUsers('banned')}
+          className="glass tap lg-rise rounded-[22px] p-4 text-left flex flex-col gap-1.5 cursor-pointer"
+          style={{ '--i': 6 } as React.CSSProperties}
+        >
+          <div
+            className="lg-tile"
+            style={{
+              background: 'color-mix(in srgb, #f43f5e 22%, rgba(255,255,255,.06))',
+              '--c': 'rgba(244,63,94,0.45)',
+            } as React.CSSProperties}
+          >
+            <Ban className="w-4 h-4 text-rose-300" />
+          </div>
+          <div className="text-[24px] font-extrabold tracking-tight text-white tabular-nums leading-tight mt-0.5">
+            {animatedBannedUsers.toLocaleString()}
+          </div>
+          <div className="text-[11px] font-bold uppercase tracking-wider text-white/60">
+            Banned Users
+          </div>
+        </button>
+
+        {/* Today Joined */}
+        <button
+          type="button"
+          onClick={() => openUsers('active')}
+          className="min-[300px]:col-span-2 glass tap lg-rise rounded-[22px] px-4 py-3.5 text-left flex items-center justify-between gap-3 cursor-pointer"
+          style={{ '--i': 7 } as React.CSSProperties}
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <div
+              className="lg-tile shrink-0"
+              style={{
+                background: 'color-mix(in srgb, #818cf8 22%, rgba(255,255,255,.06))',
+                '--c': 'rgba(129,140,248,0.45)',
+              } as React.CSSProperties}
+            >
+              <UserPlus className="w-4 h-4 text-indigo-300" />
+            </div>
+            <div className="text-[11px] font-bold uppercase tracking-wider text-white/60 truncate">
+              Today Joined
+            </div>
+          </div>
+          <div className="text-[24px] font-extrabold tracking-tight text-white tabular-nums leading-tight shrink-0">
+            {animatedTodayJoined.toLocaleString()}
+          </div>
+        </button>
       </div>
     </div>
   );

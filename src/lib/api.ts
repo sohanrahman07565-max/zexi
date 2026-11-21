@@ -55,6 +55,7 @@ export interface ItemRecord {
   createdAt: string;
   updatedAt: string;
   status: 'active' | 'disabled';
+  maintenance?: boolean;
   deliveryCount: number;
   inFiltersList?: boolean;
   retentionType?: 'permanent' | 'temporary';
@@ -154,6 +155,9 @@ export interface BotSettings {
   autoApproveJoinRequests?: boolean;
   antiForwardEnabled?: boolean;
   linkDeleteEnabled?: boolean;
+  banEnabled?: boolean;
+  muteEnabled?: boolean;
+  groupWarningLimit?: number;
   botMode?: BotOperationalMode;
   chatWhitelistEnabled?: boolean;
   allowedChats?: AllowedChatEntry[];
@@ -775,13 +779,18 @@ export const api = {
     totalUsers: number;
     onlineUsers: number;
     offlineUsers: number;
+    todayJoinedUsers: number;
+    bannedUsers: number;
     totalDeliveries: number;
+    todayDeliveries: number;
+    filesAddedToday: number;
     totalTriggers: number;
     totalItems: number;
     trackedCount: number;
     adminsCount: number;
   }> {
-    const res = await authFetch('/api/stats');
+    const tzOffset = typeof Date !== 'undefined' ? new Date().getTimezoneOffset() : 0;
+    const res = await authFetch(`/api/stats?tzOffset=${encodeURIComponent(String(tzOffset))}`);
     if (!res.ok) throw new Error('Failed to load stats');
     return await res.json();
   },
@@ -904,6 +913,39 @@ export const api = {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to auto-detect channels');
+    return data;
+  },
+
+  async addForceSubChannel(payload: {
+    chatId: string;
+    inviteLink?: string;
+  }): Promise<{
+    success: boolean;
+    detectedByTelegram?: boolean;
+    channel: ForceSubChannel;
+    channels: ForceSubChannel[];
+  }> {
+    const res = await authFetch('/api/settings/add-channel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      const err: any = new Error(data.error || 'Failed to add channel');
+      if (data.requiresAllowChat) err.requiresAllowChat = true;
+      if (data.resolvedChat) err.resolvedChat = data.resolvedChat;
+      throw err;
+    }
+    return data;
+  },
+
+  async removeForceSubChannel(channelId: string): Promise<{ success: boolean; channels: ForceSubChannel[] }> {
+    const res = await authFetch(`/api/settings/channel/${encodeURIComponent(channelId)}`, {
+      method: 'DELETE'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to remove channel');
     return data;
   },
 

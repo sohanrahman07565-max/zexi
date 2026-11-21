@@ -81,6 +81,10 @@ export default function App() {
   const [totalUsers, setTotalUsers] = useState<number>(0);
   const [onlineUsers, setOnlineUsers] = useState<number>(0);
   const [offlineUsers, setOfflineUsers] = useState<number>(0);
+  const [todayJoinedUsers, setTodayJoinedUsers] = useState<number>(0);
+  const [bannedUsers, setBannedUsers] = useState<number>(0);
+  const [todayDeliveries, setTodayDeliveries] = useState<number>(0);
+  const [filesAddedToday, setFilesAddedToday] = useState<number>(0);
   const [botDisplayName, setBotDisplayName] = useState<string>('');
   const [isBotConnected, setIsBotConnected] = useState<boolean>(false);
 
@@ -219,6 +223,10 @@ export default function App() {
         setTotalUsers(loadedStats.totalUsers || 0);
         setOnlineUsers(loadedStats.onlineUsers ?? 0);
         setOfflineUsers(loadedStats.offlineUsers ?? Math.max(0, (loadedStats.totalUsers || 0) - (loadedStats.onlineUsers || 0)));
+        setTodayJoinedUsers(loadedStats.todayJoinedUsers ?? 0);
+        setBannedUsers(loadedStats.bannedUsers ?? 0);
+        setTodayDeliveries(loadedStats.todayDeliveries ?? 0);
+        setFilesAddedToday(loadedStats.filesAddedToday ?? 0);
       }
     } catch (err) {
       console.error('Error loading app data:', err);
@@ -504,6 +512,10 @@ export default function App() {
               totalUsers={totalUsers}
               onlineUsers={onlineUsers}
               offlineUsers={offlineUsers}
+              todayJoinedUsers={todayJoinedUsers}
+              bannedUsers={bannedUsers}
+              todayDeliveries={todayDeliveries}
+              filesAddedToday={filesAddedToday}
               settings={settings}
               onNavigate={handleNavigate}
               onRefresh={refreshAllData}

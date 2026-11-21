@@ -7,7 +7,7 @@ import {
   Sparkles, Check, X, ArrowRight, ArrowLeft, Globe, Smartphone,
   Copy, Share2, Upload, AlertTriangle, Paperclip, Loader2,
   Clock, Calendar, Video, Music, MessageSquare, ChevronDown,
-  Layers, Infinity as InfinityIcon
+  Layers, Infinity as InfinityIcon, Power, Wrench
 } from 'lucide-react';
 
 interface FilesTabProps {
@@ -85,6 +85,39 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
   // Quick Action feedback
   const [copiedLinkItemId, setCopiedLinkItemId] = useState<string | null>(null);
   const [copiedTag, setCopiedTag] = useState<string | null>(null);
+  const [togglingItemState, setTogglingItemState] = useState<Record<string, boolean>>({});
+
+  const handleToggleItemStatus = async (item: ItemRecord) => {
+    const key = `${item.id}:status`;
+    if (togglingItemState[key]) return;
+    const nextStatus = item.status === 'disabled' ? 'active' : 'disabled';
+    setTogglingItemState((prev) => ({ ...prev, [key]: true }));
+    try {
+      await api.updateItem(item.id, { status: nextStatus });
+      toast.success(nextStatus === 'active' ? `${item.name} turned ON` : `${item.name} turned OFF`);
+      onRefresh();
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to update status');
+    } finally {
+      setTogglingItemState((prev) => ({ ...prev, [key]: false }));
+    }
+  };
+
+  const handleToggleItemMaintenance = async (item: ItemRecord) => {
+    const key = `${item.id}:maint`;
+    if (togglingItemState[key]) return;
+    const nextMaint = !Boolean(item.maintenance);
+    setTogglingItemState((prev) => ({ ...prev, [key]: true }));
+    try {
+      await api.updateItem(item.id, { maintenance: nextMaint });
+      toast.success(nextMaint ? `${item.name} set to Maintenance` : `${item.name} Maintenance turned OFF`);
+      onRefresh();
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to update maintenance state');
+    } finally {
+      setTogglingItemState((prev) => ({ ...prev, [key]: false }));
+    }
+  };
 
   const canAddFile = currentUser.role === 'owner' || currentUser.permissions.files_add;
   const canAddLink = currentUser.role === 'owner' || currentUser.permissions.links_add;
@@ -755,8 +788,16 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                         <Link2 className="w-4 h-4 text-indigo-300" />
                       )}
                     </div>
-                    <div className="text-sm font-bold text-white truncate min-w-0 flex-1">
-                      {item.name}
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <span className="text-sm font-bold text-white truncate">
+                        {item.name}
+                      </span>
+                      {item.status === 'disabled' && (
+                        <span className="text-[11px] font-medium text-zinc-400 shrink-0">· Off</span>
+                      )}
+                      {item.status !== 'disabled' && item.maintenance && (
+                        <span className="text-[11px] font-medium text-amber-300 shrink-0">· Maintenance</span>
+                      )}
                     </div>
                   </div>
                   <ChevronDown
@@ -926,6 +967,37 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                               <span className="truncate">Generated Link</span>
                             </>
                           )}
+                        </button>
+                      </div>
+
+                      {/* EXTRA CONTROLS: ON/OFF & MAINTENANCE TOGGLES */}
+                      <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
+                        <button
+                          type="button"
+                          disabled={Boolean(togglingItemState[`${item.id}:status`])}
+                          onClick={() => handleToggleItemStatus(item)}
+                          className={`tap min-w-0 py-2 px-2 rounded-xl border text-[11px] min-[360px]:text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-50 ${
+                            item.status === 'disabled'
+                              ? 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-200 border-rose-400/30'
+                              : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-200 border-emerald-400/35'
+                          }`}
+                        >
+                          <Power className={`w-3.5 h-3.5 shrink-0 ${item.status === 'disabled' ? 'text-rose-400' : 'text-emerald-400'}`} />
+                          <span className="truncate">{item.status === 'disabled' ? 'Off' : 'On'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={Boolean(togglingItemState[`${item.id}:maint`])}
+                          onClick={() => handleToggleItemMaintenance(item)}
+                          className={`tap min-w-0 py-2 px-2 rounded-xl border text-[11px] min-[360px]:text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap disabled:opacity-50 ${
+                            item.maintenance
+                              ? 'bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border-amber-400/45'
+                              : 'bg-white/[0.06] hover:bg-white/[0.12] text-white/80 hover:text-white border-white/10 hover:border-white/25'
+                          }`}
+                        >
+                          <Wrench className={`w-3.5 h-3.5 shrink-0 ${item.maintenance ? 'text-amber-300' : 'text-zinc-400'}`} />
+                          <span className="truncate">{item.maintenance ? 'Maintenance: ON' : 'Maintenance'}</span>
                         </button>
                       </div>
                     </div>

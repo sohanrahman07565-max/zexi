@@ -1547,7 +1547,7 @@ apiRouter.get('/items', authenticate, async (_req: Request, res: Response) => {
   return res.json(sanitized);
 });
 
-// GET /api/stats (Metrics including Total User Count and Online/Offline breakdown)
+// GET /api/stats (Metrics including Total User Count, Today Joined, Banned Users, Today Deliveries, Files Added Today)
 apiRouter.get('/stats', authenticate, async (req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'private, no-cache, stale-while-revalidate=5');
   const admin = (req as any).admin as AdminUser | undefined;
@@ -1560,9 +1560,18 @@ apiRouter.get('/stats', authenticate, async (req: Request, res: Response) => {
       }).catch(() => {});
     } catch {}
   }
-  const userStats = await storage.getUserStats();
+  const rawTzOffset = Number(req.query.tzOffset);
+  const tzOffset = Number.isFinite(rawTzOffset) ? rawTzOffset : 0;
+  const { startMs, endMs } = storage.getLocalDayBounds(tzOffset);
+  const userStats = await storage.getUserStats(tzOffset);
   const items = await storage.getItems();
   const totalDeliveries = items.reduce((acc, i) => acc + (i.deliveryCount || 0), 0);
+  const todayDeliveries = await storage.getTodayDeliveriesCount(tzOffset);
+  const filesAddedToday = items.filter((i) => {
+    if (i.type !== 'file') return false;
+    const createdMs = i.createdAt ? Date.parse(i.createdAt) : NaN;
+    return Number.isFinite(createdMs) && createdMs >= startMs && createdMs < endMs;
+  }).length;
   const totalTriggers = items.reduce((acc, i) => acc + (i.triggers?.length || 1), 0);
   const trackedCount = await storage.getTrackedCount();
   const admins = await storage.getAdmins();
@@ -1570,7 +1579,11 @@ apiRouter.get('/stats', authenticate, async (req: Request, res: Response) => {
     totalUsers: userStats.totalUsers,
     onlineUsers: userStats.onlineUsers,
     offlineUsers: userStats.offlineUsers,
+    todayJoinedUsers: userStats.todayJoinedUsers,
+    bannedUsers: userStats.bannedUsers,
     totalDeliveries,
+    todayDeliveries,
+    filesAddedToday,
     totalTriggers,
     totalItems: items.length,
     trackedCount,
@@ -2229,7 +2242,8 @@ apiRouter.post('/items', authenticate, async (req: Request, res: Response) => {
     inFiltersList: req.body.inFiltersList === true,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    status: 'active',
+    status: req.body.status === 'disabled' ? 'disabled' : 'active',
+    maintenance: req.body.maintenance === true,
     deliveryCount: 0
   };
 
@@ -2366,7 +2380,8 @@ apiRouter.put('/items/:id', authenticate, async (req: Request, res: Response) =>
     rawKeyword: currentKeyword,
     triggerType: currentType,
     triggers: currentTriggers,
-    status: status !== undefined ? status : existing.status,
+    status: status !== undefined ? (status === 'disabled' ? 'disabled' : 'active') : existing.status,
+    maintenance: req.body.maintenance !== undefined ? Boolean(req.body.maintenance) : Boolean(existing.maintenance),
     caption: caption !== undefined ? caption : (req.body.replyMessage !== undefined ? req.body.replyMessage : existing.caption),
     telegramFileId: telegramFileId !== undefined ? telegramFileId : existing.telegramFileId,
     uploadedFileId: uploadedFileId !== undefined 
@@ -3026,6 +3041,9 @@ apiRouter.get('/settings', authenticate, async (_req: Request, res: Response) =>
     botUsername,
     antiForwardEnabled: settings.antiForwardEnabled ?? false,
     linkDeleteEnabled: settings.linkDeleteEnabled ?? false,
+    banEnabled: settings.banEnabled ?? true,
+    muteEnabled: settings.muteEnabled ?? true,
+    groupWarningLimit: Math.max(1, Math.min(100, Math.round(Number(settings.groupWarningLimit) || 3))),
     botMode: normalizeBotMode(settings.botMode),
     forceSubEnabled: settings.forceSubEnabled ?? false,
     forceJoinMode: settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
@@ -3075,6 +3093,11 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
   if (req.body.autoApproveJoinRequests !== undefined) updates.autoApproveJoinRequests = Boolean(req.body.autoApproveJoinRequests);
   if (req.body.antiForwardEnabled !== undefined) updates.antiForwardEnabled = Boolean(req.body.antiForwardEnabled);
   if (req.body.linkDeleteEnabled !== undefined) updates.linkDeleteEnabled = Boolean(req.body.linkDeleteEnabled);
+  if (req.body.banEnabled !== undefined) updates.banEnabled = Boolean(req.body.banEnabled);
+  if (req.body.muteEnabled !== undefined) updates.muteEnabled = Boolean(req.body.muteEnabled);
+  if (req.body.groupWarningLimit !== undefined) {
+    updates.groupWarningLimit = Math.max(1, Math.min(100, Math.round(Number(req.body.groupWarningLimit) || 3)));
+  }
   if (req.body.chatWhitelistEnabled !== undefined) updates.chatWhitelistEnabled = Boolean(req.body.chatWhitelistEnabled);
   if (req.body.botMode !== undefined) updates.botMode = normalizeBotMode(req.body.botMode);
   if (requiredChannels !== undefined) {
@@ -3125,6 +3148,9 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
       ...newSettings,
       antiForwardEnabled: newSettings.antiForwardEnabled ?? false,
       linkDeleteEnabled: newSettings.linkDeleteEnabled ?? false,
+      banEnabled: newSettings.banEnabled ?? true,
+      muteEnabled: newSettings.muteEnabled ?? true,
+      groupWarningLimit: Math.max(1, Math.min(100, Math.round(Number(newSettings.groupWarningLimit) || 3))),
       botMode: normalizeBotMode(newSettings.botMode),
       forceSubEnabled: newSettings.forceSubEnabled ?? false,
       forceJoinMode: newSettings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
@@ -3167,6 +3193,7 @@ apiRouter.post('/chat-whitelist/toggle', authenticate, requirePermission('settin
   try {
     const enabled = Boolean(req.body?.enabled);
     const updated = await storage.updateSettings({ chatWhitelistEnabled: enabled });
+    TelegramService.invalidateForceSubCache();
     return res.json({
       success: true,
       chatWhitelistEnabled: Boolean(updated.chatWhitelistEnabled),
@@ -3205,6 +3232,7 @@ apiRouter.post('/chat-whitelist/add', authenticate, requirePermission('settings_
       currentAdmin?.id || currentAdmin?.telegramId || 'admin',
       true
     );
+    TelegramService.invalidateForceSubCache();
 
     return res.json({
       success: true,
@@ -3223,6 +3251,7 @@ apiRouter.delete('/chat-whitelist/:chatId', authenticate, requirePermission('set
       return res.status(400).json({ error: 'chatId is required' });
     }
     const removal = await storage.removeAllowedChat(rawChatId);
+    TelegramService.invalidateForceSubCache();
     return res.json({
       success: true,
       chatWhitelistEnabled: Boolean(removal.settings?.chatWhitelistEnabled),
@@ -3248,6 +3277,155 @@ apiRouter.post('/settings/sync-channels', authenticate, requirePermission('setti
   }
 });
 
+// POST /api/settings/add-channel - Add Sub Force channel using Channel ID + Invite Link and auto-detect name via getChat
+apiRouter.post('/settings/add-channel', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const rawChatId = String(req.body?.chatId || '').trim();
+    const rawInviteLink = String(req.body?.inviteLink || '').trim();
+
+    if (!rawChatId) {
+      return res.status(400).json({ error: 'Channel ID or @username is required' });
+    }
+
+    let normalizedTarget = rawChatId;
+    let derivedInviteLink = rawInviteLink;
+
+    if (normalizedTarget.startsWith('https://t.me/')) {
+      if (normalizedTarget.includes('/+')) {
+        derivedInviteLink = derivedInviteLink || normalizedTarget;
+      } else {
+        normalizedTarget = '@' + normalizedTarget.replace('https://t.me/', '').replace(/\/.*$/, '');
+      }
+    } else if (normalizedTarget.startsWith('t.me/')) {
+      if (normalizedTarget.includes('/+')) {
+        derivedInviteLink = derivedInviteLink || ('https://' + normalizedTarget);
+      } else {
+        normalizedTarget = '@' + normalizedTarget.replace('t.me/', '').replace(/\/.*$/, '');
+      }
+    } else if (!normalizedTarget.startsWith('@') && !normalizedTarget.startsWith('-') && !/^\d+$/.test(normalizedTarget)) {
+      normalizedTarget = '@' + normalizedTarget;
+    }
+
+    const queryChat: string | number = /^-?\d+$/.test(normalizedTarget) ? Number(normalizedTarget) : normalizedTarget;
+
+    let resolvedChatId = String(normalizedTarget);
+    let chatTitle = '';
+    let chatType: 'channel' | 'supergroup' | 'group' = String(normalizedTarget).startsWith('-100') ? 'channel' : 'supergroup';
+    let username = normalizedTarget.startsWith('@') ? normalizedTarget : undefined;
+    let isAdmin = false;
+    let detectedByTelegram = false;
+
+    try {
+      const chatRes = await TelegramService.callTelegramApi('getChat', { chat_id: queryChat });
+      if (chatRes?.ok && chatRes.result) {
+        const c = chatRes.result;
+        detectedByTelegram = true;
+        resolvedChatId = String(c.id);
+        chatTitle = String(c.title || (c.username ? `@${c.username.replace(/^@/, '')}` : '') || '').trim();
+        if (c.type === 'channel' || c.type === 'supergroup' || c.type === 'group') {
+          chatType = c.type;
+        }
+        if (c.username) {
+          username = `@${String(c.username).replace(/^@/, '')}`;
+        }
+        if (!derivedInviteLink && c.invite_link) {
+          derivedInviteLink = String(c.invite_link).trim();
+        }
+      }
+    } catch {}
+
+    try {
+      const me = await TelegramService.callTelegramApi('getMe', {});
+      const botId = me?.result?.id;
+      if (botId) {
+        const memRes = await TelegramService.callTelegramApi('getChatMember', {
+          chat_id: /^-?\d+$/.test(resolvedChatId) ? Number(resolvedChatId) : resolvedChatId,
+          user_id: botId
+        });
+        const st = memRes?.result?.status;
+        if (st === 'administrator' || st === 'creator') {
+          isAdmin = true;
+        }
+      }
+    } catch {}
+
+    const currentSettings = await storage.getSettings();
+    if (currentSettings.chatWhitelistEnabled) {
+      const isAllowed = await storage.isChatWhitelisted(resolvedChatId, chatType);
+      const isRawAllowed = resolvedChatId !== rawChatId ? await storage.isChatWhitelisted(rawChatId, chatType) : false;
+      if (!isAllowed && !isRawAllowed) {
+        return res.status(403).json({
+          error: `Allow Chat permission is required for "${chatTitle || resolvedChatId}" while Strict Chat Whitelist Guard is active.`,
+          requiresAllowChat: true,
+          resolvedChat: {
+            chatId: resolvedChatId,
+            name: chatTitle || (username ? username : `Channel ${resolvedChatId}`),
+            type: chatType,
+            username,
+            inviteLink: derivedInviteLink
+          }
+        });
+      }
+    }
+
+    if (!derivedInviteLink && username) {
+      derivedInviteLink = `https://t.me/${username.replace(/^@/, '')}`;
+    }
+    if (!derivedInviteLink && isAdmin) {
+      try {
+        const freshLink = await TelegramService.generateOrRenewInviteLink(resolvedChatId, chatTitle || resolvedChatId);
+        if (freshLink) {
+          derivedInviteLink = freshLink;
+        }
+      } catch {}
+    }
+
+    const finalName = chatTitle || (username ? username : `Channel ${resolvedChatId}`);
+    const channelRecord = await storage.registerDetectedChannel({
+      chatId: resolvedChatId,
+      name: finalName,
+      inviteLink: derivedInviteLink,
+      username,
+      type: chatType,
+      isAdmin,
+      isAutoDetected: false,
+      enabled: true
+    });
+
+    const updatedSettings = await storage.getSettings();
+    TelegramService.invalidateForceSubCache();
+
+    return res.json({
+      success: true,
+      detectedByTelegram,
+      channel: channelRecord,
+      channels: Array.isArray(updatedSettings.requiredChannels) ? updatedSettings.requiredChannels : [channelRecord]
+    });
+  } catch (err: any) {
+    console.error('[API] Error adding Sub Force channel:', err);
+    return res.status(500).json({ error: err.message || 'Failed to add channel' });
+  }
+});
+
+// DELETE /api/settings/channel/:channelId - Remove channel from both requiredChannels and detectedChannels
+apiRouter.delete('/settings/channel/:channelId', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
+  try {
+    const channelId = decodeURIComponent(String(req.params.channelId || '')).trim();
+    if (!channelId) {
+      return res.status(400).json({ error: 'channelId is required' });
+    }
+    await storage.removeForceSubChannel(channelId);
+    TelegramService.invalidateForceSubCache();
+    const updatedSettings = await storage.getSettings();
+    return res.json({
+      success: true,
+      channels: Array.isArray(updatedSettings.requiredChannels) ? updatedSettings.requiredChannels : []
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to remove channel' });
+  }
+});
+
 // POST /api/settings/toggle-channel - Toggle channel ON/OFF directly
 apiRouter.post('/settings/toggle-channel', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
   try {
@@ -3259,6 +3437,7 @@ apiRouter.post('/settings/toggle-channel', authenticate, requirePermission('sett
     if (!updated) {
       return res.status(404).json({ error: 'Channel not found' });
     }
+    TelegramService.invalidateForceSubCache();
     return res.json({ success: true, channel: updated });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to toggle channel' });

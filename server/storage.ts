@@ -69,6 +69,7 @@ export interface ItemRecord {
   createdAt: string;
   updatedAt: string;
   status: 'active' | 'disabled';
+  maintenance?: boolean;
   deliveryCount: number;
   inFiltersList?: boolean;
   retentionType?: 'permanent' | 'temporary';
@@ -219,6 +220,9 @@ export interface BotSettings {
   autoApproveJoinRequests?: boolean;
   antiForwardEnabled?: boolean;
   linkDeleteEnabled?: boolean;
+  banEnabled?: boolean;
+  muteEnabled?: boolean;
+  groupWarningLimit?: number;
   chatWhitelistEnabled?: boolean;
   allowedChats?: AllowedChatEntry[];
   botStopped?: boolean;
@@ -271,6 +275,11 @@ export interface BotUserRecord {
   isAdmin?: boolean;
 }
 
+export interface AdminReportMessageRef {
+  chatId: string;
+  messageId: number;
+}
+
 export interface UserReportRecord {
   id: string;
   reporterId: string;
@@ -286,6 +295,9 @@ export interface UserReportRecord {
   reportedContent?: string;
   originalMessageId?: number;
   messageId?: number;
+  adminReportMessageText?: string;
+  adminMessages?: AdminReportMessageRef[];
+  resolutionOutcome?: 'banned' | 'dismissed' | 'resolved';
   status: 'pending' | 'resolved' | 'dismissed';
   createdAt: string;
   resolvedBy?: string;
@@ -414,6 +426,7 @@ export interface AppDatabase {
   postBotPublishedPosts?: Record<string, any>;
   imageUrlBotData?: ImageUrlBotStoreData;
   keyPools?: KeyPoolRecord[];
+  hourlyDeliveries?: Record<string, number>;
   uploadedFilesIndex?: Record<string, {
     id: string;
     fileName: string;
@@ -600,6 +613,9 @@ export const DEFAULT_SETTINGS: BotSettings = {
   autoApproveJoinRequests: true,
   antiForwardEnabled: false,
   linkDeleteEnabled: false,
+  banEnabled: true,
+  muteEnabled: true,
+  groupWarningLimit: 3,
   requiredChannels: [],
   chatWhitelistEnabled: false,
   allowedChats: [],
@@ -655,6 +671,7 @@ export class SharedStorageService {
       joinRequests: {},
       postBotPublishedPosts: {},
       keyPools: [],
+      hourlyDeliveries: {},
       design: { ...DEFAULT_DESIGN },
       settings: { ...DEFAULT_SETTINGS },
       backupServer: { ...DEFAULT_BACKUP_SERVER_CONFIG }
@@ -699,6 +716,31 @@ export class SharedStorageService {
     }
 
     return null;
+  }
+
+  public async resolveItemAnyStatus(cleanPayload: string): Promise<ItemRecord | null> {
+    if (!cleanPayload) return null;
+    const p = cleanPayload.trim();
+    if (!p) return null;
+    await this.loadLatest(false);
+    this.checkAndCleanExpiredItemsSync();
+    const normalized = p.replace(/^(?:f_|l_|t_)+/, '');
+    const lower = p.toLowerCase();
+    return (
+      this.db.items.find((i) =>
+        i.id === p ||
+        i.id === normalized ||
+        i.id === `f_${normalized}` ||
+        i.id === `l_${normalized}` ||
+        i.id === `t_${normalized}` ||
+        (i.rawKeyword && i.rawKeyword.toLowerCase() === lower) ||
+        (Array.isArray(i.triggers) &&
+          i.triggers.some((t) => {
+            const ct = t.trim().toLowerCase();
+            return ct === lower || ct === `#${lower}` || ct === `/${lower}`;
+          }))
+      ) || null
+    );
   }
 
   // Fast O(1) in-memory indexing for super-fast Telegram bot responses with strict trigger-type isolation
@@ -1326,6 +1368,19 @@ export class SharedStorageService {
       keyPools: Array.isArray(loadedData.keyPools)
         ? loadedData.keyPools
         : (Array.isArray(this.db.keyPools) ? this.db.keyPools : []),
+      hourlyDeliveries: (() => {
+        const merged: Record<string, number> = {};
+        const sources = [loadedData.hourlyDeliveries, this.db.hourlyDeliveries];
+        for (const src of sources) {
+          if (src && typeof src === 'object') {
+            for (const [k, v] of Object.entries(src)) {
+              const num = Number(v) || 0;
+              if (num > 0) merged[k] = Math.max(merged[k] || 0, num);
+            }
+          }
+        }
+        return merged;
+      })(),
       design: { ...DEFAULT_DESIGN, ...(loadedData.design || {}) },
       settings: {
         ...DEFAULT_SETTINGS,
@@ -1350,6 +1405,9 @@ export class SharedStorageService {
         autoApproveJoinRequests: loadedData.settings?.autoApproveJoinRequests ?? true,
         antiForwardEnabled: loadedData.settings?.antiForwardEnabled ?? false,
         linkDeleteEnabled: loadedData.settings?.linkDeleteEnabled ?? false,
+        banEnabled: loadedData.settings?.banEnabled !== undefined ? Boolean(loadedData.settings.banEnabled) : true,
+        muteEnabled: loadedData.settings?.muteEnabled !== undefined ? Boolean(loadedData.settings.muteEnabled) : true,
+        groupWarningLimit: Math.max(1, Math.min(100, Math.round(Number(loadedData.settings?.groupWarningLimit) || 3))),
         requiredChannels: Array.isArray(loadedData.settings?.requiredChannels) ? loadedData.settings.requiredChannels : [],
         chatWhitelistEnabled: loadedData.settings?.chatWhitelistEnabled ?? false,
         allowedChats: Array.isArray(loadedData.settings?.allowedChats) ? loadedData.settings.allowedChats : []
@@ -1783,6 +1841,44 @@ export class SharedStorageService {
     return matched || null;
   }
 
+  public async findItemByTriggerAnyStatus(trigger: string): Promise<ItemRecord | null> {
+    const cleanTrigger = trigger.trim();
+    if (!cleanTrigger) return null;
+    await this.loadLatest(false);
+    this.checkAndCleanExpiredItemsSync();
+    const lowerTrigger = cleanTrigger.toLowerCase();
+    const isSlash = cleanTrigger.startsWith('/');
+    const isHashtag = cleanTrigger.startsWith('#');
+    const isNormal = !isSlash && !isHashtag;
+
+    return (
+      this.db.items.find((item) => {
+        if (!Array.isArray(item.triggers) || item.triggers.length === 0) return false;
+        if (isSlash) {
+          const cleanSlash = lowerTrigger.replace(/@\w+$/, '');
+          return item.triggers.some((t) => {
+            const ct = t.trim().toLowerCase();
+            return ct.startsWith('/') && (ct === lowerTrigger || ct === cleanSlash);
+          });
+        }
+        if (isHashtag) {
+          return item.triggers.some((t) => {
+            const ct = t.trim().toLowerCase();
+            return ct.startsWith('#') && ct === lowerTrigger;
+          });
+        }
+        if (isNormal) {
+          return item.triggers.some((t) => {
+            const ct = t.trim().toLowerCase();
+            if (ct.startsWith('#') || ct.startsWith('/')) return false;
+            return ct === lowerTrigger;
+          });
+        }
+        return false;
+      }) || null
+    );
+  }
+
   public async saveItem(item: ItemRecord): Promise<boolean> {
     await this.loadLatest(true);
     // Sanitize item: never store massive base64 in store.json if file is already on disk
@@ -1878,13 +1974,60 @@ export class SharedStorageService {
     return this.checkAndCleanExpiredItemsSync();
   }
 
+  public getLocalDayBounds(tzOffsetMinutes: number = 0): { startMs: number; endMs: number; clampedOffset: number } {
+    const clampedOffset = Number.isFinite(tzOffsetMinutes)
+      ? Math.max(-840, Math.min(840, Math.round(tzOffsetMinutes)))
+      : 0;
+    const localShiftMs = -clampedOffset * 60_000;
+    const nowLocalMs = Date.now() + localShiftMs;
+    const startMs = Math.floor(nowLocalMs / 86_400_000) * 86_400_000 - localShiftMs;
+    const endMs = startMs + 86_400_000;
+    return { startMs, endMs, clampedOffset };
+  }
+
+  private getDeliveryBucketKey(date: Date = new Date()): string {
+    const mins = Math.floor(date.getUTCMinutes() / 15) * 15;
+    const minStr = String(mins).padStart(2, '0');
+    return `${date.toISOString().slice(0, 13)}:${minStr}`;
+  }
+
   public async incrementItemDelivery(id: string): Promise<void> {
     const item = this.db.items.find(i => i.id === id);
     if (item) {
       item.deliveryCount = (item.deliveryCount || 0) + 1;
+      if (!this.db.hourlyDeliveries) {
+        this.db.hourlyDeliveries = {};
+      }
+      const bucketKey = this.getDeliveryBucketKey();
+      this.db.hourlyDeliveries[bucketKey] = (this.db.hourlyDeliveries[bucketKey] || 0) + 1;
+
+      const cutoffMs = Date.now() - 72 * 3600_000;
+      for (const k of Object.keys(this.db.hourlyDeliveries)) {
+        const parsedMs = Date.parse(`${k}:00.000Z`);
+        if (!Number.isFinite(parsedMs) || parsedMs < cutoffMs) {
+          delete this.db.hourlyDeliveries[k];
+        }
+      }
+
       this.invalidateCache('items');
+      this.invalidateCache('stats');
       this.persist().catch(() => {});
     }
+  }
+
+  public async getTodayDeliveriesCount(tzOffsetMinutes: number = 0): Promise<number> {
+    await this.loadLatest(false);
+    const { startMs, endMs } = this.getLocalDayBounds(tzOffsetMinutes);
+    const buckets = this.db.hourlyDeliveries || {};
+    let total = 0;
+    for (const [k, count] of Object.entries(buckets)) {
+      const iso = k.length === 13 ? `${k}:00:00.000Z` : `${k}:00.000Z`;
+      const bucketMs = Date.parse(iso);
+      if (Number.isFinite(bucketMs) && bucketMs >= startMs && bucketMs < endMs) {
+        total += Math.max(0, Number(count) || 0);
+      }
+    }
+    return total;
   }
 
   // --- Templates ---
@@ -2084,19 +2227,40 @@ export class SharedStorageService {
     return users.length;
   }
 
-  public async getUserStats(): Promise<{ totalUsers: number; onlineUsers: number; offlineUsers: number }> {
-    const cached = this.getCached<{ totalUsers: number; onlineUsers: number; offlineUsers: number }>('stats:users');
+  public async getUserStats(tzOffsetMinutes: number = 0): Promise<{
+    totalUsers: number;
+    onlineUsers: number;
+    offlineUsers: number;
+    todayJoinedUsers: number;
+    bannedUsers: number;
+  }> {
+    const { startMs, endMs, clampedOffset } = this.getLocalDayBounds(tzOffsetMinutes);
+    const cacheKey = `stats:users:${clampedOffset}`;
+    const cached = this.getCached<{
+      totalUsers: number;
+      onlineUsers: number;
+      offlineUsers: number;
+      todayJoinedUsers: number;
+      bannedUsers: number;
+    }>(cacheKey);
     if (cached) return cached;
 
     const users = await this.getBotUsers();
     const onlineUsers = users.filter(u => u.isOnline).length;
     const offlineUsers = Math.max(0, users.length - onlineUsers);
+    const bannedUsers = users.filter(u => Boolean(u.isBanned)).length;
+    const todayJoinedUsers = users.filter((u) => {
+      const t = u.firstSeenAt ? Date.parse(u.firstSeenAt) : NaN;
+      return Number.isFinite(t) && t >= startMs && t < endMs;
+    }).length;
     const stats = {
       totalUsers: users.length,
       onlineUsers,
-      offlineUsers
+      offlineUsers,
+      todayJoinedUsers,
+      bannedUsers
     };
-    this.setCached('stats:users', stats, 5000);
+    this.setCached(cacheKey, stats, 5000);
     return stats;
   }
 
@@ -2362,6 +2526,15 @@ export class SharedStorageService {
     if (this.db.settings.linkDeleteEnabled === undefined) {
       this.db.settings.linkDeleteEnabled = false;
     }
+    if (this.db.settings.banEnabled === undefined) {
+      this.db.settings.banEnabled = true;
+    }
+    if (this.db.settings.muteEnabled === undefined) {
+      this.db.settings.muteEnabled = true;
+    }
+    if (this.db.settings.groupWarningLimit === undefined || !Number.isFinite(Number(this.db.settings.groupWarningLimit))) {
+      this.db.settings.groupWarningLimit = 3;
+    }
     if (!Array.isArray(this.db.settings.requiredChannels)) {
       this.db.settings.requiredChannels = [];
     }
@@ -2394,6 +2567,11 @@ export class SharedStorageService {
       forceJoinMode: nextForceJoinMode,
       antiForwardEnabled: settings.antiForwardEnabled !== undefined ? Boolean(settings.antiForwardEnabled) : (this.db.settings.antiForwardEnabled ?? false),
       linkDeleteEnabled: settings.linkDeleteEnabled !== undefined ? Boolean(settings.linkDeleteEnabled) : (this.db.settings.linkDeleteEnabled ?? false),
+      banEnabled: settings.banEnabled !== undefined ? Boolean(settings.banEnabled) : (this.db.settings.banEnabled ?? true),
+      muteEnabled: settings.muteEnabled !== undefined ? Boolean(settings.muteEnabled) : (this.db.settings.muteEnabled ?? true),
+      groupWarningLimit: settings.groupWarningLimit !== undefined
+        ? Math.max(1, Math.min(100, Math.round(Number(settings.groupWarningLimit) || 3)))
+        : Math.max(1, Math.min(100, Math.round(Number(this.db.settings.groupWarningLimit) || 3))),
       requiredChannels: settings.requiredChannels !== undefined && Array.isArray(settings.requiredChannels) 
         ? settings.requiredChannels 
         : (Array.isArray(this.db.settings.requiredChannels) ? this.db.settings.requiredChannels : []),
@@ -2511,7 +2689,7 @@ export class SharedStorageService {
       chatId: cleanChatId,
       inviteLink: channel.inviteLink?.trim() || existingDetected?.inviteLink || '',
       enabled: channel.enabled !== undefined ? channel.enabled : (existingDetected?.enabled ?? true),
-      isAutoDetected: true,
+      isAutoDetected: channel.isAutoDetected !== undefined ? channel.isAutoDetected : (existingDetected?.isAutoDetected ?? true),
       type: channel.type || existingDetected?.type || 'channel',
       username: channel.username || existingDetected?.username,
       isAdmin: channel.isAdmin !== undefined ? channel.isAdmin : true,
@@ -2533,7 +2711,7 @@ export class SharedStorageService {
       this.db.settings.requiredChannels[reqIndex] = {
         ...prev,
         ...channelRecord,
-        enabled: prev.enabled !== undefined ? prev.enabled : channelRecord.enabled
+        enabled: channel.enabled !== undefined ? channel.enabled : (prev.enabled !== undefined ? prev.enabled : channelRecord.enabled)
       };
     } else {
       this.db.settings.requiredChannels.push(channelRecord);
@@ -3412,13 +3590,23 @@ export class SharedStorageService {
     return report;
   }
 
-  public async updateReportStatus(id: string, status: 'pending' | 'resolved' | 'dismissed', resolvedBy?: string): Promise<UserReportRecord | null> {
+  public async updateReportStatus(
+    id: string,
+    status: 'pending' | 'resolved' | 'dismissed',
+    resolvedBy?: string,
+    resolutionOutcome?: 'banned' | 'dismissed' | 'resolved'
+  ): Promise<UserReportRecord | null> {
     await this.loadLatest(true);
     if (!Array.isArray(this.db.reports)) return null;
     const report = this.db.reports.find(r => r.id === id);
     if (report) {
       report.status = status;
       if (resolvedBy) report.resolvedBy = resolvedBy;
+      if (resolutionOutcome) {
+        report.resolutionOutcome = resolutionOutcome;
+      } else if (status === 'dismissed') {
+        report.resolutionOutcome = 'dismissed';
+      }
       if (status === 'resolved' || status === 'dismissed') report.resolvedAt = new Date().toISOString();
       await this.persist();
       return report;

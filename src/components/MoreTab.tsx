@@ -40,7 +40,7 @@ interface MoreTabProps {
   onOpenBotSwitcher?: () => void;
 }
 
-type MoreSubView = 'menu' | 'templates' | 'admins' | 'settings' | 'webhook' | 'broadcast' | 'emoji' | 'reports' | 'fraud' | 'whitelist' | 'key_generator';
+type MoreSubView = 'menu' | 'templates' | 'admins' | 'settings' | 'sub_force' | 'group_management' | 'webhook' | 'broadcast' | 'emoji' | 'reports' | 'fraud' | 'whitelist' | 'key_generator';
 
 export const MoreTab: React.FC<MoreTabProps> = ({
   currentUser,
@@ -458,21 +458,34 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     forceJoinMode: settings?.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
     antiForwardEnabled: settings?.antiForwardEnabled ?? false,
     linkDeleteEnabled: settings?.linkDeleteEnabled ?? false,
+    banEnabled: settings?.banEnabled ?? true,
+    muteEnabled: settings?.muteEnabled ?? true,
+    groupWarningLimit: settings?.groupWarningLimit ?? 3,
     autoApproveJoinRequests: settings?.autoApproveJoinRequests ?? true,
     requiredChannels: settings?.requiredChannels || [],
     adminNewPassword: ''
   });
+  const [warningLimitInput, setWarningLimitInput] = useState<number>(settings?.groupWarningLimit ?? 3);
   const [botStatusMsg, setBotStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [savingSection, setSavingSection] = useState<'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'forceSub' | null>(null);
+  const [savingSection, setSavingSection] = useState<'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'ban' | 'mute' | 'warningLimit' | 'forceSub' | null>(null);
   const [botRuntimeStatus, setBotRuntimeStatus] = useState<'active' | 'stopped'>(settings?.botStopped ? 'stopped' : 'active');
   const [botRuntimePolling, setBotRuntimePolling] = useState<boolean>(!settings?.botStopped);
   const [botLifecycleBusy, setBotLifecycleBusy] = useState<'start' | 'stop' | 'restart' | 'clean-memory' | null>(null);
   const [lastMemCleanNote, setLastMemCleanNote] = useState<string>('');
 
-  // Force Sub Add Channel form state
-  const [newChannelName, setNewChannelName] = useState('');
+  // Sub Force Add Channel & Sync state
   const [newChannelChatId, setNewChannelChatId] = useState('');
-  const [showManualAddChannel, setShowManualAddChannel] = useState(false);
+  const [newChannelInviteLink, setNewChannelInviteLink] = useState('');
+  const [showManualAddChannel, setShowManualAddChannel] = useState(true);
+  const [addingChannel, setAddingChannel] = useState(false);
+  const [syncingChannels, setSyncingChannels] = useState(false);
+  const [pendingAllowChatError, setPendingAllowChatError] = useState<{
+    chatId: string;
+    name: string;
+    type?: 'channel' | 'supergroup' | 'group';
+    username?: string;
+    inviteLink?: string;
+  } | null>(null);
   const [joinRequests, setJoinRequests] = useState<JoinRequestRecord[]>([]);
   const [loadingJoinRequests, setLoadingJoinRequests] = useState(false);
   const [showJoinRequests, setShowJoinRequests] = useState(false);
@@ -504,10 +517,16 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         syncIfChanged('forceJoinMode', settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join');
         syncIfChanged('antiForwardEnabled', settings.antiForwardEnabled ?? false);
         syncIfChanged('linkDeleteEnabled', settings.linkDeleteEnabled ?? false);
+        syncIfChanged('banEnabled', settings.banEnabled ?? true);
+        syncIfChanged('muteEnabled', settings.muteEnabled ?? true);
+        syncIfChanged('groupWarningLimit', settings.groupWarningLimit ?? 3);
         syncIfChanged('autoApproveJoinRequests', settings.autoApproveJoinRequests ?? true);
         syncIfChanged('requiredChannels', Array.isArray(settings.requiredChannels) ? settings.requiredChannels : []);
         return next;
       });
+      if (!prevSrv || prevSrv.groupWarningLimit !== settings.groupWarningLimit) {
+        setWarningLimitInput(Math.max(1, Math.min(100, Number(settings.groupWarningLimit) || 3)));
+      }
       if (!prevSrv || prevSrv.chatWhitelistEnabled !== settings.chatWhitelistEnabled) {
         setChatWhitelistEnabled(Boolean(settings.chatWhitelistEnabled));
       }
@@ -534,13 +553,19 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     }
   };
 
-  // Load admins when viewing admins tab
+  // Load admins / view data when switching subviews
   useEffect(() => {
     if (subView === 'admins') {
       loadAdmins();
     } else if (subView === 'settings') {
-      loadJoinRequests();
       loadBotRuntimeStatus();
+    } else if (subView === 'sub_force') {
+      onRefreshSettings();
+      loadJoinRequests();
+      loadChatWhitelist();
+    } else if (subView === 'group_management') {
+      onRefreshSettings();
+      loadChatWhitelist();
     } else if (subView === 'whitelist') {
       loadChatWhitelist();
     } else if (subView === 'key_generator') {
@@ -657,7 +682,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   };
 
   const savePartialBotSetting = async (
-    section: 'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'forceSub',
+    section: 'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'ban' | 'mute' | 'warningLimit' | 'forceSub',
     partialPayload: Record<string, any>,
     successText: string,
     rollback?: () => void
@@ -1252,41 +1277,98 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     }
   };
 
-  // Force Sub Channel Management Handlers
-  const handleAddForceSubChannel = () => {
-    if (!newChannelChatId.trim()) {
-      toast.error('Please enter the Channel / Group ID or Username');
+  // Sub Force Channel Management Handlers
+  const handleAddForceSubChannel = async () => {
+    const cleanChatId = newChannelChatId.trim();
+    const cleanInviteLink = newChannelInviteLink.trim();
+    if (!cleanChatId) {
+      toast.error('Please enter the Channel ID or Username');
       return;
     }
-    const cleanChatId = newChannelChatId.trim();
-    const fallbackName = newChannelName.trim() || cleanChatId;
-    const inviteLink = cleanChatId.startsWith('@') 
-      ? `https://t.me/${cleanChatId.replace(/^@/, '')}` 
-      : (cleanChatId.startsWith('https://t.me/') ? cleanChatId : '');
-    
-    const newChan = {
-      id: `ch_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      name: fallbackName,
-      chatId: cleanChatId.startsWith('https://t.me/') 
-        ? (cleanChatId.includes('/+') ? cleanChatId : `@${cleanChatId.replace('https://t.me/', '').replace(/\/.*$/, '')}`) 
-        : cleanChatId,
-      inviteLink: inviteLink,
-      enabled: true,
-      isAutoDetected: false,
-      type: cleanChatId.startsWith('-100') ? 'supergroup' : 'channel'
-    };
-    setBotSettings((prev: any) => {
-      const existing = Array.isArray(prev.requiredChannels) ? prev.requiredChannels : [];
-      return {
+
+    setAddingChannel(true);
+    setPendingAllowChatError(null);
+    try {
+      const res = await api.addForceSubChannel({
+        chatId: cleanChatId,
+        inviteLink: cleanInviteLink || undefined
+      });
+      setBotSettings((prev: any) => ({
         ...prev,
-        forceSubEnabled: true,
-        requiredChannels: [...existing, newChan]
-      };
-    });
-    setNewChannelName('');
-    setNewChannelChatId('');
-    setShowManualAddChannel(false);
-    toast.success(`Channel "${newChan.name}" added! Click Save Channels to apply.`);
+        requiredChannels: Array.isArray(res.channels) ? res.channels : prev.requiredChannels
+      }));
+      setNewChannelChatId('');
+      setNewChannelInviteLink('');
+      onRefreshSettings();
+      toast.success(
+        res.detectedByTelegram
+          ? `Detected "${res.channel.name}" and added to Sub Force!`
+          : `Added "${res.channel.name}" to Sub Force!`
+      );
+    } catch (err: any) {
+      if (err?.requiresAllowChat && err?.resolvedChat) {
+        setPendingAllowChatError(err.resolvedChat);
+      }
+      toast.error(err?.message || 'Failed to add channel');
+    } finally {
+      setAddingChannel(false);
+    }
+  };
+
+  const handleSyncBotChannels = async () => {
+    setSyncingChannels(true);
+    try {
+      const res = await api.syncChannels();
+      setBotSettings((prev: any) => ({
+        ...prev,
+        requiredChannels: Array.isArray(res.channels) ? res.channels : prev.requiredChannels
+      }));
+      onRefreshSettings();
+      toast.success(res.message || `Synced ${res.channels?.length || 0} channel(s)`);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to sync bot channels');
+    } finally {
+      setSyncingChannels(false);
+    }
+  };
+
+  const handleAllowSubForceChannelChat = async (
+    target: { chatId: string; name?: string; type?: 'channel' | 'supergroup' | 'group'; username?: string },
+    retryAddAfterAllow: boolean = false
+  ) => {
+    setWhitelistSaving(true);
+    try {
+      const wlRes = await api.addAllowedChat({
+        chatId: target.chatId,
+        title: target.name,
+        type: target.type || 'channel',
+        username: target.username
+      });
+      setChatWhitelistEnabled(Boolean(wlRes.chatWhitelistEnabled));
+      setAllowedChats(Array.isArray(wlRes.allowedChats) ? wlRes.allowedChats : []);
+
+      if (retryAddAfterAllow) {
+        const res = await api.addForceSubChannel({
+          chatId: newChannelChatId.trim() || target.chatId,
+          inviteLink: newChannelInviteLink.trim() || undefined
+        });
+        setBotSettings((prev: any) => ({
+          ...prev,
+          requiredChannels: Array.isArray(res.channels) ? res.channels : prev.requiredChannels
+        }));
+        setPendingAllowChatError(null);
+        setNewChannelChatId('');
+        setNewChannelInviteLink('');
+        toast.success(`Allowed chat & added "${res.channel.name}" to Sub Force!`);
+      } else {
+        toast.success(`Allow Chat granted for ${target.name || target.chatId}`);
+      }
+      onRefreshSettings();
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to grant Allow Chat permission');
+    } finally {
+      setWhitelistSaving(false);
+    }
   };
 
   const handleToggleChannel = async (channelId: string, currentEnabled: boolean) => {
@@ -1302,7 +1384,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     try {
       await api.toggleChannel(channelId, nextEnabled);
       onRefreshSettings();
-      toast.success(nextEnabled ? 'Channel enabled for Force Sub' : 'Channel disabled & excluded from Force Sub');
+      toast.success(nextEnabled ? 'Channel enabled for Sub Force' : 'Channel disabled & excluded from Sub Force');
     } catch (err: any) {
       setBotSettings((prev: any) => {
         const existing = Array.isArray(prev.requiredChannels) ? prev.requiredChannels : [];
@@ -1327,15 +1409,24 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     }
   };
 
-  const handleRemoveForceSubChannel = (channelId: string) => {
-    setBotSettings((prev: any) => {
-      const existing = Array.isArray(prev.requiredChannels) ? prev.requiredChannels : [];
-      return {
+  const handleRemoveForceSubChannel = async (channelId: string) => {
+    const prevList = Array.isArray(botSettings.requiredChannels) ? botSettings.requiredChannels : [];
+    setBotSettings((prev: any) => ({
+      ...prev,
+      requiredChannels: prevList.filter((c: any) => c.id !== channelId && c.chatId !== channelId)
+    }));
+    try {
+      const res = await api.removeForceSubChannel(channelId);
+      setBotSettings((prev: any) => ({
         ...prev,
-        requiredChannels: existing.filter((c: any) => c.id !== channelId)
-      };
-    });
-    toast.info('Channel removed. Click Save Channels to apply changes.');
+        requiredChannels: Array.isArray(res.channels) ? res.channels : prev.requiredChannels
+      }));
+      onRefreshSettings();
+      toast.success('Channel removed from Sub Force');
+    } catch (err: any) {
+      setBotSettings((prev: any) => ({ ...prev, requiredChannels: prevList }));
+      toast.error(err?.message || 'Failed to remove channel');
+    }
   };
 
   const handleSaveForceSubChannels = async () => {
@@ -1345,7 +1436,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         forceSubEnabled: Boolean(botSettings.forceSubEnabled),
         requiredChannels: Array.isArray(botSettings.requiredChannels) ? botSettings.requiredChannels : []
       },
-      'Force Sub channels saved!'
+      'Sub Force settings saved!'
     );
   };
 
@@ -1707,6 +1798,59 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               </div>
               <div className="min-w-0 flex-1">
                 <div className="text-xs font-bold text-white truncate">Bot Settings</div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
+          </button>
+
+          {/* Sub Force */}
+          <button
+            onClick={() => setSubView('sub_force')}
+            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #6366f1 22%, rgba(255,255,255,.06))' }}>
+                <Radio className="w-4 h-4 text-indigo-300" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>Sub Force</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-md font-mono font-semibold tabular-nums border ${
+                    botSettings.forceSubEnabled
+                      ? 'bg-indigo-500/20 text-indigo-200 border-indigo-400/30'
+                      : 'bg-white/10 text-white/70 border-white/15'
+                  }`}>
+                    {botSettings.forceSubEnabled
+                      ? `${(botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false).length} Active`
+                      : 'Off'}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
+          </button>
+
+          {/* Group Management */}
+          <button
+            onClick={() => setSubView('group_management')}
+            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #38bdf8 22%, rgba(255,255,255,.06))' }}>
+                <ShieldCheck className="w-4 h-4 text-sky-300" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>Group Management</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-sky-500/20 text-sky-200 font-mono font-semibold tabular-nums border border-sky-400/25">
+                    {[
+                      Boolean(botSettings.linkDeleteEnabled),
+                      Boolean(botSettings.antiForwardEnabled),
+                      botSettings.banEnabled !== false,
+                      botSettings.muteEnabled !== false
+                    ].filter(Boolean).length}/4 Active
+                  </span>
+                </div>
               </div>
             </div>
             <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
@@ -2965,73 +3109,589 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             </div>
           </div>
         </div>
+      </div>
+    );
+  }
 
-        {/* 4. Anti-Forward Protection Card (Independent) */}
-        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-violet-950/25 via-zinc-900/80 to-zinc-950/90 border border-violet-500/30 space-y-3">
+  // -------------------------------------------------------------
+  // SUB-VIEW: SUB FORCE (Dedicated Force Subscribe Management)
+  // -------------------------------------------------------------
+  if (subView === 'sub_force') {
+    const requiredList = Array.isArray(botSettings.requiredChannels) ? botSettings.requiredChannels : [];
+    const activeChannels = requiredList.filter((c: any) => c.enabled !== false);
+    const isChanAllowed = (ch: any) => {
+      if (!chatWhitelistEnabled) return true;
+      const cid = String(ch?.chatId || '').trim();
+      return allowedChats.some((a) => String(a.chatId || '').trim() === cid);
+    };
+
+    return (
+      <div className="space-y-4 pb-28 animate-tab-fade-in">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            {renderSubViewBackButton('menu', 'Back to More')}
+            <div className="min-w-0">
+              <h2 className="text-base font-bold text-white flex items-center gap-1.5 truncate">
+                <Radio className="w-4 h-4 text-indigo-400 shrink-0" />
+                <span className="truncate">Sub Force</span>
+              </h2>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            disabled={syncingChannels}
+            onClick={handleSyncBotChannels}
+            className="px-2.5 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-indigo-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${syncingChannels ? 'animate-spin' : ''}`} />
+            <span>{syncingChannels ? 'Syncing...' : 'Sync Bot'}</span>
+          </button>
+        </div>
+
+        {/* Master Sub Force Card */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-indigo-950/25 via-zinc-900/80 to-zinc-950/90 border border-indigo-500/30 space-y-3">
           <div className="flex items-center justify-between gap-2.5">
             <div className="flex items-center gap-2 min-w-0 flex-1">
-              <div className="w-8 h-8 rounded-xl bg-violet-500/20 border border-violet-500/30 flex items-center justify-center text-violet-400 shrink-0">
-                <ShieldAlert className="w-4 h-4" />
+              <div className="w-8 h-8 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
+                <Radio className="w-4 h-4" />
               </div>
-              <div className="min-w-0">
-                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
-                  <span>Anti-Forward Protection</span>
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
-                    botSettings.antiForwardEnabled 
-                      ? 'bg-violet-500/20 text-violet-300 border-violet-500/40' 
-                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
-                  }`}>
-                    {botSettings.antiForwardEnabled ? 'ACTIVE (BLOCKING)' : 'DISABLED'}
-                  </span>
-                </div>
-                <p className="text-[10px] text-zinc-400 mt-0.5">
-                  Detect and instantly delete any forwarded messages from other chats, channels, or users in connected groups
-                </p>
+              <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-bold text-white">Sub Force</span>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                  botSettings.forceSubEnabled
+                    ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40'
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                }`}>
+                  {botSettings.forceSubEnabled ? 'ON' : 'OFF'}
+                </span>
               </div>
             </div>
 
             <label className="relative inline-flex items-center cursor-pointer shrink-0">
               <input
                 type="checkbox"
-                checked={Boolean(botSettings.antiForwardEnabled)}
+                checked={Boolean(botSettings.forceSubEnabled)}
                 onChange={async (e) => {
                   const nextEnabled = e.target.checked;
-                  const prevEnabled = Boolean(botSettings.antiForwardEnabled);
-                  setBotSettings((prev: any) => ({ ...prev, antiForwardEnabled: nextEnabled }));
+                  const prevEnabled = Boolean(botSettings.forceSubEnabled);
+                  setBotSettings((prev: any) => ({ ...prev, forceSubEnabled: nextEnabled }));
                   await savePartialBotSetting(
-                    'antiForward',
-                    { antiForwardEnabled: nextEnabled },
-                    nextEnabled ? 'Anti-Forward Protection enabled' : 'Anti-Forward Protection disabled',
-                    () => setBotSettings((prev: any) => ({ ...prev, antiForwardEnabled: prevEnabled }))
+                    'forceSub',
+                    { forceSubEnabled: nextEnabled },
+                    nextEnabled ? 'Sub Force enabled' : 'Sub Force disabled',
+                    () => setBotSettings((prev: any) => ({ ...prev, forceSubEnabled: prevEnabled }))
                   );
                 }}
                 className="sr-only peer"
               />
-              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-violet-500"></div>
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-500"></div>
             </label>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-zinc-950/70 border border-indigo-500/20">
+            <div className="flex items-center gap-2 text-xs text-indigo-300 font-semibold min-w-0">
+              <Sparkles className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+              <span className="hidden sm:inline-flex text-[10px] font-mono text-zinc-300 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
+                /connect &lt;chat_id&gt;
+              </span>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleOpenForceSubTemplate}
+              className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-indigo-300 hover:text-indigo-200 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer border border-zinc-700/80 whitespace-nowrap shrink-0"
+              title="Edit Force Sub Message Template"
+            >
+              <Edit2 className="w-3 h-3" />
+              <span>Edit Msg Template</span>
+            </button>
+          </div>
+
+          {/* Allow Chat Status Notice */}
+          {chatWhitelistEnabled && (
+            <div className="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/30 flex flex-wrap items-center justify-between gap-2 text-[11px] text-cyan-200">
+              <span className="min-w-0 flex-1 font-medium">
+                Allow Chat active
+              </span>
+              <button
+                type="button"
+                onClick={() => setSubView('whitelist')}
+                className="px-2.5 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/30 text-cyan-200 font-semibold text-[10px] whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Manage Allow Chat
+              </button>
+            </div>
+          )}
+
+          {/* Force Join Mode Toggle */}
+          <div className="p-3 rounded-xl bg-zinc-950/70 border border-indigo-500/30 space-y-2">
+            <div className="text-xs font-bold text-white">Force Join Mode</div>
+
+            <div className="grid grid-cols-2 gap-2">
+              {([
+                {
+                  id: 'auto_join' as const,
+                  title: 'Auto Join'
+                },
+                {
+                  id: 'request_only' as const,
+                  title: 'Request Only'
+                }
+              ]).map((mode) => {
+                const isSelected = (botSettings.forceJoinMode || 'auto_join') === mode.id;
+                return (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    onClick={async () => {
+                      const prevMode = botSettings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join';
+                      if (prevMode === mode.id) return;
+                      setBotSettings((prev: any) => ({ ...prev, forceJoinMode: mode.id }));
+                      await savePartialBotSetting(
+                        'forceSub',
+                        { forceJoinMode: mode.id },
+                        mode.id === 'request_only'
+                          ? 'Force Join Mode switched to Request Only'
+                          : 'Force Join Mode switched to Auto Join',
+                        () => setBotSettings((prev: any) => ({ ...prev, forceJoinMode: prevMode }))
+                      );
+                    }}
+                    className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer flex items-center justify-between gap-1.5 ${
+                      isSelected
+                        ? 'bg-indigo-500/20 border-indigo-400/60 text-white shadow-sm'
+                        : 'bg-zinc-900/70 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
+                    }`}
+                  >
+                    <span className="text-xs font-bold whitespace-nowrap">{mode.title}</span>
+                    <span
+                      className={`w-2 h-2 rounded-full shrink-0 ${
+                        isSelected ? 'bg-indigo-400 shadow-[0_0_8px_#818cf8]' : 'bg-zinc-700'
+                      }`}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Join Request & Auto-Approval Settings */}
+          <div className="p-3 rounded-xl bg-zinc-950/70 border border-emerald-500/30 space-y-2.5">
+            <div className="flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2 min-w-0 flex-1">
+                <div className="w-7 h-7 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                  <CheckCircle2 className="w-4 h-4" />
+                </div>
+                <span className="text-xs font-bold text-white truncate">Auto-Approve Join Requests</span>
+              </div>
+
+              <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                <input
+                  type="checkbox"
+                  checked={botSettings.autoApproveJoinRequests !== false}
+                  onChange={async (e) => {
+                    const nextApprove = e.target.checked;
+                    const prevApprove = botSettings.autoApproveJoinRequests !== false;
+                    setBotSettings((prev: any) => ({ ...prev, autoApproveJoinRequests: nextApprove }));
+                    await savePartialBotSetting(
+                      'forceSub',
+                      { autoApproveJoinRequests: nextApprove },
+                      nextApprove ? 'Auto-Approve Join Requests enabled' : 'Auto-Approve Join Requests disabled',
+                      () => setBotSettings((prev: any) => ({ ...prev, autoApproveJoinRequests: prevApprove }))
+                    );
+                  }}
+                  className="sr-only peer"
+                />
+                <div className="w-8 h-4 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
+              </label>
+            </div>
+
+            {/* Join Request Records Drawer */}
+            <div className="pt-2 border-t border-zinc-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
+              <div className="flex items-center gap-2 text-[11px] text-zinc-400 tabular-nums">
+                <span className="text-zinc-300 font-medium">Join Requests:</span>
+                <span className="px-1.5 py-0.5 rounded bg-zinc-800 font-mono text-white text-[10px] border border-zinc-700">
+                  {joinRequests.length}
+                </span>
+                {joinRequests.filter(r => r.status === 'approved').length > 0 && (
+                  <span className="text-[10px] text-emerald-400 font-semibold">
+                    ({joinRequests.filter(r => r.status === 'approved').length} approved)
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => loadJoinRequests()}
+                  disabled={loadingJoinRequests}
+                  className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors cursor-pointer"
+                  title="Refresh Join Requests"
+                >
+                  <RefreshCw className={`w-3 h-3 ${loadingJoinRequests ? 'animate-spin text-emerald-400' : ''}`} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowJoinRequests(!showJoinRequests)}
+                  className="text-[11px] text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                >
+                  <span>{showJoinRequests ? 'Hide' : 'View Log'}</span>
+                </button>
+              </div>
+            </div>
+
+            {showJoinRequests && (
+              <div className="mt-2 pt-2 border-t border-zinc-800/80 space-y-2 max-h-60 overflow-y-auto">
+                {joinRequests.length === 0 ? (
+                  <div className="p-3 rounded-lg bg-zinc-900/60 text-center text-xs text-zinc-400">
+                    No join requests yet.
+                  </div>
+                ) : (
+                  joinRequests.slice(0, 15).map((req) => (
+                    <div
+                      key={req.id}
+                      className="p-2 rounded-lg bg-zinc-900/80 border border-zinc-800 text-xs flex items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-semibold text-white truncate">
+                            {req.userName || 'User'}
+                          </span>
+                          {req.userUsername && (
+                            <span className="text-[10px] text-zinc-400 truncate">
+                              {req.userUsername}
+                            </span>
+                          )}
+                          <span className="text-[9px] font-mono text-zinc-400 bg-zinc-800 px-1 rounded tabular-nums">
+                            ID: {req.userId}
+                          </span>
+                        </div>
+                        <div className="text-[10px] text-zinc-400 truncate mt-0.5">
+                          {req.chatTitle || req.chatId}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                          req.status === 'approved'
+                            ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                            : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                        }`}>
+                          {req.status === 'approved' ? 'APPROVED' : 'PENDING'}
+                        </span>
+                        {req.status === 'pending' && (
+                          <button
+                            type="button"
+                            onClick={() => handleApproveJoinRequest(req.chatId, req.userId)}
+                            className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0"
+                          >
+                            Approve
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Add Channel Form */}
+          <div className="pt-1">
+            <button
+              type="button"
+              onClick={() => setShowManualAddChannel(!showManualAddChannel)}
+              className="text-xs text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1.5 cursor-pointer py-1"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>{showManualAddChannel ? 'Hide Add Channel' : 'Add Channel / Group'}</span>
+            </button>
+
+            {showManualAddChannel && (
+              <div className="mt-2 p-3 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-2.5">
+                <div className="text-[11px] font-bold text-indigo-300 flex items-center gap-1">
+                  <Plus className="w-3.5 h-3.5 shrink-0" />
+                  <span>Add Channel</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <div>
+                    <label className="text-[10px] text-zinc-400 mb-1 block">Channel ID or @Username *</label>
+                    <input
+                      type="text"
+                      value={newChannelChatId}
+                      onChange={(e) => setNewChannelChatId(e.target.value)}
+                      placeholder="-1001234567890 or @channel"
+                      className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] text-zinc-400 mb-1 block">Invite Link (Optional)</label>
+                    <input
+                      type="url"
+                      value={newChannelInviteLink}
+                      onChange={(e) => setNewChannelInviteLink(e.target.value)}
+                      placeholder="https://t.me/+..."
+                      className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                {pendingAllowChatError && (
+                  <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex flex-wrap items-center justify-between gap-2 text-[11px] text-amber-200">
+                    <div className="min-w-0 flex-1">
+                      Allow Chat required: <b>{pendingAllowChatError.name}</b> (<code className="font-mono">{pendingAllowChatError.chatId}</code>)
+                    </div>
+                    <button
+                      type="button"
+                      disabled={whitelistSaving}
+                      onClick={() => handleAllowSubForceChannelChat(pendingAllowChatError, true)}
+                      className="px-3 py-1 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 text-[11px] font-bold whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+                    >
+                      {whitelistSaving ? 'Allowing...' : 'Allow Chat & Add'}
+                    </button>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-end pt-1">
+                  <button
+                    type="button"
+                    disabled={addingChannel}
+                    onClick={handleAddForceSubChannel}
+                    className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-sm whitespace-nowrap shrink-0 disabled:opacity-50"
+                  >
+                    {addingChannel ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                    <span>{addingChannel ? 'Detecting...' : 'Add Channel'}</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Channels & Groups List */}
+          <div>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <label className="text-[11px] font-semibold text-zinc-300 flex flex-wrap items-center gap-1.5 tabular-nums">
+                <span>Channels &amp; Groups</span>
+                <span className="text-[10px] font-normal px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
+                  {activeChannels.length}/{requiredList.length}
+                </span>
+              </label>
+            </div>
+
+            {requiredList.length === 0 ? (
+              <div className="p-4 rounded-xl bg-zinc-950/60 border border-zinc-800/80 text-center">
+                <div className="text-xs text-zinc-400">
+                  No connected channels or groups.
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {requiredList.map((ch: any) => {
+                  const isChanActive = ch.enabled !== false;
+                  const isAuto = ch.isAutoDetected !== false;
+                  const channelType = ch.type || (String(ch.chatId).startsWith('-100') ? 'channel' : 'supergroup');
+                  const allowedByWhitelist = isChanAllowed(ch);
+
+                  return (
+                    <div
+                      key={ch.id}
+                      className={`p-3 rounded-xl border transition-all text-xs flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 ${
+                        isChanActive
+                          ? 'bg-zinc-950/80 border-indigo-500/40 shadow-sm'
+                          : 'bg-zinc-900/40 border-zinc-800/60 opacity-60'
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-bold text-white text-xs truncate">
+                            {ch.name}
+                          </span>
+
+                          <span className="text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+                            {channelType === 'supergroup' ? 'Supergroup' : channelType === 'group' ? 'Group' : 'Channel'}
+                          </span>
+
+                          {isAuto && (
+                            <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                              Synced
+                            </span>
+                          )}
+
+                          <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded ${
+                            isChanActive
+                              ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                              : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
+                          }`}>
+                            {isChanActive ? 'Active' : 'Off'}
+                          </span>
+
+                          {chatWhitelistEnabled && (
+                            allowedByWhitelist ? (
+                              <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                                Allowed
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={whitelistSaving}
+                                onClick={() => handleAllowSubForceChannelChat({
+                                  chatId: String(ch.chatId),
+                                  name: ch.name,
+                                  type: channelType,
+                                  username: ch.username
+                                }, false)}
+                                className="text-[9px] font-bold px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 cursor-pointer whitespace-nowrap"
+                              >
+                                + Allow Chat
+                              </button>
+                            )
+                          )}
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 text-[10px] text-zinc-400 min-w-0">
+                          <span className="font-mono text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded border border-indigo-500/20 truncate max-w-full">
+                            {ch.chatId}
+                          </span>
+
+                          {ch.inviteLink && (
+                            <a
+                              href={ch.inviteLink}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-zinc-400 hover:text-indigo-300 min-w-0 break-all inline-flex items-center gap-1 transition-colors"
+                            >
+                              <span className="truncate max-w-[200px] sm:max-w-none">{ch.inviteLink}</span>
+                              <ExternalLink className="w-2.5 h-2.5 shrink-0" />
+                            </a>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0 ml-auto">
+                        <label className="relative inline-flex items-center cursor-pointer" title={isChanActive ? "Turn OFF" : "Turn ON"}>
+                          <input
+                            type="checkbox"
+                            checked={isChanActive}
+                            onChange={() => handleToggleChannel(ch.id, isChanActive)}
+                            className="sr-only peer"
+                          />
+                          <div className="w-8 h-4 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
+                        </label>
+
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveForceSubChannel(ch.id)}
+                          className="p-1.5 rounded-lg bg-zinc-800 hover:bg-rose-500/20 text-zinc-400 hover:text-rose-400 transition-colors cursor-pointer"
+                          title="Remove channel"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Telegram Inline Button Preview */}
+          {activeChannels.length > 0 && (
+            <div className="p-3.5 rounded-xl bg-zinc-950/70 border border-indigo-500/30 space-y-2">
+              <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-400 flex flex-wrap items-center justify-between gap-1.5">
+                <span>Button Preview</span>
+                <span className="text-zinc-400 font-normal tabular-nums">
+                  {activeChannels.length} active
+                </span>
+              </div>
+
+              <div className="space-y-1.5 pt-0.5">
+                {activeChannels.map((c: any, idx: number) => (
+                  <div
+                    key={c.id}
+                    className="w-full py-2 px-3 rounded-xl bg-blue-600 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm border border-blue-500/40 select-none"
+                  >
+                    <span className="truncate">Join {c.name || `Channel ${idx + 1}`}</span>
+                  </div>
+                ))}
+                <div className="w-full py-2 px-3 rounded-xl bg-emerald-600 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm border border-emerald-500/40 select-none">
+                  <span>Verify / Try Again</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Save Sub Force Button */}
+          <div className="pt-2 border-t border-indigo-500/20 flex items-center justify-end">
+            <button
+              type="button"
+              disabled={savingSection === 'forceSub'}
+              onClick={handleSaveForceSubChannels}
+              className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-sm disabled:opacity-50 whitespace-nowrap shrink-0"
+            >
+              <Check className="w-3.5 h-3.5" />
+              <span>{savingSection === 'forceSub' ? 'Saving...' : 'Save Channels'}</span>
+            </button>
           </div>
         </div>
 
-        {/* 5. Link Delete (On/Off) Card (Independent) */}
-        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-rose-950/25 via-zinc-900/80 to-zinc-950/90 border border-rose-500/30 space-y-3">
+        {renderTemplateEditModal()}
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------
+  // SUB-VIEW: GROUP MANAGEMENT (Dedicated Moderation Controls)
+  // -------------------------------------------------------------
+  if (subView === 'group_management') {
+    const activeGroupModsCount = [
+      Boolean(botSettings.linkDeleteEnabled),
+      Boolean(botSettings.antiForwardEnabled),
+      botSettings.banEnabled !== false,
+      botSettings.muteEnabled !== false
+    ].filter(Boolean).length;
+
+    return (
+      <div className="space-y-4 pb-28 animate-tab-fade-in">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            {renderSubViewBackButton('menu', 'Back to More')}
+            <div className="min-w-0">
+              <h2 className="text-base font-bold text-white flex items-center gap-1.5 truncate">
+                <ShieldCheck className="w-4 h-4 text-sky-400 shrink-0" />
+                <span className="truncate">Group Management</span>
+              </h2>
+              <p className="text-[11px] text-zinc-400 truncate">
+                Automated group moderation, spam deletion &amp; member restriction controls
+              </p>
+            </div>
+          </div>
+
+          <span className="text-[11px] px-2.5 py-1 rounded-xl bg-sky-500/15 border border-sky-500/30 text-sky-300 font-semibold font-mono tabular-nums whitespace-nowrap shrink-0">
+            {activeGroupModsCount}/4 Active
+          </span>
+        </div>
+
+        {/* 1. Link Delete */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-rose-950/25 via-zinc-900/80 to-zinc-950/90 border border-rose-500/30">
           <div className="flex items-center justify-between gap-2.5">
-            <div className="flex items-center gap-2 min-w-0 flex-1">
-              <div className="w-8 h-8 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <div className="w-9 h-9 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center text-rose-400 shrink-0">
                 <Link2 className="w-4 h-4" />
               </div>
               <div className="min-w-0">
                 <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
-                  <span>Link Delete (On/Off)</span>
+                  <span>Link Delete</span>
                   <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
-                    botSettings.linkDeleteEnabled 
-                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' 
+                    botSettings.linkDeleteEnabled
+                      ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
                       : 'bg-zinc-800 text-zinc-400 border-zinc-700'
                   }`}>
-                    {botSettings.linkDeleteEnabled ? 'ON (DELETING LINKS)' : 'OFF'}
+                    {botSettings.linkDeleteEnabled ? 'ON' : 'OFF'}
                   </span>
                 </div>
                 <p className="text-[10px] text-zinc-400 mt-0.5">
-                  Automatically detect and delete unauthorized links from non-admin members in groups/chats. Turn OFF to permit links.
+                  Automatically delete unauthorized links &amp; URLs sent by non-admin members in groups with {botSettings.groupWarningLimit ?? 3}-warning auto-ban
                 </p>
               </div>
             </div>
@@ -3040,6 +3700,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               <input
                 type="checkbox"
                 checked={Boolean(botSettings.linkDeleteEnabled)}
+                disabled={savingSection === 'linkDelete'}
                 onChange={async (e) => {
                   const nextEnabled = e.target.checked;
                   const prevEnabled = Boolean(botSettings.linkDeleteEnabled);
@@ -3058,26 +3719,26 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </div>
         </div>
 
-        {/* 6. Mandatory Channel Join (Force Sub) Card (Independent) */}
-        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-indigo-950/25 via-zinc-900/80 to-zinc-950/90 border border-indigo-500/30 space-y-3">
+        {/* 2. Forward Message Delete */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-violet-950/25 via-zinc-900/80 to-zinc-950/90 border border-violet-500/30">
           <div className="flex items-center justify-between gap-2.5">
-            <div className="flex items-center gap-2 min-w-0 flex-1">
-              <div className="w-8 h-8 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
-                <Radio className="w-4 h-4" />
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <div className="w-9 h-9 rounded-xl bg-violet-500/20 border border-violet-500/30 flex items-center justify-center text-violet-400 shrink-0">
+                <ShieldAlert className="w-4 h-4" />
               </div>
               <div className="min-w-0">
                 <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
-                  <span>Mandatory Channel Join (Force Sub)</span>
+                  <span>Forward Message Delete</span>
                   <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
-                    botSettings.forceSubEnabled 
-                      ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40' 
+                    botSettings.antiForwardEnabled
+                      ? 'bg-violet-500/20 text-violet-300 border-violet-500/40'
                       : 'bg-zinc-800 text-zinc-400 border-zinc-700'
                   }`}>
-                    {botSettings.forceSubEnabled ? 'ACTIVE (FORCED)' : 'OFF'}
+                    {botSettings.antiForwardEnabled ? 'ON' : 'OFF'}
                   </span>
                 </div>
                 <p className="text-[10px] text-zinc-400 mt-0.5">
-                  Require users to subscribe to specific channels/groups before accessing bot files
+                  Detect and delete external forwarded messages from other chats, channels, or users in groups
                 </p>
               </div>
             </div>
@@ -3085,490 +3746,228 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             <label className="relative inline-flex items-center cursor-pointer shrink-0">
               <input
                 type="checkbox"
-                checked={Boolean(botSettings.forceSubEnabled)}
+                checked={Boolean(botSettings.antiForwardEnabled)}
+                disabled={savingSection === 'antiForward'}
                 onChange={async (e) => {
                   const nextEnabled = e.target.checked;
-                  const prevEnabled = Boolean(botSettings.forceSubEnabled);
-                  setBotSettings((prev: any) => ({ ...prev, forceSubEnabled: nextEnabled }));
+                  const prevEnabled = Boolean(botSettings.antiForwardEnabled);
+                  setBotSettings((prev: any) => ({ ...prev, antiForwardEnabled: nextEnabled }));
                   await savePartialBotSetting(
-                    'forceSub',
-                    { forceSubEnabled: nextEnabled },
-                    nextEnabled ? 'Mandatory Channel Join enabled' : 'Mandatory Channel Join disabled',
-                    () => setBotSettings((prev: any) => ({ ...prev, forceSubEnabled: prevEnabled }))
+                    'antiForward',
+                    { antiForwardEnabled: nextEnabled },
+                    nextEnabled ? 'Forward Message Delete turned ON' : 'Forward Message Delete turned OFF',
+                    () => setBotSettings((prev: any) => ({ ...prev, antiForwardEnabled: prevEnabled }))
                   );
                 }}
                 className="sr-only peer"
               />
-              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-500"></div>
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-violet-500"></div>
             </label>
           </div>
+        </div>
 
-          {botSettings.forceSubEnabled && (
-            <div className="space-y-3.5 pt-2 border-t border-indigo-500/20">
-              {/* Action Bar: Connect Command Guide & Edit Message Template */}
-              <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-zinc-950/70 border border-indigo-500/20">
-                <div className="flex items-center gap-2 text-xs text-indigo-300 font-semibold">
-                  <Sparkles className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-                  <span>Chat Connection &amp; Templates</span>
-                  <span className="hidden sm:inline-flex text-[10px] font-mono text-zinc-400 bg-zinc-900 px-2 py-0.5 rounded border border-zinc-800">
-                    /connect &lt;chat_id_or_username&gt;
+        {/* 3. Ban / Unban */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-amber-950/20 via-zinc-900/80 to-zinc-950/90 border border-amber-500/30">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <div className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+                <Ban className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>Ban / Unban</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                    botSettings.banEnabled !== false
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                  }`}>
+                    {botSettings.banEnabled !== false ? 'ON' : 'OFF'}
                   </span>
                 </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleOpenForceSubTemplate}
-                    className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-indigo-300 hover:text-indigo-200 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer border border-zinc-700/80"
-                    title="Edit Force Sub Message in Message Templates"
-                  >
-                    <Edit2 className="w-3 h-3" />
-                    <span>Edit Msg Template</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Force Join Verification Mode Toggle: Auto Join vs Request Only */}
-              <div className="p-3 rounded-xl bg-zinc-950/70 border border-indigo-500/30 space-y-2.5">
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <div className="min-w-0">
-                    <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
-                      <span>Force Join Mode</span>
-                      <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                        {botSettings.forceJoinMode === 'request_only' ? 'REQUEST ONLY' : 'AUTO JOIN'}
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-zinc-400 mt-0.5">
-                      {botSettings.forceJoinMode === 'request_only'
-                        ? 'Users send a join request to the channel; tapping Verify checks pending join requests by User ID / username.'
-                        : 'Traditional link-based checking; users must join the channel directly before verification succeeds.'}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  {([
-                    {
-                      id: 'auto_join' as const,
-                      title: 'Auto Join',
-                      desc: 'Direct channel membership check'
-                    },
-                    {
-                      id: 'request_only' as const,
-                      title: 'Request Only',
-                      desc: 'Verify pending join requests list'
-                    }
-                  ]).map((mode) => {
-                    const isSelected = (botSettings.forceJoinMode || 'auto_join') === mode.id;
-                    return (
-                      <button
-                        key={mode.id}
-                        type="button"
-                        onClick={async () => {
-                          const prevMode = botSettings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join';
-                          if (prevMode === mode.id) return;
-                          setBotSettings((prev: any) => ({ ...prev, forceJoinMode: mode.id }));
-                          await savePartialBotSetting(
-                            'forceSub',
-                            { forceJoinMode: mode.id },
-                            mode.id === 'request_only'
-                              ? 'Force Join Mode switched to Request Only'
-                              : 'Force Join Mode switched to Auto Join',
-                            () => setBotSettings((prev: any) => ({ ...prev, forceJoinMode: prevMode }))
-                          );
-                        }}
-                        className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                          isSelected
-                            ? 'bg-indigo-500/20 border-indigo-400/60 text-white shadow-sm'
-                            : 'bg-zinc-900/70 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-1.5">
-                          <span className="text-xs font-bold">{mode.title}</span>
-                          <span
-                            className={`w-2 h-2 rounded-full ${
-                              isSelected ? 'bg-indigo-400 shadow-[0_0_8px_#818cf8]' : 'bg-zinc-700'
-                            }`}
-                          />
-                        </div>
-                        <div className="text-[10px] text-zinc-400 mt-0.5 leading-snug">
-                          {mode.desc}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Private Channels & Groups: Join Request & Auto-Approval Settings */}
-              <div className="p-3 rounded-xl bg-zinc-950/70 border border-emerald-500/30 space-y-2.5">
-                <div className="flex items-center justify-between gap-2.5">
-                  <div className="flex items-center gap-2 min-w-0 flex-1">
-                    <div className="w-7 h-7 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
-                      <CheckCircle2 className="w-4 h-4" />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
-                        <span>Auto-Approve Join Requests</span>
-                        <span className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
-                          {botSettings.forceJoinMode === 'request_only' ? 'PAUSED IN REQUEST ONLY' : 'SMART AUTO-APPROVAL'}
-                        </span>
-                      </div>
-                      <p className="text-[10px] text-zinc-400 mt-0.5">
-                        {botSettings.forceJoinMode === 'request_only'
-                          ? 'Requests stay pending in the channel list for instant verification while Request Only mode is active'
-                          : 'Automatically accept join requests for private channels & groups and verify user access instantly'}
-                      </p>
-                    </div>
-                  </div>
-
-                  <label className="relative inline-flex items-center cursor-pointer shrink-0">
-                    <input
-                      type="checkbox"
-                      checked={botSettings.autoApproveJoinRequests !== false}
-                      onChange={async (e) => {
-                        const nextApprove = e.target.checked;
-                        const prevApprove = botSettings.autoApproveJoinRequests !== false;
-                        setBotSettings((prev: any) => ({ ...prev, autoApproveJoinRequests: nextApprove }));
-                        await savePartialBotSetting(
-                          'forceSub',
-                          { autoApproveJoinRequests: nextApprove },
-                          nextApprove ? 'Auto-Approve Join Requests enabled' : 'Auto-Approve Join Requests disabled',
-                          () => setBotSettings((prev: any) => ({ ...prev, autoApproveJoinRequests: prevApprove }))
-                        );
-                      }}
-                      className="sr-only peer"
-                    />
-                    <div className="w-8 h-4 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
-                  </label>
-                </div>
-
-                {/* Join Request Records Drawer / Stats */}
-                <div className="pt-2 border-t border-zinc-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <div className="flex items-center gap-2 text-[11px] text-zinc-400">
-                    <span className="text-zinc-300 font-medium">Join Requests Recorded:</span>
-                    <span className="px-1.5 py-0.5 rounded bg-zinc-800 font-mono text-white text-[10px] border border-zinc-700">
-                      {joinRequests.length}
-                    </span>
-                    {joinRequests.filter(r => r.status === 'approved').length > 0 && (
-                      <span className="text-[10px] text-emerald-400 font-semibold">
-                        ({joinRequests.filter(r => r.status === 'approved').length} approved)
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => loadJoinRequests()}
-                      disabled={loadingJoinRequests}
-                      className="p-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-white transition-colors cursor-pointer"
-                      title="Refresh Join Requests"
-                    >
-                      <RefreshCw className={`w-3 h-3 ${loadingJoinRequests ? 'animate-spin text-emerald-400' : ''}`} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowJoinRequests(!showJoinRequests)}
-                      className="text-[11px] text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1 cursor-pointer"
-                    >
-                      <span>{showJoinRequests ? 'Hide Details' : 'View Log'}</span>
-                    </button>
-                  </div>
-                </div>
-
-                {showJoinRequests && (
-                  <div className="mt-2 pt-2 border-t border-zinc-800/80 space-y-2 max-h-60 overflow-y-auto">
-                    {joinRequests.length === 0 ? (
-                      <div className="p-3 rounded-lg bg-zinc-900/60 text-center text-xs text-zinc-400 italic">
-                        No join requests received yet. When users submit join requests to private channels, they will be logged and approved here.
-                      </div>
-                    ) : (
-                      joinRequests.slice(0, 15).map((req) => (
-                        <div
-                          key={req.id}
-                          className="p-2 rounded-lg bg-zinc-900/80 border border-zinc-800 text-xs flex items-center justify-between gap-2"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5">
-                              <span className="font-semibold text-white truncate">
-                                {req.userName || 'User'}
-                              </span>
-                              {req.userUsername && (
-                                <span className="text-[10px] text-zinc-400 truncate">
-                                  {req.userUsername}
-                                </span>
-                              )}
-                              <span className="text-[9px] font-mono text-zinc-400 bg-zinc-800 px-1 rounded">
-                                ID: {req.userId}
-                              </span>
-                            </div>
-                            <div className="text-[10px] text-zinc-400 truncate mt-0.5">
-                              Channel: <span className="text-zinc-300 font-medium">{req.chatTitle || req.chatId}</span>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-2 shrink-0">
-                            <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                              req.status === 'approved'
-                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                            }`}>
-                              {req.status === 'approved' ? 'APPROVED ✅' : 'PENDING ⏳'}
-                            </span>
-                            {req.status === 'pending' && (
-                              <button
-                                type="button"
-                                onClick={() => handleApproveJoinRequest(req.chatId, req.userId)}
-                                className="px-2 py-0.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-semibold transition-all cursor-pointer"
-                              >
-                                Approve
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {/* List of Detected & Configured Channels / Groups */}
-              <div>
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                  <div>
-                    <label className="text-[11px] font-semibold text-zinc-300 flex flex-wrap items-center gap-1.5">
-                      <span>Channels & Groups List</span>
-                      <span className="text-[10px] font-normal px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
-                        {(botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false).length} active of {(botSettings.requiredChannels || []).length}
-                      </span>
-                    </label>
-                  </div>
-                  <span className="text-[10px] text-zinc-400">Toggle switch ON/OFF to include or exclude</span>
-                </div>
-
-                {(!botSettings.requiredChannels || botSettings.requiredChannels.length === 0) ? (
-                  <div className="p-4 rounded-xl bg-zinc-950/60 border border-zinc-800/80 text-center space-y-2">
-                    <div className="text-xs text-zinc-400">
-                      No connected channels or groups yet.
-                    </div>
-                    <p className="text-[11px] text-zinc-500 max-w-sm mx-auto">
-                      Add the bot as an administrator to your Telegram channel or group, then send <code className="text-indigo-400 font-mono">/connect &lt;chat_id_or_username&gt;</code> to register it instantly!
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    {botSettings.requiredChannels.map((ch: any) => {
-                      const isChanActive = ch.enabled !== false;
-                      const isAuto = ch.isAutoDetected !== false;
-                      const channelType = ch.type || (String(ch.chatId).startsWith('-100') ? 'supergroup' : 'channel');
-
-                      return (
-                        <div
-                          key={ch.id}
-                          className={`p-3 rounded-xl border transition-all text-xs flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5 ${
-                            isChanActive 
-                              ? 'bg-zinc-950/80 border-indigo-500/40 shadow-sm' 
-                              : 'bg-zinc-900/40 border-zinc-800/60 opacity-60'
-                          }`}
-                        >
-                          <div className="min-w-0 flex-1 space-y-1">
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="font-bold text-white text-xs truncate">
-                                {ch.name}
-                              </span>
-
-                              {/* Type Badge */}
-                              <span className="text-[9px] font-semibold uppercase px-1.5 py-0.2 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
-                                {channelType === 'supergroup' ? '👥 Supergroup' : channelType === 'group' ? '👥 Group' : '📢 Channel'}
-                              </span>
-
-                              {/* Auto-detected pill */}
-                              {isAuto && (
-                                <span className="text-[9px] font-semibold px-1.5 py-0.2 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20">
-                                  ⚡ Auto-Detected
-                                </span>
-                              )}
-
-                              {/* Active / Excluded status pill */}
-                              <span className={`text-[9px] font-semibold px-1.5 py-0.2 rounded ${
-                                isChanActive
-                                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                                  : 'bg-zinc-800 text-zinc-400 border border-zinc-700'
-                              }`}>
-                                {isChanActive ? '✓ Required for Users' : '✕ Excluded / Off'}
-                              </span>
-                            </div>
-
-                            <div className="flex flex-wrap items-center gap-2 text-[10px] text-zinc-400 min-w-0">
-                              <span className="font-mono text-indigo-400 bg-indigo-500/10 px-1.5 py-0.2 rounded border border-indigo-500/20 truncate max-w-full">
-                                {ch.chatId}
-                              </span>
-
-                              {ch.inviteLink && (
-                                <a
-                                  href={ch.inviteLink}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-zinc-400 hover:text-indigo-300 min-w-0 break-all inline-flex items-center gap-1 transition-colors"
-                                >
-                                  <span className="truncate max-w-[200px] sm:max-w-none">{ch.inviteLink}</span>
-                                  <ExternalLink className="w-2.5 h-2.5 shrink-0" />
-                                </a>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-2 shrink-0 ml-auto">
-                            {/* Toggle Switch (ON / OFF) */}
-                            <label className="relative inline-flex items-center cursor-pointer" title={isChanActive ? "Click to exclude channel" : "Click to require channel"}>
-                              <input
-                                type="checkbox"
-                                checked={isChanActive}
-                                onChange={() => handleToggleChannel(ch.id, isChanActive)}
-                                className="sr-only peer"
-                              />
-                              <div className="w-8 h-4 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-emerald-500"></div>
-                            </label>
-
-                            {/* Delete / Remove Button */}
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveForceSubChannel(ch.id)}
-                              className="p-1.5 rounded-lg bg-zinc-800 hover:bg-rose-500/20 text-zinc-400 hover:text-rose-400 transition-colors cursor-pointer"
-                              title="Remove from list"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Manual Add Collapsible Toggle */}
-              <div className="pt-1">
-                <button
-                  type="button"
-                  onClick={() => setShowManualAddChannel(!showManualAddChannel)}
-                  className="text-xs text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1.5 cursor-pointer py-1"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  <span>{showManualAddChannel ? 'Hide Manual Add Form' : 'Add Channel / Group Manually'}</span>
-                </button>
-
-                {showManualAddChannel && (
-                  <div className="mt-2 p-3 rounded-xl bg-zinc-900/90 border border-zinc-800 space-y-2.5">
-                    <div className="text-[11px] font-bold text-indigo-300 flex flex-wrap items-center justify-between gap-1.5">
-                      <span className="flex items-center gap-1">
-                        <Plus className="w-3.5 h-3.5 shrink-0" />
-                        <span>Add Channel / Group by ID or Username</span>
-                      </span>
-                      <span className="text-[10px] text-zinc-400 font-normal">No invite link required</span>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      <div>
-                        <label className="text-[10px] text-zinc-400 mb-1 block">Chat ID or Username *</label>
-                        <input
-                          type="text"
-                          value={newChannelChatId}
-                          onChange={(e) => setNewChannelChatId(e.target.value)}
-                          placeholder="@channel or -100xxxxxxxxxx"
-                          className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-[10px] text-zinc-400 mb-1 block">Channel Name (Optional)</label>
-                        <input
-                          type="text"
-                          value={newChannelName}
-                          onChange={(e) => setNewChannelName(e.target.value)}
-                          placeholder="e.g. VIP Channel (auto-named if blank)"
-                          className="w-full bg-zinc-950 border border-zinc-700/80 rounded-lg p-2 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                      <p className="text-[10px] text-zinc-400">
-                        💡 You can also send <code className="text-indigo-300">/connect &lt;channel_id&gt;</code> directly in Telegram.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={handleAddForceSubChannel}
-                        className="px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-sm shrink-0"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        <span>Add Channel</span>
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Telegram Inline Button Theme Preview (Showing only active channels) */}
-              {Array.isArray(botSettings.requiredChannels) && botSettings.requiredChannels.length > 0 && (
-                <div className="p-3.5 rounded-xl bg-zinc-950/70 border border-indigo-500/30 space-y-2.5">
-                  <div className="text-[10px] font-bold uppercase tracking-wider text-indigo-400 flex flex-wrap items-center justify-between gap-1.5">
-                    <span>Telegram Inline Button Theme Preview</span>
-                    <span className="text-zinc-400 font-normal">
-                      {(botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false).length} active channel(s)
-                    </span>
-                  </div>
-
-                  {(() => {
-                    const activeChannels = (botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false);
-                    if (activeChannels.length === 0) {
-                      return (
-                        <div className="p-3 rounded-lg bg-zinc-900/60 border border-zinc-800 text-center text-xs text-zinc-400 italic">
-                          All channel toggles are currently turned OFF. Users will bypass verification until a channel is enabled.
-                        </div>
-                      );
-                    }
-
-                    return (
-                      <div className="space-y-1.5 pt-0.5">
-                        {activeChannels.map((c: any, idx: number) => (
-                          <div
-                            key={c.id}
-                            className="w-full py-2 px-3 rounded-xl bg-blue-600 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm border border-blue-500/40 select-none"
-                          >
-                            <span className="truncate">📢 Join Channel {idx + 1}</span>
-                          </div>
-                        ))}
-                        <div className="w-full py-2 px-3 rounded-xl bg-emerald-600 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm border border-emerald-500/40 select-none">
-                          <span>🔄 Verify / Try Again ✅</span>
-                        </div>
-                      </div>
-                    );
-                  })()}
-
-                  <p className="text-[10px] text-zinc-400 text-center pt-0.5 italic">
-                    Styled with primary link accents and success confirmation theme matching the bot.
-                  </p>
-                </div>
-              )}
-
-              {/* Quick Save Force Sub Button */}
-              <div className="pt-2 border-t border-indigo-500/20 flex flex-wrap items-center justify-between gap-2">
-                <span className="text-[10px] text-zinc-400">
-                  {(botSettings.requiredChannels || []).filter((c: any) => c.enabled !== false).length} active channel(s) in mandatory join list
-                </span>
-                <button
-                  type="button"
-                  disabled={savingSection === 'forceSub'}
-                  onClick={handleSaveForceSubChannels}
-                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer active:scale-95 shadow-sm disabled:opacity-50 shrink-0"
-                >
-                  <Check className="w-3.5 h-3.5" />
-                  <span>{savingSection === 'forceSub' ? 'Saving...' : 'Save Channels'}</span>
-                </button>
+                <p className="text-[10px] text-zinc-400 mt-0.5">
+                  Allow <code className="text-amber-300">/ban</code> &amp; <code className="text-amber-300">/unban</code> moderation commands and automatic {botSettings.groupWarningLimit ?? 3}-warning bans in groups
+                </p>
               </div>
             </div>
-          )}
+
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={botSettings.banEnabled !== false}
+                disabled={savingSection === 'ban'}
+                onChange={async (e) => {
+                  const nextEnabled = e.target.checked;
+                  const prevEnabled = botSettings.banEnabled !== false;
+                  setBotSettings((prev: any) => ({ ...prev, banEnabled: nextEnabled }));
+                  await savePartialBotSetting(
+                    'ban',
+                    { banEnabled: nextEnabled },
+                    nextEnabled ? 'Ban / Unban turned ON' : 'Ban / Unban turned OFF',
+                    () => setBotSettings((prev: any) => ({ ...prev, banEnabled: prevEnabled }))
+                  );
+                }}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
+            </label>
+          </div>
+        </div>
+
+        {/* 4. Mute / Unmute */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-sky-950/25 via-zinc-900/80 to-zinc-950/90 border border-sky-500/30">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <div className="w-9 h-9 rounded-xl bg-sky-500/20 border border-sky-500/30 flex items-center justify-center text-sky-400 shrink-0">
+                <VolumeX className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>Mute / Unmute</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                    botSettings.muteEnabled !== false
+                      ? 'bg-sky-500/20 text-sky-300 border-sky-500/40'
+                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                  }`}>
+                    {botSettings.muteEnabled !== false ? 'ON' : 'OFF'}
+                  </span>
+                </div>
+                <p className="text-[10px] text-zinc-400 mt-0.5">
+                  Allow <code className="text-sky-300">/mute [1m|10m|1h]</code> &amp; <code className="text-sky-300">/unmute</code> group member restrictions
+                </p>
+              </div>
+            </div>
+
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={botSettings.muteEnabled !== false}
+                disabled={savingSection === 'mute'}
+                onChange={async (e) => {
+                  const nextEnabled = e.target.checked;
+                  const prevEnabled = botSettings.muteEnabled !== false;
+                  setBotSettings((prev: any) => ({ ...prev, muteEnabled: nextEnabled }));
+                  await savePartialBotSetting(
+                    'mute',
+                    { muteEnabled: nextEnabled },
+                    nextEnabled ? 'Mute / Unmute turned ON' : 'Mute / Unmute turned OFF',
+                    () => setBotSettings((prev: any) => ({ ...prev, muteEnabled: prevEnabled }))
+                  );
+                }}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-sky-500"></div>
+            </label>
+          </div>
+        </div>
+
+        {/* 5. Warning Limit */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-orange-950/20 via-zinc-900/80 to-zinc-950/90 border border-orange-500/30 space-y-3">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <div className="w-9 h-9 rounded-xl bg-orange-500/20 border border-orange-500/30 flex items-center justify-center text-orange-400 shrink-0">
+                <AlertCircle className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>Warning Limit</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded font-semibold font-mono tabular-nums bg-orange-500/20 text-orange-300 border border-orange-500/40">
+                    {botSettings.groupWarningLimit ?? 3} Warnings
+                  </span>
+                </div>
+                <p className="text-[10px] text-zinc-400 mt-0.5">
+                  Auto-ban member after reaching this warning limit for group violations
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setWarningLimitInput((v) => Math.max(1, (Number(v) || 3) - 1))}
+                className="p-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 cursor-pointer"
+                title="Decrease warning limit"
+              >
+                <Minus className="w-3.5 h-3.5" />
+              </button>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={warningLimitInput}
+                onChange={(e) => setWarningLimitInput(Math.max(1, Math.min(100, parseInt(e.target.value, 10) || 1)))}
+                className="w-20 px-3 py-1.5 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-center text-white tabular-nums focus:outline-none focus:border-orange-500"
+              />
+              <button
+                type="button"
+                onClick={() => setWarningLimitInput((v) => Math.min(100, (Number(v) || 3) + 1))}
+                className="p-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 cursor-pointer"
+                title="Increase warning limit"
+              >
+                <Plus className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="flex items-center gap-1">
+              {[2, 3, 5, 10].map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => setWarningLimitInput(preset)}
+                  className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold font-mono border tabular-nums cursor-pointer transition-colors ${
+                    warningLimitInput === preset
+                      ? 'bg-orange-500/20 text-orange-300 border-orange-500/40'
+                      : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-white'
+                  }`}
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              disabled={savingSection === 'warningLimit'}
+              onClick={async () => {
+                const nextLimit = Math.max(1, Math.min(100, Math.round(Number(warningLimitInput) || 3)));
+                const prevLimit = botSettings.groupWarningLimit ?? 3;
+                setWarningLimitInput(nextLimit);
+                setBotSettings((prev: any) => ({ ...prev, groupWarningLimit: nextLimit }));
+                await savePartialBotSetting(
+                  'warningLimit',
+                  { groupWarningLimit: nextLimit },
+                  `Warning limit set to ${nextLimit}`,
+                  () => {
+                    setBotSettings((prev: any) => ({ ...prev, groupWarningLimit: prevLimit }));
+                    setWarningLimitInput(prevLimit);
+                  }
+                );
+              }}
+              className="ml-auto px-3.5 py-1.5 rounded-xl bg-orange-500 hover:bg-orange-400 text-zinc-950 text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+            >
+              <Check className="w-3.5 h-3.5" />
+              <span>{savingSection === 'warningLimit' ? 'Saving...' : 'Save Limit'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Group Scope & Command Reference */}
+        <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-2.5 text-[11px] text-zinc-400">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-bold text-white">Group Moderation Info</span>
+            <span className="text-[10px] px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-300 font-mono tabular-nums">
+              {chatWhitelistEnabled ? `${allowedChats.length} Allowed Chat(s)` : 'All Connected Groups'}
+            </span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-1">
+            <div><code className="text-sky-300">/ban [user]</code> — Ban permanently</div>
+            <div><code className="text-sky-300">/unban &lt;id_or_@user&gt;</code> — Unban user</div>
+            <div><code className="text-sky-300">/mute [user] [1m|1h]</code> — Mute user</div>
+            <div><code className="text-sky-300">/unmute &lt;id_or_@user&gt;</code> — Unmute user</div>
+            <div><code className="text-sky-300">/linkdelete [on|off]</code> — Toggle link delete</div>
+            <div><code className="text-sky-300">/allowchat &lt;chat_id&gt;</code> — Whitelist group</div>
+          </div>
         </div>
       </div>
     );
@@ -5137,11 +5536,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       return remHours > 0 ? `Expires in ${days}d ${remHours}h` : `Expires in ${days}d`;
     };
 
-    const sortSerialAsc = (a: KeyPoolRecord, b: KeyPoolRecord) =>
-      new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
-    const addKeyPools = keyPoolsList.filter((p) => (p.mode || 'pool') === 'pool').sort(sortSerialAsc);
-    const generatorKeyPools = keyPoolsList.filter((p) => p.mode === 'generator').sort(sortSerialAsc);
-    const sharedKeyPools = keyPoolsList.filter((p) => p.mode === 'shared').sort(sortSerialAsc);
+    const sortNewestFirst = (a: KeyPoolRecord, b: KeyPoolRecord) =>
+      new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+    const addKeyPools = keyPoolsList.filter((p) => (p.mode || 'pool') === 'pool').sort(sortNewestFirst);
+    const generatorKeyPools = keyPoolsList.filter((p) => p.mode === 'generator').sort(sortNewestFirst);
+    const sharedKeyPools = keyPoolsList.filter((p) => p.mode === 'shared').sort(sortNewestFirst);
 
     const handleCreateKeyPool = async (e: React.FormEvent) => {
       e.preventDefault();
@@ -5188,7 +5587,10 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         if (keyGenMode === 'pool') setKeyGenText('');
         if (keyGenMode === 'shared') setKeyGenSharedText('');
         setKeyGenDurationUnit('never');
-        await loadKeyPools();
+        if (res.pool) {
+          setKeyPoolsList((prev) => [res.pool, ...prev.filter((p) => p.id !== res.pool.id)]);
+        }
+        await loadKeyPools(true);
         if (res.pool?.deepLink) {
           const okMsg =
             keyGenMode === 'generator'
@@ -5883,8 +6285,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 {keyGenMode !== 'shared' && (
                   <span className="text-[10px] text-zinc-400">
                     {keyGenMode === 'generator'
-                      ? 'Serial Order · Dynamic Rules'
-                      : 'Serial Order · One-by-One Pool'}
+                      ? 'Newest First · Dynamic Rules'
+                      : 'Newest First · One-by-One Pool'}
                   </span>
                 )}
               </div>
