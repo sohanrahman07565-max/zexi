@@ -30,6 +30,19 @@ export interface AdminUser {
   };
 }
 
+export interface ItemFileEntry {
+  id?: string;
+  telegramFileId?: string;
+  telegramFileUniqueId?: string;
+  uploadedFileId?: string;
+  fileBase64?: string;
+  fileType?: 'document' | 'photo' | 'video' | 'audio';
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+  caption?: string;
+}
+
 export interface ItemRecord {
   id: string;
   type: 'file' | 'link';
@@ -45,6 +58,7 @@ export interface ItemRecord {
   fileName?: string;
   mimeType?: string;
   fileSize?: number;
+  files?: ItemFileEntry[];
   caption?: string;
   url?: string;
   openMode?: 'browser' | 'webapp';

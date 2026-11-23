@@ -117,10 +117,10 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [keyGenText, setKeyGenText] = useState<string>('');
   const [keyGenSharedText, setKeyGenSharedText] = useState<string>('');
   const [keyGenPrefix, setKeyGenPrefix] = useState<string>('DARK-');
-  const [keyGenLength, setKeyGenLength] = useState<number>(12);
+  const [keyGenLength, setKeyGenLength] = useState<string>('12');
   const [keyGenCharType, setKeyGenCharType] = useState<KeyGeneratorCharType>('alphanumeric');
   const [keyGenDurationUnit, setKeyGenDurationUnit] = useState<'never' | 'minutes' | 'hours' | 'days'>('never');
-  const [keyGenDurationValue, setKeyGenDurationValue] = useState<number>(24);
+  const [keyGenDurationValue, setKeyGenDurationValue] = useState<string>('24');
   const [keyGenCreating, setKeyGenCreating] = useState<boolean>(false);
   const [expandedKeyPoolId, setExpandedKeyPoolId] = useState<string | null>(null);
   const [editingKeyPool, setEditingKeyPool] = useState<KeyPoolRecord | null>(null);
@@ -128,11 +128,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [editKeyText, setEditKeyText] = useState<string>('');
   const [editSharedText, setEditSharedText] = useState<string>('');
   const [editKeyPrefix, setEditKeyPrefix] = useState<string>('');
-  const [editKeyLength, setEditKeyLength] = useState<number>(12);
+  const [editKeyLength, setEditKeyLength] = useState<string>('12');
   const [editKeyCharType, setEditKeyCharType] = useState<KeyGeneratorCharType>('alphanumeric');
   const [editKeyStatus, setEditKeyStatus] = useState<'active' | 'disabled'>('active');
   const [editKeyExpiryMode, setEditKeyExpiryMode] = useState<'keep' | 'never' | 'minutes' | 'hours' | 'days'>('keep');
-  const [editKeyDurationValue, setEditKeyDurationValue] = useState<number>(24);
+  const [editKeyDurationValue, setEditKeyDurationValue] = useState<string>('24');
   const [editKeyResetClaims, setEditKeyResetClaims] = useState<boolean>(false);
   const [savingKeyPool, setSavingKeyPool] = useState<boolean>(false);
 
@@ -5504,7 +5504,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       alphanumeric: 'Random Alphanumeric (A-Z, 0-9)'
     };
 
-    const buildSampleKeyPreview = (prefix: string, length: number, charType: KeyGeneratorCharType) => {
+    const buildSampleKeyPreview = (prefix: string, length: string | number, charType: KeyGeneratorCharType) => {
       const safeLen = Math.max(4, Math.min(64, Number(length) || 12));
       const pools: Record<KeyGeneratorCharType, string> = {
         numbers: '482910573649',
@@ -5552,6 +5552,16 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         toast.error('Please enter text or a key.');
         return;
       }
+      const parsedKeyGenLength = parseInt(keyGenLength, 10);
+      if (keyGenMode === 'generator' && (!keyGenLength.trim() || !Number.isFinite(parsedKeyGenLength) || parsedKeyGenLength < 4 || parsedKeyGenLength > 64)) {
+        toast.error('Please enter a valid key body length (4 – 64).');
+        return;
+      }
+      const parsedKeyGenDuration = parseInt(keyGenDurationValue, 10);
+      if (keyGenDurationUnit !== 'never' && (!keyGenDurationValue.trim() || !Number.isFinite(parsedKeyGenDuration) || parsedKeyGenDuration < 1)) {
+        toast.error('Please enter a valid expiry time (minimum 1).');
+        return;
+      }
       setKeyGenCreating(true);
       try {
         const res = await api.createKeyPool(
@@ -5561,11 +5571,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 title: keyGenTitle.trim() || undefined,
                 generatorConfig: {
                   prefix: keyGenPrefix.trim(),
-                  length: Math.max(4, Math.min(64, Number(keyGenLength) || 12)),
+                  length: Math.max(4, Math.min(64, parsedKeyGenLength)),
                   charType: keyGenCharType
                 },
                 durationUnit: keyGenDurationUnit,
-                durationValue: keyGenDurationUnit === 'never' ? undefined : Math.max(1, Number(keyGenDurationValue) || 1)
+                durationValue: keyGenDurationUnit === 'never' ? undefined : parsedKeyGenDuration
               }
             : keyGenMode === 'shared'
             ? {
@@ -5573,14 +5583,14 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 title: keyGenTitle.trim() || undefined,
                 sharedText: keyGenSharedText.trim(),
                 durationUnit: keyGenDurationUnit,
-                durationValue: keyGenDurationUnit === 'never' ? undefined : Math.max(1, Number(keyGenDurationValue) || 1)
+                durationValue: keyGenDurationUnit === 'never' ? undefined : parsedKeyGenDuration
               }
             : {
                 mode: 'pool',
                 title: keyGenTitle.trim() || undefined,
                 keysText: keyGenText,
                 durationUnit: keyGenDurationUnit,
-                durationValue: keyGenDurationUnit === 'never' ? undefined : Math.max(1, Number(keyGenDurationValue) || 1)
+                durationValue: keyGenDurationUnit === 'never' ? undefined : parsedKeyGenDuration
               }
         );
         setKeyGenTitle('');
@@ -5624,11 +5634,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       setEditKeyText((pool.keys || []).map((k) => k.value).join('\n'));
       setEditSharedText(pool.sharedText || '');
       setEditKeyPrefix(pool.generatorConfig?.prefix || '');
-      setEditKeyLength(pool.generatorConfig?.length || 12);
+      setEditKeyLength(String(pool.generatorConfig?.length || 12));
       setEditKeyCharType(pool.generatorConfig?.charType || 'alphanumeric');
       setEditKeyStatus(pool.status === 'disabled' ? 'disabled' : 'active');
       setEditKeyExpiryMode('keep');
-      setEditKeyDurationValue(24);
+      setEditKeyDurationValue('24');
       setEditKeyResetClaims(false);
     };
 
@@ -5652,6 +5662,16 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           return;
         }
       }
+      const parsedEditKeyLength = parseInt(editKeyLength, 10);
+      if (isGenPool && (!editKeyLength.trim() || !Number.isFinite(parsedEditKeyLength) || parsedEditKeyLength < 4 || parsedEditKeyLength > 64)) {
+        toast.error('Please enter a valid key length (4 – 64).');
+        return;
+      }
+      const parsedEditDuration = parseInt(editKeyDurationValue, 10);
+      if (editKeyExpiryMode !== 'keep' && editKeyExpiryMode !== 'never' && (!editKeyDurationValue.trim() || !Number.isFinite(parsedEditDuration) || parsedEditDuration < 1)) {
+        toast.error('Please enter a valid expiry duration (minimum 1).');
+        return;
+      }
       setSavingKeyPool(true);
       try {
         const payload: any = {
@@ -5662,7 +5682,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         if (isGenPool) {
           payload.generatorConfig = {
             prefix: editKeyPrefix.trim(),
-            length: Math.max(4, Math.min(64, Number(editKeyLength) || 12)),
+            length: Math.max(4, Math.min(64, parsedEditKeyLength)),
             charType: editKeyCharType
           };
         } else if (isSharedPool) {
@@ -5675,7 +5695,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           payload.expiresAt = null;
         } else if (editKeyExpiryMode !== 'keep') {
           payload.durationUnit = editKeyExpiryMode;
-          payload.durationValue = Math.max(1, Number(editKeyDurationValue) || 1);
+          payload.durationValue = parsedEditDuration;
         }
         await api.updateKeyPool(editingKeyPool.id, payload);
         toast.success('Key link updated successfully!');
@@ -5895,7 +5915,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     min={4}
                     max={64}
                     value={keyGenLength}
-                    onChange={(e) => setKeyGenLength(Math.max(4, Math.min(64, parseInt(e.target.value, 10) || 12)))}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      if (raw === '' || /^\d+$/.test(raw)) {
+                        setKeyGenLength(raw);
+                      }
+                    }}
+                    placeholder="12"
                     className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-cyan-400"
                     required
                   />
@@ -5950,7 +5976,11 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 <span>Link Expiry Timer</span>
               </span>
               <span className="text-[10px] text-zinc-400">
-                {keyGenDurationUnit === 'never' ? 'Unlimited (No Expiry)' : `Expires in ${keyGenDurationValue} ${keyGenDurationUnit}`}
+                {keyGenDurationUnit === 'never'
+                  ? 'Unlimited (No Expiry)'
+                  : keyGenDurationValue.trim()
+                  ? `Expires in ${keyGenDurationValue} ${keyGenDurationUnit}`
+                  : `Enter ${keyGenDurationUnit}`}
               </span>
             </div>
 
@@ -5971,8 +6001,15 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   type="number"
                   min={1}
                   max={9999}
+                  required
+                  placeholder="Time"
                   value={keyGenDurationValue}
-                  onChange={(e) => setKeyGenDurationValue(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    if (raw === '' || /^\d+$/.test(raw)) {
+                      setKeyGenDurationValue(raw);
+                    }
+                  }}
                   className="w-24 px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
                 />
               )}
@@ -5990,10 +6027,10 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     type="button"
                     onClick={() => {
                       setKeyGenDurationUnit(preset.unit);
-                      setKeyGenDurationValue(preset.val);
+                      setKeyGenDurationValue(String(preset.val));
                     }}
                     className={`px-2 py-1 rounded-lg text-[10px] font-semibold border transition-colors cursor-pointer whitespace-nowrap ${
-                      keyGenDurationUnit === preset.unit && (preset.unit === 'never' || keyGenDurationValue === preset.val)
+                      keyGenDurationUnit === preset.unit && (preset.unit === 'never' || Number(keyGenDurationValue) === preset.val)
                         ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                         : 'bg-zinc-900 text-zinc-400 border-zinc-800 hover:text-white'
                     }`}
@@ -6388,7 +6425,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                         min={4}
                         max={64}
                         value={editKeyLength}
-                        onChange={(e) => setEditKeyLength(Math.max(4, Math.min(64, parseInt(e.target.value, 10) || 12)))}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          if (raw === '' || /^\d+$/.test(raw)) {
+                            setEditKeyLength(raw);
+                          }
+                        }}
+                        placeholder="12"
                         className="w-full px-3 py-2 rounded-xl bg-zinc-900 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-cyan-400"
                         required
                       />
@@ -6494,8 +6537,15 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     type="number"
                     min={1}
                     max={9999}
+                    required
+                    placeholder="Time"
                     value={editKeyDurationValue}
-                    onChange={(e) => setEditKeyDurationValue(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      if (raw === '' || /^\d+$/.test(raw)) {
+                        setEditKeyDurationValue(raw);
+                      }
+                    }}
                     className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-emerald-500"
                   />
                 </div>

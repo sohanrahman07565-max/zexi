@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { ItemRecord, TriggerType, OpenMode, AdminUser, DesignConfig, api } from '../lib/api';
+import { ItemRecord, ItemFileEntry, TriggerType, OpenMode, AdminUser, DesignConfig, api } from '../lib/api';
 import { toast } from '../lib/toast';
 import { 
   FileText, Link2, Plus, Search, Edit2, Trash2, 
@@ -24,6 +24,8 @@ interface MultiFileEntry {
   name: string;
   size: number;
   type: 'document' | 'photo' | 'video' | 'audio';
+  mimeType?: string;
+  caption?: string;
   telegramFileId?: string;
   uploadedFileId?: string;
   previewUrl?: string;
@@ -62,7 +64,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
   const [url, setUrl] = useState('');
   const [openMode, setOpenMode] = useState<OpenMode>('browser');
   const [retentionType, setRetentionType] = useState<'permanent' | 'temporary'>('permanent');
-  const [retentionDays, setRetentionDays] = useState<number>(7);
+  const [retentionDays, setRetentionDays] = useState<string>('7');
 
   // Multi-File upload list
   const [selectedFiles, setSelectedFiles] = useState<MultiFileEntry[]>([]);
@@ -162,7 +164,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
     setUrl('');
     setOpenMode('browser');
     setRetentionType('permanent');
-    setRetentionDays(7);
+    setRetentionDays('7');
     setSelectedFiles([]);
     setUploadStatus(null);
     setHasSetupVideo(false);
@@ -191,7 +193,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
     setUrl(item.url || '');
     setOpenMode(item.openMode || 'browser');
     setRetentionType(item.retentionType || 'permanent');
-    setRetentionDays(item.retentionDays || 7);
+    setRetentionDays(String(item.retentionDays || 7));
     
     // Setup Video initialization
     setHasSetupVideo(Boolean(item.hasSetupVideo));
@@ -206,17 +208,35 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
     setFormStep(1);
 
     // Existing file preview
-    if (item.type === 'file') {
-      setSelectedFiles([
-        {
-          id: item.uploadedFileId || item.telegramFileId || item.id,
-          name: item.fileName || item.name,
-          size: item.fileSize || 0,
-          type: item.fileType || 'document',
-          telegramFileId: item.telegramFileId,
-          uploadedFileId: item.uploadedFileId
-        }
-      ]);
+    if (item.type === 'file' && !item.isTextOnly && item.fileEnabled !== false) {
+      if (Array.isArray(item.files) && item.files.length > 0) {
+        setSelectedFiles(
+          item.files.map((f, idx) => ({
+            id: f.id || f.uploadedFileId || f.telegramFileId || `${item.id}_${idx}`,
+            name: f.fileName || item.name || `File ${idx + 1}`,
+            size: f.fileSize || 0,
+            type: f.fileType || 'document',
+            mimeType: f.mimeType,
+            caption: f.caption,
+            telegramFileId: f.telegramFileId,
+            uploadedFileId: f.uploadedFileId
+          }))
+        );
+      } else if (item.uploadedFileId || item.telegramFileId || item.fileName) {
+        setSelectedFiles([
+          {
+            id: item.uploadedFileId || item.telegramFileId || item.id,
+            name: item.fileName || item.name,
+            size: item.fileSize || 0,
+            type: item.fileType || 'document',
+            mimeType: item.mimeType,
+            telegramFileId: item.telegramFileId,
+            uploadedFileId: item.uploadedFileId
+          }
+        ]);
+      } else {
+        setSelectedFiles([]);
+      }
     } else {
       setSelectedFiles([]);
     }
@@ -256,6 +276,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
         name: file.name,
         size: file.size,
         type: fType,
+        mimeType: mime || 'application/octet-stream',
         previewUrl
       });
     }
@@ -323,6 +344,13 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
       toast.error(msg);
       return;
     }
+    const parsedRetentionDays = parseInt(retentionDays, 10);
+    if (retentionType === 'temporary' && (!retentionDays.trim() || !Number.isFinite(parsedRetentionDays) || parsedRetentionDays < 1 || parsedRetentionDays > 3650)) {
+      const msg = 'Please enter a valid expiration duration (1 – 3650 days)';
+      setError(msg);
+      toast.error(msg);
+      return;
+    }
     setError(null);
     setFormStep(2);
   };
@@ -382,6 +410,15 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
       return;
     }
 
+    const parsedRetentionDays = parseInt(retentionDays, 10);
+    if (retentionType === 'temporary' && (!retentionDays.trim() || !Number.isFinite(parsedRetentionDays) || parsedRetentionDays < 1 || parsedRetentionDays > 3650)) {
+      const msg = 'Please enter a valid expiration duration (1 – 3650 days)';
+      setError(msg);
+      toast.error(msg);
+      setFormStep(1);
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
@@ -417,42 +454,73 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
       }
 
       if (selectedItem) {
-        // Edit existing item
-        let uploadedFileId = selectedItem.uploadedFileId;
-        let telegramFileId = selectedItem.telegramFileId;
-        let fileName = selectedItem.fileName || name;
-        let fileType = selectedItem.fileType || 'document';
-        let fileSize = selectedItem.fileSize;
+        // Edit existing item (supports multi-file batch updates inside the single item)
+        let finalFiles: ItemFileEntry[] = [];
+        if (isAutoFile) {
+          if (selectedFiles.length > 0) {
+            const pendingCount = selectedFiles.filter((f) => Boolean(f.file)).length;
+            let uploadedSoFar = 0;
+            for (let i = 0; i < selectedFiles.length; i++) {
+              const entry = selectedFiles[i];
+              let uploadedFileId = entry.uploadedFileId;
+              let telegramFileId = entry.telegramFileId;
+              const entryMime = entry.mimeType || entry.file?.type || selectedItem.mimeType || 'application/octet-stream';
 
-        // If a new file was uploaded to replace it
-        const pendingFile = selectedFiles.find((f) => f.file);
-        if (pendingFile && pendingFile.file && isAutoFile) {
-          setUploadStatus(`Uploading ${pendingFile.name}... 0%`);
-          const fd = new FormData();
-          fd.append('file', pendingFile.file);
-          fd.append('fileName', pendingFile.name);
-          fd.append('fileType', pendingFile.type);
-          const res = await api.uploadFile(fd, (pct) => {
-            setUploadStatus(`Uploading ${pendingFile.name}... ${pct}%`);
-          });
-          uploadedFileId = res.uploadedFileId || res.fileId;
-          telegramFileId = res.fileId;
-          fileName = pendingFile.name;
-          fileType = pendingFile.type;
-          fileSize = pendingFile.size;
+              if (entry.file) {
+                uploadedSoFar++;
+                const progressLabel = pendingCount > 1 ? ` (${uploadedSoFar}/${pendingCount})` : '';
+                setUploadStatus(`Uploading ${entry.name}${progressLabel}... 0%`);
+                const fd = new FormData();
+                fd.append('file', entry.file);
+                fd.append('fileName', entry.name);
+                fd.append('fileType', entry.type);
+                const res = await api.uploadFile(fd, (pct) => {
+                  setUploadStatus(`Uploading ${entry.name}${progressLabel}... ${pct}%`);
+                });
+                uploadedFileId = res.uploadedFileId || res.fileId;
+                telegramFileId = res.fileId;
+              }
+
+              finalFiles.push({
+                id: entry.id || uploadedFileId || telegramFileId || `file_${i + 1}`,
+                telegramFileId: telegramFileId || undefined,
+                uploadedFileId: uploadedFileId || undefined,
+                fileType: entry.type,
+                fileName: entry.name,
+                mimeType: entryMime,
+                fileSize: entry.size,
+                caption: entry.caption
+              });
+            }
+          } else if (selectedItem.uploadedFileId || selectedItem.telegramFileId) {
+            finalFiles = [
+              {
+                id: selectedItem.uploadedFileId || selectedItem.telegramFileId || selectedItem.id,
+                telegramFileId: selectedItem.telegramFileId,
+                uploadedFileId: selectedItem.uploadedFileId,
+                fileType: selectedItem.fileType || 'document',
+                fileName: selectedItem.fileName || name.trim(),
+                mimeType: selectedItem.mimeType,
+                fileSize: selectedItem.fileSize
+              }
+            ];
+          }
         }
 
+        const primaryEntry = finalFiles[0];
         await api.updateItem(selectedItem.id, {
           name: name.trim(),
           rawKeyword: cleanKeyword,
           triggerType,
           triggers: [primaryTrigger],
           caption: caption.trim() || undefined,
-          telegramFileId: isAutoFile ? (telegramFileId || undefined) : undefined,
-          uploadedFileId: isAutoFile ? (uploadedFileId || undefined) : undefined,
-          fileType: isAutoFile ? fileType : undefined,
-          fileName: isAutoFile ? fileName : undefined,
-          fileSize: isAutoFile ? fileSize : undefined,
+          files: isAutoFile ? finalFiles : [],
+          telegramFileId: isAutoFile ? (primaryEntry?.telegramFileId || undefined) : undefined,
+          uploadedFileId: isAutoFile ? (primaryEntry?.uploadedFileId || undefined) : undefined,
+          fileType: isAutoFile ? (primaryEntry?.fileType || 'document') : undefined,
+          fileName: isAutoFile ? (primaryEntry?.fileName || name.trim()) : undefined,
+          mimeType: isAutoFile ? primaryEntry?.mimeType : undefined,
+          fileSize: isAutoFile ? primaryEntry?.fileSize : undefined,
           isTextOnly: itemType === 'file' ? isAutoTextOnly : false,
           fileEnabled: itemType === 'file' ? isAutoFile : false,
           url: itemType === 'link' ? url.trim() : undefined,
@@ -460,7 +528,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
           buttonText: buttonText.trim() || undefined,
           replyMessage: caption.trim() || undefined,
           retentionType: itemType === 'file' ? retentionType : undefined,
-          retentionDays: itemType === 'file' && retentionType === 'temporary' ? retentionDays : undefined,
+          retentionDays: itemType === 'file' && retentionType === 'temporary' ? parsedRetentionDays : undefined,
           hasSetupVideo,
           setupVideoUrl: hasSetupVideo ? finalSetupVideoUrl : undefined,
           setupVideoTelegramFileId: hasSetupVideo ? (finalSetupVideoTelegramFileId || undefined) : undefined,
@@ -471,7 +539,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
           setupVideoMessage: hasSetupVideo ? (setupVideoMessage.trim() || undefined) : undefined
         });
       } else {
-        // Create new item(s) - Supports Auto-Detected Text Response & File delivery
+        // Create new item - Supports Auto-Detected Text Response & Combined Multi-File Batch delivery
         if (itemType === 'text' || (itemType === 'file' && isAutoTextOnly)) {
           // Auto-Detected or Explicit Text Response delivery item (no file attachment required)
           await api.createItem({
@@ -487,7 +555,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
             buttonText: buttonText.trim() || '💬 View Message',
             replyMessage: caption.trim() || undefined,
             retentionType,
-            retentionDays: retentionType === 'temporary' ? retentionDays : undefined,
+            retentionDays: retentionType === 'temporary' ? parsedRetentionDays : undefined,
             hasSetupVideo,
             setupVideoUrl: hasSetupVideo ? finalSetupVideoUrl : undefined,
             setupVideoTelegramFileId: hasSetupVideo ? (finalSetupVideoTelegramFileId || undefined) : undefined,
@@ -498,70 +566,70 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
             setupVideoMessage: hasSetupVideo ? (setupVideoMessage.trim() || undefined) : undefined
           });
         } else if (itemType === 'file') {
-          // File Delivery: If multiple files selected, save all of them
+          // File Delivery: Store all attached files together inside a single combined item
+          const finalFiles: ItemFileEntry[] = [];
           for (let i = 0; i < selectedFiles.length; i++) {
             const entry = selectedFiles[i];
             let uploadedFileId: string | undefined = entry.uploadedFileId;
             let telegramFileId: string | undefined = entry.telegramFileId;
 
             if (entry.file) {
-              setUploadStatus(`Uploading ${entry.name} (${i + 1}/${selectedFiles.length})... 0%`);
+              const progressLabel = selectedFiles.length > 1 ? ` (${i + 1}/${selectedFiles.length})` : '';
+              setUploadStatus(`Uploading ${entry.name}${progressLabel}... 0%`);
               const fd = new FormData();
               fd.append('file', entry.file);
               fd.append('fileName', entry.name);
               fd.append('fileType', entry.type);
               const res = await api.uploadFile(fd, (pct) => {
-                setUploadStatus(`Uploading ${entry.name} (${i + 1}/${selectedFiles.length})... ${pct}%`);
+                setUploadStatus(`Uploading ${entry.name}${progressLabel}... ${pct}%`);
               });
               uploadedFileId = res.uploadedFileId || res.fileId;
               telegramFileId = res.fileId;
             }
 
-            const itemName = selectedFiles.length > 1
-              ? `${name.trim()} (${i + 1})`
-              : name.trim();
-
-            const itemKeyword = selectedFiles.length > 1 && i > 0
-              ? `${cleanKeyword}${i + 1}`
-              : cleanKeyword;
-
-            const itemTrigger = triggerType === 'hashtag'
-              ? `#${itemKeyword}`
-              : triggerType === 'slash'
-              ? `/${itemKeyword}`
-              : itemKeyword;
-
-            const targetId = i === 0 ? autoGeneratedId : generateRandomId('file');
-
-            await api.createItem({
-              id: targetId,
-              name: itemName,
-              type: 'file',
-              isTextOnly: false,
-              fileEnabled: true,
-              rawKeyword: itemKeyword,
-              triggerType,
-              triggers: [itemTrigger],
-              caption: caption.trim() || undefined,
+            finalFiles.push({
+              id: entry.id || uploadedFileId || telegramFileId || `file_${i + 1}`,
               telegramFileId,
               uploadedFileId,
               fileType: entry.type,
               fileName: entry.name,
+              mimeType: entry.mimeType || entry.file?.type || 'application/octet-stream',
               fileSize: entry.size,
-              buttonText: buttonText.trim() || undefined,
-              replyMessage: caption.trim() || undefined,
-              retentionType,
-              retentionDays: retentionType === 'temporary' ? retentionDays : undefined,
-              hasSetupVideo,
-              setupVideoUrl: hasSetupVideo ? finalSetupVideoUrl : undefined,
-              setupVideoTelegramFileId: hasSetupVideo ? (finalSetupVideoTelegramFileId || undefined) : undefined,
-              setupVideoType: hasSetupVideo ? setupVideoChoice : undefined,
-              setupVideoFileName: hasSetupVideo ? finalSetupVideoFileName : undefined,
-              setupVideoButtonText: hasSetupVideo ? (setupVideoButtonText.trim() || '🎬 Setup Video') : undefined,
-              setupResourceButtonText: hasSetupVideo ? (setupResourceButtonText.trim() || '📁 Get File') : undefined,
-              setupVideoMessage: hasSetupVideo ? (setupVideoMessage.trim() || undefined) : undefined
+              caption: entry.caption
             });
           }
+
+          const primaryEntry = finalFiles[0];
+          await api.createItem({
+            id: autoGeneratedId,
+            name: name.trim(),
+            type: 'file',
+            isTextOnly: false,
+            fileEnabled: true,
+            rawKeyword: cleanKeyword,
+            triggerType,
+            triggers: [primaryTrigger],
+            caption: caption.trim() || undefined,
+            files: finalFiles,
+            telegramFileId: primaryEntry?.telegramFileId,
+            uploadedFileId: primaryEntry?.uploadedFileId,
+            fileType: primaryEntry?.fileType || 'document',
+            fileName: primaryEntry?.fileName || name.trim(),
+            mimeType: primaryEntry?.mimeType,
+            fileSize: primaryEntry?.fileSize,
+            buttonText: buttonText.trim() || undefined,
+            replyMessage: caption.trim() || undefined,
+            retentionType,
+            retentionDays: retentionType === 'temporary' ? parsedRetentionDays : undefined,
+            hasSetupVideo,
+            setupVideoUrl: hasSetupVideo ? finalSetupVideoUrl : undefined,
+            setupVideoTelegramFileId: hasSetupVideo ? (finalSetupVideoTelegramFileId || undefined) : undefined,
+            setupVideoType: hasSetupVideo ? setupVideoChoice : undefined,
+            setupVideoFileName: hasSetupVideo ? finalSetupVideoFileName : undefined,
+            setupVideoButtonText: hasSetupVideo ? (setupVideoButtonText.trim() || '🎬 Setup Video') : undefined,
+            setupResourceButtonText: hasSetupVideo ? (setupResourceButtonText.trim() || '📁 Get File') : undefined,
+            setupVideoMessage: hasSetupVideo ? (setupVideoMessage.trim() || undefined) : undefined
+          });
         } else {
           // Link Item
           await api.createItem({
@@ -576,7 +644,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
             buttonText: buttonText.trim() || (openMode === 'webapp' ? '📱 Launch App' : '🌐 Open Link'),
             replyMessage: caption.trim() || `🔗 Here is your requested link: ${url.trim()}`,
             retentionType,
-            retentionDays: retentionType === 'temporary' ? retentionDays : undefined,
+            retentionDays: retentionType === 'temporary' ? parsedRetentionDays : undefined,
             hasSetupVideo,
             setupVideoUrl: hasSetupVideo ? finalSetupVideoUrl : undefined,
             setupVideoTelegramFileId: hasSetupVideo ? (finalSetupVideoTelegramFileId || undefined) : undefined,
@@ -792,6 +860,9 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                       <span className="text-sm font-bold text-white truncate">
                         {item.name}
                       </span>
+                      {!item.isTextOnly && item.files && item.files.length > 1 && (
+                        <span className="text-[11px] font-medium text-sky-300/85 shrink-0">· {item.files.length} files</span>
+                      )}
                       {item.status === 'disabled' && (
                         <span className="text-[11px] font-medium text-zinc-400 shrink-0">· Off</span>
                       )}
@@ -859,7 +930,13 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                       {item.type === 'file' && (
                         <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800/80 text-xs text-zinc-300 space-y-1.5">
                           <div className="flex items-center justify-between gap-2 min-w-0 text-[11px] text-zinc-400">
-                            <span className="min-w-0 flex-1 truncate">{item.isTextOnly ? 'Delivery: Only Text (No File Attachment)' : `File: ${item.fileName || 'Telegram Media'}`}</span>
+                            <span className="min-w-0 flex-1 truncate">
+                              {item.isTextOnly
+                                ? 'Delivery: Only Text (No File Attachment)'
+                                : item.files && item.files.length > 1
+                                ? `Batch (${item.files.length} files): ${item.files.map((f, idx) => f.fileName || `File ${idx + 1}`).join(', ')}`
+                                : `File: ${item.fileName || 'Telegram Media'}`}
+                            </span>
                             <span className="font-mono text-[10px] bg-zinc-950 px-1.5 py-0.5 rounded border border-zinc-800 text-zinc-400 shrink-0">
                               ID: {item.id}
                             </span>
@@ -1561,10 +1638,10 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                         <div className="pt-2 border-t border-zinc-800/80 space-y-2.5 animate-in fade-in duration-150">
                           <div className="flex items-center justify-between">
                             <label className="text-xs font-semibold text-amber-300">
-                              Expiration Duration (Days)
+                              Expiration Duration (Days) *
                             </label>
                             <span className="text-[11px] text-zinc-400">
-                              {retentionDays} Days
+                              {retentionDays.trim() ? `${retentionDays} Days` : 'Required'}
                             </span>
                           </div>
 
@@ -1573,10 +1650,14 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                               type="number"
                               min="1"
                               max="3650"
+                              required={retentionType === 'temporary'}
+                              placeholder="Days"
                               value={retentionDays}
                               onChange={(e) => {
-                                const val = Math.max(1, parseInt(e.target.value, 10) || 1);
-                                setRetentionDays(val);
+                                const raw = e.target.value;
+                                if (raw === '' || /^\d+$/.test(raw)) {
+                                  setRetentionDays(raw);
+                                }
                               }}
                               className="w-20 bg-zinc-950 border border-amber-500/40 rounded-xl py-1.5 px-3 text-sm text-white font-mono font-bold focus:outline-none focus:border-amber-400"
                             />
@@ -1588,9 +1669,9 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                                 <button
                                   key={d}
                                   type="button"
-                                  onClick={() => setRetentionDays(d)}
+                                  onClick={() => setRetentionDays(String(d))}
                                   className={`px-2 py-1 rounded-lg text-[10px] font-semibold border transition-all cursor-pointer ${
-                                    retentionDays === d
+                                    Number(retentionDays) === d
                                       ? 'bg-amber-500 text-zinc-950 border-amber-400 font-bold'
                                       : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border-zinc-700'
                                   }`}
@@ -1604,7 +1685,17 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                           <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200 flex items-center gap-2">
                             <Calendar className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                             <span>
-                              Expires: <strong className="text-white">{new Date(Date.now() + (retentionDays || 1) * 86400000).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })}</strong>
+                              {(() => {
+                                const d = parseInt(retentionDays, 10);
+                                if (!retentionDays.trim() || !Number.isFinite(d) || d < 1) {
+                                  return <span className="text-amber-300">Enter days (min 1)</span>;
+                                }
+                                return (
+                                  <>
+                                    Expires: <strong className="text-white">{new Date(Date.now() + d * 86400000).toLocaleDateString('en-US', { day: 'numeric', month: 'short', year: 'numeric' })}</strong>
+                                  </>
+                                );
+                              })()}
                             </span>
                           </div>
                         </div>

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import multer from 'multer';
 import dotenv from 'dotenv';
-import { storage, StorageManager, storageContext, AdminUser, ItemRecord, TriggerType, OpenMode, ClonedBotRecord, SharedStorageService, KeyPoolRecord } from './storage';
+import { storage, StorageManager, storageContext, AdminUser, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ClonedBotRecord, SharedStorageService, KeyPoolRecord } from './storage';
 import { TelegramService, TelegramBotManager, BotSingletonLock, getItemPayload } from './telegram';
 import { hashPassword, verifyPassword, signSessionToken, verifySessionToken } from './auth';
 
@@ -1818,7 +1818,17 @@ apiRouter.put('/reports/:id', authenticate, async (req: Request, res: Response) 
       }
     }
 
-    const updated = await storage.updateReportStatus(reportId, status || 'resolved', admin?.id);
+    const targetStatus = status || 'resolved';
+    const outcome: 'banned' | 'dismissed' | 'resolved' = banUser
+      ? 'banned'
+      : targetStatus === 'dismissed'
+      ? 'dismissed'
+      : 'resolved';
+
+    const updated = await storage.updateReportStatus(reportId, targetStatus, admin?.id, outcome);
+    if (targetStatus === 'dismissed' || targetStatus === 'resolved') {
+      TelegramService.syncAdminReportMessages(updated || report, outcome).catch(() => {});
+    }
     return res.json({ success: true, report: updated });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to update report' });
@@ -2212,7 +2222,14 @@ apiRouter.post('/items', authenticate, async (req: Request, res: Response) => {
   // 3. Otherwise: 'file'
   const isExplicitLink = rawType === 'link' || Boolean(url && String(url).trim().match(/^https?:\/\//i));
   const isExplicitText = rawType === 'text' || req.body.isTextOnly === true || req.body.fileEnabled === false;
-  const hasFilesAttached = Boolean(telegramFileId || uploadedFileId || req.body.hasFiles || fileType);
+  const rawFilesInput: any[] | undefined = Array.isArray(req.body.files) ? req.body.files : undefined;
+  const hasFilesAttached = Boolean(
+    telegramFileId ||
+    uploadedFileId ||
+    req.body.hasFiles ||
+    fileType ||
+    (rawFilesInput && rawFilesInput.length > 0)
+  );
 
   let type: 'file' | 'link' = isExplicitLink ? 'link' : 'file';
   const isTextOnly = !isExplicitLink && (isExplicitText || (!hasFilesAttached && (Boolean(caption) || Boolean(replyMessage))));
@@ -2224,7 +2241,8 @@ apiRouter.post('/items', authenticate, async (req: Request, res: Response) => {
     return res.status(403).json({ error: 'Permission denied: Cannot add links' });
   }
 
-  const resolvedName = (name && String(name).trim()) || (isTextOnly ? `Text: ${cleanKeyword}` : (fileName || `Item ${cleanKeyword}`));
+  const firstFileName = rawFilesInput && rawFilesInput[0]?.fileName ? String(rawFilesInput[0].fileName) : undefined;
+  const resolvedName = (name && String(name).trim()) || (isTextOnly ? `Text: ${cleanKeyword}` : (fileName || firstFileName || `Item ${cleanKeyword}`));
 
   const tType: TriggerType = triggerType || 'hashtag';
   const primaryTrigger = tType === 'hashtag' ? `#${cleanKeyword}` : tType === 'slash' ? `/${cleanKeyword}` : cleanKeyword;
@@ -2271,6 +2289,42 @@ apiRouter.post('/items', authenticate, async (req: Request, res: Response) => {
       item.fileSize = undefined;
       item.telegramFileId = undefined;
       item.uploadedFileId = undefined;
+      item.files = undefined;
+      item.buttonText = buttonText || undefined;
+    } else if (rawFilesInput && rawFilesInput.length > 0) {
+      const normalizedFiles: ItemFileEntry[] = [];
+      for (let i = 0; i < rawFilesInput.length; i++) {
+        const f = rawFilesInput[i] || {};
+        const fTgId = f.telegramFileId ? String(f.telegramFileId) : '';
+        const fUpId = f.uploadedFileId
+          ? String(f.uploadedFileId)
+          : (fTgId && (fTgId.startsWith('upload_') || fTgId.startsWith('local_') || fTgId.startsWith('phone_')) ? fTgId : undefined);
+        let fSize = Number(f.fileSize) || 0;
+        if (!fSize && fUpId) {
+          const up = await storage.getUploadedFile(fUpId);
+          if (up) fSize = up.size;
+        }
+        normalizedFiles.push({
+          id: f.id ? String(f.id) : (fUpId || fTgId || `file_${i + 1}`),
+          telegramFileId: fTgId || undefined,
+          telegramFileUniqueId: f.telegramFileUniqueId ? String(f.telegramFileUniqueId) : undefined,
+          uploadedFileId: fUpId,
+          fileType: f.fileType || 'document',
+          fileName: f.fileName ? String(f.fileName) : (fileName || name || `File ${i + 1}`),
+          mimeType: f.mimeType ? String(f.mimeType) : '',
+          fileSize: fSize,
+          caption: f.caption ? String(f.caption) : undefined
+        });
+      }
+      const primary = normalizedFiles[0];
+      item.files = normalizedFiles;
+      item.telegramFileId = primary.telegramFileId || '';
+      item.uploadedFileId = primary.uploadedFileId;
+      item.fileType = primary.fileType || 'document';
+      item.fileName = primary.fileName || name;
+      item.fileSize = primary.fileSize || 0;
+      item.mimeType = primary.mimeType || '';
+      item.caption = caption || primary.caption || undefined;
       item.buttonText = buttonText || undefined;
     } else {
       item.telegramFileId = telegramFileId || '';
@@ -2289,6 +2343,18 @@ apiRouter.post('/items', authenticate, async (req: Request, res: Response) => {
       item.mimeType = mimeType || '';
       item.caption = caption || undefined;
       item.buttonText = buttonText || undefined;
+      item.files = [
+        {
+          id: item.uploadedFileId || item.telegramFileId || item.id,
+          telegramFileId: item.telegramFileId || undefined,
+          uploadedFileId: item.uploadedFileId,
+          fileType: item.fileType,
+          fileName: item.fileName,
+          mimeType: item.mimeType,
+          fileSize: item.fileSize,
+          caption: item.caption
+        }
+      ];
     }
   } else if (type === 'link') {
     item.url = url;
@@ -2374,6 +2440,54 @@ apiRouter.put('/items/:id', authenticate, async (req: Request, res: Response) =>
     finalExpiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
   }
 
+  let nextFiles: ItemFileEntry[] | undefined = existing.files;
+  let nextTelegramFileId = telegramFileId !== undefined ? telegramFileId : existing.telegramFileId;
+  let nextUploadedFileId = uploadedFileId !== undefined
+    ? uploadedFileId
+    : (telegramFileId && (telegramFileId.startsWith('upload_') || telegramFileId.startsWith('local_') || telegramFileId.startsWith('phone_')) ? telegramFileId : existing.uploadedFileId);
+  let nextFileType = fileType !== undefined ? fileType : existing.fileType;
+  let nextFileName = fileName !== undefined ? fileName : existing.fileName;
+  let nextFileSize = req.body.fileSize !== undefined ? req.body.fileSize : existing.fileSize;
+  let nextMimeType = req.body.mimeType !== undefined ? req.body.mimeType : existing.mimeType;
+
+  if (req.body.isTextOnly === true || req.body.fileEnabled === false) {
+    nextFiles = undefined;
+  } else if (Array.isArray(req.body.files)) {
+    const normalized: ItemFileEntry[] = [];
+    for (let i = 0; i < req.body.files.length; i++) {
+      const f = req.body.files[i] || {};
+      const fTgId = f.telegramFileId ? String(f.telegramFileId) : '';
+      const fUpId = f.uploadedFileId
+        ? String(f.uploadedFileId)
+        : (fTgId && (fTgId.startsWith('upload_') || fTgId.startsWith('local_') || fTgId.startsWith('phone_')) ? fTgId : undefined);
+      let fSize = Number(f.fileSize) || 0;
+      if (!fSize && fUpId) {
+        const up = await storage.getUploadedFile(fUpId);
+        if (up) fSize = up.size;
+      }
+      normalized.push({
+        id: f.id ? String(f.id) : (fUpId || fTgId || `file_${i + 1}`),
+        telegramFileId: fTgId || undefined,
+        telegramFileUniqueId: f.telegramFileUniqueId ? String(f.telegramFileUniqueId) : undefined,
+        uploadedFileId: fUpId,
+        fileType: f.fileType || 'document',
+        fileName: f.fileName ? String(f.fileName) : existing.fileName || existing.name,
+        mimeType: f.mimeType ? String(f.mimeType) : '',
+        fileSize: fSize,
+        caption: f.caption ? String(f.caption) : undefined
+      });
+    }
+    nextFiles = normalized;
+    if (normalized.length > 0) {
+      nextTelegramFileId = normalized[0].telegramFileId || '';
+      nextUploadedFileId = normalized[0].uploadedFileId;
+      nextFileType = normalized[0].fileType || 'document';
+      nextFileName = normalized[0].fileName;
+      nextFileSize = normalized[0].fileSize;
+      nextMimeType = normalized[0].mimeType;
+    }
+  }
+
   const updated: ItemRecord = {
     ...existing,
     name: name !== undefined ? String(name).trim() : existing.name,
@@ -2383,13 +2497,14 @@ apiRouter.put('/items/:id', authenticate, async (req: Request, res: Response) =>
     status: status !== undefined ? (status === 'disabled' ? 'disabled' : 'active') : existing.status,
     maintenance: req.body.maintenance !== undefined ? Boolean(req.body.maintenance) : Boolean(existing.maintenance),
     caption: caption !== undefined ? caption : (req.body.replyMessage !== undefined ? req.body.replyMessage : existing.caption),
-    telegramFileId: telegramFileId !== undefined ? telegramFileId : existing.telegramFileId,
-    uploadedFileId: uploadedFileId !== undefined 
-      ? uploadedFileId 
-      : (telegramFileId && (telegramFileId.startsWith('upload_') || telegramFileId.startsWith('local_') || telegramFileId.startsWith('phone_')) ? telegramFileId : existing.uploadedFileId),
+    telegramFileId: nextTelegramFileId,
+    uploadedFileId: nextUploadedFileId,
     fileBase64: undefined,
-    fileType: fileType !== undefined ? fileType : existing.fileType,
-    fileName: fileName !== undefined ? fileName : existing.fileName,
+    fileType: nextFileType,
+    fileName: nextFileName,
+    fileSize: nextFileSize,
+    mimeType: nextMimeType,
+    files: nextFiles,
     url: url !== undefined ? url : existing.url,
     openMode: openMode !== undefined ? openMode : existing.openMode,
     buttonText: buttonText !== undefined ? buttonText : existing.buttonText,

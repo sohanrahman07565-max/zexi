@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { storage, ItemRecord, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord, SharedStorageService, AdminUser, BotOperationalMode } from './storage';
+import { storage, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord, SharedStorageService, AdminUser, BotOperationalMode, UserReportRecord, AdminReportMessageRef } from './storage';
 import { hashPassword, signSessionToken } from './auth';
 import { PostBotEngine } from './postBot';
 import { ImageUrlBotEngine } from './imageUrlBot';
@@ -2582,6 +2582,101 @@ export class TelegramService {
     }
   }
 
+  public static async syncAdminReportMessages(
+    report: UserReportRecord | null | undefined,
+    outcome: 'dismissed' | 'banned' | 'resolved',
+    options?: {
+      fallbackChatId?: string | number;
+      fallbackMessageId?: number;
+      fallbackPlainText?: string;
+    }
+  ): Promise<void> {
+    const statusLine =
+      outcome === 'dismissed'
+        ? '✅ <b>Dismissed by admin</b>'
+        : outcome === 'banned'
+        ? '🚫 <b>Banned by admin</b>'
+        : '✅ <b>Resolved by admin</b>';
+
+    let baseHtml = report?.adminReportMessageText ? String(report.adminReportMessageText).trim() : '';
+    if (!baseHtml) {
+      if (report) {
+        const reportedIdentity = this.formatUserIdentity(
+          report.reportedUserName || 'User',
+          report.reportedUserUsername,
+          report.reportedUserId
+        );
+        const reporterIdentity = this.formatUserIdentity(
+          report.reporterName || 'User',
+          report.reporterUsername,
+          report.reporterId
+        );
+        const snippetHtml = report.reportedContent
+          ? `\n💬 <b>Content Snippet:</b>\n<blockquote>${this.escapeHtml(String(report.reportedContent).slice(0, 300))}</blockquote>`
+          : '';
+        baseHtml =
+          `🚨 <b>New User Report Filed</b>\n\n` +
+          `• 👤 <b>Reported User:</b> ${reportedIdentity}\n` +
+          `• 📢 <b>Reported By:</b> ${reporterIdentity}\n` +
+          `• 👥 <b>Chat / Source:</b> <code>${this.escapeHtml(report.chatTitle || 'Chat')}</code> (<code>${this.escapeHtml(String(report.chatId || ''))}</code>)\n` +
+          `• 📝 <b>Reason:</b> <i>${this.escapeHtml(report.reason || '')}</i>` +
+          snippetHtml;
+      } else {
+        baseHtml = this.escapeHtml(String(options?.fallbackPlainText || '🚨 User Report').trim());
+      }
+    }
+
+    const finalText = `${baseHtml}\n\n${statusLine}`;
+    const targetsMap = new Map<string, AdminReportMessageRef>();
+
+    if (Array.isArray(report?.adminMessages)) {
+      for (const ref of report.adminMessages) {
+        const cId = String(ref?.chatId || '').trim();
+        const mId = Number(ref?.messageId);
+        if (cId && Number.isFinite(mId) && mId > 0) {
+          targetsMap.set(`${cId}:${mId}`, { chatId: cId, messageId: mId });
+        }
+      }
+    }
+
+    if (options?.fallbackChatId && options?.fallbackMessageId) {
+      const cId = String(options.fallbackChatId).trim();
+      const mId = Number(options.fallbackMessageId);
+      if (cId && Number.isFinite(mId) && mId > 0) {
+        targetsMap.set(`${cId}:${mId}`, { chatId: cId, messageId: mId });
+      }
+    }
+
+    if (targetsMap.size === 0) return;
+
+    await Promise.allSettled(
+      Array.from(targetsMap.values()).map(async (target) => {
+        try {
+          const editRes = await this.callTelegramApi('editMessageText', {
+            chat_id: target.chatId,
+            message_id: target.messageId,
+            text: finalText,
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: [] }
+          });
+          if (!editRes?.ok) {
+            await this.callTelegramApi('editMessageReplyMarkup', {
+              chat_id: target.chatId,
+              message_id: target.messageId,
+              reply_markup: { inline_keyboard: [] }
+            }).catch(() => {});
+          }
+        } catch {
+          await this.callTelegramApi('editMessageReplyMarkup', {
+            chat_id: target.chatId,
+            message_id: target.messageId,
+            reply_markup: { inline_keyboard: [] }
+          }).catch(() => {});
+        }
+      })
+    );
+  }
+
   public static async checkUserForceSub(
     userId: string | number,
     username?: string,
@@ -4137,18 +4232,29 @@ export class TelegramService {
         ]
       };
 
+      const sentAdminMessages: AdminReportMessageRef[] = [];
       for (const adminId of adminTargetIds) {
         try {
-          await this.callTelegramApi('sendMessage', {
+          const sent = await this.callTelegramApi('sendMessage', {
             chat_id: adminId,
             text: adminReportMsg,
             parse_mode: 'HTML',
             reply_markup: keyboard
           });
+          const sentMsgId = Number(sent?.result?.message_id);
+          if (sent?.ok && Number.isFinite(sentMsgId) && sentMsgId > 0) {
+            sentAdminMessages.push({ chatId: String(adminId), messageId: sentMsgId });
+          }
         } catch (e) {
           console.warn(`[Telegram] Failed to notify admin ${adminId} of report:`, e);
         }
       }
+
+      await storage.saveReport({
+        ...report,
+        adminReportMessageText: adminReportMsg,
+        adminMessages: sentAdminMessages
+      });
 
       // Delete the /report command message from the group only for non-admin members
       if (!isOfficial && message.message_id) {
@@ -5299,6 +5405,7 @@ export class TelegramService {
       const settings = await storage.getSettings();
       const adminTargetIds = new Set<string>();
       if (settings.rootAdminId) adminTargetIds.add(String(settings.rootAdminId).trim());
+      if (process.env.ADMIN_ID) adminTargetIds.add(String(process.env.ADMIN_ID).trim());
       if (process.env.ROOT_ADMIN_ID) adminTargetIds.add(String(process.env.ROOT_ADMIN_ID).trim());
       for (const a of admins) {
         if (a.telegramId) adminTargetIds.add(String(a.telegramId).trim());
@@ -5321,18 +5428,29 @@ export class TelegramService {
         ]
       };
 
+      const sentAdminMessages: AdminReportMessageRef[] = [];
       for (const adminId of adminTargetIds) {
         try {
-          await this.callTelegramApi('sendMessage', {
+          const sent = await this.callTelegramApi('sendMessage', {
             chat_id: adminId,
             text: adminReportMsg,
             parse_mode: 'HTML',
             reply_markup: keyboard
           });
+          const sentMsgId = Number(sent?.result?.message_id);
+          if (sent?.ok && Number.isFinite(sentMsgId) && sentMsgId > 0) {
+            sentAdminMessages.push({ chatId: String(adminId), messageId: sentMsgId });
+          }
         } catch (e) {
           console.warn(`[Telegram] Failed to notify admin ${adminId} of DM report:`, e);
         }
       }
+
+      await storage.saveReport({
+        ...report,
+        adminReportMessageText: adminReportMsg,
+        adminMessages: sentAdminMessages
+      });
 
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
@@ -6571,185 +6689,239 @@ export class TelegramService {
           console.warn('[Telegram] Only-Text delivery failed:', res?.description);
         }
       } else if (item.type === 'file') {
-        const caption = item.caption ? item.caption : undefined;
-        let fileIdOrUrl = item.telegramFileId || item.url;
+        const fileEntries: ItemFileEntry[] =
+          Array.isArray(item.files) && item.files.length > 0
+            ? item.files
+            : [
+                {
+                  id: item.uploadedFileId || item.telegramFileId || item.id,
+                  telegramFileId: item.telegramFileId,
+                  telegramFileUniqueId: item.telegramFileUniqueId,
+                  uploadedFileId: item.uploadedFileId,
+                  fileBase64: item.fileBase64,
+                  fileType: item.fileType || 'document',
+                  fileName: item.fileName || item.name || 'file',
+                  mimeType: item.mimeType,
+                  fileSize: item.fileSize,
+                  caption: item.caption
+                }
+              ];
 
-        const isLocalIdentifier = Boolean(fileIdOrUrl && (
-          fileIdOrUrl.startsWith('upload_') || 
-          fileIdOrUrl.startsWith('local_') || 
-          fileIdOrUrl.startsWith('phone_')
-        ));
+        const deliveredMessageIds: number[] = [];
+        const failedFiles: Array<{ name: string; error: string }> = [];
+        let itemDirty = false;
 
-        // Helper to lazily load uploaded buffer ONLY if needed (eliminates latency when telegramFileId is already cached)
-        const loadUploadedFileBuffer = async () => {
-          const uploadRef = item!.uploadedFileId || item!.telegramFileId || item!.id;
-          let uf = uploadRef ? await storage.getUploadedFile(uploadRef) : null;
-          if (!uf && item!.id) {
-            uf = await storage.getUploadedFile(item!.id);
-          }
-          if (!uf && item!.telegramFileId) {
-            uf = await storage.getUploadedFile(item!.telegramFileId);
-          }
-          if (!uf && item!.fileBase64) {
-            try {
-              const buf = Buffer.from(item!.fileBase64.replace(/^data:[^;]+;base64,/, ''), 'base64');
-              uf = {
-                id: item!.uploadedFileId || item!.id,
-                fileName: item!.fileName || item!.name || 'file',
-                fileType: item!.fileType || 'document',
-                mimeType: item!.mimeType || 'application/octet-stream',
-                size: buf.length,
-                buffer: buf,
-                createdAt: item!.createdAt
-              };
-            } catch {}
-          }
-          if (!uf && item!.url && item!.url.startsWith('data:')) {
-            try {
-              const matches = item!.url.match(/^data:([^;]+);base64,(.+)$/);
-              if (matches) {
-                const buf = Buffer.from(matches[2], 'base64');
+        for (let idx = 0; idx < fileEntries.length; idx++) {
+          const entry = fileEntries[idx];
+          const isLastEntry = idx === fileEntries.length - 1;
+          const entryKeyboard = isLastEntry ? backKeyboard : undefined;
+          const entryCaption = entry.caption ? entry.caption : (idx === 0 && item.caption ? item.caption : undefined);
+          const entryFileType = entry.fileType || item.fileType || 'document';
+          const fileIdOrUrl = entry.telegramFileId || (idx === 0 ? (item.telegramFileId || item.url) : undefined);
+
+          const isLocalIdentifier = Boolean(fileIdOrUrl && (
+            fileIdOrUrl.startsWith('upload_') ||
+            fileIdOrUrl.startsWith('local_') ||
+            fileIdOrUrl.startsWith('phone_')
+          ));
+
+          const loadUploadedFileBuffer = async () => {
+            const uploadRef = entry.uploadedFileId || entry.telegramFileId || entry.id || (idx === 0 ? (item!.uploadedFileId || item!.telegramFileId || item!.id) : undefined);
+            let uf = uploadRef ? await storage.getUploadedFile(uploadRef) : null;
+            if (!uf && idx === 0 && item!.id) {
+              uf = await storage.getUploadedFile(item!.id);
+            }
+            if (!uf && entry.telegramFileId) {
+              uf = await storage.getUploadedFile(entry.telegramFileId);
+            }
+            const rawB64 = entry.fileBase64 || (idx === 0 ? item!.fileBase64 : undefined);
+            if (!uf && rawB64) {
+              try {
+                const buf = Buffer.from(rawB64.replace(/^data:[^;]+;base64,/, ''), 'base64');
                 uf = {
-                  id: item!.id,
-                  fileName: item!.fileName || item!.name,
-                  fileType: item!.fileType || 'document',
-                  mimeType: matches[1],
+                  id: entry.uploadedFileId || entry.id || item!.id,
+                  fileName: entry.fileName || item!.fileName || item!.name || 'file',
+                  fileType: entryFileType,
+                  mimeType: entry.mimeType || item!.mimeType || 'application/octet-stream',
                   size: buf.length,
                   buffer: buf,
                   createdAt: item!.createdAt
                 };
-              }
-            } catch {}
-          }
-          return uf;
-        };
+              } catch {}
+            }
+            if (!uf && idx === 0 && item!.url && item!.url.startsWith('data:')) {
+              try {
+                const matches = item!.url.match(/^data:([^;]+);base64,(.+)$/);
+                if (matches) {
+                  const buf = Buffer.from(matches[2], 'base64');
+                  uf = {
+                    id: item!.id,
+                    fileName: item!.fileName || item!.name,
+                    fileType: entryFileType,
+                    mimeType: matches[1],
+                    size: buf.length,
+                    buffer: buf,
+                    createdAt: item!.createdAt
+                  };
+                }
+              } catch {}
+            }
+            return uf;
+          };
 
-        let uploadedFile = (isLocalIdentifier || !fileIdOrUrl) ? await loadUploadedFileBuffer() : null;
+          let uploadedFile = (isLocalIdentifier || !fileIdOrUrl) ? await loadUploadedFileBuffer() : null;
+          let res: any = null;
 
-        let res: any = null;
-
-        // Priority 1: If it's a local upload ID and we have the uploaded file buffer, deliver directly via multipart!
-        if (isLocalIdentifier && uploadedFile) {
-          console.info('[Telegram] Delivering uploaded file directly via multipart buffer to chat:', chatId, 'file:', uploadedFile.fileName);
-          res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, caption, backKeyboard);
-          if (res && res.ok) {
-            // Save newly assigned Telegram file_id to item for fast future caching
-            const realFileId = res.result?.document?.file_id || 
-              (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
-              res.result?.video?.file_id ||
-              res.result?.audio?.file_id;
-            if (realFileId) {
-              item.telegramFileId = realFileId;
-              item.uploadedFileId = uploadedFile.id;
-              await storage.saveItem(item);
-              console.info('[Telegram] Cached real Telegram file_id into item:', realFileId);
-            }
-          }
-        } else if (fileIdOrUrl && !isLocalIdentifier) {
-          // Priority 2: Try Telegram API with remote file_id or URL
-          if (item.fileType === 'photo') {
-            res = await this.callTelegramApi('sendPhoto', {
-              chat_id: chatId,
-              photo: fileIdOrUrl,
-              ...(caption ? { caption } : {}),
-              ...(backKeyboard ? { reply_markup: backKeyboard } : {})
-            });
-            if (!res.ok) {
-              res = await this.callTelegramApi('sendDocument', {
-                chat_id: chatId,
-                document: fileIdOrUrl,
-                ...(caption ? { caption } : {}),
-                ...(backKeyboard ? { reply_markup: backKeyboard } : {})
-              });
-            }
-          } else if (item.fileType === 'video') {
-            res = await this.callTelegramApi('sendVideo', {
-              chat_id: chatId,
-              video: fileIdOrUrl,
-              ...(caption ? { caption } : {}),
-              ...(backKeyboard ? { reply_markup: backKeyboard } : {})
-            });
-            if (!res.ok) {
-              res = await this.callTelegramApi('sendDocument', {
-                chat_id: chatId,
-                document: fileIdOrUrl,
-                ...(caption ? { caption } : {}),
-                ...(backKeyboard ? { reply_markup: backKeyboard } : {})
-              });
-            }
-          } else if (item.fileType === 'audio') {
-            res = await this.callTelegramApi('sendAudio', {
-              chat_id: chatId,
-              audio: fileIdOrUrl,
-              ...(caption ? { caption } : {}),
-              ...(backKeyboard ? { reply_markup: backKeyboard } : {})
-            });
-            if (!res.ok) {
-              res = await this.callTelegramApi('sendDocument', {
-                chat_id: chatId,
-                document: fileIdOrUrl,
-                ...(caption ? { caption } : {}),
-                ...(backKeyboard ? { reply_markup: backKeyboard } : {})
-              });
-            }
-          } else {
-            res = await this.callTelegramApi('sendDocument', {
-              chat_id: chatId,
-              document: fileIdOrUrl,
-              ...(caption ? { caption } : {}),
-              ...(backKeyboard ? { reply_markup: backKeyboard } : {})
-            });
-          }
-
-          // Fallback if Telegram API rejected remote file_id, lazily load local uploaded buffer if available
-          if (!res || !res.ok) {
-            if (!uploadedFile) {
-              uploadedFile = await loadUploadedFileBuffer();
-            }
-            if (uploadedFile) {
-              console.warn('[Telegram] Remote file_id rejected by Telegram, falling back to direct buffer delivery:', res?.description);
-              res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, caption, backKeyboard);
-              if (res && res.ok) {
-                const realFileId = res.result?.document?.file_id || 
-                  (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
-                  res.result?.video?.file_id ||
-                  res.result?.audio?.file_id;
-                if (realFileId) {
+          // Priority 1: Direct multipart upload buffer for local upload IDs
+          if (isLocalIdentifier && uploadedFile) {
+            console.info('[Telegram] Delivering uploaded file directly via multipart buffer to chat:', chatId, 'file:', uploadedFile.fileName);
+            res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, entryCaption, entryKeyboard);
+            if (res && res.ok) {
+              const realFileId = res.result?.document?.file_id ||
+                (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
+                res.result?.video?.file_id ||
+                res.result?.audio?.file_id;
+              if (realFileId) {
+                entry.telegramFileId = realFileId;
+                entry.uploadedFileId = uploadedFile.id;
+                if (idx === 0) {
                   item.telegramFileId = realFileId;
                   item.uploadedFileId = uploadedFile.id;
-                  storage.saveItem(item).catch(() => {});
+                }
+                itemDirty = true;
+              }
+            }
+          } else if (fileIdOrUrl && !isLocalIdentifier) {
+            // Priority 2: Remote Telegram file_id or URL
+            if (entryFileType === 'photo') {
+              res = await this.callTelegramApi('sendPhoto', {
+                chat_id: chatId,
+                photo: fileIdOrUrl,
+                ...(entryCaption ? { caption: entryCaption } : {}),
+                ...(entryKeyboard ? { reply_markup: entryKeyboard } : {})
+              });
+              if (!res.ok) {
+                res = await this.callTelegramApi('sendDocument', {
+                  chat_id: chatId,
+                  document: fileIdOrUrl,
+                  ...(entryCaption ? { caption: entryCaption } : {}),
+                  ...(entryKeyboard ? { reply_markup: entryKeyboard } : {})
+                });
+              }
+            } else if (entryFileType === 'video') {
+              res = await this.callTelegramApi('sendVideo', {
+                chat_id: chatId,
+                video: fileIdOrUrl,
+                ...(entryCaption ? { caption: entryCaption } : {}),
+                ...(entryKeyboard ? { reply_markup: entryKeyboard } : {})
+              });
+              if (!res.ok) {
+                res = await this.callTelegramApi('sendDocument', {
+                  chat_id: chatId,
+                  document: fileIdOrUrl,
+                  ...(entryCaption ? { caption: entryCaption } : {}),
+                  ...(entryKeyboard ? { reply_markup: entryKeyboard } : {})
+                });
+              }
+            } else if (entryFileType === 'audio') {
+              res = await this.callTelegramApi('sendAudio', {
+                chat_id: chatId,
+                audio: fileIdOrUrl,
+                ...(entryCaption ? { caption: entryCaption } : {}),
+                ...(entryKeyboard ? { reply_markup: entryKeyboard } : {})
+              });
+              if (!res.ok) {
+                res = await this.callTelegramApi('sendDocument', {
+                  chat_id: chatId,
+                  document: fileIdOrUrl,
+                  ...(entryCaption ? { caption: entryCaption } : {}),
+                  ...(entryKeyboard ? { reply_markup: entryKeyboard } : {})
+                });
+              }
+            } else {
+              res = await this.callTelegramApi('sendDocument', {
+                chat_id: chatId,
+                document: fileIdOrUrl,
+                ...(entryCaption ? { caption: entryCaption } : {}),
+                ...(entryKeyboard ? { reply_markup: entryKeyboard } : {})
+              });
+            }
+
+            // Fallback to local uploaded buffer if Telegram rejected file_id
+            if (!res || !res.ok) {
+              if (!uploadedFile) {
+                uploadedFile = await loadUploadedFileBuffer();
+              }
+              if (uploadedFile) {
+                console.warn('[Telegram] Remote file_id rejected by Telegram, falling back to direct buffer delivery:', res?.description);
+                res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, entryCaption, entryKeyboard);
+                if (res && res.ok) {
+                  const realFileId = res.result?.document?.file_id ||
+                    (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
+                    res.result?.video?.file_id ||
+                    res.result?.audio?.file_id;
+                  if (realFileId) {
+                    entry.telegramFileId = realFileId;
+                    entry.uploadedFileId = uploadedFile.id;
+                    if (idx === 0) {
+                      item.telegramFileId = realFileId;
+                      item.uploadedFileId = uploadedFile.id;
+                    }
+                    itemDirty = true;
+                  }
                 }
               }
             }
-          }
-        } else if (uploadedFile) {
-          // Priority 3: No fileIdOrUrl specified but uploadedFile buffer is available
-          console.info('[Telegram] Delivering uploaded file directly to chat:', chatId);
-          res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, caption, backKeyboard);
-          if (res && res.ok) {
-            const realFileId = res.result?.document?.file_id || 
-              (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
-              res.result?.video?.file_id ||
-              res.result?.audio?.file_id;
-            if (realFileId) {
-              item.telegramFileId = realFileId;
-              item.uploadedFileId = uploadedFile.id;
-              await storage.saveItem(item);
+          } else if (uploadedFile) {
+            // Priority 3: Local uploaded buffer directly
+            console.info('[Telegram] Delivering uploaded file directly to chat:', chatId);
+            res = await TelegramService.uploadAndDeliverDirectly(chatId, uploadedFile, entryCaption, entryKeyboard);
+            if (res && res.ok) {
+              const realFileId = res.result?.document?.file_id ||
+                (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
+                res.result?.video?.file_id ||
+                res.result?.audio?.file_id;
+              if (realFileId) {
+                entry.telegramFileId = realFileId;
+                entry.uploadedFileId = uploadedFile.id;
+                if (idx === 0) {
+                  item.telegramFileId = realFileId;
+                  item.uploadedFileId = uploadedFile.id;
+                }
+                itemDirty = true;
+              }
             }
+          }
+
+          if (res && res.ok) {
+            const msgId = res.result?.message_id;
+            if (msgId) {
+              deliveredMessageIds.push(Number(msgId));
+            }
+          } else {
+            const errorDetail = res?.description || (isLocalIdentifier && !uploadedFile ? 'Uploaded file data is not stored or has expired' : 'File identifier could not be verified by Telegram');
+            failedFiles.push({
+              name: entry.fileName || item.fileName || item.name || `File ${idx + 1}`,
+              error: errorDetail
+            });
           }
         }
 
-        if (res && res.ok) {
-          console.info('[Telegram] Successfully delivered file privately to chat:', chatId, 'item:', item.id);
+        if (itemDirty) {
+          if (Array.isArray(item.files) && item.files.length > 0) {
+            item.files = fileEntries;
+          }
+          await storage.saveItem(item).catch(() => {});
+        }
+
+        if (deliveredMessageIds.length > 0 || failedFiles.length < fileEntries.length) {
+          console.info('[Telegram] Successfully delivered file batch privately to chat:', chatId, 'item:', item.id, 'files:', fileEntries.length);
           await storage.incrementItemDelivery(item.id);
 
-          // =========================================================================
-          // 10-MINUTE DELIVERY TIMEOUT & AUTO-REMOVE (SELF-DESTRUCT)
-          // =========================================================================
-          const deliveredMessageId = res.result?.message_id;
-          if (deliveredMessageId) {
-            // Fresh Chat: Record the delivered file message for auto-cleanup on future delivery
-            await storage.recordChatDeliveryMessage(chatId, deliveredMessageId);
+          if (deliveredMessageIds.length > 0) {
+            for (const deliveredMessageId of deliveredMessageIds) {
+              await storage.recordChatDeliveryMessage(chatId, deliveredMessageId);
+            }
 
             try {
               const settings = await storage.getSettings();
@@ -6760,7 +6932,7 @@ export class TelegramService {
               if (autoDeleteEnabled && settings.autoDeleteNoticeEnabled) {
                 const noticeRes = await this.callTelegramApi('sendMessage', {
                   chat_id: chatId,
-                  text: `⏳ <i>This file will automatically self-destruct in ${timeoutMinutes} ${timeoutMinutes === 1 ? 'minute' : 'minutes'}. Please save or forward it now.</i>`,
+                  text: `⏳ <i>${deliveredMessageIds.length > 1 ? 'These files' : 'This file'} will automatically self-destruct in ${timeoutMinutes} ${timeoutMinutes === 1 ? 'minute' : 'minutes'}. Please save or forward ${deliveredMessageIds.length > 1 ? 'them' : 'it'} now.</i>`,
                   parse_mode: 'HTML'
                 });
                 if (noticeRes && noticeRes.ok && noticeRes.result?.message_id) {
@@ -6770,29 +6942,31 @@ export class TelegramService {
               }
 
               if (autoDeleteEnabled) {
-                // Persist scheduled deletion record so it strictly survives restarts and process crashes
-                const sched = await storage.scheduleMessageDeletion({
-                  chatId: String(chatId),
-                  messageId: deliveredMessageId,
-                  companionNoticeId,
-                  timeoutMinutes,
-                  itemTitle: item.fileName || item.name || 'file'
-                });
-
-                // Arm immediate in-memory timer
-                TelegramService.armScheduledDeletionTimer(sched);
-                console.info(`[Telegram] Armed ${timeoutMinutes}-minute auto-delete timer for delivered file message ${deliveredMessageId} in chat ${chatId}`);
+                for (let mIdx = 0; mIdx < deliveredMessageIds.length; mIdx++) {
+                  const deliveredMessageId = deliveredMessageIds[mIdx];
+                  const sched = await storage.scheduleMessageDeletion({
+                    chatId: String(chatId),
+                    messageId: deliveredMessageId,
+                    companionNoticeId: mIdx === 0 ? companionNoticeId : undefined,
+                    timeoutMinutes,
+                    itemTitle: item.fileName || item.name || 'file'
+                  });
+                  TelegramService.armScheduledDeletionTimer(sched);
+                }
+                console.info(`[Telegram] Armed ${timeoutMinutes}-minute auto-delete timer for ${deliveredMessageIds.length} delivered file message(s) in chat ${chatId}`);
               }
             } catch (schedErr) {
               console.warn('[Telegram] Could not schedule message auto-delete:', schedErr);
             }
           }
-        } else {
-          console.warn('[Telegram] Telegram file delivery failed for item:', item.id, 'error:', res?.description);
-          const errorDetail = res?.description || (isLocalIdentifier && !uploadedFile ? 'Uploaded file data is not stored or has expired' : 'File identifier could not be verified by Telegram');
+        }
+
+        if (failedFiles.length > 0) {
+          const firstFail = failedFiles[0];
+          console.warn('[Telegram] Telegram file delivery failed for item:', item.id, 'error:', firstFail.error);
           await this.callTelegramApi('sendMessage', {
             chat_id: chatId,
-            text: `⚠️ <b>Delivery Failed</b>\n\n• 📁 <b>File:</b> <code>${this.escapeHtml(item.fileName || item.name || 'File')}</code>\n• ℹ️ <b>Notice:</b> <code>${this.escapeHtml(errorDetail)}</code>\n\n💡 <i>Tip: Re-upload this file in the Admin Panel.</i>`,
+            text: `⚠️ <b>Delivery Failed</b>\n\n• 📁 <b>File:</b> <code>${this.escapeHtml(firstFail.name)}</code>\n• ℹ️ <b>Notice:</b> <code>${this.escapeHtml(firstFail.error)}</code>\n\n💡 <i>Tip: Re-upload this file in the Admin Panel.</i>`,
             parse_mode: 'HTML'
           });
         }
@@ -8087,11 +8261,14 @@ export class TelegramService {
     const rows: any[][] = pageItems.map((item, idx) => {
       const num = startIdx + idx + 1;
       const isTextOnly = Boolean(item.isTextOnly || (item.type === 'file' && item.fileEnabled === false));
+      const batchCount = Array.isArray(item.files) && item.files.length > 1 ? item.files.length : 0;
       const icon =
         item.type === 'link'
           ? '🔗'
           : isTextOnly
           ? '💬'
+          : batchCount > 1
+          ? '📦'
           : item.fileType === 'video'
           ? '🎥'
           : item.fileType === 'photo'
@@ -8099,11 +8276,15 @@ export class TelegramService {
           : item.fileType === 'audio'
           ? '🎵'
           : '📄';
-      const rawTitle = (item.fileName || item.name || item.rawKeyword || 'Untitled')
+      const baseTitle = batchCount > 1
+        ? (item.name || item.fileName || item.rawKeyword || 'Untitled')
+        : (item.fileName || item.name || item.rawKeyword || 'Untitled');
+      const rawTitle = baseTitle
         .replace(/[\r\n\t]+/g, ' ')
         .replace(/\s+/g, ' ')
         .trim() || 'Untitled';
-      const shortTitle = rawTitle.length > 42 ? `${rawTitle.slice(0, 39)}...` : rawTitle;
+      const suffixedTitle = batchCount > 1 ? `${rawTitle} (${batchCount})` : rawTitle;
+      const shortTitle = suffixedTitle.length > 42 ? `${suffixedTitle.slice(0, 39)}...` : suffixedTitle;
       const fullCb = `fl_v:${item.id}:${page}`;
       const cbData = Buffer.byteLength(fullCb, 'utf8') <= 64
         ? fullCb
@@ -8145,11 +8326,14 @@ export class TelegramService {
       : `?start=${payload}`;
 
     const isTextOnly = Boolean(item.isTextOnly || (item.type === 'file' && item.fileEnabled === false));
+    const batchCount = Array.isArray(item.files) && item.files.length > 1 ? item.files.length : 0;
     const typeLabel =
       item.type === 'link'
         ? '🔗 Link'
         : isTextOnly
         ? '💬 Text Message'
+        : batchCount > 1
+        ? `📦 Batch (${batchCount} Files)`
         : item.fileType === 'video'
         ? '🎥 Video'
         : item.fileType === 'photo'
@@ -8158,7 +8342,9 @@ export class TelegramService {
         ? '🎵 Audio'
         : '📄 Document / File';
 
-    const title = (item.fileName || item.name || 'Untitled').trim();
+    const title = batchCount > 1
+      ? (item.name || item.fileName || 'Untitled').trim()
+      : (item.fileName || item.name || 'Untitled').trim();
     const triggerList = Array.isArray(item.triggers) && item.triggers.length > 0
       ? item.triggers.slice(0, 5).map((t) => `<code>${this.escapeHtml(t)}</code>`).join(', ')
       : '<i>None</i>';
@@ -10711,62 +10897,56 @@ export class TelegramService {
       await storage.saveItem(newItem);
       savedItems.push(newItem);
     } else if (isFile) {
-      const nameCounts = new Map<string, number>();
-      for (const f of collectedFiles) {
-        const key = (f.fileName || 'Uploaded File').trim();
-        nameCounts.set(key, (nameCounts.get(key) || 0) + 1);
-      }
-      const seenNames = new Map<string, number>();
+      const firstEntry = collectedFiles[0];
+      const baseName = (session.fileName?.trim() || firstEntry?.fileName || 'Uploaded File').trim();
+      const itemCaption = session.caption || firstEntry?.caption || undefined;
+      const itemFiles: ItemFileEntry[] = collectedFiles.map((entry, idx) => ({
+        id: entry.fileId || entry.fileUniqueId || `file_${idx + 1}`,
+        telegramFileId: entry.fileId,
+        telegramFileUniqueId: entry.fileUniqueId,
+        fileType: entry.fileType || 'document',
+        fileName: entry.fileName || `File ${idx + 1}`,
+        fileSize: entry.fileSize || 0,
+        mimeType: entry.mimeType || 'application/octet-stream',
+        caption: entry.caption || undefined
+      }));
 
-      for (let i = 0; i < collectedFiles.length; i++) {
-        const entry = collectedFiles[i];
-        const baseName = (entry.fileName || 'Uploaded File').trim();
-        const totalWithSameName = nameCounts.get(baseName) || 1;
-        const seenIdx = (seenNames.get(baseName) || 0) + 1;
-        seenNames.set(baseName, seenIdx);
-        const itemName = totalWithSameName > 1 ? `${baseName} (${seenIdx})` : baseName;
-
-        const itemKeyword = collectedFiles.length > 1 && i > 0 ? `${rawKeyword}${i + 1}` : rawKeyword;
-        const itemTrigger = formatTrigger(itemKeyword);
-        const itemId = collectedFiles.length > 1 ? `f_${baseTimestamp}_${i + 1}` : `f_${baseTimestamp}`;
-        const itemCaption = entry.caption || session.caption || undefined;
-
-        const newItem: ItemRecord = {
-          id: itemId,
-          type: 'file',
-          name: itemName,
-          triggers: [itemTrigger],
-          triggerType,
-          rawKeyword: itemKeyword,
-          inFiltersList,
-          isTextOnly: false,
-          fileEnabled: true,
-          telegramFileId: entry.fileId,
-          telegramFileUniqueId: entry.fileUniqueId,
-          fileType: entry.fileType || 'document',
-          fileName: entry.fileName || itemName,
-          fileSize: entry.fileSize || 0,
-          mimeType: entry.mimeType || 'application/octet-stream',
-          caption: itemCaption,
-          replyMessage: itemCaption,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          status: 'active',
-          deliveryCount: 0,
-          retentionType,
-          retentionDays,
-          expiresAt,
-          hasSetupVideo,
-          setupVideoUrl,
-          setupVideoTelegramFileId,
-          setupVideoType,
-          setupVideoFileName,
-          setupVideoButtonText,
-          setupResourceButtonText
-        };
-        await storage.saveItem(newItem);
-        savedItems.push(newItem);
-      }
+      const newItem: ItemRecord = {
+        id: `f_${baseTimestamp}`,
+        type: 'file',
+        name: baseName,
+        triggers: [primaryTrigger],
+        triggerType,
+        rawKeyword,
+        inFiltersList,
+        isTextOnly: false,
+        fileEnabled: true,
+        telegramFileId: firstEntry.fileId,
+        telegramFileUniqueId: firstEntry.fileUniqueId,
+        fileType: firstEntry.fileType || 'document',
+        fileName: firstEntry.fileName || baseName,
+        fileSize: firstEntry.fileSize || 0,
+        mimeType: firstEntry.mimeType || 'application/octet-stream',
+        files: itemFiles,
+        caption: itemCaption,
+        replyMessage: itemCaption,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        status: 'active',
+        deliveryCount: 0,
+        retentionType,
+        retentionDays,
+        expiresAt,
+        hasSetupVideo,
+        setupVideoUrl,
+        setupVideoTelegramFileId,
+        setupVideoType,
+        setupVideoFileName,
+        setupVideoButtonText,
+        setupResourceButtonText
+      };
+      await storage.saveItem(newItem);
+      savedItems.push(newItem);
     } else {
       const url = session.linkData?.url || 'https://';
       const name = session.linkData?.name || `Link (${rawKeyword})`;
@@ -10818,12 +10998,13 @@ export class TelegramService {
       ? 'Yes (Visible in /filters list)'
       : 'No (Hidden from public /filters)';
 
+    const batchFileCount = isFile && !isTextOnly ? collectedFiles.length : 0;
     const typeDesc = isFile
-      ? (isTextOnly ? '💬 Text Response' : savedItems.length > 1 ? `📦 Batch (${savedItems.length} Files)` : '📁 File')
+      ? (isTextOnly ? '💬 Text Response' : batchFileCount > 1 ? `📦 Batch (${batchFileCount} Files)` : '📁 File')
       : '🔗 Web Link';
 
     const deliveryDesc = isFile
-      ? (isTextOnly ? 'Direct Text Message Response' : 'Direct Telegram Document / Media File')
+      ? (isTextOnly ? 'Direct Text Message Response' : batchFileCount > 1 ? `All ${batchFileCount} Files Delivered Together` : 'Direct Telegram Document / Media File')
       : (openMode === 'webapp' ? 'Telegram Mini App (Embedded)' : 'Standard Web Browser');
 
     const setupVideoDesc = hasSetupVideo
@@ -10831,52 +11012,40 @@ export class TelegramService {
       : 'None (Direct Delivery)';
 
     const primarySaved = savedItems[0];
-    let successText: string;
+    const payload = getItemPayload(primarySaved);
+    const deepLink = `https://t.me/${cleanBot}?start=${payload}`;
 
-    if (savedItems.length === 1) {
-      const payload = getItemPayload(primarySaved);
-      const deepLink = `https://t.me/${cleanBot}?start=${payload}`;
-      successText =
-        `✅ <b>Saved Successfully</b>\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `• 🏷️ <b>Type:</b> <code>${this.escapeHtml(typeDesc)}</code>\n` +
-        `• 📦 <b>Name:</b> <code>${this.escapeHtml(primarySaved.name)}</code>\n` +
-        `• 🎯 <b>Trigger:</b> <code>${this.escapeHtml(primaryTrigger)}</code> (<code>${this.escapeHtml(triggerType)}</code>)\n` +
-        `• 📁 <b>Public Filters:</b> <code>${this.escapeHtml(filterStatus)}</code>\n` +
-        `• 📡 <b>Delivery Mode:</b> <code>${this.escapeHtml(deliveryDesc)}</code>\n` +
-        `• ⏳ <b>Retention:</b> <code>${this.escapeHtml(retentionDesc)}</code>\n` +
-        `• 🎬 <b>Setup Video:</b> <code>${this.escapeHtml(setupVideoDesc)}</code>\n\n` +
-        `🔗 <b>Direct Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
-        `💡 <i>Type <code>${this.escapeHtml(primaryTrigger)}</code> in any group or here to test delivery!</i>`;
-    } else {
-      const maxSummaryItems = 12;
-      const itemLines = savedItems.slice(0, maxSummaryItems).map((it, idx) => {
-        const p = getItemPayload(it);
-        const link = `https://t.me/${cleanBot}?start=${p}`;
-        const trig = it.triggers?.[0] || primaryTrigger;
-        return `${idx + 1}. ${this.getFileTypeEmoji(it.fileType)} <code>${this.escapeHtml(it.name)}</code> — <code>${this.escapeHtml(trig)}</code>\n   🔗 <code>${this.escapeHtml(link)}</code>`;
-      });
-      const overflowNote = savedItems.length > maxSummaryItems
-        ? `\n<i>...and ${savedItems.length - maxSummaryItems} more saved files (view all via /allfile or Admin Panel)</i>`
+    let batchListSection = '';
+    if (batchFileCount > 1) {
+      const maxPreview = 12;
+      const fileLines = collectedFiles.slice(0, maxPreview).map((f, idx) =>
+        `${idx + 1}. ${this.getFileTypeEmoji(f.fileType)} <code>${this.escapeHtml(f.fileName || `File ${idx + 1}`)}</code>`
+      );
+      const extraNote = collectedFiles.length > maxPreview
+        ? `\n<i>...and ${collectedFiles.length - maxPreview} more file(s)</i>`
         : '';
-
-      successText =
-        `✅ <b>Saved ${savedItems.length} Files Successfully</b>\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `• 🏷️ <b>Type:</b> <code>${this.escapeHtml(typeDesc)}</code>\n` +
-        `• 🎯 <b>Triggers:</b> <code>${this.escapeHtml(primaryTrigger)}</code> → <code>${this.escapeHtml(savedItems[savedItems.length - 1].triggers?.[0] || '')}</code> (<code>${this.escapeHtml(triggerType)}</code>)\n` +
-        `• 📁 <b>Public Filters:</b> <code>${this.escapeHtml(filterStatus)}</code>\n` +
-        `• ⏳ <b>Retention:</b> <code>${this.escapeHtml(retentionDesc)}</code>\n` +
-        `• 🎬 <b>Setup Video:</b> <code>${this.escapeHtml(setupVideoDesc)}</code>\n\n` +
-        `${itemLines.join('\n')}${overflowNote}\n\n` +
-        `💡 <i>Type any trigger above in group/DM or check /allfile!</i>`;
+      batchListSection = `\n📂 <b>Files in Batch (${collectedFiles.length}):</b>\n${fileLines.join('\n')}${extraNote}\n`;
     }
+
+    const successText =
+      `✅ <b>Saved Successfully</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `• 🏷️ <b>Type:</b> <code>${this.escapeHtml(typeDesc)}</code>\n` +
+      `• 📦 <b>Name:</b> <code>${this.escapeHtml(primarySaved.name)}</code>\n` +
+      `• 🎯 <b>Trigger:</b> <code>${this.escapeHtml(primaryTrigger)}</code> (<code>${this.escapeHtml(triggerType)}</code>)\n` +
+      `• 📁 <b>Public Filters:</b> <code>${this.escapeHtml(filterStatus)}</code>\n` +
+      `• 📡 <b>Delivery Mode:</b> <code>${this.escapeHtml(deliveryDesc)}</code>\n` +
+      `• ⏳ <b>Retention:</b> <code>${this.escapeHtml(retentionDesc)}</code>\n` +
+      `• 🎬 <b>Setup Video:</b> <code>${this.escapeHtml(setupVideoDesc)}</code>\n` +
+      `${batchListSection}\n` +
+      `🔗 <b>Direct Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
+      `💡 <i>Type <code>${this.escapeHtml(primaryTrigger)}</code> in any group or here to test delivery!</i>`;
 
     const successMarkup = {
       inline_keyboard: [
         [
           {
-            text: savedItems.length > 1 ? 'Test First Delivery' : 'Test Delivery',
+            text: 'Test Delivery',
             callback_data: `test_delivery_${primarySaved.id}`,
             style: 'primary'
           }
@@ -11323,17 +11492,48 @@ export class TelegramService {
         return;
       }
 
-      await storage.setBotUserBanned(targetUserId, true);
-      if (reportId) {
-        await storage.updateReportStatus(reportId, 'resolved', fromId);
+      const allReports = await storage.getReports();
+      const existingReport = reportId ? allReports.find(r => r.id === reportId) : undefined;
+      if (existingReport && existingReport.status !== 'pending') {
+        const finalOutcome: 'dismissed' | 'banned' | 'resolved' =
+          existingReport.status === 'dismissed'
+            ? 'dismissed'
+            : existingReport.resolutionOutcome || 'banned';
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: existingReport.status === 'dismissed'
+            ? 'This report was already dismissed.'
+            : 'This report was already resolved.',
+          show_alert: false
+        });
+        await TelegramService.syncAdminReportMessages(existingReport, finalOutcome, {
+          fallbackChatId: chatId,
+          fallbackMessageId: cb.message?.message_id,
+          fallbackPlainText: cb.message?.text
+        });
+        return;
       }
 
-      const allReports = await storage.getReports();
-      const report = allReports.find(r => r.id === reportId);
-      if (report && report.chatId) {
+      try {
+        await storage.setBotUserBanned(targetUserId, true);
+      } catch (banErr: any) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: banErr?.message || 'Unable to ban this user.',
+          show_alert: true
+        });
+        return;
+      }
+
+      const updatedReport = reportId
+        ? await storage.updateReportStatus(reportId, 'resolved', fromId, 'banned')
+        : null;
+      const resolvedReport = updatedReport || existingReport;
+
+      if (resolvedReport && resolvedReport.chatId) {
         try {
           await this.callTelegramApi('banChatMember', {
-            chat_id: report.chatId,
+            chat_id: resolvedReport.chatId,
             user_id: Number(targetUserId) || targetUserId
           });
         } catch (e) {
@@ -11347,16 +11547,11 @@ export class TelegramService {
         show_alert: false
       });
 
-      if (chatId && cb.message?.message_id) {
-        try {
-          await this.callTelegramApi('editMessageText', {
-            chat_id: chatId,
-            message_id: cb.message.message_id,
-            text: `${cb.message.text || ''}\n\n<b>🔨 Resolved:</b> User was BANNED by Admin.`,
-            parse_mode: 'HTML'
-          });
-        } catch {}
-      }
+      await TelegramService.syncAdminReportMessages(resolvedReport, 'banned', {
+        fallbackChatId: chatId,
+        fallbackMessageId: cb.message?.message_id,
+        fallbackPlainText: cb.message?.text
+      });
       return;
     }
 
@@ -11374,9 +11569,31 @@ export class TelegramService {
         return;
       }
 
-      if (reportId) {
-        await storage.updateReportStatus(reportId, 'dismissed', fromId);
+      const allReports = await storage.getReports();
+      const existingReport = reportId ? allReports.find(r => r.id === reportId) : undefined;
+      if (existingReport && existingReport.status !== 'pending') {
+        const finalOutcome: 'dismissed' | 'banned' | 'resolved' =
+          existingReport.status === 'dismissed'
+            ? 'dismissed'
+            : existingReport.resolutionOutcome || 'banned';
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: existingReport.status === 'dismissed'
+            ? 'Report was already dismissed.'
+            : 'Report was already resolved.',
+          show_alert: false
+        });
+        await TelegramService.syncAdminReportMessages(existingReport, finalOutcome, {
+          fallbackChatId: chatId,
+          fallbackMessageId: cb.message?.message_id,
+          fallbackPlainText: cb.message?.text
+        });
+        return;
       }
+
+      const updatedReport = reportId
+        ? await storage.updateReportStatus(reportId, 'dismissed', fromId, 'dismissed')
+        : null;
 
       await this.callTelegramApi('answerCallbackQuery', {
         callback_query_id: cb.id,
@@ -11384,16 +11601,11 @@ export class TelegramService {
         show_alert: false
       });
 
-      if (chatId && cb.message?.message_id) {
-        try {
-          await this.callTelegramApi('editMessageText', {
-            chat_id: chatId,
-            message_id: cb.message.message_id,
-            text: `${cb.message.text || ''}\n\n<b>✅ Report Dismissed</b> by Admin.`,
-            parse_mode: 'HTML'
-          });
-        } catch {}
-      }
+      await TelegramService.syncAdminReportMessages(updatedReport || existingReport, 'dismissed', {
+        fallbackChatId: chatId,
+        fallbackMessageId: cb.message?.message_id,
+        fallbackPlainText: cb.message?.text
+      });
       return;
     }
 

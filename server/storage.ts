@@ -44,6 +44,19 @@ export interface AdminUser {
   lastLoginAt?: string;
 }
 
+export interface ItemFileEntry {
+  id?: string;
+  telegramFileId?: string;
+  telegramFileUniqueId?: string;
+  uploadedFileId?: string;
+  fileBase64?: string;
+  fileType?: 'document' | 'photo' | 'video' | 'audio';
+  fileName?: string;
+  mimeType?: string;
+  fileSize?: number;
+  caption?: string;
+}
+
 export interface ItemRecord {
   id: string;
   type: 'file' | 'link';
@@ -59,6 +72,7 @@ export interface ItemRecord {
   fileName?: string;
   mimeType?: string;
   fileSize?: number;
+  files?: ItemFileEntry[];
   caption?: string;
   url?: string;
   openMode?: OpenMode;
@@ -1929,8 +1943,15 @@ export class SharedStorageService {
     const lenBefore = this.db.items.length;
     this.db.items = this.db.items.filter(i => i.id !== id);
     if (this.db.items.length !== lenBefore) {
-      if (itemToDelete?.uploadedFileId) {
-        this.deleteUploadedFile(itemToDelete.uploadedFileId).catch(() => {});
+      const uploadIds = new Set<string>();
+      if (itemToDelete?.uploadedFileId) uploadIds.add(itemToDelete.uploadedFileId);
+      if (Array.isArray(itemToDelete?.files)) {
+        for (const f of itemToDelete.files) {
+          if (f.uploadedFileId) uploadIds.add(f.uploadedFileId);
+        }
+      }
+      for (const uid of uploadIds) {
+        this.deleteUploadedFile(uid).catch(() => {});
       }
       this.rebuildCache();
       this.invalidateCache();
@@ -1950,8 +1971,15 @@ export class SharedStorageService {
         const expTime = new Date(item.expiresAt).getTime();
         if (!isNaN(expTime) && now >= expTime) {
           expiredIds.push(item.id);
-          if (item.uploadedFileId) {
-            this.deleteUploadedFile(item.uploadedFileId).catch(() => {});
+          const uploadIds = new Set<string>();
+          if (item.uploadedFileId) uploadIds.add(item.uploadedFileId);
+          if (Array.isArray(item.files)) {
+            for (const f of item.files) {
+              if (f.uploadedFileId) uploadIds.add(f.uploadedFileId);
+            }
+          }
+          for (const uid of uploadIds) {
+            this.deleteUploadedFile(uid).catch(() => {});
           }
           console.info(`[Storage] Expired temporary item "${item.name}" (${item.id}) reached expiration time. Auto-deleted.`);
           continue;
