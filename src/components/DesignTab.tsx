@@ -61,7 +61,7 @@ export const DesignTab: React.FC<DesignTabProps> = ({ currentDesign, onUpdate })
   };
 
   return (
-    <div className="space-y-4 pb-28">
+    <div className="space-y-4 pb-28 md:pb-8 md:max-w-3xl">
       {/* Header & Save Action */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-1">
         <div className="min-w-0">

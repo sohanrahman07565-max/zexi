@@ -120,7 +120,7 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
   };
 
   return (
-    <div className="space-y-4 pb-28">
+    <div className="space-y-4 md:space-y-5 pb-28 md:pb-8">
       {/* Bot Users Hero Card */}
       <div
         className="glass lg-hero lg-rise space-y-3.5 text-white"
@@ -212,7 +212,7 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
       />
 
       {/* KPI Grid */}
-      <div className="grid grid-cols-1 min-[300px]:grid-cols-2 gap-2.5">
+      <div className="grid grid-cols-1 min-[300px]:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2.5 md:gap-4">
         {/* Files */}
         <button
           type="button"
@@ -365,7 +365,7 @@ const DashboardTabComponent: React.FC<DashboardTabProps> = ({
         <button
           type="button"
           onClick={() => openUsers('active')}
-          className="min-[300px]:col-span-2 glass tap lg-rise rounded-[22px] px-4 py-3.5 text-left flex items-center justify-between gap-3 cursor-pointer"
+          className="min-[300px]:col-span-2 md:col-span-3 lg:col-span-2 glass tap lg-rise rounded-[22px] px-4 py-3.5 md:p-4 text-left flex items-center justify-between gap-3 cursor-pointer"
           style={{ '--i': 7 } as React.CSSProperties}
         >
           <div className="flex items-center gap-3 min-w-0">

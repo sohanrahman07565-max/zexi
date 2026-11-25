@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { apiRouter } from './server/routes';
-import { storage } from './server/storage';
+import { storage, StorageManager } from './server/storage';
 import { TelegramService, TelegramBotManager, BotSingletonLock, activeBots } from './server/telegram';
 
 dotenv.config();
@@ -36,7 +36,7 @@ async function gracefulShutdown(signal: string) {
         ...Object.values(activeBots).map((handle) => handle.stop().catch(() => {})),
         TelegramService.releaseLeaderLock().catch(() => {}),
         BotSingletonLock.releaseAll().catch(() => {}),
-        storage.flush().catch(() => {})
+        StorageManager.flushAll().catch(() => {})
       ]),
       new Promise<void>((resolve) => setTimeout(resolve, 1500))
     ]);
@@ -49,55 +49,14 @@ process.on('SIGTERM', () => { gracefulShutdown('SIGTERM'); });
 process.on('SIGINT', () => { gracefulShutdown('SIGINT'); });
 process.once('exit', () => { BotSingletonLock.releaseAllSync(); });
 
-// Render Keep-Alive 24/7 Heartbeat Monitor (Prevents Render Free Tier Idle Sleep)
-function initRenderKeepAlive(port: number) {
-  const PING_INTERVAL_MS = 8 * 60 * 1000; // 8 minutes (Render sleeps after 15 minutes of inactivity)
-  const externalUrl = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || '').trim();
-
-  console.log(`💓 [Render Keep-Alive] Initialized 24/7 heartbeat monitor (interval: 8m, target: "${externalUrl || `http://127.0.0.1:${port}/api/health`}").`);
-
-  async function ping() {
-    const targetUrl = externalUrl
-      ? `${externalUrl.replace(/\/+$/, '')}/api/health`
-      : `http://127.0.0.1:${port}/api/health`;
-
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
-      const res = await fetch(targetUrl, { signal: controller.signal });
-      clearTimeout(timeout);
-
-      if (res.ok) {
-        console.log(`💓 [Render Keep-Alive] Heartbeat ping successful to ${targetUrl} (HTTP ${res.status}) - service kept active 24/7.`);
-      } else {
-        console.warn(`⚠️ [Render Keep-Alive] Heartbeat ping returned HTTP ${res.status}`);
-      }
-    } catch (err: any) {
-      if (externalUrl) {
-        try {
-          const fallbackRes = await fetch(`http://127.0.0.1:${port}/api/health`);
-          if (fallbackRes.ok) {
-            console.log(`💓 [Render Keep-Alive] Local fallback ping successful (HTTP ${fallbackRes.status}).`);
-            return;
-          }
-        } catch {}
-      }
-      console.warn(`⚠️ [Render Keep-Alive] Heartbeat ping notice:`, err?.message || err);
-    }
-  }
-
-  // Initial ping 30s after boot, then recurring every 8 minutes
-  setTimeout(ping, 30000);
-  setInterval(ping, PING_INTERVAL_MS);
-}
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 async function initBackgroundServices() {
   try {
     // Explicitly check BOT_TOKEN from environment variables upon boot
-    const envBotToken = (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || process.env.TG_BOT_TOKEN || process.env.BOT_API_TOKEN || process.env.TOKEN || '').trim().replace(/^["']|["']$/g, '');
+    const rawEnvBotToken = (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || process.env.TG_BOT_TOKEN || process.env.BOT_API_TOKEN || process.env.TOKEN || '').trim().replace(/^["']|["']$/g, '');
+    const envBotToken = rawEnvBotToken && !rawEnvBotToken.includes('your_telegram_bot_token') ? rawEnvBotToken : '';
     const envAdminId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '').trim().replace(/^["']|["']$/g, '');
 
     if (envBotToken) {
@@ -191,9 +150,9 @@ async function startServer() {
     void initBackgroundServices();
   });
 
-  // Ensure API data endpoints wait for initial storage load (health/ping respond immediately)
+  // Ensure API data endpoints wait for initial storage load (health endpoint responds immediately)
   app.use('/api', async (req, _res, next) => {
-    if (req.path === '/health' || req.path === '/ping') {
+    if (req.path === '/health') {
       return next();
     }
     await storageInitPromise;
@@ -247,7 +206,7 @@ async function startServer() {
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on http://0.0.0.0:${PORT}`);
-    initRenderKeepAlive(PORT);
+    console.log(`📁 [VPS Storage] Data Dir: ${storage.getDataDir()} | Files Dir: ${storage.getPrimaryUploadDir()}`);
   });
 }
 

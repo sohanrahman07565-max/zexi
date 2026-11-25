@@ -74,6 +74,16 @@
   input, textarea, select {
     user-select: text;
   }
+
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible,
+  [role="button"]:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--a) 75%, white);
+    outline-offset: 2px;
+  }
 }
 
 /* ==========================================================================
@@ -393,7 +403,76 @@
 
 @media (min-width: 768px) {
   .lg-nav-shell {
-    width: min(520px, calc(100% - 32px));
+    display: none !important;
+  }
+
+  .lg-hero {
+    padding: 22px;
+  }
+
+  .lg-big {
+    font-size: clamp(34px, 3.2vw, 44px);
+  }
+}
+
+/* Responsive More Menu Grid: divided glass stack on mobile, 2-3 col cards on desktop */
+.more-menu-grid {
+  border-radius: 24px;
+  overflow: hidden;
+  position: relative;
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.035) 45%, rgba(255, 255, 255, 0.07)),
+    rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(26px) saturate(190%) brightness(1.06);
+  -webkit-backdrop-filter: blur(26px) saturate(190%) brightness(1.06);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-top-color: rgba(255, 255, 255, 0.26);
+  box-shadow: var(--sh);
+}
+
+.more-menu-grid > .more-menu-item + .more-menu-item {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+@media (min-width: 768px) {
+  .more-menu-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.75rem;
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    border: 0;
+    box-shadow: none;
+    border-radius: 0;
+    overflow: visible;
+  }
+
+  .more-menu-grid > .more-menu-item + .more-menu-item {
+    border-top: 0;
+  }
+
+  .more-menu-item {
+    border-radius: 18px;
+    background:
+      linear-gradient(135deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.03) 45%, rgba(255, 255, 255, 0.06)),
+      rgba(255, 255, 255, 0.04);
+    backdrop-filter: blur(24px) saturate(180%);
+    -webkit-backdrop-filter: blur(24px) saturate(180%);
+    border: 1px solid rgba(255, 255, 255, 0.15) !important;
+    border-top-color: rgba(255, 255, 255, 0.24) !important;
+    box-shadow: 0 12px 28px -12px rgba(0, 0, 0, 0.55);
+  }
+
+  .more-menu-item:hover {
+    border-color: rgba(255, 255, 255, 0.28) !important;
+    transform: translateY(-1px);
+  }
+}
+
+@media (min-width: 1280px) {
+  .more-menu-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 

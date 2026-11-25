@@ -2,8 +2,6 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { 
   api, getUrlBotId, AdminUser, ItemRecord, MessageTemplate, DesignConfig, BotSettings 
 } from './lib/api';
-import { primaryAuth, secondaryAuth } from './lib/firebase';
-import { signOut } from 'firebase/auth';
 import { SplashScreen, DEFAULT_LOGO_URL } from './components/SplashScreen';
 import { LoginScreen } from './components/LoginScreen';
 import { OfflineScreen } from './components/OfflineScreen';
@@ -16,6 +14,7 @@ import { BottomNav } from './components/BottomNav';
 import { ToastContainer } from './components/ToastContainer';
 import { BotSwitcherModal } from './components/BotSwitcherModal';
 import { DynamicIslandHeader } from './components/DynamicIslandHeader';
+import { DesktopSidebar } from './components/DesktopSidebar';
 
 function resolveBotDisplayName(info: any, fallbackUsername?: string): string {
   if (!info) {
@@ -410,12 +409,6 @@ export default function App() {
       }
     } catch {}
     await api.logout();
-    try {
-      await Promise.all([
-        signOut(primaryAuth).catch(() => {}),
-        signOut(secondaryAuth).catch(() => {})
-      ]);
-    } catch {}
     setCurrentUser(null);
     setSessionBotId('main');
     setItems([]);
@@ -472,9 +465,9 @@ export default function App() {
     );
   }
 
-  // Authenticated Liquid Glass Mobile-First Admin Panel
+  // Authenticated Liquid Glass Responsive Admin Panel
   return (
-    <div className="relative min-h-[100dvh] w-full bg-[#05060d] text-white selection:bg-indigo-500 selection:text-white flex justify-center overflow-x-clip">
+    <div className="relative min-h-[100dvh] w-full bg-[#05060d] text-white selection:bg-indigo-500 selection:text-white flex justify-center md:block overflow-x-clip">
       {/* Deep Space Aurora Background Layer */}
       <div className="aurora" aria-hidden="true">
         <div className="orb o1" />
@@ -482,26 +475,41 @@ export default function App() {
         <div className="orb o3" />
       </div>
 
-      {/* Liquid Glass Screen Container */}
-      <div className="relative z-10 w-full max-w-[480px] md:max-w-[560px] lg:max-w-[600px] 2xl:max-w-[640px] min-h-[100dvh] flex flex-col pl-[max(0.875rem,env(safe-area-inset-left))] pr-[max(0.875rem,env(safe-area-inset-right))] sm:px-5 pt-1 pb-[calc(6.75rem+env(safe-area-inset-bottom,0px))]">
-        {/* Interactive Dynamic Island Top Bar */}
-        <DynamicIslandHeader
-          currentTab={currentTab}
-          currentUser={currentUser}
-          design={design}
-          isBotConnected={isBotConnected}
-          botDisplayName={botDisplayName}
-          totalItems={items.length}
-          totalUsers={totalUsers}
-          onlineUsers={onlineUsers}
-          canSwitchBots={sessionBotId === 'main'}
-          onNavigateMore={() => setCurrentTab('more')}
-          onRefresh={refreshAllData}
-          onOpenBotSwitcher={() => setIsBotSwitcherOpen(true)}
-        />
+      {/* Fixed Desktop Sidebar Navigation (md and larger) */}
+      <DesktopSidebar
+        currentTab={currentTab}
+        onSelectTab={handleNavigate}
+        currentUser={currentUser}
+        design={design}
+        isBotConnected={isBotConnected}
+        botDisplayName={botDisplayName}
+        totalItems={items.length}
+        canSwitchBots={sessionBotId === 'main'}
+        onOpenBotSwitcher={() => setIsBotSwitcherOpen(true)}
+        onLogout={handleLogout}
+      />
 
-        {/* Tab Content Views with Zero-Delay Native Speed Transitions */}
-        <main className="flex-1 w-full min-w-0">
+      {/* Liquid Glass Responsive Container */}
+      <div className="relative z-10 w-full max-w-[480px] md:max-w-none min-h-[100dvh] flex flex-col pl-[max(0.875rem,env(safe-area-inset-left))] pr-[max(0.875rem,env(safe-area-inset-right))] sm:px-5 md:pr-0 md:pl-64 xl:pl-72 pt-1 md:pt-0 pb-[calc(6.75rem+env(safe-area-inset-bottom,0px))] md:pb-10">
+        <div className="w-full flex-1 flex flex-col md:max-w-[1440px] md:mx-auto md:px-6 lg:px-8 md:pt-5 min-w-0">
+          {/* Interactive Header (Mobile Dynamic Island + Desktop Workspace Bar) */}
+          <DynamicIslandHeader
+            currentTab={currentTab}
+            currentUser={currentUser}
+            design={design}
+            isBotConnected={isBotConnected}
+            botDisplayName={botDisplayName}
+            totalItems={items.length}
+            totalUsers={totalUsers}
+            onlineUsers={onlineUsers}
+            canSwitchBots={sessionBotId === 'main'}
+            onNavigateMore={() => setCurrentTab('more')}
+            onRefresh={refreshAllData}
+            onOpenBotSwitcher={() => setIsBotSwitcherOpen(true)}
+          />
+
+          {/* Tab Content Views with Zero-Delay Native Speed Transitions */}
+          <main className="flex-1 w-full min-w-0">
           {/* Dashboard Tab */}
           <div className={currentTab === 'dashboard' ? 'block animate-tab-fade-in' : 'hidden'}>
             <DashboardTab
@@ -565,6 +573,7 @@ export default function App() {
             />
           </div>
         </main>
+        </div>
 
         {/* Modern Mobile Bottom Navigation */}
         <BottomNav

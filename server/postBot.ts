@@ -1078,7 +1078,7 @@ export class PostBotEngine {
           }
           await sendMessage(
             chat,
-            `✅ Private channel connected!\nName: ${forwardedChannel.title || 'Private channel'}\nID: ${channelId}\n\nএখন থেকে পোস্ট এই চ্যানেলে যাবে।\n⚠️ Render restart হলে সংযোগ আবার করতে হবে, অথবা Render Environment-এ CHANNEL_ID=${channelId} সেট করো।`
+            `✅ Private channel connected!\nName: ${forwardedChannel.title || 'Private channel'}\nID: ${channelId}\n\nPosts will now be delivered to this channel (saved to local VPS storage, or set CHANNEL_ID=${channelId} in .env).`
           );
           return;
         } catch (e: any) {

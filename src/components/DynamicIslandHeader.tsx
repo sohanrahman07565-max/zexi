@@ -82,10 +82,84 @@ export const DynamicIslandHeader: React.FC<DynamicIslandHeaderProps> = ({
   };
 
   return (
-    <header className="sticky top-[max(0.5rem,env(safe-area-inset-top))] z-30 mb-3.5 flex justify-center shrink-0 pointer-events-none">
+    <header className="sticky top-[max(0.5rem,env(safe-area-inset-top))] md:static z-30 mb-3.5 md:mb-5 flex justify-center md:block shrink-0 pointer-events-none md:pointer-events-auto">
+      {/* Desktop Workspace Header Bar */}
+      <div className="hidden md:flex items-center justify-between gap-4 glass rounded-2xl px-5 py-3 text-white">
+        <div className="flex items-center gap-3 min-w-0">
+          <h1 className="text-lg font-extrabold tracking-tight bg-gradient-to-b from-white to-white/75 bg-clip-text text-transparent truncate">
+            {tabTitle}
+          </h1>
+          <div className="h-4 w-px bg-white/15 shrink-0" />
+          <div className="flex items-center gap-1.5 text-xs font-semibold text-white/75 min-w-0">
+            {isBotConnected ? (
+              <>
+                <span className="lg-dot" />
+                <span className="truncate">{botDisplayName || 'Bot Connected'}</span>
+                <span aria-hidden="true" className="inline-flex items-end gap-[2px] h-2.5 shrink-0 ml-0.5">
+                  <span className="w-[2px] h-2 rounded-full island-bar-1" style={{ backgroundColor: activeAccent }} />
+                  <span className="w-[2px] h-2.5 rounded-full island-bar-2" style={{ backgroundColor: '#34d399' }} />
+                  <span className="w-[2px] h-1.5 rounded-full island-bar-3" style={{ backgroundColor: '#c084fc' }} />
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="w-2 h-2 rounded-full bg-white/40 shrink-0" />
+                <span className="truncate">Bot Offline</span>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.05] border border-white/10 text-[11px] font-semibold text-white/75 tabular-nums whitespace-nowrap">
+            <span>{totalItems} Items</span>
+            <span className="text-white/30">·</span>
+            <span>{totalUsers.toLocaleString()} Users</span>
+            <span className="text-white/30">·</span>
+            <span className="text-emerald-400">{onlineUsers.toLocaleString()} Online</span>
+          </div>
+
+          {onRefresh && (
+            <button
+              type="button"
+              onClick={handleRefreshClick}
+              className="tap px-3 py-1.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.15] border border-white/15 text-white text-xs font-bold flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 shrink-0 ${refreshing ? 'animate-spin' : ''}`} />
+              <span>Sync Data</span>
+            </button>
+          )}
+
+          {canSwitchBots && onOpenBotSwitcher && (
+            <button
+              type="button"
+              onClick={() => onOpenBotSwitcher()}
+              className="tap px-3 py-1.5 rounded-xl border text-white text-xs font-bold flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+              style={{
+                background: 'color-mix(in srgb, var(--a) 22%, transparent)',
+                borderColor: 'color-mix(in srgb, var(--a) 55%, transparent)',
+              }}
+            >
+              <Bot className="w-3.5 h-3.5 shrink-0" />
+              <span>Switch Bot</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={() => onNavigateMore()}
+            title={`Logged in as ${currentUser.role === 'owner' ? 'Owner' : 'Administrator'} (${currentUser.name})`}
+            className="lg-badge tap text-white cursor-pointer whitespace-nowrap shrink-0 hover:bg-white/15"
+          >
+            {currentUser.role === 'owner' ? 'Owner' : 'Admin'}
+          </button>
+        </div>
+      </div>
+
+      {/* Mobile Dynamic Island Capsule */}
       <div
         ref={islandRef}
-        className={`glass pointer-events-auto overflow-hidden text-white transition-all duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] ${
+        className={`md:hidden glass pointer-events-auto overflow-hidden text-white transition-all duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] ${
           expanded
             ? 'w-full rounded-[28px] px-3 sm:px-3.5 py-3'
             : morphPulse

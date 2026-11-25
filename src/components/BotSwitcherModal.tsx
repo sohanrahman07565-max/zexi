@@ -202,7 +202,7 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
       className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-black/85 backdrop-blur-md animate-in fade-in duration-200"
     >
       <div 
-        className="w-full max-w-md max-h-[90dvh] flex flex-col rounded-3xl glass-water-card border border-white/20 p-4 sm:p-5 shadow-[0_20px_60px_rgba(0,0,0,0.9),0_0_30px_rgba(239,68,68,0.25)] text-white relative animate-in zoom-in-95 duration-200 overflow-hidden"
+        className="w-full max-w-md md:max-w-3xl max-h-[90dvh] flex flex-col rounded-3xl glass-water-card border border-white/20 p-4 sm:p-5 shadow-[0_20px_60px_rgba(0,0,0,0.9),0_0_30px_rgba(239,68,68,0.25)] text-white relative animate-in zoom-in-95 duration-200 overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -264,8 +264,8 @@ export const BotSwitcherModal: React.FC<BotSwitcherModalProps> = ({
               <span className="text-xs">Loading bot fleet...</span>
             </div>
           ) : (
-            <div className="space-y-2.5">
-              <div className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider px-1">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 md:gap-3">
+              <div className="md:col-span-2 text-[11px] font-semibold text-zinc-400 uppercase tracking-wider px-1">
                 Connected Bots
               </div>
 

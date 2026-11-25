@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import multer from 'multer';
 import dotenv from 'dotenv';
-import { storage, StorageManager, storageContext, AdminUser, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ClonedBotRecord, SharedStorageService, KeyPoolRecord } from './storage';
+import { storage, StorageManager, storageContext, AdminUser, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ClonedBotRecord, SharedStorageService, KeyPoolRecord, DEFAULT_MODERATION_DURATIONS, sanitizeModerationDurations } from './storage';
 import { TelegramService, TelegramBotManager, BotSingletonLock, getItemPayload } from './telegram';
 import { hashPassword, verifyPassword, signSessionToken, verifySessionToken } from './auth';
 
@@ -40,8 +40,8 @@ apiRouter.use(async (req: Request, _res: Response, next: NextFunction) => {
   });
 });
 
-// Lightweight Health check and ping endpoint for network monitoring and Render keep-alive
-apiRouter.all(['/health', '/ping'], async (_req: Request, res: Response) => {
+// Lightweight Health check endpoint for VPS monitoring and client connectivity checks
+apiRouter.get('/health', async (_req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   const settings = await storage.getSettings().catch(() => null);
   const botToken = await TelegramService.getBotToken().catch(() => '');
@@ -49,6 +49,10 @@ apiRouter.all(['/health', '/ping'], async (_req: Request, res: Response) => {
     status: 'ok', 
     timestamp: Date.now(),
     uptime: Math.floor(process.uptime()),
+    storage: {
+      dataDir: storage.getDataDir(),
+      storageDir: storage.getPrimaryUploadDir()
+    },
     bot: {
       hasToken: Boolean(botToken),
       botUsername: settings?.botUsername || null,
@@ -186,7 +190,7 @@ function requirePermission(permKey: keyof AdminUser['permissions']) {
   };
 }
 
-// Build cookie options that work reliably on both HTTPS (TMA/Render/WebView) and HTTP localhost
+// Build cookie options that work reliably on both HTTPS (TMA/VPS HTTPS/WebView) and HTTP localhost
 function getSessionCookieOptions(req: Request, maxAge: number = 12 * 60 * 60 * 1000) {
   const forwardedProto = String(req.get('x-forwarded-proto') || '').toLowerCase();
   const isHttps = Boolean(req.secure || req.protocol === 'https' || forwardedProto.includes('https'));
@@ -387,7 +391,7 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   }
 
   // --- 2. PRIMARY MAIN BOT / OWNER AUTHENTICATION ---
-  // Force-reload fresh data from persistent storage (Firebase RTDB)
+  // Reload latest persisted data from VPS local storage
   await storage.loadLatest(true);
 
   // Reload latest environment variables if .env was changed
@@ -670,144 +674,6 @@ apiRouter.post('/auth/validate-credentials', async (req: Request, res: Response)
   return res.json({ valid: isPasswordValid });
 });
 
-// POST /api/auth/firebase-login (Firebase Authentication Session Creator)
-apiRouter.post('/auth/firebase-login', async (req: Request, res: Response) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
-  const requestedBotId = (
-    (req.headers['x-bot-id'] as string) ||
-    (req.query.bot_id as string) ||
-    (req.query.botId as string) ||
-    (req.body?.bot_id as string) ||
-    'main'
-  ).trim() || 'main';
-
-  if (requestedBotId !== 'main') {
-    return res.status(403).json({
-      error: 'Access Denied: Please sign in using your cloned bot sub-admin credentials.',
-      field: 'email'
-    });
-  }
-
-  const { idToken, email, displayName } = req.body;
-  const cleanEmail = String(email || '').trim().toLowerCase();
-  
-  if (!cleanEmail) {
-    return res.status(400).json({ error: 'Email is required for authentication' });
-  }
-
-  // Reload admins strictly from main storage
-  const mainStorage = StorageManager.getMainStorage();
-  await mainStorage.loadLatest(true);
-  const allAdmins = await mainStorage.getAdmins();
-  const rootAdminId = String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '8153757163').trim();
-  const rootAdminName = (process.env.ADMIN_NAME || 'Sohan').trim();
-  const envAdminEmail = (process.env.ADMIN_EMAIL || 'sohanrahman07565@gmail.com').trim().toLowerCase();
-
-  // Strict Whitelist of Authorized Admin Emails:
-  // 1. Owner email from ENV (or designated default sohanrahman07565@gmail.com, zexiofficial8884@gmail.com)
-  // 2. Explicitly added sub-admins stored in the database
-  const authorizedEmails = new Set<string>([
-    'sohanrahman07565@gmail.com',
-    'zexiofficial8884@gmail.com',
-    ...(envAdminEmail ? [envAdminEmail] : [])
-  ]);
-
-  for (const a of allAdmins) {
-    if (a.name && a.name.includes('@')) {
-      authorizedEmails.add(a.name.toLowerCase().trim());
-    }
-    if ((a as any).email) {
-      authorizedEmails.add(String((a as any).email).toLowerCase().trim());
-    }
-  }
-
-  const isAuthorized = authorizedEmails.has(cleanEmail);
-
-  if (!isAuthorized) {
-    console.warn('[Firebase Auth] Strict whitelist rejection for unauthorized email:', cleanEmail);
-    return res.status(403).json({ 
-      error: 'Access Denied',
-      field: 'email'
-    });
-  }
-
-  const isOwnerEmail = cleanEmail === 'sohanrahman07565@gmail.com' || 
-                       cleanEmail === 'zexiofficial8884@gmail.com' ||
-                       (envAdminEmail && cleanEmail === envAdminEmail);
-
-  // Find matching admin by email or name
-  let admin = allAdmins.find(a => 
-    (a.name && a.name.toLowerCase() === cleanEmail) ||
-    ((a as any).email && String((a as any).email).toLowerCase() === cleanEmail) ||
-    (a.telegramId && a.telegramId.toLowerCase() === cleanEmail) ||
-    (a.id && a.id.toLowerCase() === cleanEmail)
-  );
-
-  // If owner email, connect to the database owner account
-  if (!admin && isOwnerEmail) {
-    admin = allAdmins.find(a => a.role === 'owner');
-  }
-
-  // If owner email and no admin exists at all, bootstrap owner
-  if (!admin && isOwnerEmail) {
-    console.info('[Firebase Auth] Auto-provisioning Owner Admin for:', cleanEmail);
-    const newOwner: AdminUser = {
-      id: rootAdminId || 'sohan',
-      telegramId: rootAdminId || 'sohan',
-      name: displayName || rootAdminName || 'Sohan',
-      role: 'owner',
-      passwordHash: await hashPassword(cleanEmail + '_admin_secret'),
-      permissions: {
-        files_view: true, files_add: true, files_edit: true, files_delete: true,
-        links_view: true, links_add: true, links_edit: true, links_delete: true,
-        messages_view: true, messages_edit: true, admins_manage: true,
-        design_edit: true, settings_edit: true, cleanup_manage: true
-      },
-      enabled: true,
-      createdAt: new Date().toISOString()
-    };
-    await storage.saveAdmin(newOwner);
-    admin = newOwner;
-  }
-
-  if (!admin || !admin.enabled) {
-    console.warn('[Firebase Auth] Access denied for disabled admin email:', cleanEmail);
-    return res.status(403).json({ error: 'Access Denied: This administrator account has been disabled.' });
-  }
-
-  // Create session scoped to main panel
-  const mainStorageForSession = StorageManager.getMainStorage();
-  const rawToken = await mainStorageForSession.createSession(admin.id, admin.role, 'main');
-  const signedToken = signSessionToken(rawToken);
-
-  res.cookie('tg_admin_session', signedToken, getSessionCookieOptions(req));
-
-  if (idToken) {
-    mainStorageForSession.setCloudAuthToken(idToken);
-  }
-
-  admin.lastLoginAt = new Date().toISOString();
-  await mainStorageForSession.saveAdmin(admin);
-
-  console.info('[Firebase Auth] Session successfully created for admin:', admin.name, admin.role);
-
-  return res.json({
-    success: true,
-    token: signedToken,
-    botId: 'main',
-    admin: {
-      id: admin.id,
-      telegramId: admin.telegramId,
-      name: admin.name,
-      username: admin.username,
-      photoUrl: admin.photoUrl,
-      role: admin.role,
-      botId: 'main',
-      permissions: admin.permissions
-    }
-  });
-});
-
 // POST /api/auth/logout
 apiRouter.post('/auth/logout', async (req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -838,46 +704,6 @@ apiRouter.post('/auth/logout', async (req: Request, res: Response) => {
   });
   res.clearCookie('tg_admin_session', { path: '/' });
   return res.json({ success: true, message: 'Logged out' });
-});
-
-// GET /api/firebase-rules (Returns active secured RTDB rules & Firestore rules)
-apiRouter.get('/firebase-rules', authenticate, async (_req: Request, res: Response) => {
-  const rtdbRules = {
-    rules: {
-      ".read": "auth != null",
-      ".write": "auth != null",
-      "app_state": {
-        ".read": "auth != null",
-        ".write": "auth != null"
-      },
-      "admins": {
-        ".read": "auth != null",
-        ".write": "auth != null && (auth.token.email == 'sohanrahman07565@gmail.com' || auth.token.email == 'zexiofficial8884@gmail.com' || auth.token.admin == true)"
-      },
-      "bot_config": {
-        ".read": "auth != null",
-        ".write": "auth != null"
-      },
-      "users": {
-        ".read": "auth != null",
-        ".write": "auth != null"
-      }
-    }
-  };
-
-  return res.json({
-    success: true,
-    rtdbRules,
-    rtdbRulesFormatted: JSON.stringify(rtdbRules, null, 2),
-    authorizedAdmins: [
-      'sohanrahman07565@gmail.com',
-      'zexiofficial8884@gmail.com'
-    ],
-    publicAccessBlocked: true,
-    backendSyncSecured: true,
-    primaryProject: 'zexiofficial844',
-    secondaryProject: 'zexi-official'
-  });
 });
 
 // GET /api/auth/me
@@ -1020,14 +846,16 @@ apiRouter.get('/auth/login-design', async (req: Request, res: Response) => {
   const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
   const currentOrigin = `${protocol}://${host}`;
 
+  const configuredPublicOrigin = String(process.env.APP_URL || process.env.BASE_URL || currentOrigin).trim().replace(/\/+$/, '');
+
   return res.json({
     botUsername: botUsername ? botUsername.replace(/^@/, '') : '',
     clientId,
     clientSecretConfigured: Boolean(botToken),
     redirectUri: `${currentOrigin}/api/auth/callback`,
     deployedUrls: {
-      dev: 'https://ais-dev-5pmvaj2s66z7xu34aogymi-761412699643.asia-east1.run.app/api/auth/callback',
-      shared: 'https://ais-pre-5pmvaj2s66z7xu34aogymi-761412699643.asia-east1.run.app/api/auth/callback'
+      primary: `${configuredPublicOrigin}/api/auth/callback`,
+      current: `${currentOrigin}/api/auth/callback`
     },
     loginTitle: design.loginTitle || 'ADMIN PANEL',
     loginSubtitle: design.loginSubtitle || 'SECURE ACCESS',
@@ -2691,7 +2519,8 @@ apiRouter.post('/items/upload/complete', authenticate, async (req: Request, res:
     }
 
     const finalPath = path.join(baseDir, uploadId);
-    const writeStream = fs.createWriteStream(finalPath);
+    const tmpFinalPath = `${finalPath}.${process.pid}.${Date.now()}.tmp`;
+    const writeStream = fs.createWriteStream(tmpFinalPath);
     let assembledSize = 0;
 
     try {
@@ -2710,8 +2539,10 @@ apiRouter.post('/items/upload/complete', authenticate, async (req: Request, res:
         writeStream.end(() => resolve());
         writeStream.once('error', reject);
       });
+      await fs.promises.rename(tmpFinalPath, finalPath);
     } catch (streamErr) {
       writeStream.destroy();
+      await fs.promises.unlink(tmpFinalPath).catch(() => {});
       throw streamErr;
     }
 
@@ -2953,6 +2784,9 @@ apiRouter.post('/items/upload', authenticate, handleMulterSingle('file'), async 
 apiRouter.get('/uploads/:fileId', async (req: Request, res: Response) => {
   try {
     const cleanId = String(req.params.fileId || '').trim();
+    if (!cleanId || cleanId.includes('..') || !/^[a-zA-Z0-9._-]+$/.test(cleanId)) {
+      return res.status(400).json({ error: 'Invalid file identifier' });
+    }
     const diskPath = storage.getUploadedFilePath(cleanId);
     if (diskPath) {
       const stat = await fs.promises.stat(diskPath);
@@ -3158,6 +2992,10 @@ apiRouter.get('/settings', authenticate, async (_req: Request, res: Response) =>
     linkDeleteEnabled: settings.linkDeleteEnabled ?? false,
     banEnabled: settings.banEnabled ?? true,
     muteEnabled: settings.muteEnabled ?? true,
+    cleanServiceEnabled: settings.cleanServiceEnabled ?? false,
+    moderationDurations: Array.isArray(settings.moderationDurations)
+      ? sanitizeModerationDurations(settings.moderationDurations)
+      : DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d })),
     groupWarningLimit: Math.max(1, Math.min(100, Math.round(Number(settings.groupWarningLimit) || 3))),
     botMode: normalizeBotMode(settings.botMode),
     forceSubEnabled: settings.forceSubEnabled ?? false,
@@ -3210,6 +3048,12 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
   if (req.body.linkDeleteEnabled !== undefined) updates.linkDeleteEnabled = Boolean(req.body.linkDeleteEnabled);
   if (req.body.banEnabled !== undefined) updates.banEnabled = Boolean(req.body.banEnabled);
   if (req.body.muteEnabled !== undefined) updates.muteEnabled = Boolean(req.body.muteEnabled);
+  if (req.body.cleanServiceEnabled !== undefined) updates.cleanServiceEnabled = Boolean(req.body.cleanServiceEnabled);
+  if (req.body.moderationDurations !== undefined) {
+    updates.moderationDurations = Array.isArray(req.body.moderationDurations)
+      ? sanitizeModerationDurations(req.body.moderationDurations)
+      : DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d }));
+  }
   if (req.body.groupWarningLimit !== undefined) {
     updates.groupWarningLimit = Math.max(1, Math.min(100, Math.round(Number(req.body.groupWarningLimit) || 3)));
   }
@@ -3265,6 +3109,10 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
       linkDeleteEnabled: newSettings.linkDeleteEnabled ?? false,
       banEnabled: newSettings.banEnabled ?? true,
       muteEnabled: newSettings.muteEnabled ?? true,
+      cleanServiceEnabled: newSettings.cleanServiceEnabled ?? false,
+      moderationDurations: Array.isArray(newSettings.moderationDurations)
+        ? sanitizeModerationDurations(newSettings.moderationDurations)
+        : DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d })),
       groupWarningLimit: Math.max(1, Math.min(100, Math.round(Number(newSettings.groupWarningLimit) || 3))),
       botMode: normalizeBotMode(newSettings.botMode),
       forceSubEnabled: newSettings.forceSubEnabled ?? false,
@@ -3623,15 +3471,17 @@ apiRouter.post('/settings/decline-join-request', authenticate, requirePermission
 
 // POST /api/bot/set-webhook
 apiRouter.post('/bot/set-webhook', authenticate, requirePermission('settings_edit'), async (req: Request, res: Response) => {
-  const appUrl = (req.body.appUrl || process.env.APP_URL || '').replace(/\/+$/, '');
-  if (!appUrl) {
-    return res.status(400).json({ error: 'App URL is required to set webhook' });
+  const rawTarget = String(req.body.appUrl || process.env.WEBHOOK_URL || process.env.APP_URL || process.env.BASE_URL || '').trim().replace(/\/+$/, '');
+  if (!rawTarget) {
+    return res.status(400).json({ error: 'App URL or WEBHOOK_URL is required to set webhook' });
   }
 
   // Ensure polling loop is completely stopped before activating webhook
   TelegramService.stopPolling();
 
-  const webhookUrl = `${appUrl}/api/telegram-webhook`;
+  const webhookUrl = rawTarget.endsWith('/api/telegram-webhook')
+    ? rawTarget
+    : `${rawTarget}/api/telegram-webhook`;
   const result = await TelegramService.callTelegramApi('setWebhook', { 
     url: webhookUrl,
     allowed_updates: [

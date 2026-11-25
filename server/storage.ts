@@ -214,6 +214,11 @@ export interface ImageUrlBotStoreData {
   }>;
 }
 
+export interface ModerationDurationPreset {
+  label: string;
+  value: string;
+}
+
 export interface BotSettings {
   botToken: string;
   botUsername: string;
@@ -236,6 +241,8 @@ export interface BotSettings {
   linkDeleteEnabled?: boolean;
   banEnabled?: boolean;
   muteEnabled?: boolean;
+  cleanServiceEnabled?: boolean;
+  moderationDurations?: ModerationDurationPreset[];
   groupWarningLimit?: number;
   chatWhitelistEnabled?: boolean;
   allowedChats?: AllowedChatEntry[];
@@ -286,7 +293,32 @@ export interface BotUserRecord {
   interactionCount: number;
   isBanned?: boolean;
   bannedAt?: string;
+  banUntil?: string;
+  banChatId?: string;
+  banReason?: string;
+  isMuted?: boolean;
+  mutedAt?: string;
+  muteUntil?: string;
+  muteChatId?: string;
+  muteReason?: string;
   isAdmin?: boolean;
+}
+
+export interface GroupMemberModerationState {
+  userId: string;
+  username?: string;
+  firstName?: string;
+  lastName?: string;
+  lastSeenAt: string;
+  isBanned?: boolean;
+  bannedAt?: string;
+  banUntil?: string;
+  banReason?: string;
+  unbannedAt?: string;
+  isMuted?: boolean;
+  mutedAt?: string;
+  muteUntil?: string;
+  muteReason?: string;
 }
 
 export interface AdminReportMessageRef {
@@ -431,6 +463,7 @@ export interface AppDatabase {
   clonedBots?: ClonedBotRecord[];
   addSessions?: Record<string, any>;
   botUsers?: Record<string, BotUserRecord>;
+  groupModeration?: Record<string, Record<string, GroupMemberModerationState>>;
   reports?: UserReportRecord[];
   fraudRules?: FraudKeywordRule[];
   linkWarnings?: Record<string, number>;
@@ -461,6 +494,22 @@ export const DEFAULT_TEMPLATES: Record<string, MessageTemplate> = {
     variables: ['user_name', 'user_id', 'bot_name'],
     mediaType: 'none',
     mediaUrl: ''
+  },
+  GROUP_WELCOME_MESSAGE: {
+    key: 'GROUP_WELCOME_MESSAGE',
+    name: 'Welcome Message',
+    description: 'Automatic welcome message sent in groups when a new member joins',
+    content: "👋 <b>Welcome to the group, {first_name}!</b>\n\n👤 <b>Username:</b> {username}\n🆔 <b>User ID:</b> <code>{user_id}</code>",
+    variables: ['username', 'first_name', 'last_name', 'user_id'],
+    mediaType: 'none',
+    mediaUrl: ''
+  },
+  GROUP_INFO_MESSAGE: {
+    key: 'GROUP_INFO_MESSAGE',
+    name: 'Group Info',
+    description: 'Group details message sent when /info is used in a group',
+    content: "ℹ️ <b>Group Information</b>\n\n🏷️ <b>Group Name:</b> {group_name}\n🆔 <b>Chat ID:</b> <code>{chat_id}</code>\n👥 <b>Members:</b> <code>{member_count}</code>\n\n🛡️ <b>Group Admins ({admin_count}):</b>\n{admins_list}",
+    variables: ['chat_id', 'group_name', 'member_count', 'admins_list', 'admin_count']
   },
   DELIVERY_STATUS_MESSAGE: {
     key: 'DELIVERY_STATUS_MESSAGE',
@@ -609,6 +658,42 @@ export const DEFAULT_DESIGN: DesignConfig = {
   buttonAnimationStyle: 'orbit'
 };
 
+export const DEFAULT_MODERATION_DURATIONS: ModerationDurationPreset[] = [
+  { label: '1 Day', value: '1d' },
+  { label: '5 Days', value: '5d' }
+];
+
+export function sanitizeModerationDurations(raw: any): ModerationDurationPreset[] {
+  if (!Array.isArray(raw)) {
+    return DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d }));
+  }
+  const seen = new Set<string>();
+  const result: ModerationDurationPreset[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const rawVal = String(item.value || '').trim().toLowerCase().replace(/\s+/g, '');
+    const m = rawVal.match(/^(\d+(?:\.\d+)?)(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)$/);
+    if (!m) continue;
+    const num = parseFloat(m[1]);
+    if (!Number.isFinite(num) || num <= 0) continue;
+    const u = m[2];
+    const shortUnit = u.startsWith('w') ? 'w' : u.startsWith('d') ? 'd' : u.startsWith('h') ? 'h' : u.startsWith('s') ? 's' : 'm';
+    const compactVal = `${num}${shortUnit}`;
+    if (seen.has(compactVal)) continue;
+    seen.add(compactVal);
+    const unitWord =
+      shortUnit === 'w' ? (num === 1 ? 'Week' : 'Weeks') :
+      shortUnit === 'd' ? (num === 1 ? 'Day' : 'Days') :
+      shortUnit === 'h' ? (num === 1 ? 'Hour' : 'Hours') :
+      shortUnit === 's' ? (num === 1 ? 'Second' : 'Seconds') :
+      (num === 1 ? 'Minute' : 'Minutes');
+    const cleanLabel = String(item.label || '').trim().slice(0, 28) || `${num} ${unitWord}`;
+    result.push({ label: cleanLabel, value: compactVal });
+    if (result.length >= 12) break;
+  }
+  return result;
+}
+
 export const DEFAULT_SETTINGS: BotSettings = {
   botToken: process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '',
   botUsername: '',
@@ -629,6 +714,8 @@ export const DEFAULT_SETTINGS: BotSettings = {
   linkDeleteEnabled: false,
   banEnabled: true,
   muteEnabled: true,
+  cleanServiceEnabled: false,
+  moderationDurations: DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d })),
   groupWarningLimit: 3,
   requiredChannels: [],
   chatWhitelistEnabled: false,
@@ -636,34 +723,76 @@ export const DEFAULT_SETTINGS: BotSettings = {
   botStopped: false
 };
 
-// Persistent storage paths for standalone Render Web Service and local environment (Dual Firebase projects)
-const FIREBASE_RTDB_URL = "https://zexiofficial844-default-rtdb.asia-southeast1.firebasedatabase.app";
-const SECONDARY_FIREBASE_RTDB_URL = "https://zexi-official-default-rtdb.asia-southeast1.firebasedatabase.app";
+// Local VPS persistence & file storage helpers (DATA_DIR, DATA_FILE_PATH, STORAGE_DIR)
+export function resolveVpsDataDir(): string {
+  const custom = (process.env.DATA_DIR || '').trim();
+  return custom ? path.resolve(custom) : path.resolve(process.cwd(), 'data');
+}
 
-function getFallbackFilePaths(botId: string = 'main'): string[] {
-  const suffix = botId === 'main' ? '' : `_${botId}`;
-  const paths: string[] = [];
-  if (process.env.DATA_FILE_PATH) {
+export function resolveVpsStorageDir(): string {
+  const custom = (process.env.STORAGE_DIR || '').trim();
+  return custom ? path.resolve(custom) : path.resolve(process.cwd(), 'storage', 'files');
+}
+
+function sanitizeBotStorageId(botId: string = 'main'): string {
+  const clean = String(botId || 'main').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+  return clean || 'main';
+}
+
+function safeResolveInsideDir(baseDir: string, entryName: string): string | null {
+  const clean = String(entryName || '').trim();
+  if (!clean || clean.includes('..') || clean.includes('/') || clean.includes('\\') || !/^[a-zA-Z0-9._-]+$/.test(clean)) {
+    return null;
+  }
+  const resolvedBase = path.resolve(baseDir);
+  const resolvedTarget = path.resolve(resolvedBase, clean);
+  if (!resolvedTarget.startsWith(resolvedBase + path.sep)) {
+    return null;
+  }
+  return resolvedTarget;
+}
+
+function getPrimaryDataFilePath(botId: string = 'main'): string {
+  const safeId = sanitizeBotStorageId(botId);
+  const suffix = safeId === 'main' ? '' : `_${safeId}`;
+  const customFile = (process.env.DATA_FILE_PATH || '').trim();
+  if (customFile) {
     try {
-      paths.push(path.resolve(process.env.DATA_FILE_PATH.replace(/\.json$/, `${suffix}.json`)));
+      const resolved = path.resolve(customFile);
+      return suffix && resolved.endsWith('.json')
+        ? resolved.replace(/\.json$/, `${suffix}.json`)
+        : (suffix ? `${resolved}${suffix}.json` : resolved);
     } catch {}
   }
-  try {
-    paths.push(path.resolve(process.cwd(), '.data', `store${suffix}.json`));
-  } catch {}
-  paths.push(`/tmp/tg_bot_store${suffix}.json`);
-  return paths;
+  return path.join(resolveVpsDataDir(), `store${suffix}.json`);
+}
+
+function getDataFileSearchPaths(botId: string = 'main'): string[] {
+  const safeId = sanitizeBotStorageId(botId);
+  const suffix = safeId === 'main' ? '' : `_${safeId}`;
+  const primary = getPrimaryDataFilePath(safeId);
+  const candidates = [
+    primary,
+    `${primary}.bak`,
+    path.resolve(process.cwd(), 'data', `store${suffix}.json`),
+    path.resolve(process.cwd(), 'data', `store${suffix}.json.bak`),
+    path.resolve(process.cwd(), '.data', `store${suffix}.json`),
+    `/tmp/tg_bot_store${suffix}.json`
+  ];
+  return Array.from(new Set(candidates));
 }
 
 export class SharedStorageService {
   private db: AppDatabase;
   private lastLoadedAt: number = 0;
+  private hasInitialized = false;
   private triggerCache = new Map<string, ItemRecord>();
   private itemCache = new Map<string, ItemRecord>();
   private sortedActiveItemsNewestCache: ItemRecord[] | null = null;
   private sortedItemsChronoCache: ItemRecord[] | null = null;
-  private cloudSyncTimer: NodeJS.Timeout | null = null;
   private invalidatedJoinRequestIds = new Set<string>();
+  private writeQueue: Promise<void> = Promise.resolve();
+  private static claimedUpdatesMemory = new Map<string, number>();
 
   constructor(public readonly botId: string = 'main') {
     this.db = {
@@ -677,6 +806,7 @@ export class SharedStorageService {
       clonedBots: [],
       addSessions: {},
       botUsers: {},
+      groupModeration: {},
       reports: [],
       fraudRules: [],
       linkWarnings: {},
@@ -690,6 +820,21 @@ export class SharedStorageService {
       settings: { ...DEFAULT_SETTINGS },
       backupServer: { ...DEFAULT_BACKUP_SERVER_CONFIG }
     };
+  }
+
+  public getDataDir(): string {
+    const primaryFile = getPrimaryDataFilePath(this.botId);
+    const dir = path.dirname(primaryFile);
+    try {
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+    } catch {}
+    return dir;
+  }
+
+  public getStorageDir(): string {
+    return resolveVpsStorageDir();
   }
 
   // Zero-latency in-memory item lookup: O(1) instant resolution for super-fast file delivery
@@ -819,336 +964,77 @@ export class SharedStorageService {
       });
   }
 
-  private isCloudSyncing = false;
-  private hasPendingCloudSync = false;
-  private cloudSyncPromise: Promise<boolean> | null = null;
   private activeLoadPromise: Promise<AppDatabase> | null = null;
-  private cachedAuthToken: string | null = null;
-  private tokenExpiresAt: number = 0;
-  private static sharedCloudToken: string | null = null;
-  private static sharedRefreshToken: string | null = null;
-  private static sharedTokenExpiresAt: number = 0;
-  private static authRateLimitedUntil: number = 0;
-  private static tokenFetchPromise: Promise<string | null> | null = null;
 
-  // Explicitly set authenticated admin Firebase ID token (from client login)
-  public setCloudAuthToken(token: string, refreshToken?: string): void {
-    if (token && typeof token === 'string') {
-      const clean = token.trim();
-      const exp = Date.now() + 55 * 60 * 1000;
-      this.cachedAuthToken = clean;
-      this.tokenExpiresAt = exp;
-      SharedStorageService.sharedCloudToken = clean;
-      SharedStorageService.sharedTokenExpiresAt = exp;
-      if (refreshToken && typeof refreshToken === 'string') {
-        SharedStorageService.sharedRefreshToken = refreshToken.trim();
-      }
-    }
+  private buildSerializableSnapshot(): string {
+    const cleanDb = {
+      ...this.db,
+      sessions: (this.db.sessions || []).filter((s) => s && s.expiresAt > Date.now())
+    };
+    return JSON.stringify(cleanDb, null, 2);
   }
 
-  // Retrieve Firebase Auth ID Token or Secret for Cloud RTDB requests
-  public async getFirebaseAuthToken(): Promise<string | null> {
-    if (process.env.FIREBASE_DATABASE_SECRET) {
-      return process.env.FIREBASE_DATABASE_SECRET.trim();
+  private async writeSnapshotAtomically(): Promise<boolean> {
+    const primaryPath = getPrimaryDataFilePath(this.botId);
+    // Never overwrite existing disk store before initial load from disk has completed
+    if (!this.hasInitialized && fs.existsSync(primaryPath)) {
+      return false;
     }
-    if (process.env.FIREBASE_AUTH_TOKEN) {
-      return process.env.FIREBASE_AUTH_TOKEN.trim();
-    }
-
-    const now = Date.now();
-    if (this.cachedAuthToken && now < this.tokenExpiresAt - 60000) {
-      return this.cachedAuthToken;
-    }
-    if (SharedStorageService.sharedCloudToken && now < SharedStorageService.sharedTokenExpiresAt - 60000) {
-      this.cachedAuthToken = SharedStorageService.sharedCloudToken;
-      this.tokenExpiresAt = SharedStorageService.sharedTokenExpiresAt;
-      return this.cachedAuthToken;
-    }
-
-    if (SharedStorageService.tokenFetchPromise) {
-      const shared = await SharedStorageService.tokenFetchPromise;
-      if (shared) {
-        this.cachedAuthToken = shared;
-        this.tokenExpiresAt = SharedStorageService.sharedTokenExpiresAt;
+    const snapshot = this.buildSerializableSnapshot();
+    const task = this.writeQueue.then(async () => {
+      const dir = path.dirname(primaryPath);
+      if (!fs.existsSync(dir)) {
+        await fs.promises.mkdir(dir, { recursive: true });
       }
-      return shared;
-    }
-
-    const apiKey = process.env.FIREBASE_API_KEY || "AIzaSyAvuHW-o4Rl-Ry8Fx5I3xp_Op1ujBT24Ls";
-    const email = process.env.FIREBASE_SYNC_EMAIL || "bot-cloud-sync-v2@zexibot.local";
-    const password = process.env.FIREBASE_SYNC_PASSWORD || "ZexiCloudSync#2025!";
-
-    const cacheToken = (idToken: string, expiresInSec?: any, refreshToken?: string) => {
-      const exp = Date.now() + (Number(expiresInSec) || 3600) * 1000;
-      this.cachedAuthToken = idToken;
-      this.tokenExpiresAt = exp;
-      SharedStorageService.sharedCloudToken = idToken;
-      SharedStorageService.sharedTokenExpiresAt = exp;
-      if (refreshToken) {
-        SharedStorageService.sharedRefreshToken = refreshToken;
-      }
-      return idToken;
-    };
-
-    SharedStorageService.tokenFetchPromise = (async (): Promise<string | null> => {
+      const tmpPath = `${primaryPath}.${process.pid}.${Date.now()}.tmp`;
       try {
-        // 0. If we have a refresh token, exchange it via Secure Token API (avoids password rate limits)
-        if (SharedStorageService.sharedRefreshToken) {
+        const fh = await fs.promises.open(tmpPath, 'w', 0o600);
+        try {
+          await fh.writeFile(snapshot, 'utf-8');
+          await fh.sync();
+        } finally {
+          await fh.close();
+        }
+        // Preserve rolling valid backup before swapping primary store.json
+        if (fs.existsSync(primaryPath)) {
           try {
-            const refreshRes = await fetch(
-              `https://securetoken.googleapis.com/v1/token?key=${apiKey}`,
-              {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: `grant_type=refresh_token&refresh_token=${encodeURIComponent(SharedStorageService.sharedRefreshToken)}`
-              }
-            );
-            if (refreshRes.ok) {
-              const refreshData = await refreshRes.json();
-              if (refreshData.id_token) {
-                return cacheToken(refreshData.id_token, refreshData.expires_in, refreshData.refresh_token);
-              }
+            const stat = await fs.promises.stat(primaryPath);
+            if (stat.size > 2) {
+              const bakTmpPath = `${primaryPath}.bak.${process.pid}.tmp`;
+              await fs.promises.copyFile(primaryPath, bakTmpPath);
+              await fs.promises.rename(bakTmpPath, `${primaryPath}.bak`);
             }
           } catch {}
         }
-
-        // 1. Try primary sync account signInWithPassword (unless temporarily backed off)
-        if (Date.now() > SharedStorageService.authRateLimitedUntil) {
-          const authRes = await fetch(
-            `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${apiKey}`,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ email, password, returnSecureToken: true })
-            }
-          );
-
-          if (authRes.ok) {
-            const authData = await authRes.json();
-            if (authData.idToken) return cacheToken(authData.idToken, authData.expiresIn, authData.refreshToken);
-          } else {
-            const errBody = await authRes.json().catch(() => null);
-            const errMsg = String(errBody?.error?.message || '');
-            if (errMsg.includes('TOO_MANY_ATTEMPTS_TRY_LATER')) {
-              SharedStorageService.authRateLimitedUntil = Date.now() + 5 * 60 * 1000;
-            } else {
-              // 2. Auto-provision primary sync user if not yet created
-              const signUpRes = await fetch(
-                `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${apiKey}`,
-                {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ email, password, returnSecureToken: true })
-                }
-              );
-              if (signUpRes.ok) {
-                const signUpData = await signUpRes.json();
-                if (signUpData.idToken) return cacheToken(signUpData.idToken, signUpData.expiresIn, signUpData.refreshToken);
-              }
-            }
-          }
-        }
-
-        // 3. Fallback: Ephemeral email/password sync session (works even when anonymous auth is disabled)
-        const ephemeralEmail = `sync-${crypto.randomBytes(6).toString('hex')}@zexibot.local`;
-        const ephemeralPassword = crypto.randomBytes(16).toString('hex') + 'A1!';
-        const fallbackSignUp = await fetch(
-          `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${apiKey}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email: ephemeralEmail, password: ephemeralPassword, returnSecureToken: true })
-          }
-        );
-        if (fallbackSignUp.ok) {
-          const fallbackData = await fallbackSignUp.json();
-          if (fallbackData.idToken) return cacheToken(fallbackData.idToken, fallbackData.expiresIn, fallbackData.refreshToken);
-        }
-      } catch {
-        // Non-critical token retrieval error
+        await fs.promises.rename(tmpPath, primaryPath);
+      } catch (err) {
+        await fs.promises.unlink(tmpPath).catch(() => {});
+        throw err;
       }
-      return null;
-    })().finally(() => {
-      SharedStorageService.tokenFetchPromise = null;
     });
-
-    return SharedStorageService.tokenFetchPromise;
-  }
-
-  private getRtdbUrl(path: string, token?: string | null): string {
-    const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
-    const defaultUrl = isSecondary ? SECONDARY_FIREBASE_RTDB_URL : FIREBASE_RTDB_URL;
-    const baseUrl = (process.env.FIREBASE_DATABASE_URL || defaultUrl).replace(/\/+$/, '');
-    const cleanPath = path.startsWith('/') ? path : `/${path}`;
-    const targetPath = this.botId === 'main' ? cleanPath : `/cloned_bots/${this.botId}${cleanPath}`;
-    const url = `${baseUrl}${targetPath}.json`;
-    if (token) {
-      return `${url}?auth=${encodeURIComponent(token)}`;
-    }
-    return url;
-  }
-
-  // 100% Cloud Persistence: Serialized & awaitable commit to Firebase Realtime Database
-  public async syncToFirebaseCloud(): Promise<boolean> {
-    if (this.isCloudSyncing && this.cloudSyncPromise) {
-      this.hasPendingCloudSync = true;
-      await this.cloudSyncPromise.catch(() => false);
-      if (this.hasPendingCloudSync && !this.isCloudSyncing) {
-        return this.syncToFirebaseCloud();
-      }
-      return true;
-    }
-
-    this.isCloudSyncing = true;
-    this.hasPendingCloudSync = false;
-
-    const runSync = async (): Promise<boolean> => {
-      let ok = false;
-      try {
-        const token = await this.getFirebaseAuthToken();
-        const payload = JSON.stringify({
-          items: this.db.items,
-          templates: this.db.templates,
-          admins: this.db.admins,
-          sessions: (this.db.sessions || []).filter(s => s.expiresAt > Date.now()),
-          clonedBots: this.db.clonedBots || [],
-          settings: this.db.settings,
-          design: this.db.design,
-          botUsers: this.db.botUsers,
-          reports: this.db.reports,
-          fraudRules: this.db.fraudRules,
-          linkWarnings: this.db.linkWarnings,
-          fraudWarnings: this.db.fraudWarnings,
-          detectedChannels: this.db.detectedChannels,
-          joinRequests: this.db.joinRequests,
-          postBotPublishedPosts: this.db.postBotPublishedPosts || {},
-          imageUrlBotData: this.db.imageUrlBotData,
-          keyPools: this.db.keyPools || [],
-          trackedMessages: this.db.trackedMessages,
-          scheduledDeletions: this.db.scheduledDeletions,
-          chatDeliveryMessages: this.db.chatDeliveryMessages,
-          backupServer: this.db.backupServer,
-          addSessions: this.db.addSessions,
-          uploadedFilesIndex: this.db.uploadedFilesIndex,
-          updatedAt: new Date().toISOString()
-        });
-
-        let res = await fetch(this.getRtdbUrl('/app_state', token), {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: payload
-        });
-
-        if (!res.ok && token) {
-          res = await fetch(this.getRtdbUrl('/app_state'), {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: payload
-          });
-        }
-
-        if (res.ok) {
-          ok = true;
-          console.log(`☁️ [Firebase Cloud] Storage (${this.botId}) committed to Firebase Realtime Database.`);
-        } else {
-          const errorText = await res.text().catch(() => '');
-          console.warn(`☁️ [Firebase Cloud] Cloud sync (${this.botId}) returned HTTP ${res.status}:`, errorText);
-        }
-      } catch (err: any) {
-        console.warn(`☁️ [Firebase Cloud] Storage sync (${this.botId}) notice:`, err?.message || err);
-      } finally {
-        this.isCloudSyncing = false;
-        this.cloudSyncPromise = null;
-      }
-
-      if (this.hasPendingCloudSync) {
-        this.hasPendingCloudSync = false;
-        return this.syncToFirebaseCloud();
-      }
-      return ok;
-    };
-
-    this.cloudSyncPromise = runSync();
-    return this.cloudSyncPromise;
-  }
-
-  // Restore latest database state from Firebase Realtime Database cloud
-  public async loadFromFirebaseCloud(): Promise<Partial<AppDatabase> | null> {
+    this.writeQueue = task.catch(() => {});
     try {
-      const token = await this.getFirebaseAuthToken();
-      let res = await fetch(this.getRtdbUrl('/app_state', token));
-
-      if (!res.ok && token) {
-        res = await fetch(this.getRtdbUrl('/app_state'));
-      }
-
-      let cloudData: any = null;
-      if (res.ok) {
-        const parsed = await res.json();
-        if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
-          cloudData = parsed;
-        }
-      }
-
-      // For main bot, also merge /cloned_bots_meta so cloned bots are never lost across updates (excluding deleted tombstones)
-      if (this.botId === 'main') {
-        try {
-          const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
-          const baseUrl = (process.env.FIREBASE_DATABASE_URL || (isSecondary ? SECONDARY_FIREBASE_RTDB_URL : FIREBASE_RTDB_URL)).replace(/\/+$/, '');
-          let metaRes = await fetch(token ? `${baseUrl}/cloned_bots_meta.json?auth=${encodeURIComponent(token)}` : `${baseUrl}/cloned_bots_meta.json`);
-          if (!metaRes.ok && token) {
-            metaRes = await fetch(`${baseUrl}/cloned_bots_meta.json`);
-          }
-          if (metaRes.ok) {
-            const metaObj = await metaRes.json();
-            if (metaObj && typeof metaObj === 'object') {
-              const metaBots = Object.values(metaObj).filter((b: any) =>
-                b && b.id && b.token && !SharedStorageService.isClonedBotDeleted(b.id)
-              ) as ClonedBotRecord[];
-              if (metaBots.length > 0) {
-                if (!cloudData) cloudData = {};
-                const merged = new Map<string, ClonedBotRecord>();
-                for (const b of (Array.isArray(cloudData.clonedBots) ? cloudData.clonedBots : [])) {
-                  if (b && b.id && !SharedStorageService.isClonedBotDeleted(b.id)) merged.set(b.id, b);
-                }
-                for (const b of metaBots) {
-                  if (!merged.has(b.id)) {
-                    merged.set(b.id, b);
-                  } else {
-                    merged.set(b.id, { ...b, ...merged.get(b.id)! });
-                  }
-                }
-                cloudData.clonedBots = Array.from(merged.values());
-              }
-            }
-          }
-        } catch {}
-      }
-
-      if (cloudData) {
-        console.log(`☁️ [Firebase Storage] Restored state (${this.botId}) from Firebase Realtime Database cloud.`);
-        return cloudData;
-      }
+      await task;
+      return true;
     } catch (err: any) {
-      console.warn('☁️ [Firebase Storage] Notice reading from cloud:', err?.message || err);
+      console.error(`[VPS Storage] Atomic save error (${this.botId}):`, err?.message || err);
+      return false;
     }
-    return null;
   }
 
-  // Graceful flush to ensure all in-flight changes are safely committed to cloud
+  // Graceful flush to ensure all in-flight changes are safely written to VPS disk
   public async flush(): Promise<void> {
-    if (this.cloudSyncTimer) {
-      clearTimeout(this.cloudSyncTimer);
-      this.cloudSyncTimer = null;
+    if (this.pendingPersistTimer) {
+      clearTimeout(this.pendingPersistTimer);
+      this.pendingPersistTimer = null;
     }
-    await this.syncToFirebaseCloud();
+    await this.writeSnapshotAtomically();
   }
 
   // High-performance LRU / In-Memory Cache Layer
   private lruCache = new Map<string, { value: any; expiresAt: number; hitCount: number }>();
   private readonly MAX_LRU_ENTRIES = 1000;
   private blobStore = new Map<string, Map<string, any>>();
-  private isPersisting = false;
   private pendingPersistTimer: NodeJS.Timeout | null = null;
   private lastDiskCheck: number = 0;
   private revokedSessionTokens = new Set<string>();
@@ -1192,10 +1078,6 @@ export class SharedStorageService {
   }
 
   public stopTimers(): void {
-    if (this.cloudSyncTimer) {
-      clearTimeout(this.cloudSyncTimer);
-      this.cloudSyncTimer = null;
-    }
     if (this.pendingPersistTimer) {
       clearTimeout(this.pendingPersistTimer);
       this.pendingPersistTimer = null;
@@ -1238,8 +1120,8 @@ export class SharedStorageService {
     return { clearedLruEntries, clearedBlobs, clearedMemoryFiles, prunedSessions };
   }
 
-  // --- Hybrid Blob / Netlify Blobs Compatibility Layer ---
-  // Maps storage keys efficiently in-memory so data retrieval remains instantaneous on Render
+  // --- Hybrid In-Memory Cache Compatibility Layer ---
+  // Maps storage keys efficiently in-memory so data retrieval remains instantaneous on VPS
   public async getBlob<T = any>(storeName: string, key: string): Promise<T | null> {
     const store = this.blobStore.get(storeName);
     if (store && store.has(key)) {
@@ -1295,35 +1177,27 @@ export class SharedStorageService {
     return [];
   }
 
-  // Background non-blocking disk & Firebase revalidation (Stale-While-Revalidate)
+  // Background non-blocking local disk revalidation
   private async revalidateInBackground(): Promise<void> {
     const now = Date.now();
     if (now - this.lastDiskCheck < 20000) return;
     this.lastDiskCheck = now;
 
     try {
-      let newestDiskJson: string | null = null;
-      let freshestMtime = -1;
-      for (const filePath of getFallbackFilePaths(this.botId)) {
-        if (fs.existsSync(filePath)) {
-          const stat = await fs.promises.stat(filePath).catch(() => null);
-          if (stat && stat.mtimeMs > freshestMtime) {
-            const raw = await fs.promises.readFile(filePath, 'utf-8').catch(() => null);
-            if (raw && raw.trim().startsWith('{')) {
-              freshestMtime = stat.mtimeMs;
-              newestDiskJson = raw;
+      const primaryPath = getPrimaryDataFilePath(this.botId);
+      if (fs.existsSync(primaryPath)) {
+        const stat = await fs.promises.stat(primaryPath).catch(() => null);
+        if (stat && stat.mtimeMs > this.lastLoadedAt) {
+          const raw = await fs.promises.readFile(primaryPath, 'utf-8').catch(() => null);
+          if (raw && raw.trim().startsWith('{')) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === 'object') {
+              this.applyLoadedData(parsed);
+              this.lastLoadedAt = stat.mtimeMs;
+              this.rebuildCache();
+              this.invalidateCache();
             }
           }
-        }
-      }
-
-      if (newestDiskJson && freshestMtime > this.lastLoadedAt) {
-        const parsed = JSON.parse(newestDiskJson);
-        if (parsed && typeof parsed === 'object') {
-          this.applyLoadedData(parsed);
-          this.lastLoadedAt = freshestMtime;
-          this.rebuildCache();
-          this.invalidateCache();
         }
       }
     } catch {}
@@ -1365,6 +1239,7 @@ export class SharedStorageService {
       uploadedFilesIndex: loadedData.uploadedFilesIndex || {},
       addSessions: loadedData.addSessions || {},
       botUsers: loadedData.botUsers || {},
+      groupModeration: loadedData.groupModeration || {},
       reports: Array.isArray(loadedData.reports) ? loadedData.reports : [],
       fraudRules: Array.isArray(loadedData.fraudRules) ? loadedData.fraudRules : [],
       linkWarnings: loadedData.linkWarnings || {},
@@ -1400,7 +1275,11 @@ export class SharedStorageService {
         ...DEFAULT_SETTINGS,
         ...(loadedData.settings || {}),
         botToken: isMainBot
-          ? (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || loadedData.settings?.botToken || '')
+          ? ((() => {
+              const envTok = String(process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '').trim().replace(/^["']|["']$/g, '');
+              const validEnvTok = envTok && !envTok.includes('your_telegram_bot_token') ? envTok : '';
+              return validEnvTok || loadedData.settings?.botToken || '';
+            })())
           : (loadedData.settings?.botToken || this.db.settings?.botToken || ''),
         rootAdminId: isMainBot
           ? (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || loadedData.settings?.rootAdminId || '')
@@ -1421,6 +1300,10 @@ export class SharedStorageService {
         linkDeleteEnabled: loadedData.settings?.linkDeleteEnabled ?? false,
         banEnabled: loadedData.settings?.banEnabled !== undefined ? Boolean(loadedData.settings.banEnabled) : true,
         muteEnabled: loadedData.settings?.muteEnabled !== undefined ? Boolean(loadedData.settings.muteEnabled) : true,
+        cleanServiceEnabled: loadedData.settings?.cleanServiceEnabled ?? false,
+        moderationDurations: Array.isArray(loadedData.settings?.moderationDurations)
+          ? sanitizeModerationDurations(loadedData.settings.moderationDurations)
+          : DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d })),
         groupWarningLimit: Math.max(1, Math.min(100, Math.round(Number(loadedData.settings?.groupWarningLimit) || 3))),
         requiredChannels: Array.isArray(loadedData.settings?.requiredChannels) ? loadedData.settings.requiredChannels : [],
         chatWhitelistEnabled: loadedData.settings?.chatWhitelistEnabled ?? false,
@@ -1456,47 +1339,67 @@ export class SharedStorageService {
   }
 
   private async performLoadLatest(): Promise<AppDatabase> {
-
+    const primaryPath = getPrimaryDataFilePath(this.botId);
     let loadedData: Partial<AppDatabase> | null = null;
+    let loadedFromLegacyPath: string | null = null;
 
-    // 100% Cloud Permanence: Restore state from Firebase Realtime Database cloud first
-    try {
-      loadedData = await this.loadFromFirebaseCloud();
-    } catch (err: any) {
-      console.warn('☁️ [Firebase Storage] Initial cloud read exception:', err?.message || err);
-    }
-
-    // Emergency Offline Fallback: Only check local files if cloud was completely offline
-    if (!loadedData) {
-      let freshestMtime = -1;
-      let freshestJson: string | null = null;
-      for (const filePath of getFallbackFilePaths(this.botId)) {
-        try {
-          if (fs.existsSync(filePath)) {
-            const stat = fs.statSync(filePath);
-            if (stat.mtimeMs > freshestMtime) {
-              const raw = fs.readFileSync(filePath, 'utf-8');
-              if (raw && raw.trim().startsWith('{')) {
-                freshestMtime = stat.mtimeMs;
-                freshestJson = raw;
+    // Local VPS Store: prefer primary DATA_DIR/store.json, falling back cleanly to legacy .data/store.json for automatic migration
+    for (const filePath of getDataFileSearchPaths(this.botId)) {
+      try {
+        if (fs.existsSync(filePath)) {
+          const raw = await fs.promises.readFile(filePath, 'utf-8');
+          if (raw && raw.trim().startsWith('{')) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === 'object') {
+              loadedData = parsed;
+              if (filePath !== primaryPath) {
+                loadedFromLegacyPath = filePath;
               }
+              console.log(`💾 [VPS Storage] Loaded local database (${this.botId}) from ${filePath}`);
+              break;
             }
           }
-        } catch {}
-      }
-      if (freshestJson) {
-        try {
-          loadedData = JSON.parse(freshestJson);
-          if (loadedData) {
-            console.log('💾 [Local Storage] Restored offline fallback snapshot from disk.');
-          }
-        } catch {}
+        }
+      } catch (err: any) {
+        console.warn(`⚠️ [VPS Storage] Could not read store file ${filePath}:`, err?.message || err);
       }
     }
 
     if (loadedData) {
       this.applyLoadedData(loadedData);
     }
+
+    // Ensure primary data & file storage directories exist, clean up orphan .tmp files, and migrate legacy snapshots
+    try {
+      const dataDir = path.dirname(primaryPath);
+      if (!fs.existsSync(dataDir)) {
+        await fs.promises.mkdir(dataDir, { recursive: true });
+      }
+      const storageDir = resolveVpsStorageDir();
+      if (!fs.existsSync(storageDir)) {
+        await fs.promises.mkdir(storageDir, { recursive: true });
+      }
+      const entries = await fs.promises.readdir(dataDir).catch(() => [] as string[]);
+      const nowMs = Date.now();
+      for (const name of entries) {
+        if (name.endsWith('.tmp')) {
+          const full = path.join(dataDir, name);
+          const st = await fs.promises.stat(full).catch(() => null);
+          if (st && nowMs - st.mtimeMs > 10000) {
+            await fs.promises.unlink(full).catch(() => {});
+          }
+        }
+      }
+    } catch {}
+
+    this.hasInitialized = true;
+
+    try {
+      if (loadedFromLegacyPath && !fs.existsSync(primaryPath)) {
+        await this.writeSnapshotAtomically();
+        console.log(`🔄 [VPS Storage] Migrated database (${this.botId}) from ${loadedFromLegacyPath} to ${primaryPath}`);
+      }
+    } catch {}
 
     // Ensure root admin from ADMIN_ID / ROOT_ADMIN_ID exists ONLY for primary main bot
     if (this.botId === 'main') {
@@ -1544,22 +1447,11 @@ export class SharedStorageService {
     await this.loadLatest(true);
   }
 
-  // Fast asynchronous persistence: updates in-memory immediately & commits to cloud reliably
-  public async persist(waitForCloud: boolean = false): Promise<boolean> {
+  // Local VPS persistence: updates in-memory immediately & writes atomically to DATA_DIR
+  public async persist(waitForDisk: boolean = false): Promise<boolean> {
     this.lastLoadedAt = Date.now();
     this.rebuildCache();
     this.invalidateCache();
-
-    // 100% Cloud Permanence: Commit to Firebase Realtime Database
-    if (waitForCloud) {
-      await this.syncToFirebaseCloud().catch((err) => {
-        console.warn('☁️ [Firebase Cloud] Sync error:', err?.message || err);
-      });
-    } else {
-      this.syncToFirebaseCloud().catch((err) => {
-        console.warn('☁️ [Firebase Cloud] Background sync error:', err?.message || err);
-      });
-    }
 
     // Trigger debounced real-time replication to silent backup mirror if enabled
     if (
@@ -1571,24 +1463,19 @@ export class SharedStorageService {
       this.scheduleSilentReplication();
     }
 
-    // Non-blocking asynchronous file persistence
-    if (this.pendingPersistTimer) clearTimeout(this.pendingPersistTimer);
-    this.pendingPersistTimer = setTimeout(async () => {
-      try {
-        const snapshot = JSON.stringify(this.db, null, 2);
-        for (const filePath of getFallbackFilePaths(this.botId)) {
-          try {
-            const dir = path.dirname(filePath);
-            if (!fs.existsSync(dir)) {
-              await fs.promises.mkdir(dir, { recursive: true });
-            }
-            await fs.promises.writeFile(filePath, snapshot, 'utf-8');
-          } catch {}
-        }
-      } catch (err: any) {
-        console.error('[Storage] Error during async file persistence:', err?.message || err);
+    if (waitForDisk) {
+      if (this.pendingPersistTimer) {
+        clearTimeout(this.pendingPersistTimer);
+        this.pendingPersistTimer = null;
       }
-    }, 250);
+      return await this.writeSnapshotAtomically();
+    }
+
+    if (this.pendingPersistTimer) clearTimeout(this.pendingPersistTimer);
+    this.pendingPersistTimer = setTimeout(() => {
+      this.pendingPersistTimer = null;
+      void this.writeSnapshotAtomically();
+    }, 200);
 
     return true;
   }
@@ -1945,6 +1832,9 @@ export class SharedStorageService {
     if (this.db.items.length !== lenBefore) {
       const uploadIds = new Set<string>();
       if (itemToDelete?.uploadedFileId) uploadIds.add(itemToDelete.uploadedFileId);
+      if (itemToDelete?.setupVideoUrl && /^(?:upload|local|phone)_/i.test(itemToDelete.setupVideoUrl)) {
+        uploadIds.add(itemToDelete.setupVideoUrl);
+      }
       if (Array.isArray(itemToDelete?.files)) {
         for (const f of itemToDelete.files) {
           if (f.uploadedFileId) uploadIds.add(f.uploadedFileId);
@@ -1973,6 +1863,9 @@ export class SharedStorageService {
           expiredIds.push(item.id);
           const uploadIds = new Set<string>();
           if (item.uploadedFileId) uploadIds.add(item.uploadedFileId);
+          if (item.setupVideoUrl && /^(?:upload|local|phone)_/i.test(item.setupVideoUrl)) {
+            uploadIds.add(item.setupVideoUrl);
+          }
           if (Array.isArray(item.files)) {
             for (const f of item.files) {
               if (f.uploadedFileId) uploadIds.add(f.uploadedFileId);
@@ -2390,9 +2283,47 @@ export class SharedStorageService {
     return sorted;
   }
 
+  private pruneExpiredModerationStatuses(): boolean {
+    if (!this.db.botUsers) return false;
+    const now = Date.now();
+    let changed = false;
+    for (const u of Object.values(this.db.botUsers)) {
+      if (!u) continue;
+      if (u.isBanned && u.banUntil) {
+        const exp = new Date(u.banUntil).getTime();
+        if (Number.isFinite(exp) && now >= exp) {
+          u.isBanned = false;
+          delete u.bannedAt;
+          delete u.banUntil;
+          delete u.banChatId;
+          delete u.banReason;
+          changed = true;
+        }
+      }
+      if (u.isMuted && u.muteUntil) {
+        const exp = new Date(u.muteUntil).getTime();
+        if (Number.isFinite(exp) && now >= exp) {
+          u.isMuted = false;
+          delete u.mutedAt;
+          delete u.muteUntil;
+          delete u.muteChatId;
+          delete u.muteReason;
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      this.invalidateCache('users:');
+    }
+    return changed;
+  }
+
   public async isUserBanned(userId: string | number): Promise<boolean> {
     if (!userId) return false;
     await this.loadLatest(false);
+    if (this.pruneExpiredModerationStatuses()) {
+      this.persist().catch(() => {});
+    }
     const cleanId = String(userId).trim();
     // 1. Direct key check
     const directUser = this.db.botUsers?.[cleanId];
@@ -2409,9 +2340,40 @@ export class SharedStorageService {
     return Boolean(match?.isBanned);
   }
 
+  public async getActiveBannedUsers(): Promise<BotUserRecord[]> {
+    await this.loadLatest(false);
+    if (this.pruneExpiredModerationStatuses()) {
+      this.persist().catch(() => {});
+    }
+    return Object.values(this.db.botUsers || {})
+      .filter((u) => Boolean(u && u.isBanned))
+      .sort((a, b) => {
+        const ta = new Date(a.bannedAt || a.lastActiveAt || 0).getTime();
+        const tb = new Date(b.bannedAt || b.lastActiveAt || 0).getTime();
+        return tb - ta;
+      });
+  }
+
+  public async getActiveMutedUsers(): Promise<BotUserRecord[]> {
+    await this.loadLatest(false);
+    if (this.pruneExpiredModerationStatuses()) {
+      this.persist().catch(() => {});
+    }
+    return Object.values(this.db.botUsers || {})
+      .filter((u) => Boolean(u && u.isMuted))
+      .sort((a, b) => {
+        const ta = new Date(a.mutedAt || a.lastActiveAt || 0).getTime();
+        const tb = new Date(b.mutedAt || b.lastActiveAt || 0).getTime();
+        return tb - ta;
+      });
+  }
+
   public async getUser(userId: string | number): Promise<BotUserRecord | null> {
     if (!userId) return null;
     await this.loadLatest(false);
+    if (this.pruneExpiredModerationStatuses()) {
+      this.persist().catch(() => {});
+    }
     const cleanId = String(userId).trim();
     if (this.db.botUsers?.[cleanId]) {
       return this.db.botUsers[cleanId];
@@ -2477,6 +2439,9 @@ export class SharedStorageService {
           u.bannedAt = now;
         } else {
           delete u.bannedAt;
+          delete u.banUntil;
+          delete u.banChatId;
+          delete u.banReason;
           (u as any).bannedAt = undefined;
         }
         user = u;
@@ -2486,6 +2451,9 @@ export class SharedStorageService {
     // When unbanned, completely clear any link warnings or fraud restrictions
     if (user && !user.isBanned) {
       delete user.bannedAt;
+      delete user.banUntil;
+      delete user.banChatId;
+      delete user.banReason;
       (user as any).bannedAt = undefined;
       await this.resetUserLinkWarning(cleanId);
       await this.resetUserFraudWarning(cleanId);
@@ -2495,6 +2463,9 @@ export class SharedStorageService {
         if (this.db.botUsers[String(user.id).trim()]) {
           this.db.botUsers[String(user.id).trim()].isBanned = false;
           delete this.db.botUsers[String(user.id).trim()].bannedAt;
+          delete this.db.botUsers[String(user.id).trim()].banUntil;
+          delete this.db.botUsers[String(user.id).trim()].banChatId;
+          delete this.db.botUsers[String(user.id).trim()].banReason;
           (this.db.botUsers[String(user.id).trim()] as any).bannedAt = undefined;
         }
       }
@@ -2560,6 +2531,12 @@ export class SharedStorageService {
     if (this.db.settings.muteEnabled === undefined) {
       this.db.settings.muteEnabled = true;
     }
+    if (this.db.settings.cleanServiceEnabled === undefined) {
+      this.db.settings.cleanServiceEnabled = false;
+    }
+    if (!Array.isArray(this.db.settings.moderationDurations)) {
+      this.db.settings.moderationDurations = DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d }));
+    }
     if (this.db.settings.groupWarningLimit === undefined || !Number.isFinite(Number(this.db.settings.groupWarningLimit))) {
       this.db.settings.groupWarningLimit = 3;
     }
@@ -2597,6 +2574,12 @@ export class SharedStorageService {
       linkDeleteEnabled: settings.linkDeleteEnabled !== undefined ? Boolean(settings.linkDeleteEnabled) : (this.db.settings.linkDeleteEnabled ?? false),
       banEnabled: settings.banEnabled !== undefined ? Boolean(settings.banEnabled) : (this.db.settings.banEnabled ?? true),
       muteEnabled: settings.muteEnabled !== undefined ? Boolean(settings.muteEnabled) : (this.db.settings.muteEnabled ?? true),
+      cleanServiceEnabled: settings.cleanServiceEnabled !== undefined ? Boolean(settings.cleanServiceEnabled) : (this.db.settings.cleanServiceEnabled ?? false),
+      moderationDurations: settings.moderationDurations !== undefined && Array.isArray(settings.moderationDurations)
+        ? sanitizeModerationDurations(settings.moderationDurations)
+        : (Array.isArray(this.db.settings.moderationDurations)
+            ? this.db.settings.moderationDurations
+            : DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d }))),
       groupWarningLimit: settings.groupWarningLimit !== undefined
         ? Math.max(1, Math.min(100, Math.round(Number(settings.groupWarningLimit) || 3)))
         : Math.max(1, Math.min(100, Math.round(Number(this.db.settings.groupWarningLimit) || 3))),
@@ -3158,21 +3141,29 @@ export class SharedStorageService {
     return recordedList;
   }
 
-  // --- Uploaded Files Storage (Direct phone / storage upload support) ---
+  // --- Local VPS File Storage (STORAGE_DIR, default ./storage/files) ---
   private static uploadedFilesMemory = new Map<string, UploadedFileRecord>();
 
   private getUploadDirs(): string[] {
-    const dirs: string[] = [];
+    const dirs: string[] = [resolveVpsStorageDir()];
     try {
+      dirs.push(path.resolve(process.cwd(), 'storage', 'files'));
       dirs.push(path.resolve(process.cwd(), '.data', 'uploads'));
     } catch {}
     dirs.push('/tmp/tg_uploads');
-    return dirs;
+    return Array.from(new Set(dirs));
   }
 
   private static readonly MAX_RAM_CACHE_BYTES = 25 * 1024 * 1024;
 
   public getPrimaryUploadDir(): string {
+    const primary = resolveVpsStorageDir();
+    try {
+      if (!fs.existsSync(primary)) {
+        fs.mkdirSync(primary, { recursive: true });
+      }
+      return primary;
+    } catch {}
     for (const dir of this.getUploadDirs()) {
       try {
         if (!fs.existsSync(dir)) {
@@ -3181,113 +3172,20 @@ export class SharedStorageService {
         return dir;
       } catch {}
     }
-    const fallback = '/tmp/tg_uploads';
-    try {
-      if (!fs.existsSync(fallback)) fs.mkdirSync(fallback, { recursive: true });
-    } catch {}
-    return fallback;
+    return primary;
   }
 
   public getUploadedFilePath(fileId: string): string | null {
     if (!fileId) return null;
-    const cleanId = String(fileId).trim();
     for (const dir of this.getUploadDirs()) {
       try {
-        const filePath = path.join(dir, cleanId);
-        if (fs.existsSync(filePath)) {
-          return filePath;
+        const resolved = safeResolveInsideDir(dir, fileId);
+        if (resolved && fs.existsSync(resolved)) {
+          return resolved;
         }
       } catch {}
     }
     return null;
-  }
-
-  private async syncUploadedBufferToRtdb(
-    cleanId: string,
-    buffer: Buffer,
-    meta: { fileName: string; fileType: 'document' | 'photo' | 'video' | 'audio'; mimeType: string; size: number; createdAt: string }
-  ): Promise<void> {
-    if (meta.size <= 0 || meta.size > 24 * 1024 * 1024) return;
-    if (meta.size <= 3 * 1024 * 1024) {
-      try {
-        const token = await this.getFirebaseAuthToken();
-        const url = this.getRtdbUrl(`/uploaded_files/${cleanId}`, token);
-        const body = JSON.stringify({
-          id: cleanId,
-          fileName: meta.fileName,
-          fileType: meta.fileType,
-          mimeType: meta.mimeType,
-          size: meta.size,
-          base64: buffer.toString('base64'),
-          createdAt: meta.createdAt
-        });
-        const cloudRes = await fetch(url, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body
-        });
-        if (!cloudRes.ok && token) {
-          await fetch(this.getRtdbUrl(`/uploaded_files/${cleanId}`), {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body
-          });
-        }
-      } catch {}
-      return;
-    }
-
-    try {
-      const token = await this.getFirebaseAuthToken();
-      const fullB64 = buffer.toString('base64');
-      const CHUNK_LEN = 1800000;
-      const totalChunks = Math.ceil(fullB64.length / CHUNK_LEN);
-      let allChunksOk = true;
-      for (let idx = 0; idx < totalChunks; idx++) {
-        const part = fullB64.slice(idx * CHUNK_LEN, (idx + 1) * CHUNK_LEN);
-        const cUrl = this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/c_${idx}`, token);
-        let cRes = await fetch(cUrl, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(part)
-        });
-        if (!cRes.ok && token) {
-          cRes = await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/c_${idx}`), {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(part)
-          });
-        }
-        if (!cRes.ok) {
-          allChunksOk = false;
-          break;
-        }
-      }
-      if (allChunksOk) {
-        const metaUrl = this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/meta`, token);
-        const metaBody = JSON.stringify({
-          id: cleanId,
-          fileName: meta.fileName,
-          fileType: meta.fileType,
-          mimeType: meta.mimeType,
-          size: meta.size,
-          totalChunks,
-          createdAt: meta.createdAt
-        });
-        const mRes = await fetch(metaUrl, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: metaBody
-        });
-        if (!mRes.ok && token) {
-          await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/meta`), {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: metaBody
-          });
-        }
-      }
-    } catch {}
   }
 
   public async registerUploadedFileFromDisk(fileId: string, data: {
@@ -3312,25 +3210,20 @@ export class SharedStorageService {
       createdAt
     };
 
-    for (const dir of this.getUploadDirs()) {
-      try {
-        if (!fs.existsSync(dir)) {
-          await fs.promises.mkdir(dir, { recursive: true });
-        }
-        if (fs.existsSync(path.join(dir, cleanId))) {
-          await fs.promises.writeFile(path.join(dir, `${cleanId}.meta.json`), JSON.stringify(meta));
-        }
-      } catch {}
+    const primaryDir = this.getPrimaryUploadDir();
+    const filePath = safeResolveInsideDir(primaryDir, cleanId);
+    const metaPath = safeResolveInsideDir(primaryDir, `${cleanId}.meta.json`);
+    if (filePath && metaPath && fs.existsSync(filePath)) {
+      const tmpMetaPath = `${metaPath}.${process.pid}.tmp`;
+      await fs.promises.writeFile(tmpMetaPath, JSON.stringify(meta)).catch(() => {});
+      await fs.promises.rename(tmpMetaPath, metaPath).catch(() => {});
     }
 
-    if (data.bufferForSmallSync && size <= 24 * 1024 * 1024) {
-      if (size <= SharedStorageService.MAX_RAM_CACHE_BYTES) {
-        SharedStorageService.uploadedFilesMemory.set(cleanId, {
-          ...meta,
-          buffer: data.bufferForSmallSync
-        });
-      }
-      await this.syncUploadedBufferToRtdb(cleanId, data.bufferForSmallSync, meta);
+    if (data.bufferForSmallSync && size <= SharedStorageService.MAX_RAM_CACHE_BYTES) {
+      SharedStorageService.uploadedFilesMemory.set(cleanId, {
+        ...meta,
+        buffer: data.bufferForSmallSync
+      });
     }
 
     await this.loadLatest(true);
@@ -3368,7 +3261,7 @@ export class SharedStorageService {
       SharedStorageService.uploadedFilesMemory.set(cleanId, record);
     }
 
-    // 2. Persist to disk (.data/uploads and /tmp/tg_uploads)
+    // 2. Persist atomically directly to VPS STORAGE_DIR
     const meta = {
       id: cleanId,
       fileName: data.fileName,
@@ -3377,20 +3270,27 @@ export class SharedStorageService {
       size,
       createdAt
     };
-    for (const dir of this.getUploadDirs()) {
-      try {
-        await fs.promises.mkdir(dir, { recursive: true });
-        await fs.promises.writeFile(path.join(dir, cleanId), data.buffer);
-        await fs.promises.writeFile(path.join(dir, `${cleanId}.meta.json`), JSON.stringify(meta));
-      } catch (err) {
-        console.warn(`[Storage] Could not write upload to disk ${dir}:`, err);
-      }
+    const primaryDir = this.getPrimaryUploadDir();
+    const targetFilePath = safeResolveInsideDir(primaryDir, cleanId);
+    const targetMetaPath = safeResolveInsideDir(primaryDir, `${cleanId}.meta.json`);
+    if (!targetFilePath || !targetMetaPath) {
+      throw new Error('Invalid file identifier');
+    }
+    await fs.promises.mkdir(primaryDir, { recursive: true });
+    const tmpFilePath = `${targetFilePath}.${process.pid}.${Date.now()}.tmp`;
+    const tmpMetaPath = `${targetMetaPath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await fs.promises.writeFile(tmpFilePath, data.buffer);
+      await fs.promises.rename(tmpFilePath, targetFilePath);
+      await fs.promises.writeFile(tmpMetaPath, JSON.stringify(meta));
+      await fs.promises.rename(tmpMetaPath, targetMetaPath);
+    } catch (err) {
+      await fs.promises.unlink(tmpFilePath).catch(() => {});
+      await fs.promises.unlink(tmpMetaPath).catch(() => {});
+      throw err;
     }
 
-    // 3. Persist small/medium files (<= 24MB) to Firebase RTDB so media survives restarts/updates
-    await this.syncUploadedBufferToRtdb(cleanId, data.buffer, meta);
-
-    // 4. Keep index in database (metadata only inside app_state)
+    // 3. Keep index in local database (metadata only inside store.json)
     await this.loadLatest(true);
     if (!this.db.uploadedFilesIndex) {
       this.db.uploadedFilesIndex = {};
@@ -3409,15 +3309,15 @@ export class SharedStorageService {
       return SharedStorageService.uploadedFilesMemory.get(cleanId)!;
     }
 
-    // 2. Check disk in all known upload dirs
+    // 2. Check disk in STORAGE_DIR and legacy upload directories
     for (const dir of this.getUploadDirs()) {
       try {
-        const filePath = path.join(dir, cleanId);
-        const metaPath = path.join(dir, `${cleanId}.meta.json`);
-        if (fs.existsSync(filePath)) {
+        const filePath = safeResolveInsideDir(dir, cleanId);
+        const metaPath = safeResolveInsideDir(dir, `${cleanId}.meta.json`);
+        if (filePath && fs.existsSync(filePath)) {
           const buffer = await fs.promises.readFile(filePath);
           let meta: any = {};
-          if (fs.existsSync(metaPath)) {
+          if (metaPath && fs.existsSync(metaPath)) {
             try {
               meta = JSON.parse(await fs.promises.readFile(metaPath, 'utf8'));
             } catch {}
@@ -3441,7 +3341,7 @@ export class SharedStorageService {
       }
     }
 
-    // 3. Check db.uploadedFilesIndex
+    // 3. Check db.uploadedFilesIndex legacy embedded base64
     await this.loadLatest(false);
     if (this.db.uploadedFilesIndex && this.db.uploadedFilesIndex[cleanId]) {
       const entry = this.db.uploadedFilesIndex[cleanId];
@@ -3479,75 +3379,6 @@ export class SharedStorageService {
       }
     }
 
-    // 5. Hydrate from Firebase RTDB /uploaded_files/${cleanId} or chunked /uploaded_file_chunks/${cleanId}
-    try {
-      const token = await this.getFirebaseAuthToken();
-      let res = await fetch(this.getRtdbUrl(`/uploaded_files/${cleanId}`, token));
-      if (!res.ok && token) {
-        res = await fetch(this.getRtdbUrl(`/uploaded_files/${cleanId}`));
-      }
-      if (res.ok) {
-        const cloudFile = await res.json();
-        if (cloudFile && cloudFile.base64) {
-          const buffer = Buffer.from(cloudFile.base64, 'base64');
-          const rec: UploadedFileRecord = {
-            id: cleanId,
-            fileName: cloudFile.fileName || 'file',
-            fileType: cloudFile.fileType || 'document',
-            mimeType: cloudFile.mimeType || 'application/octet-stream',
-            size: buffer.length,
-            buffer,
-            createdAt: cloudFile.createdAt || new Date().toISOString()
-          };
-          SharedStorageService.uploadedFilesMemory.set(cleanId, rec);
-          return rec;
-        }
-      }
-
-      // Check chunked RTDB node for larger setup videos / files
-      let chunkMetaRes = await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/meta`, token));
-      if (!chunkMetaRes.ok && token) {
-        chunkMetaRes = await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/meta`));
-      }
-      if (chunkMetaRes.ok) {
-        const cMeta = await chunkMetaRes.json();
-        if (cMeta && Number(cMeta.totalChunks) > 0) {
-          const parts: string[] = [];
-          let missing = false;
-          for (let idx = 0; idx < Number(cMeta.totalChunks); idx++) {
-            let pRes = await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/c_${idx}`, token));
-            if (!pRes.ok && token) {
-              pRes = await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}/c_${idx}`));
-            }
-            if (!pRes.ok) {
-              missing = true;
-              break;
-            }
-            const chunkStr = await pRes.json();
-            if (typeof chunkStr !== 'string') {
-              missing = true;
-              break;
-            }
-            parts.push(chunkStr);
-          }
-          if (!missing && parts.length === Number(cMeta.totalChunks)) {
-            const buffer = Buffer.from(parts.join(''), 'base64');
-            const rec: UploadedFileRecord = {
-              id: cleanId,
-              fileName: cMeta.fileName || 'file',
-              fileType: cMeta.fileType || 'document',
-              mimeType: cMeta.mimeType || 'application/octet-stream',
-              size: buffer.length,
-              buffer,
-              createdAt: cMeta.createdAt || new Date().toISOString()
-            };
-            SharedStorageService.uploadedFilesMemory.set(cleanId, rec);
-            return rec;
-          }
-        }
-      }
-    } catch {}
-
     return null;
   }
 
@@ -3557,17 +3388,12 @@ export class SharedStorageService {
     SharedStorageService.uploadedFilesMemory.delete(cleanId);
     for (const dir of this.getUploadDirs()) {
       try {
-        const filePath = path.join(dir, cleanId);
-        const metaPath = path.join(dir, `${cleanId}.meta.json`);
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+        const filePath = safeResolveInsideDir(dir, cleanId);
+        const metaPath = safeResolveInsideDir(dir, `${cleanId}.meta.json`);
+        if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        if (metaPath && fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
       } catch {}
     }
-    try {
-      const token = await this.getFirebaseAuthToken();
-      await fetch(this.getRtdbUrl(`/uploaded_files/${cleanId}`, token), { method: 'DELETE' }).catch(() => {});
-      await fetch(this.getRtdbUrl(`/uploaded_file_chunks/${cleanId}`, token), { method: 'DELETE' }).catch(() => {});
-    } catch {}
     if (this.db.uploadedFilesIndex && this.db.uploadedFilesIndex[cleanId]) {
       delete this.db.uploadedFilesIndex[cleanId];
       await this.persist();
@@ -3788,7 +3614,11 @@ export class SharedStorageService {
     return null;
   }
 
-  public async setBotUserBanned(userId: string | number, isBanned: boolean): Promise<BotUserRecord | null> {
+  public async setBotUserBanned(
+    userId: string | number,
+    isBanned: boolean,
+    opts?: { chatId?: string; untilMs?: number; reason?: string; name?: string; username?: string }
+  ): Promise<BotUserRecord | null> {
     if (!userId) return null;
     const cleanId = String(userId).trim();
     await this.loadLatest(true);
@@ -3816,27 +3646,49 @@ export class SharedStorageService {
     });
 
     const now = new Date().toISOString();
+    const banUntilIso = isBanned && opts?.untilMs && opts.untilMs > Date.now()
+      ? new Date(opts.untilMs).toISOString()
+      : undefined;
+    const formattedOptUsername = opts?.username
+      ? `@${String(opts.username).replace(/^@+/, '').trim()}`
+      : undefined;
     let user: BotUserRecord | null = null;
 
     if (matchingKeys.length === 0) {
       user = {
         id: cleanId,
-        username: cleanId.startsWith('@') ? cleanId : undefined,
+        username: formattedOptUsername || (cleanId.startsWith('@') ? cleanId : undefined),
+        firstName: opts?.name || undefined,
         firstSeenAt: now,
         lastActiveAt: now,
         interactionCount: 0,
         isBanned: Boolean(isBanned),
-        bannedAt: isBanned ? now : undefined
+        bannedAt: isBanned ? now : undefined,
+        ...(banUntilIso ? { banUntil: banUntilIso } : {}),
+        ...(isBanned && opts?.chatId ? { banChatId: String(opts.chatId) } : {}),
+        ...(isBanned && opts?.reason ? { banReason: opts.reason } : {})
       };
       this.db.botUsers[cleanId] = user;
     } else {
       for (const k of matchingKeys) {
         const u = this.db.botUsers[k];
+        if (!u.firstName && opts?.name) u.firstName = opts.name;
+        if (!u.username && formattedOptUsername) u.username = formattedOptUsername;
         u.isBanned = Boolean(isBanned);
         if (isBanned) {
           u.bannedAt = now;
+          if (banUntilIso) u.banUntil = banUntilIso;
+          else delete u.banUntil;
+          if (opts?.chatId) u.banChatId = String(opts.chatId);
+          if (opts?.reason !== undefined) {
+            if (opts.reason) u.banReason = opts.reason;
+            else delete u.banReason;
+          }
         } else {
           delete u.bannedAt;
+          delete u.banUntil;
+          delete u.banChatId;
+          delete u.banReason;
           (u as any).bannedAt = undefined;
         }
         user = u;
@@ -3846,6 +3698,9 @@ export class SharedStorageService {
     // When unbanned, completely clear any link warnings or fraud restrictions
     if (user && !isBanned) {
       delete user.bannedAt;
+      delete user.banUntil;
+      delete user.banChatId;
+      delete user.banReason;
       (user as any).bannedAt = undefined;
       await this.resetUserLinkWarning(cleanId);
       await this.resetUserFraudWarning(cleanId);
@@ -3855,6 +3710,9 @@ export class SharedStorageService {
         if (this.db.botUsers[String(user.id).trim()]) {
           this.db.botUsers[String(user.id).trim()].isBanned = false;
           delete this.db.botUsers[String(user.id).trim()].bannedAt;
+          delete this.db.botUsers[String(user.id).trim()].banUntil;
+          delete this.db.botUsers[String(user.id).trim()].banChatId;
+          delete this.db.botUsers[String(user.id).trim()].banReason;
           (this.db.botUsers[String(user.id).trim()] as any).bannedAt = undefined;
         }
       }
@@ -3864,8 +3722,337 @@ export class SharedStorageService {
       }
     }
 
+    this.invalidateCache('users:');
     await this.persist();
     return user;
+  }
+
+  public async setBotUserMuted(
+    userId: string | number,
+    isMuted: boolean,
+    opts?: { chatId?: string; untilMs?: number; reason?: string; name?: string; username?: string }
+  ): Promise<BotUserRecord | null> {
+    if (!userId) return null;
+    const cleanId = String(userId).trim();
+    await this.loadLatest(true);
+    if (!this.db.botUsers) {
+      this.db.botUsers = {};
+    }
+
+    if (isMuted) {
+      const admins = await this.getAdmins();
+      const settings = await this.getSettings();
+      const rootAdminId = String(settings.rootAdminId || process.env.ROOT_ADMIN_ID || '8153757163');
+      const isAdmin = cleanId === rootAdminId || rootAdminId.includes(cleanId) || admins.some(a => String(a.telegramId) === cleanId || String(a.id) === cleanId);
+      if (isAdmin) {
+        throw new Error('Administrators cannot be muted');
+      }
+    }
+
+    const cleanUsername = cleanId.replace(/^@+/, '').toLowerCase();
+    const matchingKeys = Object.keys(this.db.botUsers).filter(k => {
+      const u = this.db.botUsers![k];
+      return k === cleanId ||
+             k.replace(/^@+/, '').toLowerCase() === cleanUsername ||
+             String(u.id).trim() === cleanId ||
+             (u.username && u.username.replace(/^@+/, '').toLowerCase() === cleanUsername);
+    });
+
+    const now = new Date().toISOString();
+    const muteUntilIso = isMuted && opts?.untilMs && opts.untilMs > Date.now()
+      ? new Date(opts.untilMs).toISOString()
+      : undefined;
+    const formattedOptUsername = opts?.username
+      ? `@${String(opts.username).replace(/^@+/, '').trim()}`
+      : undefined;
+    let user: BotUserRecord | null = null;
+
+    if (matchingKeys.length === 0) {
+      user = {
+        id: cleanId,
+        username: formattedOptUsername || (cleanId.startsWith('@') ? cleanId : undefined),
+        firstName: opts?.name || undefined,
+        firstSeenAt: now,
+        lastActiveAt: now,
+        interactionCount: 0,
+        isMuted: Boolean(isMuted),
+        mutedAt: isMuted ? now : undefined,
+        ...(muteUntilIso ? { muteUntil: muteUntilIso } : {}),
+        ...(isMuted && opts?.chatId ? { muteChatId: String(opts.chatId) } : {}),
+        ...(isMuted && opts?.reason ? { muteReason: opts.reason } : {})
+      };
+      this.db.botUsers[cleanId] = user;
+    } else {
+      for (const k of matchingKeys) {
+        const u = this.db.botUsers[k];
+        if (!u.firstName && opts?.name) u.firstName = opts.name;
+        if (!u.username && formattedOptUsername) u.username = formattedOptUsername;
+        u.isMuted = Boolean(isMuted);
+        if (isMuted) {
+          u.mutedAt = now;
+          if (muteUntilIso) u.muteUntil = muteUntilIso;
+          else delete u.muteUntil;
+          if (opts?.chatId) u.muteChatId = String(opts.chatId);
+          if (opts?.reason !== undefined) {
+            if (opts.reason) u.muteReason = opts.reason;
+            else delete u.muteReason;
+          }
+        } else {
+          delete u.mutedAt;
+          delete u.muteUntil;
+          delete u.muteChatId;
+          delete u.muteReason;
+        }
+        user = u;
+      }
+    }
+
+    if (user && !isMuted && user.id && this.db.botUsers[String(user.id).trim()]) {
+      const rec = this.db.botUsers[String(user.id).trim()];
+      rec.isMuted = false;
+      delete rec.mutedAt;
+      delete rec.muteUntil;
+      delete rec.muteChatId;
+      delete rec.muteReason;
+    }
+
+    this.invalidateCache('users:');
+    await this.persist();
+    return user;
+  }
+
+  private pruneExpiredGroupModeration(chatId?: string): boolean {
+    if (!this.db.groupModeration) return false;
+    const now = Date.now();
+    let changed = false;
+    const targets = chatId
+      ? (this.db.groupModeration[chatId] ? [this.db.groupModeration[chatId]] : [])
+      : Object.values(this.db.groupModeration);
+
+    for (const chatMap of targets) {
+      if (!chatMap || typeof chatMap !== 'object') continue;
+      for (const rec of Object.values(chatMap)) {
+        if (!rec) continue;
+        if (rec.isBanned && rec.banUntil) {
+          const exp = new Date(rec.banUntil).getTime();
+          if (Number.isFinite(exp) && now >= exp) {
+            rec.isBanned = false;
+            delete rec.bannedAt;
+            delete rec.banUntil;
+            delete rec.banReason;
+            rec.unbannedAt = new Date(now).toISOString();
+            changed = true;
+          }
+        }
+        if (rec.isMuted && rec.muteUntil) {
+          const exp = new Date(rec.muteUntil).getTime();
+          if (Number.isFinite(exp) && now >= exp) {
+            rec.isMuted = false;
+            delete rec.mutedAt;
+            delete rec.muteUntil;
+            delete rec.muteReason;
+            changed = true;
+          }
+        }
+      }
+    }
+    return changed;
+  }
+
+  public trackGroupMember(
+    chatId: string | number,
+    user: { id: string | number; username?: string; firstName?: string; lastName?: string }
+  ): void {
+    const cleanChatId = String(chatId || '').trim();
+    const cleanUserId = String(user?.id || '').trim();
+    if (!cleanChatId || !cleanUserId || !/^\d+$/.test(cleanUserId)) return;
+
+    if (!this.db.groupModeration) this.db.groupModeration = {};
+    if (!this.db.groupModeration[cleanChatId]) this.db.groupModeration[cleanChatId] = {};
+
+    const now = new Date().toISOString();
+    const existing = this.db.groupModeration[cleanChatId][cleanUserId];
+    const cleanUsername = user.username ? `@${String(user.username).replace(/^@+/, '').trim()}` : undefined;
+
+    if (!existing) {
+      this.db.groupModeration[cleanChatId][cleanUserId] = {
+        userId: cleanUserId,
+        username: cleanUsername,
+        firstName: user.firstName || undefined,
+        lastName: user.lastName || undefined,
+        lastSeenAt: now
+      };
+      this.persist().catch(() => {});
+      return;
+    }
+
+    let profileChanged = false;
+    if (cleanUsername && existing.username !== cleanUsername) {
+      existing.username = cleanUsername;
+      profileChanged = true;
+    }
+    if (user.firstName && existing.firstName !== user.firstName) {
+      existing.firstName = user.firstName;
+      profileChanged = true;
+    }
+    if (user.lastName && existing.lastName !== user.lastName) {
+      existing.lastName = user.lastName;
+      profileChanged = true;
+    }
+    const lastMs = existing.lastSeenAt ? new Date(existing.lastSeenAt).getTime() : 0;
+    if (profileChanged || !lastMs || Date.now() - lastMs > 10 * 60 * 1000) {
+      existing.lastSeenAt = now;
+      this.persist().catch(() => {});
+    }
+  }
+
+  public async setGroupMemberBanned(
+    chatId: string | number,
+    userId: string | number,
+    isBanned: boolean,
+    opts?: { untilMs?: number; reason?: string; name?: string; username?: string }
+  ): Promise<GroupMemberModerationState | null> {
+    const cleanChatId = String(chatId || '').trim();
+    const cleanUserId = String(userId || '').trim();
+    if (!cleanChatId || !cleanUserId) return null;
+
+    await this.loadLatest(true);
+    if (!this.db.groupModeration) this.db.groupModeration = {};
+    if (!this.db.groupModeration[cleanChatId]) this.db.groupModeration[cleanChatId] = {};
+
+    const now = new Date().toISOString();
+    const banUntilIso = isBanned && opts?.untilMs && opts.untilMs > Date.now()
+      ? new Date(opts.untilMs).toISOString()
+      : undefined;
+    const cleanUsername = opts?.username ? `@${String(opts.username).replace(/^@+/, '').trim()}` : undefined;
+
+    const existing = this.db.groupModeration[cleanChatId][cleanUserId] || {
+      userId: cleanUserId,
+      lastSeenAt: now
+    };
+    if (opts?.name && !existing.firstName) existing.firstName = opts.name;
+    if (cleanUsername && !existing.username) existing.username = cleanUsername;
+
+    existing.isBanned = Boolean(isBanned);
+    if (isBanned) {
+      existing.bannedAt = now;
+      delete existing.unbannedAt;
+      if (banUntilIso) existing.banUntil = banUntilIso;
+      else delete existing.banUntil;
+      if (opts?.reason !== undefined) {
+        if (opts.reason) existing.banReason = opts.reason;
+        else delete existing.banReason;
+      }
+    } else {
+      delete existing.bannedAt;
+      delete existing.banUntil;
+      delete existing.banReason;
+      existing.unbannedAt = now;
+    }
+
+    this.db.groupModeration[cleanChatId][cleanUserId] = existing;
+    await this.persist();
+    return existing;
+  }
+
+  public async setGroupMemberMuted(
+    chatId: string | number,
+    userId: string | number,
+    isMuted: boolean,
+    opts?: { untilMs?: number; reason?: string; name?: string; username?: string }
+  ): Promise<GroupMemberModerationState | null> {
+    const cleanChatId = String(chatId || '').trim();
+    const cleanUserId = String(userId || '').trim();
+    if (!cleanChatId || !cleanUserId) return null;
+
+    await this.loadLatest(true);
+    if (!this.db.groupModeration) this.db.groupModeration = {};
+    if (!this.db.groupModeration[cleanChatId]) this.db.groupModeration[cleanChatId] = {};
+
+    const now = new Date().toISOString();
+    const muteUntilIso = isMuted && opts?.untilMs && opts.untilMs > Date.now()
+      ? new Date(opts.untilMs).toISOString()
+      : undefined;
+    const cleanUsername = opts?.username ? `@${String(opts.username).replace(/^@+/, '').trim()}` : undefined;
+
+    const existing = this.db.groupModeration[cleanChatId][cleanUserId] || {
+      userId: cleanUserId,
+      lastSeenAt: now
+    };
+    if (opts?.name && !existing.firstName) existing.firstName = opts.name;
+    if (cleanUsername && !existing.username) existing.username = cleanUsername;
+
+    existing.isMuted = Boolean(isMuted);
+    if (isMuted) {
+      existing.mutedAt = now;
+      if (muteUntilIso) existing.muteUntil = muteUntilIso;
+      else delete existing.muteUntil;
+      if (opts?.reason !== undefined) {
+        if (opts.reason) existing.muteReason = opts.reason;
+        else delete existing.muteReason;
+      }
+    } else {
+      delete existing.mutedAt;
+      delete existing.muteUntil;
+      delete existing.muteReason;
+    }
+
+    this.db.groupModeration[cleanChatId][cleanUserId] = existing;
+    await this.persist();
+    return existing;
+  }
+
+  public async getGroupMemberModeration(
+    chatId: string | number,
+    userId: string | number
+  ): Promise<GroupMemberModerationState | null> {
+    const cleanChatId = String(chatId || '').trim();
+    const cleanUserId = String(userId || '').trim();
+    if (!cleanChatId || !cleanUserId) return null;
+    await this.loadLatest(false);
+    if (this.pruneExpiredGroupModeration(cleanChatId)) {
+      this.persist().catch(() => {});
+    }
+    return this.db.groupModeration?.[cleanChatId]?.[cleanUserId] || null;
+  }
+
+  public async getGroupModerationSummary(chatId: string | number): Promise<{
+    trackedTotal: number;
+    bannedUsers: GroupMemberModerationState[];
+    mutedUsers: GroupMemberModerationState[];
+    unbannedCount: number;
+  }> {
+    const cleanChatId = String(chatId || '').trim();
+    await this.loadLatest(false);
+    if (cleanChatId && this.pruneExpiredGroupModeration(cleanChatId)) {
+      this.persist().catch(() => {});
+    }
+    const members = Object.values((cleanChatId && this.db.groupModeration?.[cleanChatId]) || {});
+    const bannedUsers = members
+      .filter((m) => Boolean(m && m.isBanned))
+      .sort((a, b) => new Date(b.bannedAt || b.lastSeenAt || 0).getTime() - new Date(a.bannedAt || a.lastSeenAt || 0).getTime());
+    const mutedUsers = members
+      .filter((m) => Boolean(m && m.isMuted))
+      .sort((a, b) => new Date(b.mutedAt || b.lastSeenAt || 0).getTime() - new Date(a.mutedAt || a.lastSeenAt || 0).getTime());
+    const unbannedCount = members.filter((m) => Boolean(m) && !m.isBanned).length;
+
+    return {
+      trackedTotal: members.length,
+      bannedUsers,
+      mutedUsers,
+      unbannedCount
+    };
+  }
+
+  public hasActiveBanInAnyGroup(userId: string | number): boolean {
+    const cleanUserId = String(userId || '').trim();
+    if (!cleanUserId || !this.db.groupModeration) return false;
+    this.pruneExpiredGroupModeration();
+    for (const chatMap of Object.values(this.db.groupModeration)) {
+      const rec = chatMap?.[cleanUserId];
+      if (rec?.isBanned) return true;
+    }
+    return false;
   }
 
   public async setBotUserAdmin(userId: string | number, isAdmin: boolean): Promise<BotUserRecord | null> {
@@ -4092,14 +4279,34 @@ export class SharedStorageService {
   }
 
   // =========================================================================
-  // DISTRIBUTED LEADER ELECTION & UPDATE DEDUPLICATION LOCKS (RTDB)
+  // LOCAL VPS PROCESS LEADER LOCKS & UPDATE DEDUPLICATION
   // =========================================================================
 
   public static hashToken(botToken: string): string {
     return crypto.createHash('sha256').update(String(botToken || '').trim()).digest('hex').slice(0, 20);
   }
 
-  // Distributed Token Lock across all servers (Render, Dev, Preview) keyed by SHA-256 token hash
+  private getLocksDir(): string {
+    const dir = path.join(resolveVpsDataDir(), '.locks');
+    try {
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+    } catch {}
+    return dir;
+  }
+
+  private static isLocalPidAlive(pid: number): boolean {
+    if (!pid || !Number.isInteger(pid) || pid <= 0) return false;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err: any) {
+      return err?.code === 'EPERM';
+    }
+  }
+
+  // Local VPS Token Lock keyed by SHA-256 token hash
   public async tryClaimTokenLock(
     botToken: string,
     metadata: { instanceId: string; host: string; pid: number; botId: string; env: string; isPrimary?: boolean },
@@ -4115,45 +4322,31 @@ export class SharedStorageService {
     }
     const tokenHash = SharedStorageService.hashToken(botToken);
     try {
-      const authToken = await this.getFirebaseAuthToken();
-      const url = this.getRtdbUrl(`/bot_token_locks/${tokenHash}`, authToken);
-      const res = await fetch(url);
+      const lockPath = path.join(this.getLocksDir(), `token_${tokenHash}.json`);
       const now = Date.now();
       let existing: any = null;
-      if (res.ok) {
-        existing = await res.json();
+      if (fs.existsSync(lockPath)) {
+        try {
+          existing = JSON.parse(await fs.promises.readFile(lockPath, 'utf-8'));
+        } catch {
+          existing = null;
+        }
       }
-
-      const callerIsPrimary = Boolean(metadata.isPrimary || String(metadata.env || '').startsWith('render('));
-      const existingIsPrimary = Boolean(existing?.isPrimary || String(existing?.env || '').startsWith('render('));
-      const sameHostSameBot = Boolean(
-        existing &&
-        existing.host &&
-        metadata.host &&
-        existing.host === metadata.host &&
-        existing.botId === metadata.botId
-      );
 
       const isDifferentAliveInstance = Boolean(
         existing &&
         existing.instanceId &&
         existing.instanceId !== metadata.instanceId &&
+        SharedStorageService.isLocalPidAlive(Number(existing.pid || 0)) &&
         (now - Number(existing.heartbeat || 0)) < ttlMs
       );
 
-      const canResetExisting = Boolean(
-        options?.forceReset ||
-        (callerIsPrimary && !existingIsPrimary) ||
-        sameHostSameBot ||
-        (options?.isStartupBoot && existing?.botId === metadata.botId && callerIsPrimary)
-      );
-
-      if (isDifferentAliveInstance && !canResetExisting) {
+      if (isDifferentAliveInstance && !options?.forceReset) {
         return { acquired: false, conflict: existing };
       }
 
       const overwrote =
-        isDifferentAliveInstance && canResetExisting
+        isDifferentAliveInstance && options?.forceReset
           ? {
               instanceId: String(existing.instanceId || ''),
               env: existing.env,
@@ -4169,34 +4362,9 @@ export class SharedStorageService {
         updatedAt: new Date().toISOString()
       };
 
-      await fetch(url, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(claimPayload)
-      });
-
-      // Read-after-write check to resolve near-simultaneous startup races across external hosts
-      if (!options?.forceReset && (!existing || existing.instanceId !== metadata.instanceId)) {
-        await new Promise((r) => setTimeout(r, 40));
-        const verifyRes = await fetch(url).catch(() => null);
-        if (verifyRes && verifyRes.ok) {
-          const verified = await verifyRes.json().catch(() => null);
-          const verifiedIsPrimary = Boolean(verified?.isPrimary || String(verified?.env || '').startsWith('render('));
-          if (
-            verified &&
-            verified.instanceId &&
-            verified.instanceId !== metadata.instanceId &&
-            (Date.now() - Number(verified.heartbeat || 0)) < ttlMs &&
-            !(callerIsPrimary && !verifiedIsPrimary)
-          ) {
-            return { acquired: false, conflict: verified };
-          }
-        }
-      }
-
+      await fs.promises.writeFile(lockPath, JSON.stringify(claimPayload), 'utf-8');
       return { acquired: true, overwrote };
     } catch {
-      // Fallback to local OS lockfile & Telegram 409 check if RTDB is unreachable
       return { acquired: true };
     }
   }
@@ -4205,90 +4373,74 @@ export class SharedStorageService {
     if (!botToken || !botToken.trim()) return;
     const tokenHash = SharedStorageService.hashToken(botToken);
     try {
-      const authToken = await this.getFirebaseAuthToken();
-      const url = this.getRtdbUrl(`/bot_token_locks/${tokenHash}`, authToken);
-      const res = await fetch(url);
-      if (res.ok) {
-        const existing = await res.json();
+      const lockPath = path.join(this.getLocksDir(), `token_${tokenHash}.json`);
+      if (fs.existsSync(lockPath)) {
+        const raw = await fs.promises.readFile(lockPath, 'utf-8');
+        const existing = JSON.parse(raw);
         if (existing?.instanceId === instanceId) {
-          await fetch(url, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ instanceId: '', heartbeat: 0, releasedAt: new Date().toISOString() })
-          });
+          await fs.promises.unlink(lockPath).catch(() => {});
         }
       }
     } catch {}
   }
 
-  // Distributed Leader Election for Telegram Polling across multi-instance environments
+  // Local VPS Leader Lock for Telegram Polling
   public async tryClaimPollingLeader(
     instanceId: string,
     ttlMs: number = 10000,
     options?: { forceReset?: boolean; isPrimary?: boolean }
   ): Promise<{ isLeader: boolean; currentLeader: string }> {
     try {
-      const token = await this.getFirebaseAuthToken();
-      const url = this.getRtdbUrl('/bot_leader', token);
-      const res = await fetch(url);
+      const leaderPath = path.join(this.getLocksDir(), 'polling_leader.json');
       const now = Date.now();
       let leader: any = null;
-      if (res.ok) {
-        leader = await res.json();
+      if (fs.existsSync(leaderPath)) {
+        try {
+          leader = JSON.parse(await fs.promises.readFile(leaderPath, 'utf-8'));
+        } catch {
+          leader = null;
+        }
       }
-
-      const leaderIsPrimary = Boolean(leader?.isPrimary);
-      const callerIsPrimary = Boolean(options?.isPrimary);
 
       const hasActiveOtherLeader = Boolean(
         !options?.forceReset &&
         leader &&
         leader.instanceId &&
         leader.instanceId !== instanceId &&
-        (now - Number(leader.heartbeat || 0)) < ttlMs &&
-        !(callerIsPrimary && !leaderIsPrimary)
+        SharedStorageService.isLocalPidAlive(Number(leader.pid || 0)) &&
+        (now - Number(leader.heartbeat || 0)) < ttlMs
       );
 
       if (hasActiveOtherLeader) {
         return { isLeader: false, currentLeader: leader.instanceId };
       }
 
-      // Claim or renew leader role
       const claimPayload = {
         instanceId,
-        isPrimary: callerIsPrimary,
+        pid: process.pid,
+        isPrimary: Boolean(options?.isPrimary),
         heartbeat: now,
         updatedAt: new Date().toISOString()
       };
 
-      await fetch(url, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(claimPayload)
-      });
-
+      await fs.promises.writeFile(leaderPath, JSON.stringify(claimPayload), 'utf-8');
       return { isLeader: true, currentLeader: instanceId };
     } catch {
-      // If network fails to RTDB, permit local leadership so bot is never paralyzed
       return { isLeader: true, currentLeader: instanceId };
     }
   }
 
   public async renewPollingLeaderHeartbeat(instanceId: string): Promise<boolean> {
     try {
-      const token = await this.getFirebaseAuthToken();
-      const url = this.getRtdbUrl('/bot_leader', token);
+      const leaderPath = path.join(this.getLocksDir(), 'polling_leader.json');
       const payload = {
         instanceId,
+        pid: process.pid,
         heartbeat: Date.now(),
         updatedAt: new Date().toISOString()
       };
-      const res = await fetch(url, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      return res.ok;
+      await fs.promises.writeFile(leaderPath, JSON.stringify(payload), 'utf-8');
+      return true;
     } catch {
       return false;
     }
@@ -4296,55 +4448,33 @@ export class SharedStorageService {
 
   public async releasePollingLeader(instanceId: string): Promise<void> {
     try {
-      const token = await this.getFirebaseAuthToken();
-      const url = this.getRtdbUrl('/bot_leader', token);
-      const res = await fetch(url);
-      if (res.ok) {
-        const leader = await res.json();
+      const leaderPath = path.join(this.getLocksDir(), 'polling_leader.json');
+      if (fs.existsSync(leaderPath)) {
+        const leader = JSON.parse(await fs.promises.readFile(leaderPath, 'utf-8'));
         if (leader?.instanceId === instanceId) {
-          await fetch(url, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ instanceId: '', heartbeat: 0, releasedAt: new Date().toISOString() })
-          });
+          await fs.promises.unlink(leaderPath).catch(() => {});
         }
       }
     } catch {}
   }
 
-  // Atomic Distributed Update Claim across all instances (Dev, Preview, Render, etc.)
-  public async claimDistributedTelegramUpdate(updateKey: string, instanceId: string, ttlMs: number = 90000): Promise<boolean> {
+  // Fast in-memory update deduplication claim across concurrent handlers
+  public async claimDistributedTelegramUpdate(updateKey: string, _instanceId: string, ttlMs: number = 90000): Promise<boolean> {
     if (!updateKey) return true;
-    const safeKey = updateKey.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 100);
-    try {
-      const token = await this.getFirebaseAuthToken();
-      const url = this.getRtdbUrl(`/bot_claimed_updates/${safeKey}`, token);
-      const checkRes = await fetch(url);
-      const now = Date.now();
-      if (checkRes.ok) {
-        const existing = await checkRes.json();
-        if (existing && existing.timestamp && (now - Number(existing.timestamp)) < ttlMs) {
-          // Already claimed and processed by another instance or thread!
-          return false;
+    const now = Date.now();
+    const existingTs = SharedStorageService.claimedUpdatesMemory.get(updateKey);
+    if (existingTs && (now - existingTs) < ttlMs) {
+      return false;
+    }
+    SharedStorageService.claimedUpdatesMemory.set(updateKey, now);
+    if (SharedStorageService.claimedUpdatesMemory.size > 5000) {
+      for (const [k, ts] of SharedStorageService.claimedUpdatesMemory.entries()) {
+        if (now - ts >= ttlMs) {
+          SharedStorageService.claimedUpdatesMemory.delete(k);
         }
       }
-
-      // Atomically claim the update
-      await fetch(url, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          timestamp: now,
-          instanceId,
-          createdAt: new Date().toISOString()
-        })
-      });
-
-      return true;
-    } catch {
-      // In case of RTDB network disruption, fallback to true to not drop user messages
-      return true;
     }
+    return true;
   }
 
   // =========================================================================
@@ -4402,26 +4532,6 @@ export class SharedStorageService {
       this.db.clonedBots.push(cloned);
     }
 
-    // Commit immediately to Firebase /cloned_bots_meta/${cloned.id} and /app_state
-    try {
-      const token = await this.getFirebaseAuthToken();
-      const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
-      const baseUrl = (process.env.FIREBASE_DATABASE_URL || (isSecondary ? SECONDARY_FIREBASE_RTDB_URL : FIREBASE_RTDB_URL)).replace(/\/+$/, '');
-      const metaUrl = token ? `${baseUrl}/cloned_bots_meta/${cloned.id}.json?auth=${encodeURIComponent(token)}` : `${baseUrl}/cloned_bots_meta/${cloned.id}.json`;
-      let metaRes = await fetch(metaUrl, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(cloned)
-      });
-      if (!metaRes.ok && token) {
-        await fetch(`${baseUrl}/cloned_bots_meta/${cloned.id}.json`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(cloned)
-        }).catch(() => {});
-      }
-    } catch {}
-
     await this.persist(true);
   }
 
@@ -4445,23 +4555,6 @@ export class SharedStorageService {
       });
     }
     const removedLocally = Array.isArray(this.db.clonedBots) ? this.db.clonedBots.length !== prevLen : false;
-
-    // Always purge isolated Firebase RTDB records regardless of local cache state
-    try {
-      const token = await this.getFirebaseAuthToken();
-      const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
-      const baseUrl = (process.env.FIREBASE_DATABASE_URL || (isSecondary ? SECONDARY_FIREBASE_RTDB_URL : FIREBASE_RTDB_URL)).replace(/\/+$/, '');
-      const buildRtdbDeleteUrl = (p: string) =>
-        token ? `${baseUrl}${p}.json?auth=${encodeURIComponent(token)}` : `${baseUrl}${p}.json`;
-
-      await Promise.all(
-        candidateIds.flatMap((cid) => [
-          fetch(buildRtdbDeleteUrl(`/cloned_bots_meta/${cid}`), { method: 'DELETE' }).catch(() => {}),
-          fetch(buildRtdbDeleteUrl(`/cloned_bots/${cid}`), { method: 'DELETE' }).catch(() => {}),
-          fetch(buildRtdbDeleteUrl(`/sub_admins/${cid}`), { method: 'DELETE' }).catch(() => {})
-        ])
-      );
-    } catch {}
 
     await this.persist(true);
     return removedLocally || candidateIds.length > 0;
@@ -5042,6 +5135,13 @@ export class StorageManager {
     return ['main', ...Array.from(this.instances.keys())];
   }
 
+  public static async flushAll(): Promise<void> {
+    await Promise.allSettled([
+      sharedStorage.flush(),
+      ...Array.from(this.instances.values()).map((inst) => inst.flush())
+    ]);
+  }
+
   public static async destroyStorage(botId: string): Promise<void> {
     const cleanId = (botId || '').trim();
     if (!cleanId || cleanId === 'main') return;
@@ -5055,10 +5155,13 @@ export class StorageManager {
         await inst.clearMemoryCaches().catch(() => {});
         this.instances.delete(cid);
       }
-      for (const filePath of getFallbackFilePaths(cid)) {
+      for (const filePath of getDataFileSearchPaths(cid)) {
         try {
           if (fs.existsSync(filePath)) {
             await fs.promises.unlink(filePath).catch(() => {});
+          }
+          if (fs.existsSync(`${filePath}.bak`)) {
+            await fs.promises.unlink(`${filePath}.bak`).catch(() => {});
           }
         } catch {}
       }

@@ -1,14 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { api, AdminUser } from '../lib/api';
 import { toast } from '../lib/toast';
-import { auth, authPersistenceReady } from '../lib/firebase';
-import {
-  GoogleAuthProvider,
-  signInWithPopup,
-  signInWithRedirect,
-  getRedirectResult,
-  signOut
-} from 'firebase/auth';
 
 import { DEFAULT_LOGO_URL } from './SplashScreen';
 
@@ -16,11 +8,6 @@ interface LoginScreenProps {
   onSuccess: (admin: AdminUser) => void;
   design?: any;
 }
-
-const AUTHORIZED_ADMIN_EMAILS = [
-  'sohanrahman07565@gmail.com',
-  'zexiofficial8884@gmail.com'
-];
 
 const EMBEDDED_ZEXI_LOGO =
   'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAB4AHgDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD5uVav6Rpd7ql2ttYwNLIeuOgHqT2p/h/SrnWNSisbVfnflmPRF7k17j4X0vTdAsDDDbhhs5Zusjf3j/QV6WEwdbG1fZUVd/gj0MbjcHlOFeMx0rQ2SXxSfZfq+hw2n+DNH01Q+tXL3c//ADxg4UfU1q3d1YaJOILfw9ZIQobLHccEZHNWdYxJMxVep4xWHPbSyT+XtJcnGK/TMt4Ky+EVLE3m+t3ZfgfE1PEXHVX/ALJCNKPonL5tmg3jIp00SxP4f/Wq3Y+LZZ3C/wBg2H5f/WrAh08ySqmACTjJ7V0nhrSQboKwBAOMjoa9TEcM5HSg37Bfe/8AM9vh/jDM8ZiVTrV9PRf5HUaM818hkbSbGKNRlmK8D9Kt3s9lZS+VPaWsT4yDLAVU/iRU3iS+Hha20G6MO+2aeR5Bt4Z127QfwLED/Cud+J/xHk8YFEFnFAqrsVUXHFfj+fZpl+BxTpUqC09dfxP37LMFXxkoOME6bveWmli1qWsT2LY/sKwcdQdvUflWTJ45ePP/ABTunHHXj/61anhuzuJ/CMf2xD+6kdIy3XaMHH4EkVyOvWyxzsFGK/RciynKMww8KsqCTa7v/MWMw9GN1G107GqfiE5OweG9MJPqP/rVJper+GvEt5Fp+q+EbNZJn2iSEhcf1rijCzSbVUlvQUkO6Jw6EqRyCK9+twflFSDjCnZ+Tf8AmeBPCRnL31odX4n+EumXU88fhfUlS9iGXsZ3yenY15HrOl32k38ljqNrJbXEZwyOMH8PUV6FZS3f9opOtxItwGBEiv8AMD9a9P1zw1a+NPDcVnrBjXUwn+i3qrghsdD7e1fAZ7wtLLoqdKXMvxPCzXJJ4ek8RT1h+KPl51orS17Sr3RtVuNM1CExXNu+11P6Eexor5K9j5pxvqj134M+GGXRzfvH+8uBvcntH/Cv48muq1WAqxTGO1dT4NtIbPw+FjXav3AP9lRgVla1HCVl3BvM42Y6D1zX3fDMFQoJ21lq/wCvI/COPuIKmYcQVcMn+7oe5FenxP1bv+ByniXRFsY7aRbqKYzpuIQ8r7GtX4T6f4ck8VWf9uG4/wBaNuANhPbPeqTWrytg5P1rX0TRZZblFhXLhuGWvqsTUbwsqcp2bT1Wh42HzD6u4t626dyn4l0bRX1+4XQVumg81seYBjr2rpvCXhC6YLK0JVRyWbgD8a6jw54d8m9FhY2kd5qYUPJ5nEVsp6NIfX0UcmvQ9P8AA2mmHzNfupdTfHzBz5cC+yoOMfXNfJ4/iFUaaoxk3Zb7tn2+QZdjatT6y/dT1OGv9N8IT6LLpfiTVNOa1LqGUzguj9AVxyGr500a30zTPjLFpuq6gF8MSTTAXDxFDGq7tmWx3wOfevrfxfo3wqv9ObS9Zk0a2SKVZiI7hYZFdehypB7157qXhb9nO7by7nW7ORhx82quT/6FXzUa2CrTlUr022+tlp5n6jSzvNsNFQoVrR6q71EvrPRb6wgi0PUtNmgMeIEhnU5X2Ga8z8W+GL23dmkgcDrnFe+eG9H+F1po9ro+hS6FJbxoUgTzkdyCSTyTk9TUuq+FLUQ/6Cwjj/55OfMhYenqv1Fe9lmfrCNRitD6PL+KeW0cQeC/CTT/AAp/wkYXxAbsOI5NgwNmdp/H1rhvEUWlrqcq6Obk2oY7DMBnGfavY/FPhBFnlmsozDcRDMkOeVB7g9196831HRGt3OYzxX22W4ynWryxCm9Ula+iPs8NOliJe1hK6dtOiOctkeMh8ED1xXQJr2oC2SFJmXYQVI6gjoatXeoW58OR6YtjGsqNuM2OTWNaxI0qrI2xCeTjOK9STjiIt1I7H0eHpXhyNXTL/wAaNNi8R+C7DxtbRKt3bkW1+FHUZwD+B/RqK6PwhbrqnhjxL4ecFlubJpYx2DAYz+ez8qK/H87y9YfGThDY/E82jHK8fWwktovT0auvzOxsJ9ulwwr12/1qDVtOuIgjzRMolXcpI6iqENzsby8428Vrxyz3ojWWRnCDC5OcCvpsFGVLD05Lay/I/lziiKo51i5Pf2kvzZHouiJc755f3NtAheaQ9AB3pmr+Mf8AhGL62sLHwrK13evHFZG5k2szyHapKjoMkHB7Vr+LtVj8L6FoQdB5V5fNJMf7ywpuCH2LMv8A3zXIeFvEA8c/Hrwv9rPEU0t3gdCYomIB/E/pXxWccQ1p4/6tB+6vxP3PgDw+ws8hlnWOpc/NFtXei1srfM9o8Ua7ofwc+GkmramxubgnLc/vb67fryfU/kB7V8u/Gf4h65qluJPEfi+aOa4TcNF0qQpHAp6K7Dlj61c/4KE+KJpvG2heGYpz5FnaG5kj/wCmjnAP5CrX7Lngbwjc+EpvFHie0/tG8uNwto5BuUY4/Ou3LFDWtOPM/v8AwFmuYUcuoKVR2Wy6HzRd6k7zM7NIzMeS7En8SapPdg9h+Ve4ftZeBdH8OLpOvaPbpaLf70mhThdy4O4D3z+lfPxY1eKreznY0yzGwzDDRxENmXlvZY3EkUskbjoUYgj8q9J+FXxz8Z+B7+CN9Rn1PSNwE1ncuX+TvtJ5Bqz8K/hp4c1HwmfF3jTX4tN0tpDFDGrDfIw68davfEH4WeE38FXXizwD4gTULayGbqCRsOq+vr+FDw9SUObQwlnGGVf2DT3teztftc+pdR1208QeCLTxz4aAuTHA1zAmcb1xmSB/YgH6EA1xej65pfjCFrgaPNYwNtxOG3ohbpu9BnjNcv8AsOaxJf8Ag3xD4buJtyWc6TQoTyqyAhvwyP1qP4a+MI/Dj6jpBiVrNp57V1fnKB2X+VczzKeFUZxlY/TOCVVrSr4emuaUUnHXz1NLxP4elsLh43TBBrI1VNLFvZrYQzJOseLgucgtk9K9HnkGteB9K1VvmkeFoXY9WMbFM/jtrzvUodkjcdDzX6Tk+OeNowqNn6rlFT28Vz6Si2n6rQ6b4QqDrl4COPspH/jy0U74QHGu3h/6df8A2daK+b4hV8a/RH4T4kSa4gqpdo/kUpJW/taWJeTvwAK67RA0T7JVKuOoIxiuGu5mh8Q3BU4KyAg/gK6bTtQmubkO7mSVyMnuTXrRpP6lS7cq/I/nHjWhKea4nl/nl+Zp/GfSZtd+HtrcWgZptKuDK6D/AJ5Ou1j+BC/hmvMPgqzaT8Z/D094GiyLiFcjqzxNj88V7Ta3s1hdNBMMMvyujDgjuCKjn8EeH9WMeoaTG+n6raSC4s9kxEIlBzyvoeRx2NfBYzI6bxf1p9T9e4D8VKNDhyfDeOg1JaRfzvZ/M8Y/a48DXXir446RPDdJbw6lpgXzXGVBiJyB6nDZxWfofiiT4H6Zb6TrGzXdOumZ4BG3lyRMMZ4Ocqa9n8ZaVpHjnRZNC8Qw3NpPbvuXYdtzZS4+8vqvuOCK8F8S/s0eML6887SfFmnaxGSdpu5WjkUds5zWtquEbcI3TPVrwyvMsA8LiqfNK973/Q57xn4/tvjL8QdJ07WZf7C0OPMMGDu8st/ExPckDPtU0f7OPjEa2UnktI9GU721IzL5Xlf3s/SqM37N3xbgmKx6FbzYPDx3seD+ZFaEnwV+PBsfsUllcG3xt8o6mm3HpjdWUcRGa/eR1ORYKdBKGFmoxStb9UeYePYrHS/EV7o2iatNqGlWspWCVjgP6kDp1zXafBvwXYeKNGvpL7xBNaoX8trWKQLuAGQzZ6ir2n/s2fFK6c/aLHT7Ff79xepj/wAdzXS+H/2b7zT5FuPFHi62tI/+WkGn5eRhnpu4HP0rOLrVat4Rb8j2MDWw2FlF14qaXR9X3O0/Zb8O23hK/wDGl3Bffa7MSQ2kM4xh8Dc3TuCQDXDaZYXeoX15LApkSS8mkDqOCGkYjH1zXtHh3SojZweFfClmLOzt48DHIhB6yyt3Y8kDqT7Voy6T4b8I26QaVaszwjEck0hcqfUZ4BrtxGSLEwhQfxJ30Ps+B8e8Jjq2KhD4laK7XZBNGNE8G6XoZI823gzKM5xIxLN+rGuH1tHiI34G9dwweorV1S7ubqOW8IZolYKzdsmuav5i3fNfoOUYJYanGnHofqmVYd048zd222/V6nV/CFv+J7ef9ev/ALOtFR/CI4128P8A06/+zLRXgcQL/bH6I/CfEOPNn1R+UfyMTXZNniK8HpJ/QVu+DtfbSdThuBbwzBXBIkXNc14hlZPGF+FxlZe4yPuitTR7KZgCUO09eK+jpUoSy+nGezivyPwfiiaoZrXqX1U5NfeeieJPEJ13W5Z4beKKLdhCq4JHua6LwbDM0ynBxXN+FdH8+RBxz19q7Cw0u98QaLdNpxuLbRlDRiS2wLi+IOCEJ4RM5Gep+lfJZhVo4en7GOiWh5GSZZic7zB4nonds4nxj4vs/Ezy2cFqkmJZY7Z7dB9oEUTlWk8w/dyUbAHQYNczPrGmuYoP7D1OCUMqoUkcOxbAUE55JyPzqlqHhXW/CNsLvWdL1nSoommU3ke2SJI3ldl3FenysAT0zmlubC7uVjlPiW9kxIJkYhThuCCD+A/Ku/AYfDTpL2TTXq9/kfVZpjXhavJipShZ6WWjXr1Fu/FSWlw5S/8AEtmGTcFLb1UeoyKwNf8AiH4z0/7H/ZV9b6tZ3QKrLLDtlWQfwtg45HQ/Wtv7J4klsJNMs9ellgaPYyfZFc7du3qBnpUugada+HbJLGS2Ejk73NzFyx9cEdK7vqlCMHZLn6K7d/W9jL/WGOG5asJynHqmv1sVPD9v8Ytci/tK9nstO09Ru+XaxYe/JCj8amtdO8Q2/iy0/tLVLTUrC9kAtkeXEXmDkxsUORkZwa2I49CntPscunQCAvvKRM0YJ6/wkVX1Dwt4bltZJLa+vtPZT5i5mEkaEezDp+Nc1N1qalGpFJPsjr/1ywcppq6fZr/K57NpjWkWkjSodGTQrxU3G0GCsn+0jj749+teUeNre6F25IY4J4qr8IbT4i65eSQazb66fD8UvmafewbV2yBsF1L/ADbCADgcHJrvPGdhcxXp07UxG88kZe2uol2rcAD5lK/wuOuOhFeRgK1PCYpw5lI/buFc5hCUFVVua1jjYfFmnQ+ALnRX0i1a6aZcMR1GD831Fefshdi2MCtzUbErdGNRyWwMnFV9OWziv4/7QV2tg37wIeTX2eFhRw8ZTp/a1P2fAU6OFhOdPVy1fX7jb+FyLHq11jr9n/8AZhRTvh+8B8SX/wBmDCDyTsDdQNwxRXzGdSUsTzeSPxLj1c+dTl5R/I5bWCg8d6hvGQJx/wCgivVRfaJLoFtDawKtwo+dsV5drz2UPiuS/kiea31C2S5gYNjllGD9BitfQJpZNqjOD0Ne0qccVgqFRNpKK/I/nrjTDVP7Srq27f4u+h6dpEip4f1SSIssi2cpUp94HaenvXqHhG/sY/DWmQ2bKIFtIhGenG0YNea+GVkskiKQG5up1JitwwUFR1ZmPCqM8mn2Ph/xZp8E0Oj634blRjutdOlkceTk5ZFk7rzxxxXxOZwp1ZtSlY+r4JpywmE5JK1zQ+Nd94wtfCetXGl6jodzYm0k/wBGuYyrkbeRnOD36183+GdU8vwzpyCRmAtkALdTxUX7QUHizS7yOz1nw5qmiWc82Zrhb4zWsw/ujHAz6GuWXU0W2RImARVwMelfZcH5Snh5VU003+R0cWUPrKp02ttT6Y/Z/wBQlt9I1fUoLeO6u7m6isrSNjjL4LNk9lAIJ+leha94XvNemin1vTNEuZYlKoyvIpAPbivDPgb8SfBfhjw2ses3zwais8rAeUzD5sDdkd9oA/P1r0mP44eA5jxr6L/vIwr53N8tx/8AaFSpSpS30dn6aHfl1DDU8DChUs1bbQ5v4seDpdA04a5bQ2VlaxkRyRRzsxZieCM15L4k1ic6JKtvskk3Jtjc/LJ84+U+x6H61vfHv4n2nijUrPTNGuzNptovmPIOBJKfT2A/ma8tvr+GezeGdwI3GGOa+zyfKsVPLv8Aavid9+i8z5bHZdh1mEatGOiaPtzw9qPixbS3uNel0a2gMaj7JZZJQ4/vHjjpgCub+J8z3Edq8LLvguY5lYjOMH5h+Kkj8a8I+EreN9R0A3B0nWZrW3lZIdSnuT5UiZO3ah5PA69K9Niu9QktPI1AEsBwTX5pRpQo4jR3sz9HpzUpxctNUct4iAe4d1GAxyB6VzV3u5ArqdaQ7jkVzdwmWr73DT/do/ecsr89GMr9DX+Hx+zX887dHi2fqD/SijQv3QOOOKK8zF0VVqNs+D4hy5Y7HzrS8l9xxngW6XxP4Fisw27VNCJAX+KS3Pp64P8AnmvQfCMVxMLe3lHyRfdGOmea+cPCWv33hzXLfVbB8SRH5lPSRT1U+xr6j+GuueH9chGr2MuIsbp4Or27dwR6eleLlOc+zwzwtTpsfmfEfD/1+tHEU93o/wBC18Q9Zn0S6ktlYRCeCEKy9TGAePpuzXmmoeLtSR8peO6A52scium+PfjLwbrehxQ2FxPHq1ixWN2TajofvIfx5H/168DOtCUHEoPqM9K+84fy2E8IqlanZ36rfzPlc24ZxeFxPNUvZpWPpH4afEy18QZ8GeM44dR06+/dQm5G4oxGPLYnqp7HqDxWJZfAbw1L4k1jQYte1LT5o/8AS9PJIkR7cnBUgj7yNweehBrwa21Gf7Uht2bzSfk29d3Vce+cV7x4o8awaX448P3GpatbWd7Dp8pu0aTGC6p8px33An8K8vN8rngMRGpgJuHPul3R7+XznOj7Ksuax5d8XPAepeB0luYb+LULeMgEmPaeTjtXm6axchS0loOP7rV6z8VPiJomu6edLs/PvTPKrXFwEwqIpztUHkknHNcDJc+HWt2QRXpcgjHkj/GvbwmKxzgnKo0/Tfz2HVoOFkqLd+yN3SPBnjLU7WOew0Oa43gELGwJ5r0f4C/COXWPFF/q3j+1NtpWhybWspW4mmChjvI/hUEEj1p3w0+Lmi2un2sV9MdNvEQLIJFPlsQPvBh0zjoa05PGZu/gxr7aPdLPLJfTi7aOTc22SfLN64MZH5V5Oa5pmeK/2RPljJpN2szeOGhh06jjqjovF3xgE+q/YdHCW2jwL5dvDGoAZRwGPp7DsKw28bC55YjJrxSC/Z9zE5YmtG2mnbpmq/sHB0YqMVsfNyli6lRyu9T1WTW4Lv5XYA9jVORQzZHNcRbvccda6DSb6QEJNkj1prDqkrRZ+o8GcVVcNbCY34Xs+3qdNYfKtFFqwKAg8GiuKcbs/QqsI1JOS6nzKrVq+Hdd1TQNRS/0q8ktp17qeGHoR3FFFfmm2qPz6LurM9X0n4k+EfECLF4z0KOC5OA11BHuVvcjqK2YvCHwt1x1lstR0hw3UM5jb8sjFFFe5gc5xlNezjN2OTGVamGjenL5OzX4pl1PhN4BDK8Wo2UTDkFLzGD/AN9U/wD4VT4FDl21W0dz1Z7pWJ/EmiivXhnWMjqpHiLPcbTl7rS/7dj/AJEy/DbwQn3dSsP+/wCv+NKfh54L/wCghYf9/wBf8aKK6Fn2Pf2z0KXE+ZWtzr/wGP8AkRS/DrwQwIN/Zf8AgQv+NQL8OPBMRYxalboWGDtuwMj0ODzRRRLOcXPSUrm0s+xtVWm0/wDt2P8AkNi+HnhKI/6DJbySgfwTbzj6Zok8KWsPCgUUUUsZVqatmEa8q/xpfJJfkQvosUfTFRnT0TpiiiuyNWb6kypQ7FuzcxfKeRRRRWt7nv4LM8TTpKCloj//2Q==';
@@ -106,32 +93,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
     };
   }, [isSuccessExiting]);
 
-  // Check for redirect result from Google Sign-In if returning from redirect flow (Main panel only)
-  useEffect(() => {
-    let isMounted = true;
-    const params = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
-    const urlBid = (params?.get('bot_id') || params?.get('botId') || '').trim();
-    if (urlBid && urlBid !== 'main') return;
-    try {
-      if (window.sessionStorage?.getItem('tg_just_logged_out') === '1') {
-        return;
-      }
-    } catch {}
-
-    authPersistenceReady.then(() => getRedirectResult(auth))
-      .then(async (result) => {
-        if (!isMounted || !result || !result.user) return;
-        setLoading(true);
-        await processGoogleUser(result.user);
-      })
-      .catch((err) => {
-        console.warn('[Google Auth] Redirect verification:', err?.message || err);
-      });
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
   const triggerEmailError = (msg: string) => {
     setEmailError(msg);
     setEmailShakeKey((k) => k + 1);
@@ -142,42 +103,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
     setPasswordError(msg);
     setPasswordShakeKey((k) => k + 1);
     passInputRef.current?.focus();
-  };
-
-  // Shared handler for authenticated Google user
-  const processGoogleUser = async (user: any) => {
-    const userEmail = (user.email || '').trim().toLowerCase();
-    setEmailError(null);
-    setPasswordError(null);
-
-    const isAuthorized = AUTHORIZED_ADMIN_EMAILS.includes(userEmail);
-    if (!isAuthorized) {
-      await signOut(auth).catch(() => {});
-      triggerEmailError('Access Denied');
-      setLoading(false);
-      return;
-    }
-
-    try {
-      const idToken = await user.getIdToken();
-      const res = await api.firebaseLogin({
-        idToken,
-        email: user.email,
-        displayName: user.displayName || 'Owner Admin'
-      });
-
-      setIsSuccessExiting(true);
-      toast.success(`Welcome back, ${res.admin.name || 'Admin'}!`);
-
-      setTimeout(() => {
-        onSuccess(res.admin);
-      }, 450);
-    } catch (err: any) {
-      console.error('[Google Sign-In] Backend verification error:', err);
-      triggerEmailError('Access Denied');
-      setLoading(false);
-      setIsSuccessExiting(false);
-    }
   };
 
   const spawnRipple = (e: React.MouseEvent<HTMLButtonElement>) => {
@@ -247,52 +172,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
       if (err.field === 'password' || /password/i.test(msg)) {
         triggerPasswordError('Incorrect password');
       } else {
-        triggerEmailError('Access Denied');
-      }
-      setLoading(false);
-      setIsSuccessExiting(false);
-    }
-  };
-
-  // Interactive Google Sign-In with popup & redirect support
-  const handleGoogleSignIn = async () => {
-    if (loading || isSuccessExiting) return;
-    if (targetBotId && targetBotId !== 'main') {
-      triggerEmailError('Access Denied');
-      return;
-    }
-
-    setEmailError(null);
-    setPasswordError(null);
-    setLoading(true);
-    try { window.sessionStorage?.removeItem('tg_just_logged_out'); } catch {}
-    await authPersistenceReady;
-
-    try {
-      const provider = new GoogleAuthProvider();
-      provider.setCustomParameters({ prompt: 'select_account' });
-
-      let userCredential;
-      try {
-        userCredential = await signInWithPopup(auth, provider);
-      } catch (popupErr: any) {
-        if (
-          popupErr.code === 'auth/popup-blocked' ||
-          popupErr.code === 'auth/cancelled-popup-request'
-        ) {
-          console.info('[Google Auth] Popup blocked, redirecting...');
-          await signInWithRedirect(auth, provider);
-          return;
-        }
-        throw popupErr;
-      }
-
-      if (userCredential?.user) {
-        await processGoogleUser(userCredential.user);
-      }
-    } catch (err: any) {
-      console.error('[Google Sign-In] Authentication error:', err);
-      if (err.code !== 'auth/popup-closed-by-user' && err.code !== 'auth/cancelled-popup-request') {
         triggerEmailError('Access Denied');
       }
       setLoading(false);
@@ -1085,35 +964,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onSuccess, design }) =
             </button>
           )}
 
-          {(!targetBotId || targetBotId === 'main') && !tmaAvailable && (
-            <button
-              className="zexi-login-google"
-              type="button"
-              onClick={handleGoogleSignIn}
-              disabled={loading || isSuccessExiting}
-              aria-label="Continue with Google"
-              title="Continue with Google"
-            >
-              <svg viewBox="0 0 48 48">
-                <path
-                  fill="#EA4335"
-                  d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.1C12.4 13.6 17.7 9.5 24 9.5z"
-                />
-                <path
-                  fill="#4285F4"
-                  d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.6 5.9c4.4-4.1 7-10.1 7-17.6z"
-                />
-                <path
-                  fill="#FBBC05"
-                  d="M10.5 28.7a14.5 14.5 0 0 1 0-9.4l-7.9-6.1a24 24 0 0 0 0 21.6l7.9-6.1z"
-                />
-                <path
-                  fill="#34A853"
-                  d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.6-5.9c-2.1 1.4-4.9 2.3-8.3 2.3-6.3 0-11.6-4.1-13.5-9.8l-7.9 6.1C6.5 42.6 14.600 48 24 48z"
-                />
-              </svg>
-            </button>
-          )}
         </form>
 
         <div className="zexi-login-foot-wrap">

@@ -711,7 +711,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
   }, [items, filter, search]);
 
   return (
-    <div className="space-y-4 pb-28">
+    <div className="space-y-4 pb-28 md:pb-8">
       {/* Search and Unified Add Button */}
       <div className="flex items-center gap-2 min-w-0">
         <div className="relative flex-1 min-w-0">
@@ -742,7 +742,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
       </div>
 
       {/* Segmented Filter */}
-      <div className="glass flex p-1 rounded-2xl text-xs flex-wrap gap-1">
+      <div className="glass flex p-1 rounded-2xl text-xs flex-wrap md:flex-nowrap gap-1">
         <button
           onClick={() => setFilter('all')}
           className={`tap flex-1 min-w-[56px] py-1.5 px-2 text-center font-semibold rounded-xl cursor-pointer inline-flex items-center justify-center gap-1.5 ${
@@ -800,9 +800,9 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
       </div>
 
       {/* Items List (Accordion Collapsed by Default: Type Icon + Name Only) */}
-      <div className="space-y-2.5">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5 md:gap-3.5 items-start">
         {filteredItems.length === 0 ? (
-          <div className="glass-panel rounded-2xl p-8 text-center border border-zinc-800 text-zinc-400 text-xs">
+          <div className="col-span-full glass-panel rounded-2xl p-8 text-center border border-zinc-800 text-zinc-400 text-xs">
             No matching items found.
           </div>
         ) : (
@@ -1134,7 +1134,7 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
         >
           <div 
             onClick={(e) => e.stopPropagation()}
-            className="glass-panel w-full max-w-md max-h-[90dvh] h-auto flex flex-col rounded-[24px] overflow-hidden animate-in zoom-in-95 duration-200 my-auto"
+            className="glass-panel w-full max-w-md md:max-w-2xl lg:max-w-3xl max-h-[90dvh] h-auto flex flex-col rounded-[24px] overflow-hidden animate-in zoom-in-95 duration-200 my-auto"
           >
             {/* Modal Header - Pinned at Top */}
             <div className="shrink-0 p-4 sm:p-5 border-b border-white/10 bg-white/[0.03] flex items-center justify-between gap-2">
@@ -1266,77 +1266,80 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                       </div>
                     )}
 
-                    {/* 1. File / Link / Text Name field */}
-                    <div>
-                      <label className="block text-xs font-semibold text-zinc-300 mb-1">
-                        {itemType === 'file' ? 'File Name *' : itemType === 'link' ? 'Link Title / Name *' : 'Text Message Title / Name *'}
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={name}
-                        onChange={(e) => setName(e.target.value)}
-                        placeholder={itemType === 'file' ? 'Enter File Name' : itemType === 'link' ? 'Enter Link Title' : 'Enter Text Response Title'}
-                        className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-sm text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
-                      />
-                    </div>
-
-                    {/* 2. Trigger field & Trigger Type Selection */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <label className="text-xs font-semibold text-zinc-300">
-                          {itemType === 'file' ? 'File Trigger *' : itemType === 'link' ? 'Link Trigger *' : 'Trigger Keyword *'}
+                    {/* 1. Name & 2. Trigger (2-column split on desktop) */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
+                      {/* 1. File / Link / Text Name field */}
+                      <div>
+                        <label className="block text-xs font-semibold text-zinc-300 mb-1">
+                          {itemType === 'file' ? 'File Name *' : itemType === 'link' ? 'Link Title / Name *' : 'Text Message Title / Name *'}
                         </label>
-                        <span className="text-xs font-mono text-red-400 font-bold">
-                          Active: {previewTrigger()}
-                        </span>
+                        <input
+                          type="text"
+                          required
+                          value={name}
+                          onChange={(e) => setName(e.target.value)}
+                          placeholder={itemType === 'file' ? 'Enter File Name' : itemType === 'link' ? 'Enter Link Title' : 'Enter Text Response Title'}
+                          className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-sm text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
+                        />
                       </div>
 
-                      {/* Trigger Type Toggle */}
-                      <div className="grid grid-cols-3 gap-1.5 mb-2">
-                        <button
-                          type="button"
-                          onClick={() => setTriggerType('hashtag')}
-                          className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
-                            triggerType === 'hashtag'
-                              ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
-                              : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
-                          }`}
-                        >
-                          # Hashtag
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setTriggerType('slash')}
-                          className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
-                            triggerType === 'slash'
-                              ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
-                              : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
-                          }`}
-                        >
-                          / Slash
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setTriggerType('normal')}
-                          className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
-                            triggerType === 'normal'
-                              ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
-                              : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
-                          }`}
-                        >
-                          🔤 Normal
-                        </button>
-                      </div>
+                      {/* 2. Trigger field & Trigger Type Selection */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1.5">
+                          <label className="text-xs font-semibold text-zinc-300">
+                            {itemType === 'file' ? 'File Trigger *' : itemType === 'link' ? 'Link Trigger *' : 'Trigger Keyword *'}
+                          </label>
+                          <span className="text-xs font-mono text-red-400 font-bold">
+                            Active: {previewTrigger()}
+                          </span>
+                        </div>
 
-                      <input
-                        type="text"
-                        required
-                        value={rawKeyword}
-                        onChange={(e) => setRawKeyword(e.target.value)}
-                        placeholder="Enter Trigger keyword"
-                        className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-sm text-white font-mono focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
-                      />
+                        {/* Trigger Type Toggle */}
+                        <div className="grid grid-cols-3 gap-1.5 mb-2">
+                          <button
+                            type="button"
+                            onClick={() => setTriggerType('hashtag')}
+                            className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
+                              triggerType === 'hashtag'
+                                ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
+                                : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
+                            }`}
+                          >
+                            # Hashtag
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setTriggerType('slash')}
+                            className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
+                              triggerType === 'slash'
+                                ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
+                                : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
+                            }`}
+                          >
+                            / Slash
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setTriggerType('normal')}
+                            className={`py-1.5 px-2 rounded-lg text-xs font-medium border text-center transition-all cursor-pointer ${
+                              triggerType === 'normal'
+                                ? 'bg-red-500/20 border-red-500 text-sky-300 font-semibold'
+                                : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
+                            }`}
+                          >
+                            🔤 Normal
+                          </button>
+                        </div>
+
+                        <input
+                          type="text"
+                          required
+                          value={rawKeyword}
+                          onChange={(e) => setRawKeyword(e.target.value)}
+                          placeholder="Enter Trigger keyword"
+                          className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-sm text-white font-mono focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40 transition-colors"
+                        />
+                      </div>
                     </div>
 
                     {/* Dedicated Text Only Editor */}
@@ -1538,50 +1541,53 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                       </div>
                     )}
 
-                    {/* Inline Button Text */}
-                    <div>
-                      <label className="block text-xs font-semibold text-zinc-300 mb-1">
-                        Inline Button Text (Optional)
-                      </label>
-                      <input
-                        type="text"
-                        value={buttonText}
-                        onChange={(e) => setButtonText(e.target.value)}
-                        placeholder="Enter inline button text"
-                        className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
-                      />
-                    </div>
-
-                    {/* Auto-generated File / Link / Text ID */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-xs font-semibold text-zinc-300">
-                          {itemType === 'file' ? 'Auto-generated File ID' : itemType === 'link' ? 'Auto-generated Link ID' : 'Auto-generated Text ID'}
+                    {/* Inline Button Text & Auto-generated ID (2-column split on desktop) */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
+                      {/* Inline Button Text */}
+                      <div>
+                        <label className="block text-xs font-semibold text-zinc-300 mb-1">
+                          Inline Button Text (Optional)
                         </label>
-                      </div>
-                      <div className="flex items-center gap-2">
                         <input
                           type="text"
-                          readOnly
-                          value={autoGeneratedId}
-                          className="w-full bg-zinc-950 border border-zinc-800 rounded-xl py-2 px-3 text-xs text-red-400 font-mono font-semibold focus:outline-none select-all cursor-default"
+                          value={buttonText}
+                          onChange={(e) => setButtonText(e.target.value)}
+                          placeholder="Enter inline button text"
+                          className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
                         />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            navigator.clipboard.writeText(autoGeneratedId);
-                            setCopiedTag(autoGeneratedId);
-                            setTimeout(() => setCopiedTag((p) => (p === autoGeneratedId ? null : p)), 1800);
-                          }}
-                          title="Copy ID"
-                          className="p-2 rounded-xl bg-zinc-900 border border-zinc-700/80 hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors cursor-pointer shrink-0"
-                        >
-                          {copiedTag === autoGeneratedId ? (
-                            <Check className="w-4 h-4 text-emerald-400" />
-                          ) : (
-                            <Copy className="w-4 h-4 text-zinc-400" />
-                          )}
-                        </button>
+                      </div>
+
+                      {/* Auto-generated File / Link / Text ID */}
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-xs font-semibold text-zinc-300">
+                            {itemType === 'file' ? 'Auto-generated File ID' : itemType === 'link' ? 'Auto-generated Link ID' : 'Auto-generated Text ID'}
+                          </label>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            readOnly
+                            value={autoGeneratedId}
+                            className="w-full bg-zinc-950 border border-zinc-800 rounded-xl py-2 px-3 text-xs text-red-400 font-mono font-semibold focus:outline-none select-all cursor-default"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard.writeText(autoGeneratedId);
+                              setCopiedTag(autoGeneratedId);
+                              setTimeout(() => setCopiedTag((p) => (p === autoGeneratedId ? null : p)), 1800);
+                            }}
+                            title="Copy ID"
+                            className="p-2 rounded-xl bg-zinc-900 border border-zinc-700/80 hover:bg-zinc-800 text-zinc-300 hover:text-white transition-colors cursor-pointer shrink-0"
+                          >
+                            {copiedTag === autoGeneratedId ? (
+                              <Check className="w-4 h-4 text-emerald-400" />
+                            ) : (
+                              <Copy className="w-4 h-4 text-zinc-400" />
+                            )}
+                          </button>
+                        </div>
                       </div>
                     </div>
 

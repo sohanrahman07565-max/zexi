@@ -276,7 +276,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
   };
 
   return (
-    <div className="space-y-4 pb-28">
+    <div className="space-y-4 pb-28 md:pb-8">
       {/* =========================================================================
           REDESIGNED FILTER HEADER (Requirement 1)
           - Title on Top: "Filter Keywords & Commands"
@@ -334,8 +334,8 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
         </div>
 
         {/* Search and Filter View Bar */}
-        <div className="space-y-2 pt-1">
-          <div className="relative">
+        <div className="space-y-2 md:space-y-0 md:flex md:items-center md:gap-3 pt-1">
+          <div className="relative md:flex-1">
             <Search className="w-4 h-4 text-white/50 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
@@ -346,10 +346,10 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
             />
           </div>
 
-          <div className="flex p-1 bg-white/[0.05] border border-white/15 rounded-2xl text-xs gap-1">
+          <div className="flex p-1 bg-white/[0.05] border border-white/15 rounded-2xl text-xs gap-1 md:min-w-[300px] shrink-0">
             <button
               onClick={() => setFilterMode('all')}
-              className={`tap flex-1 py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
+              className={`tap flex-1 py-1.5 px-2.5 text-center font-semibold rounded-xl cursor-pointer whitespace-nowrap ${
                 filterMode === 'all' ? 'bg-white/15 text-white border border-white/25 shadow-xs' : 'text-white/60 hover:text-white'
               }`}
             >
@@ -357,7 +357,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
             </button>
             <button
               onClick={() => setFilterMode('in_filters')}
-              className={`tap flex-1 py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
+              className={`tap flex-1 py-1.5 px-2.5 text-center font-semibold rounded-xl cursor-pointer whitespace-nowrap ${
                 filterMode === 'in_filters' ? 'bg-emerald-500/20 text-emerald-200 border border-emerald-400/35' : 'text-white/60 hover:text-white'
               }`}
             >
@@ -365,7 +365,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
             </button>
             <button
               onClick={() => setFilterMode('hidden')}
-              className={`tap flex-1 py-1.5 text-center font-semibold rounded-xl cursor-pointer ${
+              className={`tap flex-1 py-1.5 px-2.5 text-center font-semibold rounded-xl cursor-pointer whitespace-nowrap ${
                 filterMode === 'hidden' ? 'bg-white/12 text-white/90 border border-white/20' : 'text-white/60 hover:text-white'
               }`}
             >
@@ -378,9 +378,9 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
       {/* =========================================================================
           FILTER LIST & CARD ACTIONS (Accordion Collapsed by Default: Icon + Name Only)
           ========================================================================= */}
-      <div className="space-y-2.5">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5 md:gap-3.5 items-start">
         {displayedItems.length === 0 ? (
-          <div className="glass-panel rounded-2xl p-8 border border-zinc-800 text-center space-y-3">
+          <div className="col-span-full glass-panel rounded-2xl p-8 border border-zinc-800 text-center space-y-3">
             <div className="w-12 h-12 rounded-2xl bg-zinc-800/60 flex items-center justify-center mx-auto text-zinc-500">
               <Filter className="w-6 h-6" />
             </div>
@@ -646,7 +646,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
           ========================================================================= */}
       {isAddModalOpen && createPortal(
         <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-          <div className="glass-panel border border-zinc-800 w-full max-w-md rounded-3xl p-4 sm:p-5 max-h-[90dvh] overflow-y-auto overscroll-contain space-y-4 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+          <div className="glass-panel border border-zinc-800 w-full max-w-md md:max-w-xl rounded-3xl p-4 sm:p-5 max-h-[90dvh] overflow-y-auto overscroll-contain space-y-4 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
             {/* Modal Header */}
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
               <div className="flex items-center gap-2 min-w-0">
@@ -835,7 +835,7 @@ const FiltersTabComponent: React.FC<FiltersTabProps> = ({
           ========================================================================= */}
       {isEditModalOpen && selectedItem && createPortal(
         <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
-          <div className="glass-panel border border-zinc-800 w-full max-w-md rounded-3xl p-4 sm:p-5 max-h-[90dvh] overflow-y-auto overscroll-contain space-y-4 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
+          <div className="glass-panel border border-zinc-800 w-full max-w-md md:max-w-xl rounded-3xl p-4 sm:p-5 max-h-[90dvh] overflow-y-auto overscroll-contain space-y-4 shadow-2xl animate-in fade-in zoom-in-95 duration-150">
             {/* Modal Header */}
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
               <div className="flex items-center gap-2 min-w-0">

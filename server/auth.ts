@@ -1,9 +1,11 @@
 import bcrypt from 'bcryptjs';
 import crypto from 'node:crypto';
 
-// Get session secret from environment, with a secure fallback
+const EPHEMERAL_SESSION_SECRET = crypto.randomBytes(32).toString('hex');
+
+// Get session secret from environment, with an in-memory random fallback
 export function getSessionSecret(): string {
-  return process.env.SESSION_SECRET || 'tg-admin-secure-session-secret-key-32chars';
+  return (process.env.SESSION_SECRET || '').trim() || EPHEMERAL_SESSION_SECRET;
 }
 
 // Password hashing

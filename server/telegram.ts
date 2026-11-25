@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { storage, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord, SharedStorageService, AdminUser, BotOperationalMode, UserReportRecord, AdminReportMessageRef } from './storage';
+import { storage, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord, SharedStorageService, AdminUser, BotOperationalMode, UserReportRecord, AdminReportMessageRef, DEFAULT_MODERATION_DURATIONS, sanitizeModerationDurations } from './storage';
 import { hashPassword, signSessionToken } from './auth';
 import { PostBotEngine } from './postBot';
 import { ImageUrlBotEngine } from './imageUrlBot';
@@ -132,10 +132,37 @@ interface KeyCreationSession {
   createdAt: number;
 }
 
+interface PendingModerationAction {
+  token: string;
+  chatId: string | number;
+  action: 'ban' | 'mute';
+  targetId: string;
+  targetName: string;
+  targetUsername: string;
+  reason?: string;
+  adminId: string;
+  replyToMessageId?: number;
+  promptMessageId?: number;
+  createdAt: number;
+}
+
+interface UpdateItemSession {
+  itemId: string;
+  chatId: string | number;
+  field?: 'file' | 'url' | 'message' | 'setup_video' | 'trigger' | 'retention' | 'name';
+  promptMessageId?: number;
+  pendingFiles?: AddFileEntry[];
+  createdAt: number;
+}
+
 const activeEditSessions: Map<string, { templateKey: string }> = new Map();
 const activeSetChannelSessions: Map<string, { timestamp: number }> = new Map();
 const activeCloneSessions: Map<string, CloneSession> = new Map();
 const activeAddKeySessions: Map<string, KeyCreationSession> = new Map();
+const pendingGroupModerationMap: Map<string, PendingModerationAction> = new Map();
+const activeGroupTempModSessions: Map<string, PendingModerationAction> = new Map();
+const activeUpdateSessions: Map<string, UpdateItemSession> = new Map();
+const recentGroupWelcomes: Map<string, number> = new Map();
 
 // Deduplication map to prevent repeated deliveries from retried webhooks
 const recentDeliveries = new Map<string, number>();
@@ -209,29 +236,24 @@ interface HeldBotLockEntry {
 /**
  * Multi-layer Singleton Lock for Telegram bot polling instances:
  * 1) Local OS PID lockfile in os.tmpdir() (prevents duplicate local Node processes/restarts)
- * 2) Cross-server Firebase RTDB token lock (/bot_token_locks/<sha256>) (prevents Render + Dev/Preview dual polling)
+ * 2) Local VPS token lockfile in DATA_DIR/.locks (prevents duplicate polling across worker restarts)
  * 3) Telegram API getWebhookInfo & getUpdates probe (catches unknown external pollers/webhooks via 409)
  */
 export class BotSingletonLock {
   private static heldLocks = new Map<string, HeldBotLockEntry>();
   private static conflicts = new Map<string, BotLockConflict>();
   private static readonly LOCAL_STALE_MS = 35000;
-  private static readonly RTDB_TTL_MS = 22000;
+  private static readonly LOCK_TTL_MS = 22000;
   private static readonly HEARTBEAT_INTERVAL_MS = 6000;
 
   public static isPrimaryProdHost(): boolean {
     return Boolean(
-      process.env.RENDER ||
-      process.env.RENDER_EXTERNAL_URL ||
-      process.env.RENDER_SERVICE_ID ||
+      process.env.VPS_PRIMARY === 'true' ||
       process.env.NODE_ENV === 'production'
     );
   }
 
   private static getEnvLabel(): string {
-    if (process.env.RENDER || process.env.RENDER_EXTERNAL_URL || process.env.RENDER_SERVICE_ID) {
-      return `render(${process.env.RENDER_EXTERNAL_HOSTNAME || os.hostname()})`;
-    }
     return `${process.env.NODE_ENV || 'development'}(${os.hostname()})`;
   }
 
@@ -430,7 +452,7 @@ export class BotSingletonLock {
       console.warn(`[BotSingletonLock] Local lockfile notice (${lockPath}):`, fsErr?.message || fsErr);
     }
 
-    // 2. Check / claim distributed cross-server Firebase RTDB lock
+    // 2. Check / claim local VPS token lockfile
     // Primary main bot cleanly resets/acquires the primary lock rather than halting its own startup.
     const meta = {
       instanceId: BOT_INSTANCE_ID,
@@ -442,23 +464,23 @@ export class BotSingletonLock {
     };
 
     const mainStorage = StorageManager.getMainStorage();
-    const rtdbClaim = await mainStorage.tryClaimTokenLock(cleanToken, meta, this.RTDB_TTL_MS, {
+    const localClaim = await mainStorage.tryClaimTokenLock(cleanToken, meta, this.LOCK_TTL_MS, {
       forceReset,
       isStartupBoot: opts?.isStartupBoot
     });
-    if (rtdbClaim.acquired && rtdbClaim.overwrote) {
+    if (localClaim.acquired && localClaim.overwrote) {
       console.info(
-        `🔄 [BotSingletonLock] Primary lock reset for "${botId}" (cleared prior holder: ${rtdbClaim.overwrote.env || rtdbClaim.overwrote.host || rtdbClaim.overwrote.instanceId}).`
+        `🔄 [BotSingletonLock] Primary lock reset for "${botId}" (cleared prior holder: ${localClaim.overwrote.env || localClaim.overwrote.host || localClaim.overwrote.instanceId}).`
       );
     }
-    if (!rtdbClaim.acquired && rtdbClaim.conflict) {
+    if (!localClaim.acquired && localClaim.conflict) {
       if (!alreadyHeld) {
         try { fs.unlinkSync(lockPath); } catch {}
       }
-      const c = rtdbClaim.conflict;
+      const c = localClaim.conflict;
       const holder = `${c.env || c.host} (PID ${c.pid}, ${c.instanceId})`;
-      const message = `Cross-server singleton lock conflict for bot "${botId}": already active on ${holder}. Dual polling blocked to prevent duplicate replies.`;
-      console.error(`\n❌ [BotSingletonLock] CROSS-SERVER TOKEN CONFLICT [${botId}]\n   Active Instance: ${holder}\n   Token Hash: ${tokenHash}\n   Action: Blocking conflicting bot listener in this process.\n`);
+      const message = `Singleton lock conflict for bot "${botId}": already active on ${holder}. Dual polling blocked to prevent duplicate replies.`;
+      console.error(`\n❌ [BotSingletonLock] TOKEN LOCK CONFLICT [${botId}]\n   Active Instance: ${holder}\n   Token Hash: ${tokenHash}\n   Action: Blocking conflicting bot listener in this process.\n`);
       const conflict = this.recordConflict(botId, 'remote_instance_lock', holder, message);
       this.handleExitIfConfigured(botId, 'remote_instance_lock');
       return { ok: false, conflict };
@@ -531,7 +553,7 @@ export class BotSingletonLock {
       }
     }
 
-    // 4. Register / refresh heartbeat timer keeping BOTH local lockfile and RTDB lock alive
+    // 4. Register / refresh heartbeat timer keeping BOTH local OS lockfile and VPS token lock alive
     if (alreadyHeld) {
       clearInterval(alreadyHeld.timer);
     }
@@ -540,7 +562,7 @@ export class BotSingletonLock {
         this.writeLocalLockPayload(lockPath, tokenHash, botId, false);
       } catch {}
       StorageManager.getMainStorage()
-        .tryClaimTokenLock(cleanToken, meta, this.RTDB_TTL_MS, { forceReset: isMain && isPrimaryProd })
+        .tryClaimTokenLock(cleanToken, meta, this.LOCK_TTL_MS, { forceReset: isMain && isPrimaryProd })
         .catch(() => {});
     }, this.HEARTBEAT_INTERVAL_MS);
     if (typeof timer.unref === 'function') {
@@ -1194,6 +1216,18 @@ export class TelegramService {
       return { id: targetId, name: targetName, username: targetUsername };
     }
 
+    const textMentionEntity = Array.isArray(message?.entities)
+      ? message.entities.find((e: any) => e?.type === 'text_mention' && e.user?.id)
+      : null;
+    if (textMentionEntity?.user) {
+      const u = textMentionEntity.user;
+      targetId = String(u.id);
+      const fullName = [u.first_name, u.last_name].filter(Boolean).join(' ').trim();
+      targetName = fullName || u.username || `User ${targetId}`;
+      targetUsername = u.username ? `@${String(u.username).replace(/^@/, '')}` : '';
+      return { id: targetId, name: targetName, username: targetUsername };
+    }
+
     const query = (rawQuery || '').trim();
     if (!query) return { id: '', name: '', username: '' };
 
@@ -1231,6 +1265,1054 @@ export class TelegramService {
     }
 
     return { id: targetId, name: targetName, username: targetUsername };
+  }
+
+  private static parseModerationDuration(rawToken: string): {
+    valid: boolean;
+    isPermanent: boolean;
+    durationSec: number;
+    displayLabel: string;
+  } {
+    const clean = String(rawToken || '').trim().toLowerCase().replace(/\s+/g, '');
+    if (!clean) {
+      return { valid: false, isPermanent: false, durationSec: 0, displayLabel: '' };
+    }
+    if (clean === 'perm' || clean === 'permanent' || clean === 'forever') {
+      return { valid: true, isPermanent: true, durationSec: 0, displayLabel: 'Permanent' };
+    }
+    const m = clean.match(/^(\d+(?:\.\d+)?)(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)$/);
+    if (!m) {
+      return { valid: false, isPermanent: false, durationSec: 0, displayLabel: '' };
+    }
+    const val = parseFloat(m[1]);
+    if (!Number.isFinite(val) || val <= 0) {
+      return { valid: false, isPermanent: false, durationSec: 0, displayLabel: '' };
+    }
+    const unit = m[2];
+    let durationSec = 0;
+    let displayLabel = '';
+    if (unit.startsWith('w')) {
+      durationSec = Math.round(val * 7 * 86400);
+      displayLabel = `${val} ${val === 1 ? 'Week' : 'Weeks'}`;
+    } else if (unit.startsWith('d')) {
+      durationSec = Math.round(val * 86400);
+      displayLabel = `${val} ${val === 1 ? 'Day' : 'Days'}`;
+    } else if (unit.startsWith('h')) {
+      durationSec = Math.round(val * 3600);
+      displayLabel = `${val} ${val === 1 ? 'Hour' : 'Hours'}`;
+    } else if (unit.startsWith('s')) {
+      durationSec = Math.max(30, Math.round(val));
+      const disp = Math.max(30, Math.round(val));
+      displayLabel = `${disp} Seconds`;
+    } else {
+      durationSec = Math.max(30, Math.round(val * 60));
+      displayLabel = `${val} ${val === 1 ? 'Minute' : 'Minutes'}`;
+    }
+    return { valid: true, isPermanent: false, durationSec, displayLabel };
+  }
+
+  private static async parseModerationCommandArgs(
+    chatId: number | string,
+    message: any,
+    rawArg: string
+  ): Promise<{
+    target: { id: string; name: string; username: string };
+    targetQuery: string;
+    durationToken: string;
+    reason: string;
+  }> {
+    const trimmed = String(rawArg || '').trim();
+
+    if (message?.reply_to_message?.from) {
+      const target = await this.resolveModerationTarget(chatId, message, '');
+      if (!trimmed) {
+        return { target, targetQuery: '', durationToken: '', reason: '' };
+      }
+      const parts = trimmed.split(/\s+/);
+      const dur = this.parseModerationDuration(parts[0]);
+      if (dur.valid) {
+        return {
+          target,
+          targetQuery: '',
+          durationToken: parts[0],
+          reason: parts.slice(1).join(' ').trim()
+        };
+      }
+      return { target, targetQuery: '', durationToken: '', reason: trimmed };
+    }
+
+    const textMention = Array.isArray(message?.entities)
+      ? message.entities.find((e: any) => e?.type === 'text_mention' && e.user?.id && Number(e.offset) > 0)
+      : null;
+
+    if (textMention?.user && typeof message?.text === 'string') {
+      const target = await this.resolveModerationTarget(chatId, message, '');
+      const afterMention = message.text.slice(Number(textMention.offset) + Number(textMention.length)).trim();
+      if (!afterMention) {
+        return { target, targetQuery: target.name, durationToken: '', reason: '' };
+      }
+      const parts = afterMention.split(/\s+/);
+      const dur = this.parseModerationDuration(parts[0]);
+      if (dur.valid) {
+        return {
+          target,
+          targetQuery: target.name,
+          durationToken: parts[0],
+          reason: parts.slice(1).join(' ').trim()
+        };
+      }
+      return { target, targetQuery: target.name, durationToken: '', reason: afterMention };
+    }
+
+    if (!trimmed) {
+      return {
+        target: { id: '', name: '', username: '' },
+        targetQuery: '',
+        durationToken: '',
+        reason: ''
+      };
+    }
+
+    const parts = trimmed.split(/\s+/);
+    const firstPart = parts[0].trim();
+    if (this.parseModerationDuration(firstPart).valid) {
+      return {
+        target: { id: '', name: '', username: '' },
+        targetQuery: '',
+        durationToken: '',
+        reason: ''
+      };
+    }
+
+    const target = await this.resolveModerationTarget(chatId, message, firstPart);
+    const rest = parts.slice(1);
+    if (rest.length === 0) {
+      return { target, targetQuery: firstPart, durationToken: '', reason: '' };
+    }
+    const maybeDur = this.parseModerationDuration(rest[0]);
+    if (maybeDur.valid) {
+      return {
+        target,
+        targetQuery: firstPart,
+        durationToken: rest[0],
+        reason: rest.slice(1).join(' ').trim()
+      };
+    }
+    return {
+      target,
+      targetQuery: firstPart,
+      durationToken: '',
+      reason: rest.join(' ').trim()
+    };
+  }
+
+  private static async isGroupModerator(message: any, fromId: string): Promise<boolean> {
+    if (message?.sender_chat?.id && message?.chat?.id && String(message.sender_chat.id) === String(message.chat.id)) {
+      return true;
+    }
+    if (fromId && (await this.isAuthorizedAdmin(fromId, message?.from?.username))) {
+      return true;
+    }
+    if (fromId && message?.chat?.id && (await this.isGroupAdminOrCreator(message.chat.id, fromId))) {
+      return true;
+    }
+    return false;
+  }
+
+  private static async replyNonGroupAdmin(message: any): Promise<void> {
+    const chatId = message?.chat?.id;
+    if (!chatId) return;
+    const res = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: '⛔ Only group admins can use this command.',
+      ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+      ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+    });
+    if (!res?.ok && message.message_id) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: '⛔ Only group admins can use this command.',
+        ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+      });
+    }
+  }
+
+  private static async replyOwnerDashboardDenied(message: any): Promise<void> {
+    const chatId = message?.chat?.id;
+    if (!chatId) return;
+    const res = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: '⛔ Only bot owners can open the dashboard.',
+      ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+      ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+    });
+    if (!res?.ok && message.message_id) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: '⛔ Only bot owners can open the dashboard.',
+        ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+      });
+    }
+  }
+
+  private static formatRemainingModerationDuration(untilIso?: string): string {
+    if (!untilIso) return 'Permanent';
+    const expMs = new Date(untilIso).getTime();
+    if (!Number.isFinite(expMs)) return 'Permanent';
+    const remSec = Math.max(0, Math.round((expMs - Date.now()) / 1000));
+    if (remSec <= 0) return 'Expired';
+    const days = Math.floor(remSec / 86400);
+    const hours = Math.floor((remSec % 86400) / 3600);
+    const mins = Math.floor((remSec % 3600) / 60);
+    if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+    if (hours > 0) return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+    return `${Math.max(1, mins)}m`;
+  }
+
+  private static formatModerationUserButtonLabel(user: any, untilIso?: string): string {
+    const rawName = String(user?.firstName || user?.username || user?.userId || user?.id || 'User').replace(/\s+/g, ' ').trim();
+    const cleanUname = user?.username ? `@${String(user.username).replace(/^@+/, '').trim()}` : '';
+    const baseName = cleanUname && !rawName.toLowerCase().includes(cleanUname.toLowerCase())
+      ? `${rawName} (${cleanUname})`
+      : rawName;
+    const trimmedName = baseName.length > 26 ? `${baseName.slice(0, 23)}...` : baseName;
+    const dur = this.formatRemainingModerationDuration(untilIso);
+    return `${trimmedName} • ${dur}`;
+  }
+
+  private static async sendOrEditOwnerDashboardMessage(
+    chatId: string | number,
+    text: string,
+    inlineKeyboard: any[][],
+    editMessageId?: number,
+    replyToMessageId?: number,
+    threadId?: number
+  ): Promise<void> {
+    if (editMessageId) {
+      await this.callTelegramApi('editMessageText', {
+        chat_id: chatId,
+        message_id: editMessageId,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: { inline_keyboard: inlineKeyboard }
+      }).catch(() => {});
+      return;
+    }
+
+    const res = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
+      ...(threadId ? { message_thread_id: threadId } : {}),
+      reply_markup: { inline_keyboard: inlineKeyboard }
+    });
+    if (!res?.ok && replyToMessageId) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        ...(threadId ? { message_thread_id: threadId } : {}),
+        reply_markup: { inline_keyboard: inlineKeyboard }
+      });
+    }
+  }
+
+  private static async renderOwnerAdminDashboard(
+    chatId: string | number,
+    editMessageId?: number,
+    replyToMessageId?: number,
+    threadId?: number
+  ): Promise<void> {
+    const [countRes, summary] = await Promise.all([
+      this.callTelegramApi('getChatMemberCount', { chat_id: chatId }).catch(() => null),
+      storage.getGroupModerationSummary(chatId)
+    ]);
+
+    const tgMemberCount = countRes?.ok && typeof countRes.result === 'number'
+      ? countRes.result
+      : null;
+    const groupMembersCount = tgMemberCount !== null ? tgMemberCount : summary.trackedTotal;
+    const unbannedActiveCount = tgMemberCount !== null ? tgMemberCount : summary.unbannedCount;
+
+    const text =
+      `🛡️ <b>Group Moderation Dashboard</b>\n\n` +
+      `👥 <b>Group Members:</b> <code>${groupMembersCount}</code>\n` +
+      `✅ <b>Unbanned / Active:</b> <code>${unbannedActiveCount}</code>\n` +
+      `🚫 <b>Banned Users:</b> <code>${summary.bannedUsers.length}</code>\n` +
+      `🔇 <b>Muted Users:</b> <code>${summary.mutedUsers.length}</code>`;
+
+    const keyboard = [
+      [
+        { text: `🚫 Banned Users (${summary.bannedUsers.length})`, callback_data: 'adm_list:ban:0', style: 'danger' },
+        { text: `🔇 Muted Users (${summary.mutedUsers.length})`, callback_data: 'adm_list:mute:0', style: 'primary' }
+      ],
+      [
+        { text: '🔄 Refresh', callback_data: 'adm_dash' },
+        { text: '✖️ Close', callback_data: 'adm_close' }
+      ]
+    ];
+
+    await this.sendOrEditOwnerDashboardMessage(chatId, text, keyboard, editMessageId, replyToMessageId, threadId);
+  }
+
+  private static async renderOwnerModerationList(
+    chatId: string | number,
+    editMessageId: number,
+    kind: 'ban' | 'mute',
+    page: number
+  ): Promise<void> {
+    const summary = await storage.getGroupModerationSummary(chatId);
+    const list = kind === 'ban' ? summary.bannedUsers : summary.mutedUsers;
+
+    const perPage = 6;
+    const totalPages = Math.max(1, Math.ceil(list.length / perPage));
+    const safePage = Math.max(0, Math.min(page, totalPages - 1));
+    const slice = list.slice(safePage * perPage, safePage * perPage + perPage);
+
+    const header = kind === 'ban'
+      ? `🚫 <b>Banned Users (${list.length})</b>`
+      : `🔇 <b>Muted Users (${list.length})</b>`;
+
+    const text = list.length === 0
+      ? `${header}\n\n<i>No active ${kind === 'ban' ? 'banned' : 'muted'} users in this group.</i>`
+      : `${header}${totalPages > 1 ? ` • Page ${safePage + 1}/${totalPages}` : ''}\n\n<i>Select a user to manage:</i>`;
+
+    const keyboard: any[][] = [];
+    for (const u of slice) {
+      const uid = String(u.userId || '').trim();
+      const cbData = `adm_u:${kind}:${uid}:${safePage}`;
+      if (Buffer.byteLength(cbData, 'utf8') > 64) continue;
+      const untilIso = kind === 'ban' ? u.banUntil : u.muteUntil;
+      keyboard.push([{ text: this.formatModerationUserButtonLabel(u, untilIso), callback_data: cbData }]);
+    }
+
+    if (totalPages > 1) {
+      const navRow: any[] = [];
+      if (safePage > 0) {
+        navRow.push({ text: '◀️ Prev', callback_data: `adm_list:${kind}:${safePage - 1}` });
+      }
+      if (safePage < totalPages - 1) {
+        navRow.push({ text: 'Next ▶️', callback_data: `adm_list:${kind}:${safePage + 1}` });
+      }
+      if (navRow.length > 0) keyboard.push(navRow);
+    }
+
+    keyboard.push([
+      { text: '⬅️ Back', callback_data: 'adm_dash' },
+      { text: '✖️ Close', callback_data: 'adm_close' }
+    ]);
+
+    await this.sendOrEditOwnerDashboardMessage(chatId, text, keyboard, editMessageId);
+  }
+
+  private static async renderOwnerModerationUserDetail(
+    chatId: string | number,
+    editMessageId: number,
+    kind: 'ban' | 'mute',
+    userId: string,
+    page: number
+  ): Promise<void> {
+    const user = await storage.getGroupMemberModeration(chatId, userId);
+    const isActive = kind === 'ban' ? Boolean(user?.isBanned) : Boolean(user?.isMuted);
+    if (!user || !isActive) {
+      await this.renderOwnerModerationList(chatId, editMessageId, kind, page);
+      return;
+    }
+
+    const untilIso = kind === 'ban' ? user.banUntil : user.muteUntil;
+    const reason = kind === 'ban' ? user.banReason : user.muteReason;
+    const durationText = this.formatRemainingModerationDuration(untilIso);
+    const displayName = user.firstName || user.username || user.userId;
+    const profileLink = this.formatUserProfileLink(displayName, user.username, user.userId);
+    const title = kind === 'ban' ? '🚫 <b>Banned User</b>' : '🔇 <b>Muted User</b>';
+
+    const text =
+      `${title}\n\n` +
+      `👤 <b>User:</b> ${profileLink}\n` +
+      `🆔 <b>ID:</b> <code>${this.escapeHtml(String(user.userId))}</code>\n` +
+      `⏱ <b>Duration:</b> <code>${this.escapeHtml(durationText)}</code>` +
+      (reason ? `\n📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>` : '');
+
+    const isTemp = Boolean(untilIso);
+    const keyboard: any[][] = [
+      [
+        { text: '➖ Decrease', callback_data: `adm_adj:${kind}:${user.userId}:dec:${page}` },
+        { text: '➕ Increase', callback_data: `adm_adj:${kind}:${user.userId}:inc:${page}` }
+      ],
+      isTemp
+        ? [
+            { text: kind === 'ban' ? '✅ Unban' : '🔊 Unmute', callback_data: `adm_un:${kind}:${user.userId}:${page}`, style: 'success' },
+            { text: '♾️ Permanent', callback_data: `adm_adj:${kind}:${user.userId}:perm:${page}`, style: 'danger' }
+          ]
+        : [
+            { text: kind === 'ban' ? '✅ Unban' : '🔊 Unmute', callback_data: `adm_un:${kind}:${user.userId}:${page}`, style: 'success' }
+          ],
+      [
+        { text: '⬅️ Back', callback_data: `adm_list:${kind}:${page}` },
+        { text: '🏠 Dashboard', callback_data: 'adm_dash' }
+      ]
+    ];
+
+    await this.sendOrEditOwnerDashboardMessage(chatId, text, keyboard, editMessageId);
+  }
+
+  private static async handleOwnerModerationDurationAdjust(
+    cb: any,
+    chatId: string | number,
+    kind: 'ban' | 'mute',
+    userId: string,
+    op: 'inc' | 'dec' | 'perm',
+    page: number
+  ): Promise<void> {
+    const user = await storage.getGroupMemberModeration(chatId, userId);
+    const isActive = kind === 'ban' ? Boolean(user?.isBanned) : Boolean(user?.isMuted);
+    if (!user || !isActive) {
+      await this.callTelegramApi('answerCallbackQuery', {
+        callback_query_id: cb.id,
+        text: 'User is no longer restricted in this group.'
+      }).catch(() => {});
+      if (cb.message?.message_id) {
+        await this.renderOwnerModerationList(chatId, cb.message.message_id, kind, page);
+      }
+      return;
+    }
+
+    const untilIso = kind === 'ban' ? user.banUntil : user.muteUntil;
+    const nowMs = Date.now();
+    const untilMs = untilIso ? new Date(untilIso).getTime() : 0;
+    const remSec = untilMs > nowMs ? Math.round((untilMs - nowMs) / 1000) : 0;
+
+    let nextDurationSec: number | undefined;
+    if (op === 'perm') {
+      if (!untilIso) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Already permanent.'
+        }).catch(() => {});
+        return;
+      }
+      nextDurationSec = undefined;
+    } else if (op === 'inc') {
+      if (!untilIso) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Already permanent.'
+        }).catch(() => {});
+        return;
+      }
+      let nextSec: number;
+      if (remSec < 3600) nextSec = remSec + 1800;
+      else if (remSec < 86400) nextSec = remSec + 3600;
+      else nextSec = remSec + 86400;
+      nextDurationSec = nextSec > 365 * 86400 ? undefined : nextSec;
+    } else {
+      if (!untilIso) {
+        nextDurationSec = 86400;
+      } else if (remSec <= 300) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: `Minimum duration is 5m. Use ${kind === 'ban' ? 'Unban' : 'Unmute'} to lift it.`,
+          show_alert: true
+        }).catch(() => {});
+        return;
+      } else if (remSec <= 3600) {
+        nextDurationSec = Math.max(300, remSec - 1800);
+      } else if (remSec <= 86400) {
+        nextDurationSec = Math.max(1800, remSec - 3600);
+      } else {
+        nextDurationSec = Math.max(3600, remSec - 86400);
+      }
+    }
+
+    const nextUntilSec = nextDurationSec !== undefined ? Math.floor(nowMs / 1000) + nextDurationSec : undefined;
+    const nextUntilMs = nextUntilSec !== undefined ? nextUntilSec * 1000 : undefined;
+
+    if (/^\d+$/.test(String(user.userId))) {
+      let apiRes: any = null;
+      if (kind === 'ban') {
+        apiRes = await this.callTelegramApi('banChatMember', {
+          chat_id: chatId,
+          user_id: Number(user.userId),
+          ...(nextUntilSec ? { until_date: nextUntilSec } : {})
+        }).catch(() => null);
+      } else {
+        apiRes = await this.callTelegramApi('restrictChatMember', {
+          chat_id: chatId,
+          user_id: Number(user.userId),
+          permissions: {
+            can_send_messages: false,
+            can_send_audios: false,
+            can_send_documents: false,
+            can_send_photos: false,
+            can_send_videos: false,
+            can_send_video_notes: false,
+            can_send_voice_notes: false,
+            can_send_polls: false,
+            can_send_other_messages: false,
+            can_add_web_page_previews: false
+          },
+          ...(nextUntilSec ? { until_date: nextUntilSec } : {})
+        }).catch(() => null);
+      }
+
+      if (!apiRes?.ok) {
+        const errMsg = String(apiRes?.description || 'Failed to update duration on Telegram.');
+        if (/right|admin|permission/i.test(errMsg)) {
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: errMsg,
+            show_alert: true
+          }).catch(() => {});
+          return;
+        }
+      }
+    }
+
+    if (kind === 'ban') {
+      await storage.setGroupMemberBanned(chatId, user.userId, true, {
+        untilMs: nextUntilMs,
+        reason: user.banReason,
+        name: user.firstName,
+        username: user.username
+      });
+    } else {
+      await storage.setGroupMemberMuted(chatId, user.userId, true, {
+        untilMs: nextUntilMs,
+        reason: user.muteReason,
+        name: user.firstName,
+        username: user.username
+      });
+    }
+
+    const label = nextUntilMs ? this.formatRemainingModerationDuration(new Date(nextUntilMs).toISOString()) : 'Permanent';
+    await this.callTelegramApi('answerCallbackQuery', {
+      callback_query_id: cb.id,
+      text: `Duration updated: ${label}`
+    }).catch(() => {});
+
+    if (cb.message?.message_id) {
+      await this.renderOwnerModerationUserDetail(chatId, cb.message.message_id, kind, String(user.userId), page);
+    }
+  }
+
+  private static async handleOwnerModerationLift(
+    cb: any,
+    chatId: string | number,
+    kind: 'ban' | 'mute',
+    userId: string,
+    page: number
+  ): Promise<void> {
+    const user = await storage.getGroupMemberModeration(chatId, userId);
+    const resolvedId = String(user?.userId || userId);
+
+    if (/^\d+$/.test(resolvedId)) {
+      if (kind === 'ban') {
+        await this.callTelegramApi('unbanChatMember', {
+          chat_id: chatId,
+          user_id: Number(resolvedId),
+          only_if_banned: true
+        }).catch(() => {});
+      } else {
+        await this.callTelegramApi('restrictChatMember', {
+          chat_id: chatId,
+          user_id: Number(resolvedId),
+          permissions: {
+            can_send_messages: true,
+            can_send_audios: true,
+            can_send_documents: true,
+            can_send_photos: true,
+            can_send_videos: true,
+            can_send_video_notes: true,
+            can_send_voice_notes: true,
+            can_send_polls: true,
+            can_send_other_messages: true,
+            can_add_web_page_previews: true
+          }
+        }).catch(() => {});
+      }
+    }
+
+    if (kind === 'ban') {
+      await storage.setGroupMemberBanned(chatId, resolvedId, false);
+      if (!storage.hasActiveBanInAnyGroup(resolvedId)) {
+        await storage.setBotUserBanned(resolvedId, false).catch(() => {});
+      }
+    } else {
+      await storage.setGroupMemberMuted(chatId, resolvedId, false);
+      await storage.setBotUserMuted(resolvedId, false).catch(() => {});
+    }
+    await storage.resetUserLinkWarning(chatId, resolvedId).catch(() => {});
+    await storage.resetUserFraudWarning(chatId, resolvedId).catch(() => {});
+
+    await this.callTelegramApi('answerCallbackQuery', {
+      callback_query_id: cb.id,
+      text: kind === 'ban' ? 'User unbanned.' : 'User unmuted.'
+    }).catch(() => {});
+
+    if (cb.message?.message_id) {
+      await this.renderOwnerModerationList(chatId, cb.message.message_id, kind, page);
+    }
+  }
+
+  private static async handleGroupInfoCommand(message: any): Promise<void> {
+    const chatId = message?.chat?.id;
+    if (!chatId) return;
+
+    const [chatRes, countRes, adminsRes, tpl] = await Promise.all([
+      this.callTelegramApi('getChat', { chat_id: chatId }).catch(() => null),
+      this.callTelegramApi('getChatMemberCount', { chat_id: chatId }).catch(() => null),
+      this.callTelegramApi('getChatAdministrators', { chat_id: chatId }).catch(() => null),
+      storage.getTemplate('GROUP_INFO_MESSAGE')
+    ]);
+
+    const chatInfo = chatRes?.ok && chatRes.result ? chatRes.result : message.chat;
+    const groupTitle = String(chatInfo?.title || message.chat?.title || 'Group').trim();
+    const groupIdStr = String(chatInfo?.id ?? chatId).trim();
+    const memberCount = countRes?.ok && typeof countRes.result === 'number'
+      ? String(countRes.result)
+      : 'N/A';
+
+    const rawAdmins: any[] = adminsRes?.ok && Array.isArray(adminsRes.result) ? adminsRes.result : [];
+    const sortedAdmins = [...rawAdmins].sort((a, b) => {
+      if (a?.status === 'creator' && b?.status !== 'creator') return -1;
+      if (b?.status === 'creator' && a?.status !== 'creator') return 1;
+      return 0;
+    });
+
+    const adminLines = sortedAdmins.map((member, index) => {
+      const u = member?.user || {};
+      const fullName = [u.first_name, u.last_name].filter(Boolean).join(' ').trim() || (u.username ? `@${u.username}` : 'Admin');
+      const uid = u.id !== undefined ? String(u.id) : '';
+      const uname = u.username ? String(u.username).replace(/^@+/, '').trim() : '';
+      const profileLink = uid
+        ? this.formatUserProfileLink(fullName, uname, uid)
+        : this.escapeHtml(fullName);
+      const unameSuffix = uname && fullName.toLowerCase() !== `@${uname.toLowerCase()}`
+        ? ` (@${this.escapeHtml(uname)})`
+        : '';
+      const roleIcon = member?.status === 'creator' ? '👑' : '🛡️';
+      const roleTag = member?.status === 'creator' ? ' (Owner)' : (u.is_bot ? ' (Bot)' : '');
+      return `${index + 1}. ${roleIcon} ${profileLink}${unameSuffix}${roleTag}`;
+    });
+
+    const adminsListText = adminLines.length > 0
+      ? adminLines.join('\n')
+      : '<i>Unable to retrieve admins list.</i>';
+
+    const rawContent = String(tpl?.content || '').trim() ||
+      "ℹ️ <b>Group Information</b>\n\n🏷️ <b>Group Name:</b> {group_name}\n🆔 <b>Chat ID:</b> <code>{chat_id}</code>\n👥 <b>Members:</b> <code>{member_count}</code>\n\n🛡️ <b>Group Admins ({admin_count}):</b>\n{admins_list}";
+
+    const renderedText = rawContent
+      .replace(/\{chat_id\}|\{group_id\}/gi, this.escapeHtml(groupIdStr))
+      .replace(/\{group_name\}|\{group_title\}|\{title\}/gi, this.escapeHtml(groupTitle))
+      .replace(/\{member_count\}|\{members_count\}|\{members\}/gi, this.escapeHtml(memberCount))
+      .replace(/\{admin_count\}|\{admins_count\}/gi, String(sortedAdmins.length))
+      .replace(/\{admins_list\}|\{admins\}/gi, adminsListText);
+
+    const res = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: renderedText,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+      ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+    });
+
+    if (!res?.ok && message.message_id) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: renderedText,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+      });
+    }
+  }
+
+  private static async executeGroupModerationAction(params: {
+    chatId: string | number;
+    action: 'ban' | 'mute';
+    target: { id: string; name: string; username: string };
+    durationToken?: string;
+    isPermanent?: boolean;
+    reason?: string;
+    replyToMessageId?: number;
+    editMessageId?: number;
+  }): Promise<{ ok: boolean; error?: string }> {
+    const { chatId, action, target, durationToken, reason, replyToMessageId, editMessageId } = params;
+    if (!target.id || !/^\d+$/.test(target.id)) {
+      const errText = `❌ <b>User Not Found</b>\n<i>Could not resolve a Telegram User ID for <code>${this.escapeHtml(target.name || target.id || 'target')}</code>. Reply to their message or pass their numeric User ID.</i>`;
+      if (editMessageId) {
+        await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: editMessageId,
+          text: errText,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [] }
+        }).catch(() => {});
+      } else {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: errText,
+          parse_mode: 'HTML',
+          ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+        });
+      }
+      return { ok: false, error: 'Invalid user ID' };
+    }
+
+    const meRes = await this.callTelegramApi('getMe', {}).catch(() => null);
+    if (meRes?.ok && meRes.result?.id && String(meRes.result.id) === String(target.id)) {
+      const selfText = `⚠️ <b>Action Skipped</b>\n<i>The bot cannot ${action} itself.</i>`;
+      if (editMessageId) {
+        await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: editMessageId,
+          text: selfText,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [] }
+        }).catch(() => {});
+      } else {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: selfText,
+          parse_mode: 'HTML',
+          ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+        });
+      }
+      return { ok: false, error: 'Cannot target self' };
+    }
+
+    const targetIsAdmin = await this.isGroupAdminOrCreator(chatId, target.id);
+    if (targetIsAdmin) {
+      const adminSkipText = `⚠️ <b>Action Skipped</b>\n<i>Administrators cannot be ${action === 'ban' ? 'banned' : 'muted'}.</i>`;
+      if (editMessageId) {
+        await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: editMessageId,
+          text: adminSkipText,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [] }
+        }).catch(() => {});
+      } else {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: adminSkipText,
+          parse_mode: 'HTML',
+          ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+        });
+      }
+      return { ok: false, error: 'Target is admin' };
+    }
+
+    const parsedDur = durationToken ? this.parseModerationDuration(durationToken) : { valid: false, isPermanent: true, durationSec: 0, displayLabel: 'Permanent' };
+    const isPermanent = Boolean(params.isPermanent || !parsedDur.valid || parsedDur.isPermanent);
+    const untilDate = !isPermanent && parsedDur.durationSec >= 30
+      ? Math.floor(Date.now() / 1000) + parsedDur.durationSec
+      : undefined;
+
+    let apiRes: any;
+    try {
+      if (action === 'ban') {
+        apiRes = await this.callTelegramApi('banChatMember', {
+          chat_id: chatId,
+          user_id: Number(target.id),
+          ...(untilDate ? { until_date: untilDate } : {})
+        });
+      } else {
+        apiRes = await this.callTelegramApi('restrictChatMember', {
+          chat_id: chatId,
+          user_id: Number(target.id),
+          permissions: {
+            can_send_messages: false,
+            can_send_audios: false,
+            can_send_documents: false,
+            can_send_photos: false,
+            can_send_videos: false,
+            can_send_video_notes: false,
+            can_send_voice_notes: false,
+            can_send_polls: false,
+            can_send_other_messages: false,
+            can_add_web_page_previews: false
+          },
+          ...(untilDate ? { until_date: untilDate } : {})
+        });
+      }
+    } catch (err: any) {
+      apiRes = { ok: false, description: err?.message || 'Telegram API error' };
+    }
+
+    if (!apiRes?.ok) {
+      const failText = `❌ <b>${action === 'ban' ? 'Ban' : 'Mute'} Failed</b>\n<i>${this.escapeHtml(apiRes?.description || 'Please verify that the bot is a group administrator with restriction permissions.')}</i>`;
+      if (editMessageId) {
+        await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: editMessageId,
+          text: failText,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [] }
+        }).catch(() => {});
+      } else {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: failText,
+          parse_mode: 'HTML',
+          ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+        });
+      }
+      return { ok: false, error: apiRes?.description || 'API failed' };
+    }
+
+    const untilMs = untilDate ? untilDate * 1000 : undefined;
+    if (action === 'ban') {
+      await storage.setGroupMemberBanned(chatId, target.id, true, {
+        untilMs,
+        reason,
+        name: target.name,
+        username: target.username
+      });
+      if (isPermanent) {
+        await storage.setBotUserBanned(target.id, true, {
+          chatId: String(chatId),
+          reason,
+          name: target.name,
+          username: target.username
+        }).catch(() => {});
+      }
+    } else {
+      await storage.setGroupMemberMuted(chatId, target.id, true, {
+        untilMs,
+        reason,
+        name: target.name,
+        username: target.username
+      });
+    }
+
+    const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
+    const title = action === 'ban'
+      ? (isPermanent ? '🚫 <b>Banned Permanently</b>' : `🚫 <b>Banned for ${this.escapeHtml(parsedDur.displayLabel)}</b>`)
+      : (isPermanent ? '🔇 <b>Muted Permanently</b>' : `🔇 <b>Muted for ${this.escapeHtml(parsedDur.displayLabel)}</b>`);
+
+    const confirmationText =
+      `${title}\n\n` +
+      `👤 <b>User:</b> ${userProfileLink}` +
+      (reason ? `\n📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>` : '');
+
+    if (editMessageId) {
+      await this.callTelegramApi('editMessageText', {
+        chat_id: chatId,
+        message_id: editMessageId,
+        text: confirmationText,
+        parse_mode: 'HTML',
+        reply_markup: { inline_keyboard: [] }
+      }).catch(() => {});
+    } else {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: confirmationText,
+        parse_mode: 'HTML',
+        ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+      });
+    }
+
+    return { ok: true };
+  }
+
+  private static async sendModerationPickerPrompt(params: {
+    chatId: string | number;
+    action: 'ban' | 'mute';
+    target: { id: string; name: string; username: string };
+    reason?: string;
+    adminId: string;
+    replyToMessageId?: number;
+  }): Promise<void> {
+    const { chatId, action, target, reason, adminId, replyToMessageId } = params;
+    const settings = await storage.getSettings();
+    const presets = Array.isArray(settings.moderationDurations)
+      ? sanitizeModerationDurations(settings.moderationDurations)
+      : DEFAULT_MODERATION_DURATIONS;
+
+    // Clean stale pending actions > 30 minutes
+    const now = Date.now();
+    for (const [k, v] of pendingGroupModerationMap.entries()) {
+      if (now - v.createdAt > 30 * 60 * 1000) pendingGroupModerationMap.delete(k);
+    }
+
+    const token = crypto.randomBytes(4).toString('hex');
+    const pending: PendingModerationAction = {
+      token,
+      chatId,
+      action,
+      targetId: target.id,
+      targetName: target.name,
+      targetUsername: target.username,
+      reason: reason || undefined,
+      adminId,
+      replyToMessageId,
+      createdAt: now
+    };
+    pendingGroupModerationMap.set(token, pending);
+
+    const inlineKeyboard: any[][] = [];
+    for (let i = 0; i < presets.length; i += 2) {
+      const row: any[] = [];
+      row.push({ text: presets[i].label, callback_data: `modp:${token}:${i}`, style: 'primary' });
+      if (presets[i + 1]) {
+        row.push({ text: presets[i + 1].label, callback_data: `modp:${token}:${i + 1}`, style: 'primary' });
+      }
+      inlineKeyboard.push(row);
+    }
+    inlineKeyboard.push([
+      { text: '⏱ Temp', callback_data: `modt:${token}`, style: 'primary' },
+      { text: '♾️ Permanent', callback_data: `moda:${token}:perm`, style: 'danger' }
+    ]);
+
+    const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
+    const header = action === 'ban' ? '🚫 <b>Ban User</b>' : '🔇 <b>Mute User</b>';
+    const promptText =
+      `${header}\n\n` +
+      `👤 <b>User:</b> ${userProfileLink}` +
+      (reason ? `\n📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>` : '') +
+      `\n\n<i>Select duration below:</i>`;
+
+    const sent = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: promptText,
+      parse_mode: 'HTML',
+      ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
+      reply_markup: { inline_keyboard: inlineKeyboard }
+    });
+    if (sent?.ok && sent.result?.message_id) {
+      pending.promptMessageId = sent.result.message_id;
+    }
+  }
+
+  public static async sendGroupWelcomeMessage(
+    chatId: string | number,
+    joinedUser: any,
+    threadId?: number
+  ): Promise<void> {
+    if (!joinedUser || !joinedUser.id || joinedUser.is_bot) return;
+
+    const botScopeId = String((storage as any)?.botId || 'main').trim() || 'main';
+    const userId = String(joinedUser.id).trim();
+    const dedupKey = `${botScopeId}:${String(chatId).trim()}:${userId}`;
+    const now = Date.now();
+    const prevAt = recentGroupWelcomes.get(dedupKey);
+    if (prevAt && now - prevAt < 15000) {
+      return;
+    }
+    recentGroupWelcomes.set(dedupKey, now);
+    if (recentGroupWelcomes.size > 300) {
+      for (const [k, t] of recentGroupWelcomes.entries()) {
+        if (now - t > 60000) recentGroupWelcomes.delete(k);
+      }
+    }
+
+    const rawUsername = joinedUser.username ? String(joinedUser.username).replace(/^@+/, '').trim() : '';
+    const firstName = String(joinedUser.first_name || '').trim();
+    const lastName = String(joinedUser.last_name || '').trim();
+
+    storage.trackBotUser({
+      id: userId,
+      username: rawUsername ? `@${rawUsername}` : undefined,
+      firstName: firstName || undefined,
+      lastName: lastName || undefined
+    }).catch(() => {});
+
+    const welcomeTpl = await storage.getTemplate('GROUP_WELCOME_MESSAGE');
+    const rawContent = String(welcomeTpl?.content || '').trim();
+    const mediaType = welcomeTpl?.mediaType || 'none';
+    const mediaUrl = String(welcomeTpl?.mediaUrl || '').trim();
+
+    if (!rawContent && (mediaType === 'none' || !mediaUrl)) {
+      return;
+    }
+
+    const fullName = [firstName, lastName].filter(Boolean).join(' ').trim() || (rawUsername ? `@${rawUsername}` : 'User');
+    const safeFirstName = this.escapeHtml(firstName || (rawUsername ? `@${rawUsername}` : 'User'));
+    const safeLastName = this.escapeHtml(lastName);
+    const safeUsername = this.escapeHtml(rawUsername ? `@${rawUsername}` : (firstName || 'User'));
+    const safeFullName = this.escapeHtml(fullName);
+    const safeUserId = this.escapeHtml(userId);
+    const botUsername = await this.getBotUsername();
+    const safeBotName = this.escapeHtml(botUsername ? `@${botUsername.replace(/^@/, '')}` : 'the bot');
+
+    let welcomeText = rawContent
+      .replace(/@?\{@?username\}/gi, safeUsername)
+      .replace(/\{first_name\}|\{firstname\}/gi, safeFirstName)
+      .replace(/\{last_name\}|\{lastname\}/gi, safeLastName)
+      .replace(/\{user_id\}|\{userid\}|\{id\}/gi, safeUserId)
+      .replace(/\{user_name\}|\{name\}|\{fullname\}/gi, safeFullName)
+      .replace(/@?\{@?bot_name\}|@?\{@?bot_username\}/gi, safeBotName)
+      .replace(/@@([a-zA-Z0-9_]+)/g, '@$1');
+
+    let sent = false;
+    const isLocalUpload = Boolean(mediaUrl && (
+      mediaUrl.startsWith('upload_') ||
+      mediaUrl.startsWith('local_') ||
+      mediaUrl.startsWith('phone_')
+    ));
+
+    if (isLocalUpload && mediaUrl && mediaType !== 'none') {
+      try {
+        const up = await storage.getUploadedFile(mediaUrl);
+        if (up && up.buffer) {
+          const res = await TelegramService.uploadAndDeliverDirectly(chatId, {
+            buffer: up.buffer,
+            fileName: up.fileName || (mediaType === 'video' ? 'welcome.mp4' : 'welcome.jpg'),
+            mimeType: up.mimeType || (mediaType === 'video' ? 'video/mp4' : 'image/jpeg'),
+            fileType: mediaType === 'video' ? 'video' : 'photo'
+          }, welcomeText || undefined);
+          if (res && res.ok) {
+            sent = true;
+            const realFileId =
+              (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
+              res.result?.video?.file_id ||
+              res.result?.document?.file_id;
+            if (realFileId) {
+              await storage.updateTemplate('GROUP_WELCOME_MESSAGE', welcomeTpl.content, {
+                mediaType,
+                mediaUrl: realFileId
+              }).catch(() => {});
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[Telegram] Local upload delivery for group welcome error:', err);
+      }
+    }
+
+    if (!sent && mediaUrl && (mediaType === 'photo' || (mediaType !== 'video' && mediaType !== 'none' && /\.(jpe?g|png|webp|gif)$/i.test(mediaUrl)))) {
+      const res = await this.callTelegramApi('sendPhoto', {
+        chat_id: chatId,
+        photo: mediaUrl,
+        ...(welcomeText ? { caption: welcomeText, parse_mode: 'HTML' } : {}),
+        ...(threadId ? { message_thread_id: threadId } : {})
+      });
+      if (res?.ok) sent = true;
+    } else if (!sent && mediaUrl && (mediaType === 'video' || (mediaType !== 'photo' && mediaType !== 'none' && /\.(mp4|mov|webm|m4v)$/i.test(mediaUrl)))) {
+      const res = await this.callTelegramApi('sendVideo', {
+        chat_id: chatId,
+        video: mediaUrl,
+        ...(welcomeText ? { caption: welcomeText, parse_mode: 'HTML' } : {}),
+        ...(threadId ? { message_thread_id: threadId } : {})
+      });
+      if (res?.ok) sent = true;
+    }
+
+    if (!sent && welcomeText) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: welcomeText,
+        parse_mode: 'HTML',
+        ...(threadId ? { message_thread_id: threadId } : {})
+      });
+    }
   }
 
   // Dynamically resolve placeholders inside Maintenance Notice:
@@ -1327,7 +2409,7 @@ export class TelegramService {
       // Ignore edited messages for commands and general replies to prevent double replies on edit
       if (update.edited_message && !update.message) {
         const fromId = String(update.edited_message.from?.id || '');
-        const isInInteractiveSession = activeAddSessions.has(fromId) || activeEditSessions.has(fromId) || activeCloneSessions.has(fromId);
+        const isInInteractiveSession = activeAddSessions.has(fromId) || activeEditSessions.has(fromId) || activeCloneSessions.has(fromId) || activeUpdateSessions.has(fromId);
         if (!isInInteractiveSession) {
           return;
         }
@@ -1509,7 +2591,15 @@ export class TelegramService {
     const isBotAdmin = await this.isAuthorizedAdmin(cleanUserId);
     if (isBotAdmin) return true;
 
-    // 2. Check local in-memory cache scoped per bot
+    return this.isTelegramGroupAdmin(cleanChatId, cleanUserId);
+  }
+
+  public static async isTelegramGroupAdmin(chatId: string | number, userId: string | number): Promise<boolean> {
+    if (!chatId || !userId) return false;
+    const cleanChatId = String(chatId).trim();
+    const cleanUserId = String(userId).trim();
+
+    // Check local in-memory cache scoped per bot
     const botScope = String((storage as any)?.botId || 'main').trim() || 'main';
     const cacheKey = `${botScope}:${cleanChatId}:${cleanUserId}`;
     const now = Date.now();
@@ -1566,6 +2656,24 @@ export class TelegramService {
       console.warn(`[Telegram] Fallback getChatAdministrators error for chat ${cleanChatId}:`, err?.message || err);
     }
 
+    return false;
+  }
+
+  private static async canOpenGroupDashboard(
+    chatId: string | number | undefined,
+    fromId: string | number,
+    fromUsername?: string,
+    senderChatId?: string | number
+  ): Promise<boolean> {
+    if (senderChatId && chatId && String(senderChatId) === String(chatId)) {
+      return true;
+    }
+    if (fromId && (await this.isOwnerAdmin(fromId, fromUsername))) {
+      return true;
+    }
+    if (chatId && fromId && (await this.isTelegramGroupAdmin(chatId, fromId))) {
+      return true;
+    }
     return false;
   }
 
@@ -1673,11 +2781,12 @@ export class TelegramService {
       `━━━━━━━━━━━━━━━━━━━━`,
       `📁 <b>CONTENT &amp; FILE MANAGEMENT</b>`,
       `• <code>/add</code> — Start interactive wizard to add Files, Links, or Text`,
+      `• <code>/update &lt;trigger_or_name&gt;</code> — Interactively update any saved file or link`,
       `• <code>/addkey</code> — Add Key mode (pre-loaded serial keys + expiry timer)`,
       `• <code>/genkey</code> — Key Generator mode (prefix, length, format + expiry timer)`,
       `• <code>/textlink</code> — Text link (single reusable key/text + Unlimited or timer)`,
       `• <code>/allfiles</code> — Browse &amp; copy links for stored files/links`,
-      `• <code>/cancel</code> — Cancel active setup wizard (${isMainBot ? '/add, /addkey, /genkey, /textlink, /clone, /setchannel' : '/add, /addkey, /genkey, /textlink, /setchannel'})`,
+      `• <code>/cancel</code> — Cancel active setup wizard (${isMainBot ? '/add, /update, /addkey, /genkey, /textlink, /clone, /setchannel' : '/add, /update, /addkey, /genkey, /textlink, /setchannel'})`,
       `• <code>/editthismessage</code> — Reply to a bot message to edit its template`,
       `• <code>/cleanup</code> — Remove tracked old bot messages (24h+)`,
       ``,
@@ -1693,9 +2802,10 @@ export class TelegramService {
       ``,
       `🔨 <b>MODERATION &amp; ACCESS CONTROL</b>`,
       `• <code>/linkdelete [on|off]</code> — Toggle unauthorized link deletion in groups`,
-      `• <code>/ban &lt;id_or_@user&gt;</code> — Ban user (or reply <code>/ban</code> in group)`,
+      `• <code>/cleanservice [on|off]</code> — Auto-delete group join &amp; leave service messages`,
+      `• <code>/ban [user] [time] [reason]</code> — Ban user interactively or directly in group`,
       `• <code>/unban &lt;id_or_@user&gt;</code> — Unban user &amp; clear warnings`,
-      `• <code>/mute &lt;id_or_@user&gt; [10m|1h|1d]</code> — Mute user in group (or reply <code>/mute</code>)`,
+      `• <code>/mute [user] [time] [reason]</code> — Mute user interactively or directly in group`,
       `• <code>/unmute &lt;id_or_@user&gt;</code> — Unmute user in group (or reply <code>/unmute</code>)`,
       `• <code>/grantadmin &lt;id_or_@user&gt; [full|editor|moderator]</code> — <i>(Owner)</i> Promote user to Admin &amp; issue token`,
       `• <code>/revokeadmin &lt;id_or_@user&gt;</code> — <i>(Owner)</i> Revoke Admin permissions`,
@@ -1940,6 +3050,13 @@ export class TelegramService {
 
     this.invalidateForceSubCache(userId);
 
+    const oldStatus = String(chatMember.old_chat_member?.status || '').trim();
+    const wasMember =
+      oldStatus === 'member' ||
+      oldStatus === 'administrator' ||
+      oldStatus === 'creator' ||
+      (oldStatus === 'restricted' && chatMember.old_chat_member?.is_member === true);
+
     if (newStatus === 'left' || newStatus === 'kicked') {
       this.clearCachedPendingJoinRequest(botScopeId, { chatId, username: chatUsername }, userId, userUsername, chatId);
       await storage.invalidateJoinRequest(chatId, userId, undefined, chatUsername, userUsername).catch(() => false);
@@ -1952,6 +3069,9 @@ export class TelegramService {
     ) {
       this.clearCachedPendingJoinRequest(botScopeId, { chatId, username: chatUsername }, userId, userUsername, chatId);
       await storage.updateJoinRequestStatus(chatId, userId, 'approved').catch(() => null);
+      if ((chat.type === 'group' || chat.type === 'supergroup') && !wasMember && !memberUser.is_bot) {
+        await this.sendGroupWelcomeMessage(chat.id, memberUser).catch(() => {});
+      }
     }
   }
 
@@ -3173,6 +4293,42 @@ export class TelegramService {
   // =========================================================================
   private static async handleGroupMessage(message: any, text: string): Promise<void> {
     const fromId = String(message.from?.id || '');
+    const groupSettings = await storage.getSettings();
+
+    if (message.chat?.id && message.from && !message.from.is_bot && fromId) {
+      storage.trackGroupMember(message.chat.id, {
+        id: fromId,
+        username: message.from.username,
+        firstName: message.from.first_name,
+        lastName: message.from.last_name
+      });
+    }
+
+    // 0. CLEAN SERVICE & GROUP WELCOME MESSAGE ON JOIN/LEAVE
+    const isJoinServiceMsg =
+      (Array.isArray(message.new_chat_members) && message.new_chat_members.length > 0) ||
+      Boolean(message.new_chat_member);
+    const isLeaveServiceMsg = Boolean(message.left_chat_member);
+
+    if (isJoinServiceMsg || isLeaveServiceMsg) {
+      if (groupSettings.cleanServiceEnabled && message.message_id) {
+        await this.deleteUserMessage(message.chat.id, message.message_id);
+      }
+      const joinedMembers = Array.isArray(message.new_chat_members)
+        ? message.new_chat_members
+        : (message.new_chat_member ? [message.new_chat_member] : []);
+      for (const member of joinedMembers) {
+        if (!member || member.is_bot) continue;
+        storage.trackGroupMember(message.chat.id, {
+          id: member.id,
+          username: member.username,
+          firstName: member.first_name,
+          lastName: member.last_name
+        });
+        await this.sendGroupWelcomeMessage(message.chat.id, member, message.message_thread_id).catch(() => {});
+      }
+      return;
+    }
 
     // =========================================================================
     // ADVANCED ANTI-SPAM & LINK/FORWARD PROTECTION SYSTEM
@@ -3181,7 +4337,6 @@ export class TelegramService {
     // 3. 3-Strike Warning & Auto-Ban System
     // =========================================================================
     const isOfficial = await this.isOfficialOrAdminMessage(message, fromId);
-    const groupSettings = await storage.getSettings();
     const shouldBlockLinks = Boolean(groupSettings.linkDeleteEnabled);
     const shouldBlockForwards = Boolean(groupSettings.antiForwardEnabled);
 
@@ -3256,7 +4411,17 @@ export class TelegramService {
                 console.warn('[Anti-Spam] banChatMember error on warning limit:', banErr);
               }
 
-              await storage.setBotUserBanned(fromId, true);
+              await storage.setGroupMemberBanned(message.chat.id, fromId, true, {
+                reason: 'Reached warning limit',
+                name: realName,
+                username: userObj.username
+              });
+              await storage.setBotUserBanned(fromId, true, {
+                chatId: String(message.chat.id),
+                reason: 'Reached warning limit',
+                name: realName,
+                username: userObj.username
+              }).catch(() => {});
               await storage.resetUserLinkWarning(message.chat.id, fromId);
 
               const templates = await storage.getTemplates();
@@ -3339,18 +4504,118 @@ export class TelegramService {
       return;
     }
 
+    // 1b. Check if admin is replying with a custom Temp Ban/Mute duration in this group
+    let tempModSessionKey = `${String(message.chat.id)}:${fromId}`;
+    let pendingTempMod = activeGroupTempModSessions.get(tempModSessionKey);
+    if (!pendingTempMod && message?.sender_chat?.id && String(message.sender_chat.id) === String(message.chat.id)) {
+      for (const [k, v] of activeGroupTempModSessions.entries()) {
+        if (String(v.chatId) === String(message.chat.id)) {
+          tempModSessionKey = k;
+          pendingTempMod = v;
+          break;
+        }
+      }
+    }
+    if (pendingTempMod && text) {
+      if (/^\/cancel(?:@\w+)?(?:\s|$)/i.test(text.trim())) {
+        activeGroupTempModSessions.delete(tempModSessionKey);
+        pendingGroupModerationMap.delete(pendingTempMod.token);
+        if (pendingTempMod.promptMessageId) {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: message.chat.id,
+            message_id: pendingTempMod.promptMessageId,
+            text: '❌ <b>Moderation Action Cancelled</b>',
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: [] }
+          }).catch(() => {});
+        }
+        if (!isOfficial && message.message_id) {
+          await this.deleteUserMessage(message.chat.id, message.message_id);
+        }
+        return;
+      }
+
+      if (!text.trim().startsWith('/')) {
+        const parts = text.trim().split(/\s+/);
+        const parsedDur = this.parseModerationDuration(parts[0]);
+        if (!parsedDur.valid || parsedDur.isPermanent) {
+          await this.callTelegramApi('sendMessage', {
+            chat_id: message.chat.id,
+            text: `⚠️ <b>Invalid Duration</b>\n<i>Send a valid duration like <code>30m</code>, <code>2h</code>, <code>3d</code>, or <code>1w</code> (or send <code>/cancel</code>).</i>`,
+            parse_mode: 'HTML',
+            reply_to_message_id: message.message_id
+          });
+          return;
+        }
+        const customReason = parts.slice(1).join(' ').trim() || pendingTempMod.reason;
+        activeGroupTempModSessions.delete(tempModSessionKey);
+        pendingGroupModerationMap.delete(pendingTempMod.token);
+        if (message.message_id) {
+          this.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
+        }
+        await this.executeGroupModerationAction({
+          chatId: message.chat.id,
+          action: pendingTempMod.action,
+          target: {
+            id: pendingTempMod.targetId,
+            name: pendingTempMod.targetName,
+            username: pendingTempMod.targetUsername
+          },
+          durationToken: parts[0],
+          isPermanent: false,
+          reason: customReason,
+          editMessageId: pendingTempMod.promptMessageId,
+          replyToMessageId: pendingTempMod.promptMessageId ? undefined : pendingTempMod.replyToMessageId
+        });
+        return;
+      }
+    }
+
+    // 1c. /cleanservice on|off directly in group
+    if (/^\/cleanservice(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
+      const canModerate = await this.isGroupModerator(message, fromId);
+      if (!canModerate) {
+        await this.replyNonGroupAdmin(message);
+        return;
+      }
+      await this.handleCleanServiceToggleCommand(message.chat.id, text, message.message_id);
+      return;
+    }
+
+    // 1d. /admin Group Moderation Dashboard (Group Admins & Bot Owners)
+    if (/^\/admin(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
+      const canAccess = await this.canOpenGroupDashboard(
+        message.chat.id,
+        fromId,
+        message.from?.username,
+        message.sender_chat?.id
+      );
+      if (!canAccess) {
+        await this.replyOwnerDashboardDenied(message);
+        return;
+      }
+      await this.renderOwnerAdminDashboard(
+        message.chat.id,
+        undefined,
+        message.message_id,
+        message.message_thread_id
+      );
+      return;
+    }
+
     // 2. Identify Admin Commands in group (strictly restricted to authorized admins & private DM delivery)
     const isAddKeyCommand = /^\/addkey(?:@\w+)?(?:\s+|$)/i.test(text);
     const isGenKeyCommand = /^\/genkey(?:@\w+)?(?:\s+|$)/i.test(text);
     const isTextLinkCommand = /^\/(?:textlink|textkey)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isAddCommand = /^\/add(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isUpdateCommand = /^\/update(?:@\w+)?(?:\s+|$)/i.test(text);
     const isCancelCommand = /^\/cancel(?:@\w+)?(?:\s+|$)/i.test(text);
     const isSetPasswordCommand = /^\/setpassword(?:@\w+)?(?:\s+|$)/i.test(text);
     const isSetStartMsgCommand = /^\/(?:setstartmsg|startmsg)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isSetStartMediaCommand = /^\/setstartmedia(?:@\w+)?(?:\s+|$)/i.test(text);
     const isClearStartMediaCommand = /^\/clearstartmedia(?:@\w+)?(?:\s+|$)/i.test(text);
     const isCleanupCommand = /^\/cleanup(?:@\w+)?(?:\s+|$)/i.test(text);
-    const isAdminListCommand = /^\/(?:admins?|users?)(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isAdminListCommand = /^\/(?:admins|users?)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isConnectCommand = /^\/(?:connect|addchannel|setchannel)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isDisconnectCommand = /^\/(?:disconnect|removechannel)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isAllowChatCommand = /^\/allowchat(?:@\w+)?(?:\s+|$)/i.test(text);
@@ -3369,6 +4634,7 @@ export class TelegramService {
       isGenKeyCommand ||
       isTextLinkCommand ||
       isAddCommand ||
+      isUpdateCommand ||
       isCancelCommand ||
       isSetPasswordCommand ||
       isSetStartMsgCommand ||
@@ -3647,6 +4913,16 @@ export class TelegramService {
         return;
       }
 
+      if (isUpdateCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleUpdateItemCommand(fromId, fromId, text);
+          },
+          `Item updater opened in your private messages.`
+        );
+        return;
+      }
+
       if (isCancelCommand) {
         await executeWithPrivateDelivery(
           async () => {
@@ -3656,6 +4932,7 @@ export class TelegramService {
             await storage.deleteAddSession(fromId);
             activeEditSessions.delete(fromId);
             activeCloneSessions.delete(fromId);
+            activeUpdateSessions.delete(fromId);
             const templates = await storage.getTemplates();
             const cancelMsg = templates.CANCEL_MESSAGE?.content || '❌ <b>Operation Cancelled</b>\n<i>Current action has been aborted.</i>';
             if (addSession?.lastPromptMessageId) {
@@ -3827,12 +5104,12 @@ export class TelegramService {
       }
     }
 
-    // 1. /ban Command (Admins Only): Admin replies /ban or runs /ban <user_id_or_username>
-    const banMatch = text.match(/^\/ban(?:@\w+)?(?:\s+(.+))?$/i);
+    // 1. /ban Command (Admins Only): Reply /ban [time] [reason] or /ban <user> [time] [reason]
+    const banMatch = text.match(/^\/ban(?:@\w+)?(?:\s+([\s\S]+))?$/i);
     if (banMatch) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
-      if (!isAdmin) {
-        if (!isOfficial && message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
+      const canModerate = await this.isGroupModerator(message, fromId);
+      if (!canModerate) {
+        await this.replyNonGroupAdmin(message);
         return;
       }
       if (groupSettings.banEnabled === false) {
@@ -3845,33 +5122,56 @@ export class TelegramService {
         return;
       }
 
-      const target = await this.resolveModerationTarget(message.chat.id, message, banMatch[1]);
-      if (!target.id) {
+      const parsed = await this.parseModerationCommandArgs(message.chat.id, message, banMatch[1] || '');
+      if (!parsed.target.id) {
         await this.callTelegramApi('sendMessage', {
           chat_id: message.chat.id,
-          text: `ℹ️ <b>How to Ban</b>\nReply to any user's message with <code>/ban</code>, or run <code>/ban &lt;user_id_or_username&gt;</code>.`,
+          text: `ℹ️ <b>How to Ban</b>\nReply to any user's message with <code>/ban</code>, or run:\n• <code>/ban &lt;user_id_or_@username&gt;</code>\n• <code>/ban 1d reason</code> (replying) or <code>/ban @user 1d reason</code>`,
           parse_mode: 'HTML',
           reply_to_message_id: message.message_id
         });
         return;
       }
 
-      try {
-        await this.callTelegramApi('banChatMember', {
+      if (!/^\d+$/.test(parsed.target.id)) {
+        await this.callTelegramApi('sendMessage', {
           chat_id: message.chat.id,
-          user_id: Number(target.id) || target.id
+          text: `❌ <b>User Not Found</b>\n<i>Could not resolve a Telegram User ID for <code>${this.escapeHtml(parsed.targetQuery || parsed.target.name)}</code>. Reply to their message or pass their numeric User ID.</i>`,
+          parse_mode: 'HTML',
+          reply_to_message_id: message.message_id
         });
-      } catch (e) {
-        console.warn('[Telegram] banChatMember error:', e);
+        return;
       }
-      await storage.setBotUserBanned(target.id, true);
 
-      const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
-      await this.callTelegramApi('sendMessage', {
-        chat_id: message.chat.id,
-        text: `🚫 <b>Banned permanently</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
-        parse_mode: 'HTML',
-        reply_to_message_id: message.message_id
+      if (await this.isGroupAdminOrCreator(message.chat.id, parsed.target.id)) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: '⚠️ <b>Action Skipped</b>\n<i>Administrators cannot be banned.</i>',
+          parse_mode: 'HTML',
+          reply_to_message_id: message.message_id
+        });
+        return;
+      }
+
+      if (!parsed.durationToken) {
+        await this.sendModerationPickerPrompt({
+          chatId: message.chat.id,
+          action: 'ban',
+          target: parsed.target,
+          reason: parsed.reason,
+          adminId: fromId,
+          replyToMessageId: message.message_id
+        });
+        return;
+      }
+
+      await this.executeGroupModerationAction({
+        chatId: message.chat.id,
+        action: 'ban',
+        target: parsed.target,
+        durationToken: parsed.durationToken,
+        reason: parsed.reason,
+        replyToMessageId: message.message_id
       });
       if (!isOfficial && message.message_id) {
         setTimeout(() => {
@@ -3882,11 +5182,11 @@ export class TelegramService {
     }
 
     // 2. /unban Command (Admins Only): Admin runs /unban <user_id_or_username> or replies /unban
-    const unbanMatch = text.match(/^\/unban(?:@\w+)?(?:\s+(.+))?$/i);
+    const unbanMatch = text.match(/^\/unban(?:@\w+)?(?:\s+([\s\S]+))?$/i);
     if (unbanMatch) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
-      if (!isAdmin) {
-        if (!isOfficial && message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
+      const canModerate = await this.isGroupModerator(message, fromId);
+      if (!canModerate) {
+        await this.replyNonGroupAdmin(message);
         return;
       }
       if (groupSettings.banEnabled === false) {
@@ -3919,7 +5219,10 @@ export class TelegramService {
       } catch (e) {
         console.warn('[Telegram] unbanChatMember error in group:', e);
       }
-      await storage.setBotUserBanned(target.id, false);
+      await storage.setGroupMemberBanned(message.chat.id, target.id, false);
+      if (!storage.hasActiveBanInAnyGroup(target.id)) {
+        await storage.setBotUserBanned(target.id, false).catch(() => {});
+      }
       await storage.resetUserLinkWarning(message.chat.id, target.id);
       await storage.resetUserFraudWarning(message.chat.id, target.id);
       TelegramService.unbanUserInConnectedChats(target.id).catch(() => {});
@@ -3927,7 +5230,7 @@ export class TelegramService {
       const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
       await this.callTelegramApi('sendMessage', {
         chat_id: message.chat.id,
-        text: `✅ <b>User unbanned</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
+        text: `✅ <b>User Unbanned</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
         parse_mode: 'HTML',
         reply_to_message_id: message.message_id
       });
@@ -3939,12 +5242,12 @@ export class TelegramService {
       return;
     }
 
-    // 2b. /mute Command (Admins Only): Reply /mute [duration] or /mute <user_id_or_@username> [duration]
-    const muteMatch = text.match(/^\/mute(?:@\w+)?(?:\s+(.+))?$/i);
+    // 2b. /mute Command (Admins Only): Reply /mute [time] [reason] or /mute <user> [time] [reason]
+    const muteMatch = text.match(/^\/mute(?:@\w+)?(?:\s+([\s\S]+))?$/i);
     if (muteMatch) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
-      if (!isAdmin) {
-        if (!isOfficial && message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
+      const canModerate = await this.isGroupModerator(message, fromId);
+      if (!canModerate) {
+        await this.replyNonGroupAdmin(message);
         return;
       }
       if (groupSettings.muteEnabled === false) {
@@ -3957,39 +5260,28 @@ export class TelegramService {
         return;
       }
 
-      const rawArg = (muteMatch[1] || '').trim();
-      let targetQuery = '';
-      let durationRaw = '';
-
-      if (message.reply_to_message?.from) {
-        durationRaw = rawArg;
-      } else if (rawArg) {
-        const parts = rawArg.split(/\s+/);
-        const firstPart = parts[0].trim();
-        const looksLikeDurationOnly =
-          /^\d+(?:\.\d+)?\s*(?:s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$/i.test(firstPart) ||
-          /^(?:permanent|forever)$/i.test(firstPart);
-        if (looksLikeDurationOnly) {
-          targetQuery = '';
-        } else {
-          targetQuery = firstPart;
-          durationRaw = parts.slice(1).join(' ').trim();
-        }
-      }
-
-      const target = await this.resolveModerationTarget(message.chat.id, message, targetQuery);
-      if (!target.id) {
+      const parsed = await this.parseModerationCommandArgs(message.chat.id, message, muteMatch[1] || '');
+      if (!parsed.target.id) {
         await this.callTelegramApi('sendMessage', {
           chat_id: message.chat.id,
-          text: `ℹ️ <b>How to Mute</b>\nReply to any user's message with <code>/mute</code> or <code>/mute [duration]</code>, or run <code>/mute &lt;user_id_or_@username&gt; [duration]</code>.`,
+          text: `ℹ️ <b>How to Mute</b>\nReply to any user's message with <code>/mute</code>, or run:\n• <code>/mute &lt;user_id_or_@username&gt;</code>\n• <code>/mute 2h reason</code> (replying) or <code>/mute @user 2h reason</code>`,
           parse_mode: 'HTML',
           reply_to_message_id: message.message_id
         });
         return;
       }
 
-      const targetIsAdmin = await this.isGroupAdminOrCreator(message.chat.id, target.id);
-      if (targetIsAdmin) {
+      if (!/^\d+$/.test(parsed.target.id)) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: `❌ <b>User Not Found</b>\n<i>Could not resolve a Telegram User ID for <code>${this.escapeHtml(parsed.targetQuery || parsed.target.name)}</code>. Reply to their message or pass their numeric User ID.</i>`,
+          parse_mode: 'HTML',
+          reply_to_message_id: message.message_id
+        });
+        return;
+      }
+
+      if (await this.isGroupAdminOrCreator(message.chat.id, parsed.target.id)) {
         await this.callTelegramApi('sendMessage', {
           chat_id: message.chat.id,
           text: '⚠️ <b>Action Skipped</b>\n<i>Administrators cannot be muted.</i>',
@@ -3999,65 +5291,25 @@ export class TelegramService {
         return;
       }
 
-      let durationSec = 0;
-      let totalMinutes = 0;
-      const durLower = durationRaw.toLowerCase();
-      if (durLower && durLower !== 'permanent' && durLower !== 'forever') {
-        const durMatch = durLower.match(/^(\d+(?:\.\d+)?)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)?$/);
-        if (durMatch) {
-          const val = parseFloat(durMatch[1]);
-          const unit = durMatch[2] || 'm';
-          if (unit.startsWith('h')) {
-            totalMinutes = val * 60;
-            durationSec = Math.round(totalMinutes * 60);
-          } else if (unit.startsWith('d')) {
-            totalMinutes = val * 1440;
-            durationSec = Math.round(totalMinutes * 60);
-          } else if (unit.startsWith('s')) {
-            durationSec = Math.max(30, Math.round(val));
-            totalMinutes = Math.max(1, Math.round(val / 60));
-          } else {
-            totalMinutes = val;
-            durationSec = Math.round(val * 60);
-          }
-        }
-      }
-
-      const untilDate = durationSec >= 30 ? Math.floor(Date.now() / 1000) + durationSec : undefined;
-
-      try {
-        await this.callTelegramApi('restrictChatMember', {
-          chat_id: message.chat.id,
-          user_id: Number(target.id) || target.id,
-          permissions: {
-            can_send_messages: false,
-            can_send_audios: false,
-            can_send_documents: false,
-            can_send_photos: false,
-            can_send_videos: false,
-            can_send_video_notes: false,
-            can_send_voice_notes: false,
-            can_send_polls: false,
-            can_send_other_messages: false,
-            can_add_web_page_previews: false
-          },
-          ...(untilDate ? { until_date: untilDate } : {})
+      if (!parsed.durationToken) {
+        await this.sendModerationPickerPrompt({
+          chatId: message.chat.id,
+          action: 'mute',
+          target: parsed.target,
+          reason: parsed.reason,
+          adminId: fromId,
+          replyToMessageId: message.message_id
         });
-      } catch (e) {
-        console.warn('[Telegram] restrictChatMember (/mute) error:', e);
+        return;
       }
 
-      const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
-      let statusLine = 'Muted permanently';
-      if (untilDate && totalMinutes > 0) {
-        const displayMins = Number.isInteger(totalMinutes) ? totalMinutes : Number(totalMinutes.toFixed(1));
-        statusLine = `Muted for ${displayMins} ${displayMins === 1 ? 'minute' : 'minutes'}`;
-      }
-      await this.callTelegramApi('sendMessage', {
-        chat_id: message.chat.id,
-        text: `🔇 <b>${this.escapeHtml(statusLine)}</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
-        parse_mode: 'HTML',
-        reply_to_message_id: message.message_id
+      await this.executeGroupModerationAction({
+        chatId: message.chat.id,
+        action: 'mute',
+        target: parsed.target,
+        durationToken: parsed.durationToken,
+        reason: parsed.reason,
+        replyToMessageId: message.message_id
       });
       if (!isOfficial && message.message_id) {
         setTimeout(() => {
@@ -4068,11 +5320,11 @@ export class TelegramService {
     }
 
     // 2c. /unmute Command (Admins Only): Reply /unmute or /unmute <user_id_or_@username>
-    const unmuteMatch = text.match(/^\/unmute(?:@\w+)?(?:\s+(.+))?$/i);
+    const unmuteMatch = text.match(/^\/unmute(?:@\w+)?(?:\s+([\s\S]+))?$/i);
     if (unmuteMatch) {
-      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
-      if (!isAdmin) {
-        if (!isOfficial && message.message_id) await this.deleteUserMessage(message.chat.id, message.message_id);
+      const canModerate = await this.isGroupModerator(message, fromId);
+      if (!canModerate) {
+        await this.replyNonGroupAdmin(message);
         return;
       }
       if (groupSettings.muteEnabled === false) {
@@ -4117,13 +5369,15 @@ export class TelegramService {
         console.warn('[Telegram] restrictChatMember (/unmute) error:', e);
       }
 
+      await storage.setGroupMemberMuted(message.chat.id, target.id, false);
+      await storage.setBotUserMuted(target.id, false).catch(() => {});
       await storage.resetUserLinkWarning(message.chat.id, target.id);
       await storage.resetUserFraudWarning(message.chat.id, target.id);
 
       const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
       await this.callTelegramApi('sendMessage', {
         chat_id: message.chat.id,
-        text: `🔊 <b>User unmuted</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
+        text: `🔊 <b>User Unmuted</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
         parse_mode: 'HTML',
         reply_to_message_id: message.message_id
       });
@@ -4132,6 +5386,12 @@ export class TelegramService {
           TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
         }, 3000);
       }
+      return;
+    }
+
+    // 2d. /info Command: Display group chat ID, title, member count, and full admins list
+    if (/^\/info(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
+      await this.handleGroupInfoCommand(message);
       return;
     }
 
@@ -4366,6 +5626,12 @@ export class TelegramService {
                 } catch (e) {
                   console.warn('[Telegram] Error muting user for fraud keyword:', e);
                 }
+                await storage.setGroupMemberMuted(message.chat.id, fromId, true, {
+                  untilMs: untilDate ? untilDate * 1000 : undefined,
+                  reason: `Matched filter: ${rule.keyword}`,
+                  name: message.from?.first_name,
+                  username: message.from?.username
+                }).catch(() => {});
               } else if (action === 'ban') {
                 try {
                   await this.callTelegramApi('banChatMember', {
@@ -4376,7 +5642,20 @@ export class TelegramService {
                 } catch (e) {
                   console.warn('[Telegram] Error banning user for fraud keyword:', e);
                 }
-                await storage.setBotUserBanned(fromId, true);
+                await storage.setGroupMemberBanned(message.chat.id, fromId, true, {
+                  untilMs: untilDate ? untilDate * 1000 : undefined,
+                  reason: `Matched filter: ${rule.keyword}`,
+                  name: message.from?.first_name,
+                  username: message.from?.username
+                });
+                if (!untilDate) {
+                  await storage.setBotUserBanned(fromId, true, {
+                    chatId: String(message.chat.id),
+                    reason: `Matched filter: ${rule.keyword}`,
+                    name: message.from?.first_name,
+                    username: message.from?.username
+                  }).catch(() => {});
+                }
               }
 
               // Reset warnings after enforcing final punishment
@@ -5705,13 +6984,28 @@ export class TelegramService {
       return;
     }
 
+    // 5c-ter. Clean Service On/Off Command (/cleanservice [on|off]) in Private DM
+    if (/^\/cleanservice(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <b>Access Denied</b>\n<i>Only authorized administrators can configure Clean Service.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      await this.handleCleanServiceToggleCommand(chatId, text);
+      return;
+    }
+
     // 5d. Owner-Only Admin Promotion / Revocation Commands (/grantadmin, /promote, /addadmin, /revokeadmin, /demote)
     if (/^\/(?:grantadmin|promote|addadmin|revokeadmin|demote|removeadmin|deladmin)(?:@\w+)?(?:\s+|$)/i.test(text)) {
       await this.handleOwnerGrantRevokeCommand(fromId, chatId, text, message);
       return;
     }
 
-    // 6. Command: /addkey, /genkey, /textlink & /add (strictly require '/' prefix)
+    // 6. Command: /addkey, /genkey, /textlink, /add & /update (strictly require '/' prefix)
     const isAddKeyCommand = /^\/addkey(?:@\w+)?(?:\s+|$)/i.test(text);
     if (isAddKeyCommand) {
       await this.handleAddKeyCommand(fromId, chatId, message, text);
@@ -5736,6 +7030,12 @@ export class TelegramService {
       return;
     }
 
+    const isUpdateCommand = /^\/update(?:@\w+)?(?:\s+|$)/i.test(text);
+    if (isUpdateCommand) {
+      await this.handleUpdateItemCommand(fromId, chatId, text);
+      return;
+    }
+
     // 7. Command: /cancel (strictly requires '/' prefix)
     if (text === '/cancel' || text.startsWith('/cancel')) {
       activeSetChannelSessions.delete(fromId);
@@ -5743,6 +7043,8 @@ export class TelegramService {
       activeCloneSessions.delete(fromId);
       const addKeySession = activeAddKeySessions.get(fromId);
       activeAddKeySessions.delete(fromId);
+      const updateSession = activeUpdateSessions.get(fromId);
+      activeUpdateSessions.delete(fromId);
       const addSession = activeAddSessions.get(fromId) || await storage.getAddSession(fromId);
       activeAddSessions.delete(fromId);
       await storage.deleteAddSession(fromId);
@@ -5753,7 +7055,7 @@ export class TelegramService {
       const templates = await storage.getTemplates();
       const cancelMsg = templates.CANCEL_MESSAGE?.content || '❌ <b>Operation Cancelled</b>\n<i>Current action has been aborted.</i>';
 
-      const cancelEditId = addSession?.lastPromptMessageId || addKeySession?.promptMessageId || cloneSession?.promptMessageId;
+      const cancelEditId = addSession?.lastPromptMessageId || updateSession?.promptMessageId || addKeySession?.promptMessageId || cloneSession?.promptMessageId;
       if (cancelEditId) {
         try {
           const editRes = await this.callTelegramApi('editMessageText', {
@@ -5785,6 +7087,13 @@ export class TelegramService {
     const pendingAddKey = activeAddKeySessions.get(fromId);
     if (pendingAddKey) {
       await this.handleActiveAddKeySessionMessage(message, fromId, chatId, text, pendingAddKey);
+      return;
+    }
+
+    // 7a-3. Check if admin is inside an interactive /update item field prompt
+    const pendingUpdate = activeUpdateSessions.get(fromId);
+    if (pendingUpdate) {
+      await this.handleActiveUpdateSessionMessage(message, fromId, chatId, text, pendingUpdate);
       return;
     }
 
@@ -7194,7 +8503,7 @@ export class TelegramService {
       if (docFallback && docFallback.ok) return;
     }
 
-    // 2. Check if setup video is stored as an uploaded file (disk or Firebase RTDB / chunked RTDB)
+    // 2. Check if setup video is stored as an uploaded file in VPS local storage
     const isUpload = Boolean(
       item.setupVideoType === 'upload' ||
       item.setupVideoUrl.startsWith('upload_') ||
@@ -8420,6 +9729,484 @@ export class TelegramService {
         : `🔗 <b>Link Delete is now OFF</b>\n\nLinks sent in groups/chats are permitted to remain in the chat.`,
       parse_mode: 'HTML'
     });
+  }
+
+  private static async handleCleanServiceToggleCommand(
+    chatId: number | string,
+    text: string,
+    replyToMessageId?: number
+  ): Promise<void> {
+    const arg = text.replace(/^\/cleanservice(?:@\w+)?/i, '').trim().toLowerCase();
+    const current = await storage.getSettings();
+    let nextValue = Boolean(current.cleanServiceEnabled);
+
+    if (arg === 'on' || arg === 'enable' || arg === 'true' || arg === '1') {
+      nextValue = true;
+    } else if (arg === 'off' || arg === 'disable' || arg === 'false' || arg === '0') {
+      nextValue = false;
+    } else if (!arg) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text:
+          `🧹 <b>Clean Service</b>\n\n` +
+          `• Status: <b>${nextValue ? '🟢 ON' : '⚪ OFF'}</b>\n` +
+          `Usage: <code>/cleanservice on</code> or <code>/cleanservice off</code>`,
+        parse_mode: 'HTML',
+        ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+      });
+      return;
+    } else {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `ℹ️ Usage: <code>/cleanservice on</code> or <code>/cleanservice off</code>`,
+        parse_mode: 'HTML',
+        ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+      });
+      return;
+    }
+
+    await storage.updateSettings({ cleanServiceEnabled: nextValue });
+    await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: nextValue
+        ? `🧹 <b>Clean Service: ON</b>\n<i>Join and leave service messages will now be automatically deleted.</i>`
+        : `🧹 <b>Clean Service: OFF</b>\n<i>Join and leave service messages will remain visible.</i>`,
+      parse_mode: 'HTML',
+      ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+    });
+  }
+
+  private static findItemsForUpdateQuery(items: ItemRecord[], rawQuery: string): ItemRecord[] {
+    const cleanQ = String(rawQuery || '').trim().toLowerCase();
+    if (!cleanQ) return [];
+    const strippedQ = cleanQ.replace(/^[#/]+/, '');
+
+    const exactMatches = items.filter((item) => {
+      const triggers = Array.isArray(item.triggers) ? item.triggers.map((t) => t.trim().toLowerCase()) : [];
+      if (triggers.includes(cleanQ)) return true;
+      if (strippedQ && triggers.some((t) => t.replace(/^[#/]+/, '') === strippedQ)) return true;
+      if ((item.rawKeyword || '').trim().toLowerCase() === strippedQ) return true;
+      if ((item.name || '').trim().toLowerCase() === cleanQ) return true;
+      if ((item.fileName || '').trim().toLowerCase() === cleanQ) return true;
+      return false;
+    });
+    if (exactMatches.length > 0) return exactMatches;
+
+    return items.filter((item) => {
+      const triggers = Array.isArray(item.triggers) ? item.triggers.map((t) => t.trim().toLowerCase()) : [];
+      if (triggers.some((t) => t.includes(cleanQ) || (strippedQ && t.includes(strippedQ)))) return true;
+      if ((item.name || '').toLowerCase().includes(cleanQ)) return true;
+      if ((item.fileName || '').toLowerCase().includes(cleanQ)) return true;
+      return false;
+    });
+  }
+
+  private static buildItemUpdateMenuPayload(item: ItemRecord): { text: string; replyMarkup: any } {
+    const triggerDisplay = (item.triggers && item.triggers[0]) || item.rawKeyword || item.name;
+    const isLink = item.type === 'link';
+    const isText = Boolean(item.isTextOnly || item.fileEnabled === false);
+    const fileCount = Array.isArray(item.files) && item.files.length > 0 ? item.files.length : (item.telegramFileId || item.uploadedFileId ? 1 : 0);
+    const storageLabel = item.retentionType === 'temporary' ? `Temporary (${item.retentionDays || 7}d)` : 'Permanent';
+    const setupVideoLabel = item.hasSetupVideo ? 'Enabled' : 'None';
+    const filtersLabel = item.inFiltersList ? 'ON' : 'OFF';
+    const msgPreview = (item.replyMessage || item.caption || '').trim();
+
+    const text =
+      `✏️ <b>Update ${isLink ? 'Link' : isText ? 'Text Item' : 'File'}</b>\n\n` +
+      `• <b>Name:</b> <code>${this.escapeHtml(item.name || 'Untitled')}</code>\n` +
+      `• <b>Trigger:</b> <code>${this.escapeHtml(triggerDisplay)}</code>\n` +
+      (isLink
+        ? `• <b>URL:</b> <code>${this.escapeHtml((item.url || '').slice(0, 70))}</code>\n`
+        : (!isText ? `• <b>Files:</b> <code>${fileCount} file(s)</code>\n` : '')) +
+      `• <b>Message:</b> <i>${msgPreview ? this.escapeHtml(msgPreview.slice(0, 70)) + (msgPreview.length > 70 ? '...' : '') : 'None'}</i>\n` +
+      `• <b>Setup Video:</b> <code>${setupVideoLabel}</code>\n` +
+      `• <b>Auto-Delete Time:</b> <code>${storageLabel}</code>\n` +
+      `• <b>In /filters:</b> <code>${filtersLabel}</code>\n\n` +
+      `<i>Select a field below to update:</i>`;
+
+    const primaryActionBtn = isLink
+      ? { text: '🔗 URL', callback_data: `upd_f:${item.id}:url`, style: 'primary' }
+      : { text: '📁 File', callback_data: `upd_f:${item.id}:file`, style: 'primary' };
+
+    const inlineKeyboard = [
+      [
+        primaryActionBtn,
+        { text: '💬 Message', callback_data: `upd_f:${item.id}:message`, style: 'primary' }
+      ],
+      [
+        { text: '🎬 Setup Video', callback_data: `upd_f:${item.id}:setup_video`, style: 'primary' },
+        { text: '🏷️ Trigger', callback_data: `upd_f:${item.id}:trigger`, style: 'primary' }
+      ],
+      [
+        { text: '⏳ Auto-Delete Time', callback_data: `upd_f:${item.id}:retention`, style: 'primary' },
+        { text: '✏️ Name', callback_data: `upd_f:${item.id}:name`, style: 'primary' }
+      ],
+      [
+        { text: `📋 Filters: ${filtersLabel}`, callback_data: `upd_f:${item.id}:filters`, style: 'primary' },
+        { text: '✅ Done', callback_data: `upd_close:${item.id}`, style: 'success' }
+      ]
+    ];
+
+    return { text, replyMarkup: { inline_keyboard: inlineKeyboard } };
+  }
+
+  private static async sendOrEditItemUpdateMenu(
+    chatId: number | string,
+    item: ItemRecord,
+    messageIdToEdit?: number
+  ): Promise<number | undefined> {
+    const payload = this.buildItemUpdateMenuPayload(item);
+    if (messageIdToEdit) {
+      const editRes = await this.callTelegramApi('editMessageText', {
+        chat_id: chatId,
+        message_id: messageIdToEdit,
+        text: payload.text,
+        parse_mode: 'HTML',
+        reply_markup: payload.replyMarkup
+      }).catch(() => null);
+      if (editRes?.ok) return messageIdToEdit;
+    }
+    const sent = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: payload.text,
+      parse_mode: 'HTML',
+      reply_markup: payload.replyMarkup
+    });
+    return sent?.ok ? sent.result?.message_id : undefined;
+  }
+
+  private static async handleUpdateItemCommand(
+    fromId: string,
+    chatId: number | string,
+    text: string
+  ): Promise<void> {
+    const isAdmin = await this.isAuthorizedAdmin(fromId);
+    if (!isAdmin) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: '⛔ <b>Access Denied</b>\n<i>Only authorized administrators can use <code>/update</code>.</i>',
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    const query = text.replace(/^\/update(?:@\w+)?/i, '').trim();
+    if (!query) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `ℹ️ <b>How to Update an Item</b>\n\nSend <code>/update &lt;trigger_or_name&gt;</code>\n<b>Example:</b> <code>/update #modapk</code>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    await storage.loadLatest(false);
+    const items = await storage.getItems();
+    const matches = this.findItemsForUpdateQuery(items, query);
+
+    if (matches.length === 0) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: `❌ <b>Item Not Found</b>\n<i>No saved file, text, or link matched <code>${this.escapeHtml(query)}</code>.</i>`,
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    activeUpdateSessions.delete(fromId);
+
+    if (matches.length === 1) {
+      await this.sendOrEditItemUpdateMenu(chatId, matches[0]);
+      return;
+    }
+
+    const rows = matches.slice(0, 8).map((item) => {
+      const trig = (item.triggers && item.triggers[0]) || item.rawKeyword || '';
+      const label = `${item.name || trig}`.slice(0, 42) + (trig ? ` (${trig})` : '');
+      return [{ text: label.slice(0, 60), callback_data: `upd_pick:${item.id}`, style: 'primary' }];
+    });
+    rows.push([{ text: '❌ Cancel', callback_data: 'upd_close:none', style: 'danger' }]);
+
+    await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: `🔍 <b>Multiple Matches Found</b>\n<i>Select the item you want to update:</i>`,
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: rows }
+    });
+  }
+
+  private static async handleActiveUpdateSessionMessage(
+    message: any,
+    fromId: string,
+    chatId: number | string,
+    text: string,
+    session: UpdateItemSession
+  ): Promise<void> {
+    if (!(await this.isAuthorizedAdmin(fromId, message?.from?.username))) {
+      activeUpdateSessions.delete(fromId);
+      return;
+    }
+
+    const item = await storage.getItem(session.itemId);
+    if (!item) {
+      activeUpdateSessions.delete(fromId);
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: '❌ <b>Item Not Found</b>\n<i>This item may have been deleted.</i>',
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    const rawInput = (text || '').trim();
+    const field = session.field;
+
+    if (field === 'file') {
+      const media = this.extractMediaFromMessage(message);
+      if (media) {
+        const fileCaption = message.caption ? String(message.caption).trim() : undefined;
+        const entry: AddFileEntry = { ...media, caption: fileCaption };
+        session.pendingFiles = [...(session.pendingFiles || []), entry];
+        activeUpdateSessions.set(fromId, session);
+
+        const listPreview = session.pendingFiles
+          .map((f, idx) => `${idx + 1}. <code>${this.escapeHtml(f.fileName || `File ${idx + 1}`)}</code>`)
+          .join('\n');
+        const promptText =
+          `📁 <b>Updated File(s) Collected (${session.pendingFiles.length})</b>\n\n` +
+          `${listPreview}\n\n` +
+          `<i>Send more files to include in this batch, or tap <b>✅ Save File(s)</b> to apply.</i>`;
+        const markup = {
+          inline_keyboard: [
+            [{ text: `✅ Save File(s) (${session.pendingFiles.length})`, callback_data: `upd_file_save:${item.id}`, style: 'success' }],
+            [{ text: '⬅️ Back', callback_data: `upd_menu:${item.id}`, style: 'primary' }]
+          ]
+        };
+        if (session.promptMessageId) {
+          const edited = await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: session.promptMessageId,
+            text: promptText,
+            parse_mode: 'HTML',
+            reply_markup: markup
+          }).catch(() => null);
+          if (edited?.ok) return;
+        }
+        const sent = await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: promptText,
+          parse_mode: 'HTML',
+          reply_markup: markup
+        });
+        if (sent?.ok && sent.result?.message_id) {
+          session.promptMessageId = sent.result.message_id;
+        }
+        return;
+      }
+
+      if (rawInput && item.isTextOnly) {
+        const updated: ItemRecord = {
+          ...item,
+          caption: rawInput,
+          replyMessage: rawInput,
+          updatedAt: new Date().toISOString()
+        };
+        await storage.saveItem(updated);
+        activeUpdateSessions.delete(fromId);
+        await this.sendOrEditItemUpdateMenu(chatId, updated);
+        return;
+      }
+
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: '❌ <b>No File Detected</b>\n<i>Please send a Document, Photo, Video, or Audio file, or send <code>/cancel</code>.</i>',
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    if (field === 'url') {
+      const urlMatch = rawInput.match(/https?:\/\/[^\s]+/i);
+      if (!urlMatch) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '❌ <b>Invalid URL</b>\n<i>Please send a valid link starting with <code>https://</code> or <code>http://</code>.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      const updated: ItemRecord = {
+        ...item,
+        url: urlMatch[0],
+        updatedAt: new Date().toISOString()
+      };
+      await storage.saveItem(updated);
+      activeUpdateSessions.delete(fromId);
+      await this.sendOrEditItemUpdateMenu(chatId, updated);
+      return;
+    }
+
+    if (field === 'message') {
+      if (!rawInput) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '❌ <b>Empty Message</b>\n<i>Please send the new message/caption text (or send <code>clear</code> to remove it).</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      const nextMsg = rawInput.toLowerCase() === 'clear' ? undefined : rawInput;
+      const updated: ItemRecord = {
+        ...item,
+        caption: nextMsg,
+        replyMessage: nextMsg,
+        updatedAt: new Date().toISOString()
+      };
+      await storage.saveItem(updated);
+      activeUpdateSessions.delete(fromId);
+      await this.sendOrEditItemUpdateMenu(chatId, updated);
+      return;
+    }
+
+    if (field === 'name') {
+      if (!rawInput) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '❌ <b>Invalid Name</b>\n<i>Please send a valid item name.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      const updated: ItemRecord = {
+        ...item,
+        name: rawInput.slice(0, 120),
+        updatedAt: new Date().toISOString()
+      };
+      await storage.saveItem(updated);
+      activeUpdateSessions.delete(fromId);
+      await this.sendOrEditItemUpdateMenu(chatId, updated);
+      return;
+    }
+
+    if (field === 'trigger') {
+      const cleanRaw = rawInput.trim();
+      const rawKeyword = cleanRaw.replace(/^[#/]+/, '').trim();
+      if (!rawKeyword) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '❌ <b>Invalid Trigger</b>\n<i>Send a trigger such as <code>#newtag</code>, <code>/newcmd</code>, or <code>keyword</code>.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      let nextType: TriggerType = item.triggerType || 'hashtag';
+      if (cleanRaw.startsWith('#')) nextType = 'hashtag';
+      else if (cleanRaw.startsWith('/')) nextType = 'slash';
+      else if (cleanRaw) nextType = 'normal';
+
+      const formattedTrigger =
+        nextType === 'hashtag' ? `#${rawKeyword}` :
+        nextType === 'slash' ? `/${rawKeyword}` :
+        rawKeyword;
+
+      const updated: ItemRecord = {
+        ...item,
+        triggerType: nextType,
+        rawKeyword,
+        triggers: [formattedTrigger],
+        updatedAt: new Date().toISOString()
+      };
+      await storage.saveItem(updated);
+      activeUpdateSessions.delete(fromId);
+      await this.sendOrEditItemUpdateMenu(chatId, updated);
+      return;
+    }
+
+    if (field === 'retention') {
+      const lower = rawInput.toLowerCase();
+      if (lower === 'permanent' || lower === 'perm' || lower === '0') {
+        const updated: ItemRecord = {
+          ...item,
+          retentionType: 'permanent',
+          retentionDays: undefined,
+          expiresAt: undefined,
+          updatedAt: new Date().toISOString()
+        };
+        await storage.saveItem(updated);
+        activeUpdateSessions.delete(fromId);
+        await this.sendOrEditItemUpdateMenu(chatId, updated);
+        return;
+      }
+      const daysMatch = lower.match(/^(\d+)\s*(?:d|day|days)?$/);
+      const days = daysMatch ? parseInt(daysMatch[1], 10) : NaN;
+      if (!Number.isFinite(days) || days < 1 || days > 3650) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '❌ <b>Invalid Duration</b>\n<i>Send a number of days between <code>1</code> and <code>3650</code>, or send <code>permanent</code>.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      const updated: ItemRecord = {
+        ...item,
+        retentionType: 'temporary',
+        retentionDays: days,
+        expiresAt: new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      await storage.saveItem(updated);
+      activeUpdateSessions.delete(fromId);
+      await this.sendOrEditItemUpdateMenu(chatId, updated);
+      return;
+    }
+
+    if (field === 'setup_video') {
+      const media = this.extractMediaFromMessage(message);
+      let nextUrl = '';
+      let nextType: 'url' | 'upload' = 'url';
+      let nextFileName: string | undefined;
+      let nextTgFileId: string | undefined;
+
+      if (media && (media.fileType === 'video' || media.fileType === 'document')) {
+        nextTgFileId = media.fileId;
+        const mirroredVideoId = await this.mirrorTelegramFileToVpsStorage({
+          fileId: media.fileId,
+          fileType: media.fileType === 'video' ? 'video' : 'document',
+          fileName: media.fileName || 'setup_video.mp4',
+          mimeType: media.mimeType || 'video/mp4',
+          fileSize: media.fileSize
+        });
+        nextUrl = mirroredVideoId || media.fileId;
+        nextType = 'upload';
+        nextFileName = media.fileName;
+      } else if (/^https?:\/\/[^\s]+/i.test(rawInput)) {
+        nextUrl = rawInput.match(/^https?:\/\/[^\s]+/i)![0];
+        nextType = 'url';
+      } else {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '❌ <b>Invalid Setup Video</b>\n<i>Please upload/forward a video or send a valid video URL (or tap Remove Setup Video).</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+
+      const updated: ItemRecord = {
+        ...item,
+        hasSetupVideo: true,
+        setupVideoUrl: nextUrl,
+        setupVideoTelegramFileId: nextTgFileId,
+        setupVideoType: nextType,
+        setupVideoFileName: nextFileName,
+        setupVideoButtonText: item.setupVideoButtonText || '🎬 Setup Video',
+        setupResourceButtonText: item.setupResourceButtonText || (item.type === 'file' ? '📁 Get File' : '🔗 Open Link'),
+        updatedAt: new Date().toISOString()
+      };
+      await storage.saveItem(updated);
+      activeUpdateSessions.delete(fromId);
+      await this.sendOrEditItemUpdateMenu(chatId, updated);
+      return;
+    }
   }
 
   private static async handleFilesListCommand(
@@ -10851,12 +12638,23 @@ export class TelegramService {
     const openMode: OpenMode = session.openMode || 'browser';
 
     const hasSetupVideo = Boolean(session.hasSetupVideo && session.setupVideoUrl);
-    const setupVideoUrl = hasSetupVideo ? session.setupVideoUrl : undefined;
+    let setupVideoUrl = hasSetupVideo ? session.setupVideoUrl : undefined;
     const setupVideoTelegramFileId = (hasSetupVideo && setupVideoUrl && !/^https?:\/\//i.test(setupVideoUrl) && !setupVideoUrl.startsWith('upload_') && !setupVideoUrl.startsWith('local_') && !setupVideoUrl.startsWith('phone_'))
       ? setupVideoUrl
       : undefined;
     const setupVideoType = hasSetupVideo ? (session.setupVideoType || 'url') : undefined;
     const setupVideoFileName = hasSetupVideo ? session.setupVideoFileName : undefined;
+    if (hasSetupVideo && setupVideoTelegramFileId) {
+      const mirroredSetupId = await this.mirrorTelegramFileToVpsStorage({
+        fileId: setupVideoTelegramFileId,
+        fileType: 'video',
+        fileName: setupVideoFileName || 'setup_video.mp4',
+        mimeType: 'video/mp4'
+      });
+      if (mirroredSetupId) {
+        setupVideoUrl = mirroredSetupId;
+      }
+    }
     const setupVideoButtonText = hasSetupVideo ? '🎬 Setup Video' : undefined;
     const setupResourceButtonText = hasSetupVideo ? (isFile ? (isTextOnly ? '💬 View Message' : '📁 Get File') : '🔗 Open Link') : undefined;
 
@@ -10900,16 +12698,31 @@ export class TelegramService {
       const firstEntry = collectedFiles[0];
       const baseName = (session.fileName?.trim() || firstEntry?.fileName || 'Uploaded File').trim();
       const itemCaption = session.caption || firstEntry?.caption || undefined;
-      const itemFiles: ItemFileEntry[] = collectedFiles.map((entry, idx) => ({
-        id: entry.fileId || entry.fileUniqueId || `file_${idx + 1}`,
-        telegramFileId: entry.fileId,
-        telegramFileUniqueId: entry.fileUniqueId,
-        fileType: entry.fileType || 'document',
-        fileName: entry.fileName || `File ${idx + 1}`,
-        fileSize: entry.fileSize || 0,
-        mimeType: entry.mimeType || 'application/octet-stream',
-        caption: entry.caption || undefined
-      }));
+      const itemFiles: ItemFileEntry[] = [];
+      for (let idx = 0; idx < collectedFiles.length; idx++) {
+        const entry = collectedFiles[idx];
+        const fName = entry.fileName || `File ${idx + 1}`;
+        const fType = entry.fileType || 'document';
+        const fMime = entry.mimeType || 'application/octet-stream';
+        const uploadedFileId = await this.mirrorTelegramFileToVpsStorage({
+          fileId: entry.fileId,
+          fileType: fType,
+          fileName: fName,
+          mimeType: fMime,
+          fileSize: entry.fileSize
+        });
+        itemFiles.push({
+          id: entry.fileId || entry.fileUniqueId || `file_${idx + 1}`,
+          telegramFileId: entry.fileId,
+          telegramFileUniqueId: entry.fileUniqueId,
+          ...(uploadedFileId ? { uploadedFileId } : {}),
+          fileType: fType,
+          fileName: fName,
+          fileSize: entry.fileSize || 0,
+          mimeType: fMime,
+          caption: entry.caption || undefined
+        });
+      }
 
       const newItem: ItemRecord = {
         id: `f_${baseTimestamp}`,
@@ -10923,6 +12736,7 @@ export class TelegramService {
         fileEnabled: true,
         telegramFileId: firstEntry.fileId,
         telegramFileUniqueId: firstEntry.fileUniqueId,
+        ...(itemFiles[0]?.uploadedFileId ? { uploadedFileId: itemFiles[0].uploadedFileId } : {}),
         fileType: firstEntry.fileType || 'document',
         fileName: firstEntry.fileName || baseName,
         fileSize: firstEntry.fileSize || 0,
@@ -11515,7 +13329,19 @@ export class TelegramService {
       }
 
       try {
-        await storage.setBotUserBanned(targetUserId, true);
+        await storage.setBotUserBanned(targetUserId, true, {
+          chatId: existingReport?.chatId ? String(existingReport.chatId) : undefined,
+          reason: existingReport?.reason,
+          name: existingReport?.reportedUserName,
+          username: existingReport?.reportedUserUsername
+        });
+        if (existingReport?.chatId) {
+          await storage.setGroupMemberBanned(existingReport.chatId, targetUserId, true, {
+            reason: existingReport.reason,
+            name: existingReport.reportedUserName,
+            username: existingReport.reportedUserUsername
+          }).catch(() => {});
+        }
       } catch (banErr: any) {
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
@@ -11607,6 +13433,520 @@ export class TelegramService {
         fallbackPlainText: cb.message?.text
       });
       return;
+    }
+
+    // =========================================================================
+    // GROUP MODERATION INTERACTIVE CALLBACKS (modp / moda / modt / modc)
+    // =========================================================================
+    if (data && (data.startsWith('modp:') || data.startsWith('moda:') || data.startsWith('modt:') || data.startsWith('modc:'))) {
+      const msgChatId = cb.message?.chat?.id;
+      const isMod = msgChatId
+        ? ((await this.isAuthorizedAdmin(fromId, cb.from?.username)) || (await this.isGroupAdminOrCreator(msgChatId, fromId)))
+        : (await this.isAuthorizedAdmin(fromId, cb.from?.username));
+
+      if (!isMod) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Only group administrators can perform this action.',
+          show_alert: true
+        });
+        return;
+      }
+
+      const parts = data.split(':');
+      const token = parts[1];
+      const pending = pendingGroupModerationMap.get(token);
+
+      if (data.startsWith('modc:')) {
+        if (pending) {
+          activeGroupTempModSessions.delete(`${String(pending.chatId)}:${fromId}`);
+          activeGroupTempModSessions.delete(`${String(pending.chatId)}:${pending.adminId}`);
+          pendingGroupModerationMap.delete(token);
+        }
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Cancelled.'
+        }).catch(() => {});
+        if (chatId && cb.message?.message_id) {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: '❌ <b>Moderation Action Cancelled</b>',
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: [] }
+          }).catch(() => {});
+        }
+        return;
+      }
+
+      if (!pending) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'This moderation prompt has expired. Please run the command again.',
+          show_alert: true
+        });
+        return;
+      }
+
+      if (data.startsWith('modt:')) {
+        pending.promptMessageId = cb.message?.message_id || pending.promptMessageId;
+        activeGroupTempModSessions.set(`${String(pending.chatId)}:${fromId}`, pending);
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Send duration in this chat (e.g. 2h, 3d, 30m).'
+        }).catch(() => {});
+        const userLink = this.formatUserProfileLink(pending.targetName, pending.targetUsername, pending.targetId);
+        const promptText =
+          `⏱ <b>Temporary ${pending.action === 'ban' ? 'Ban' : 'Mute'}</b>\n\n` +
+          `👤 <b>User:</b> ${userLink}\n` +
+          `Send the custom duration in this chat (e.g. <code>30m</code>, <code>2h</code>, <code>3d</code>, <code>1w</code>) or <code>/cancel</code>.`;
+        if (chatId && cb.message?.message_id) {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: promptText,
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [[{ text: '❌ Cancel', callback_data: `modc:${token}`, style: 'danger' }]]
+            }
+          }).catch(() => {});
+        }
+        return;
+      }
+
+      if (data.startsWith('moda:')) {
+        pendingGroupModerationMap.delete(token);
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: pending.action === 'ban' ? 'Applying permanent ban...' : 'Applying permanent mute...'
+        }).catch(() => {});
+        await this.executeGroupModerationAction({
+          chatId: pending.chatId,
+          action: pending.action,
+          target: {
+            id: pending.targetId,
+            name: pending.targetName,
+            username: pending.targetUsername
+          },
+          isPermanent: true,
+          reason: pending.reason,
+          editMessageId: cb.message?.message_id
+        });
+        return;
+      }
+
+      if (data.startsWith('modp:')) {
+        const idx = parseInt(parts[2] || '0', 10);
+        const settings = await storage.getSettings();
+        const presets = Array.isArray(settings.moderationDurations)
+          ? sanitizeModerationDurations(settings.moderationDurations)
+          : DEFAULT_MODERATION_DURATIONS;
+        const chosen = presets[idx];
+        if (!chosen) {
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: 'Duration preset no longer available.',
+            show_alert: true
+          });
+          return;
+        }
+        pendingGroupModerationMap.delete(token);
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: `Applying ${chosen.label}...`
+        }).catch(() => {});
+        await this.executeGroupModerationAction({
+          chatId: pending.chatId,
+          action: pending.action,
+          target: {
+            id: pending.targetId,
+            name: pending.targetName,
+            username: pending.targetUsername
+          },
+          durationToken: chosen.value,
+          isPermanent: false,
+          reason: pending.reason,
+          editMessageId: cb.message?.message_id
+        });
+        return;
+      }
+    }
+
+    // =========================================================================
+    // GROUP MODERATION DASHBOARD CALLBACKS (adm_*)
+    // =========================================================================
+    if (data && data.startsWith('adm_')) {
+      const canAccess = await this.canOpenGroupDashboard(chatId, fromId, cb.from?.username);
+      if (!canAccess) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: '⛔ Only bot owners can open the dashboard.',
+          show_alert: true
+        }).catch(() => {});
+        return;
+      }
+
+      const msgId = cb.message?.message_id;
+      if (data === 'adm_close') {
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+        if (chatId && msgId) {
+          await this.callTelegramApi('deleteMessage', {
+            chat_id: chatId,
+            message_id: msgId
+          }).catch(async () => {
+            await this.callTelegramApi('editMessageText', {
+              chat_id: chatId,
+              message_id: msgId,
+              text: '🛡️ <b>Dashboard Closed</b>',
+              parse_mode: 'HTML',
+              reply_markup: { inline_keyboard: [] }
+            }).catch(() => {});
+          });
+        }
+        return;
+      }
+
+      if (data === 'adm_dash') {
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+        if (chatId && msgId) {
+          await this.renderOwnerAdminDashboard(chatId, msgId);
+        }
+        return;
+      }
+
+      if (data.startsWith('adm_list:')) {
+        const [, rawKind, rawPage] = data.split(':');
+        const kind: 'ban' | 'mute' = rawKind === 'mute' ? 'mute' : 'ban';
+        const page = Math.max(0, parseInt(rawPage || '0', 10) || 0);
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+        if (chatId && msgId) {
+          await this.renderOwnerModerationList(chatId, msgId, kind, page);
+        }
+        return;
+      }
+
+      if (data.startsWith('adm_u:')) {
+        const [, rawKind, userId, rawPage] = data.split(':');
+        const kind: 'ban' | 'mute' = rawKind === 'mute' ? 'mute' : 'ban';
+        const page = Math.max(0, parseInt(rawPage || '0', 10) || 0);
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+        if (chatId && msgId && userId) {
+          await this.renderOwnerModerationUserDetail(chatId, msgId, kind, userId, page);
+        }
+        return;
+      }
+
+      if (data.startsWith('adm_adj:')) {
+        const [, rawKind, userId, rawOp, rawPage] = data.split(':');
+        const kind: 'ban' | 'mute' = rawKind === 'mute' ? 'mute' : 'ban';
+        const op: 'inc' | 'dec' | 'perm' = rawOp === 'inc' ? 'inc' : (rawOp === 'perm' ? 'perm' : 'dec');
+        const page = Math.max(0, parseInt(rawPage || '0', 10) || 0);
+        if (chatId && userId) {
+          await this.handleOwnerModerationDurationAdjust(cb, chatId, kind, userId, op, page);
+        }
+        return;
+      }
+
+      if (data.startsWith('adm_un:')) {
+        const [, rawKind, userId, rawPage] = data.split(':');
+        const kind: 'ban' | 'mute' = rawKind === 'mute' ? 'mute' : 'ban';
+        const page = Math.max(0, parseInt(rawPage || '0', 10) || 0);
+        if (chatId && userId) {
+          await this.handleOwnerModerationLift(cb, chatId, kind, userId, page);
+        }
+        return;
+      }
+
+      await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+      return;
+    }
+
+    // =========================================================================
+    // INTERACTIVE /update ITEM CALLBACKS (upd_*)
+    // =========================================================================
+    if (data && data.startsWith('upd_')) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, cb.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Only authorized administrators can update items.',
+          show_alert: true
+        });
+        return;
+      }
+
+      if (data.startsWith('upd_close:')) {
+        activeUpdateSessions.delete(fromId);
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+        if (chatId && cb.message?.message_id) {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: '✅ <b>Update Completed</b>',
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: [] }
+          }).catch(() => {});
+        }
+        return;
+      }
+
+      if (data.startsWith('upd_pick:')) {
+        const itemId = data.slice('upd_pick:'.length).trim();
+        const item = await storage.getItem(itemId);
+        if (!item) {
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: 'Item not found.',
+            show_alert: true
+          });
+          return;
+        }
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+        if (chatId) {
+          await this.sendOrEditItemUpdateMenu(chatId, item, cb.message?.message_id);
+        }
+        return;
+      }
+
+      if (data.startsWith('upd_menu:')) {
+        const itemId = data.slice('upd_menu:'.length).trim();
+        activeUpdateSessions.delete(fromId);
+        const item = await storage.getItem(itemId);
+        if (!item) {
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: 'Item not found.',
+            show_alert: true
+          });
+          return;
+        }
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+        if (chatId) {
+          await this.sendOrEditItemUpdateMenu(chatId, item, cb.message?.message_id);
+        }
+        return;
+      }
+
+      if (data.startsWith('upd_sv_clear:')) {
+        const itemId = data.slice('upd_sv_clear:'.length).trim();
+        activeUpdateSessions.delete(fromId);
+        const item = await storage.getItem(itemId);
+        if (!item) {
+          await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Item not found.', show_alert: true });
+          return;
+        }
+        const updated: ItemRecord = {
+          ...item,
+          hasSetupVideo: false,
+          setupVideoUrl: undefined,
+          setupVideoTelegramFileId: undefined,
+          setupVideoType: undefined,
+          setupVideoFileName: undefined,
+          updatedAt: new Date().toISOString()
+        };
+        await storage.saveItem(updated);
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Setup Video removed.' }).catch(() => {});
+        if (chatId) {
+          await this.sendOrEditItemUpdateMenu(chatId, updated, cb.message?.message_id);
+        }
+        return;
+      }
+
+      if (data.startsWith('upd_file_save:')) {
+        const itemId = data.slice('upd_file_save:'.length).trim();
+        const session = activeUpdateSessions.get(fromId);
+        const item = await storage.getItem(itemId);
+        if (!item || !session || session.itemId !== itemId || !session.pendingFiles || session.pendingFiles.length === 0) {
+          await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'No pending files to save.', show_alert: true });
+          return;
+        }
+        const firstEntry = session.pendingFiles[0];
+        const nextFiles: ItemFileEntry[] = [];
+        for (let idx = 0; idx < session.pendingFiles.length; idx++) {
+          const entry = session.pendingFiles[idx];
+          const fName = entry.fileName || `File ${idx + 1}`;
+          const fType = entry.fileType || 'document';
+          const fMime = entry.mimeType || 'application/octet-stream';
+          const uploadedFileId = await this.mirrorTelegramFileToVpsStorage({
+            fileId: entry.fileId,
+            fileType: fType,
+            fileName: fName,
+            mimeType: fMime,
+            fileSize: entry.fileSize
+          });
+          nextFiles.push({
+            id: entry.fileId || entry.fileUniqueId || `file_${idx + 1}`,
+            telegramFileId: entry.fileId,
+            telegramFileUniqueId: entry.fileUniqueId,
+            ...(uploadedFileId ? { uploadedFileId } : {}),
+            fileType: fType,
+            fileName: fName,
+            fileSize: entry.fileSize || 0,
+            mimeType: fMime,
+            caption: entry.caption || undefined
+          });
+        }
+        const updated: ItemRecord = {
+          ...item,
+          isTextOnly: false,
+          fileEnabled: true,
+          telegramFileId: firstEntry.fileId,
+          telegramFileUniqueId: firstEntry.fileUniqueId,
+          uploadedFileId: nextFiles[0]?.uploadedFileId,
+          fileType: firstEntry.fileType || 'document',
+          fileName: firstEntry.fileName || item.name,
+          fileSize: firstEntry.fileSize || 0,
+          mimeType: firstEntry.mimeType || 'application/octet-stream',
+          files: nextFiles,
+          updatedAt: new Date().toISOString()
+        };
+        await storage.saveItem(updated);
+        activeUpdateSessions.delete(fromId);
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id, text: `Updated ${nextFiles.length} file(s)!` }).catch(() => {});
+        if (chatId) {
+          await this.sendOrEditItemUpdateMenu(chatId, updated, cb.message?.message_id);
+        }
+        return;
+      }
+
+      if (data.startsWith('upd_ret:')) {
+        const rest = data.slice('upd_ret:'.length);
+        const colonIdx = rest.lastIndexOf(':');
+        const itemId = rest.slice(0, colonIdx);
+        const val = rest.slice(colonIdx + 1);
+        const item = await storage.getItem(itemId);
+        if (!item) {
+          await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Item not found.', show_alert: true });
+          return;
+        }
+        activeUpdateSessions.delete(fromId);
+        let updated: ItemRecord;
+        if (val === 'perm') {
+          updated = {
+            ...item,
+            retentionType: 'permanent',
+            retentionDays: undefined,
+            expiresAt: undefined,
+            updatedAt: new Date().toISOString()
+          };
+        } else {
+          const days = Math.max(1, parseInt(val, 10) || 7);
+          updated = {
+            ...item,
+            retentionType: 'temporary',
+            retentionDays: days,
+            expiresAt: new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString(),
+            updatedAt: new Date().toISOString()
+          };
+        }
+        await storage.saveItem(updated);
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Auto-delete time updated!' }).catch(() => {});
+        if (chatId) {
+          await this.sendOrEditItemUpdateMenu(chatId, updated, cb.message?.message_id);
+        }
+        return;
+      }
+
+      if (data.startsWith('upd_f:')) {
+        const rest = data.slice('upd_f:'.length);
+        const colonIdx = rest.lastIndexOf(':');
+        const itemId = rest.slice(0, colonIdx);
+        const field = rest.slice(colonIdx + 1) as UpdateItemSession['field'] | 'filters';
+        const item = await storage.getItem(itemId);
+        if (!item) {
+          await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Item not found.', show_alert: true });
+          return;
+        }
+
+        if (field === 'filters') {
+          const updated: ItemRecord = {
+            ...item,
+            inFiltersList: !item.inFiltersList,
+            updatedAt: new Date().toISOString()
+          };
+          await storage.saveItem(updated);
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: updated.inFiltersList ? 'Added to /filters list' : 'Removed from /filters list'
+          }).catch(() => {});
+          if (chatId) {
+            await this.sendOrEditItemUpdateMenu(chatId, updated, cb.message?.message_id);
+          }
+          return;
+        }
+
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+        if (!chatId) return;
+
+        activeUpdateSessions.set(fromId, {
+          itemId,
+          chatId,
+          field,
+          promptMessageId: cb.message?.message_id,
+          createdAt: Date.now()
+        });
+
+        let promptText = '';
+        let inlineKeyboard: any[][] = [
+          [{ text: '⬅️ Back', callback_data: `upd_menu:${itemId}`, style: 'primary' }]
+        ];
+
+        if (field === 'file') {
+          promptText = item.isTextOnly
+            ? `💬 <b>Update Text Content</b>\n\nSend the new text content (or upload a file) for <code>${this.escapeHtml(item.name)}</code>:`
+            : `📁 <b>Update File(s)</b>\n\nSend one or more new files (Document, Photo, Video, or Audio) for <code>${this.escapeHtml(item.name)}</code>:`;
+        } else if (field === 'url') {
+          promptText = `🔗 <b>Update URL</b>\n\nCurrent: <code>${this.escapeHtml(item.url || 'None')}</code>\nSend the new link URL starting with <code>https://</code>:`;
+        } else if (field === 'message') {
+          promptText = `💬 <b>Update Message / Caption</b>\n\nSend the new message text (supports HTML tags) or send <code>clear</code> to remove it:`;
+        } else if (field === 'setup_video') {
+          promptText = `🎬 <b>Update Setup Video</b>\n\nUpload/forward a setup video or send a video URL:`;
+          inlineKeyboard = [
+            ...(item.hasSetupVideo ? [[{ text: '🗑️ Remove Setup Video', callback_data: `upd_sv_clear:${itemId}`, style: 'danger' }]] : []),
+            [{ text: '⬅️ Back', callback_data: `upd_menu:${itemId}`, style: 'primary' }]
+          ];
+        } else if (field === 'trigger') {
+          const curTrig = (item.triggers && item.triggers[0]) || item.rawKeyword || '';
+          promptText = `🏷️ <b>Update Trigger</b>\n\nCurrent: <code>${this.escapeHtml(curTrig)}</code>\nSend the new trigger (e.g. <code>#newtag</code>, <code>/newcmd</code>, or <code>keyword</code>):`;
+        } else if (field === 'name') {
+          promptText = `✏️ <b>Update Name</b>\n\nCurrent: <code>${this.escapeHtml(item.name)}</code>\nSend the new display name:`;
+        } else if (field === 'retention') {
+          promptText = `⏳ <b>Update Auto-Delete Time</b>\n\nSelect a preset below or send any number of days (e.g. <code>14</code> or <code>permanent</code>):`;
+          inlineKeyboard = [
+            [
+              { text: '♾️ Permanent', callback_data: `upd_ret:${itemId}:perm`, style: 'primary' },
+              { text: '1 Day', callback_data: `upd_ret:${itemId}:1`, style: 'primary' }
+            ],
+            [
+              { text: '7 Days', callback_data: `upd_ret:${itemId}:7`, style: 'primary' },
+              { text: '30 Days', callback_data: `upd_ret:${itemId}:30`, style: 'primary' }
+            ],
+            [{ text: '⬅️ Back', callback_data: `upd_menu:${itemId}`, style: 'primary' }]
+          ];
+        }
+
+        if (cb.message?.message_id) {
+          const editRes = await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: promptText,
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: inlineKeyboard }
+          }).catch(() => null);
+          if (editRes?.ok) return;
+        }
+        const sent = await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: promptText,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: inlineKeyboard }
+        });
+        if (sent?.ok && sent.result?.message_id) {
+          const curSess = activeUpdateSessions.get(fromId);
+          if (curSess) curSess.promptMessageId = sent.result.message_id;
+        }
+        return;
+      }
     }
 
     // COPY KEY FALLBACK CALLBACK (copy_key:<poolId>)
@@ -12896,6 +15236,74 @@ export class TelegramService {
     } catch (err: any) {
       console.error('[Telegram] uploadAndDeliverDirectly fetch error:', err);
       return { ok: false, description: err.message };
+    }
+  }
+
+  // Mirror Telegram-collected media/files (within Telegram's 20MB getFile limit) onto VPS local STORAGE_DIR
+  public static async mirrorTelegramFileToVpsStorage(opts: {
+    fileId?: string;
+    fileType?: 'document' | 'photo' | 'video' | 'audio';
+    fileName?: string;
+    mimeType?: string;
+    fileSize?: number;
+    token?: string;
+  }): Promise<string | undefined> {
+    const cleanFileId = String(opts.fileId || '').trim();
+    if (
+      !cleanFileId ||
+      cleanFileId.startsWith('upload_') ||
+      cleanFileId.startsWith('local_') ||
+      cleanFileId.startsWith('phone_') ||
+      /^https?:\/\//i.test(cleanFileId)
+    ) {
+      return undefined;
+    }
+
+    // Telegram Bot API getFile only supports downloading files up to 20MB
+    const MAX_TG_DOWNLOAD_BYTES = 20 * 1024 * 1024;
+    if (opts.fileSize && opts.fileSize > MAX_TG_DOWNLOAD_BYTES) {
+      return undefined;
+    }
+
+    const token = String(opts.token || (await this.getBotToken()) || '').trim();
+    if (!token) return undefined;
+
+    try {
+      const infoRes = await this.callTelegramApi('getFile', { file_id: cleanFileId }, token);
+      const filePath = String(infoRes?.result?.file_path || '').trim();
+      const reportedSize = Number(infoRes?.result?.file_size || opts.fileSize || 0);
+      if (!infoRes?.ok || !filePath || reportedSize > MAX_TG_DOWNLOAD_BYTES) {
+        return undefined;
+      }
+
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      try {
+        const dlRes = await fetch(`https://api.telegram.org/file/bot${token}/${filePath}`, {
+          signal: controller.signal
+        });
+        if (!dlRes.ok) return undefined;
+        const arrBuf = await dlRes.arrayBuffer();
+        const buffer = Buffer.from(arrBuf);
+        if (!buffer.length || buffer.length > MAX_TG_DOWNLOAD_BYTES) {
+          return undefined;
+        }
+
+        const extFromPath = path.extname(filePath);
+        const safeName = (opts.fileName || path.basename(filePath) || `file${extFromPath || ''}`).trim();
+        const uploadId = `upload_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`;
+        await storage.saveUploadedFile(uploadId, {
+          buffer,
+          fileName: safeName,
+          fileType: opts.fileType || 'document',
+          mimeType: opts.mimeType || 'application/octet-stream'
+        });
+        return uploadId;
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch {
+      return undefined;
     }
   }
 
@@ -14260,13 +16668,13 @@ export class TelegramBotManager {
     if (customBase && typeof customBase === 'string' && customBase.startsWith('http')) {
       return customBase.trim().replace(/\/+$/, '');
     }
-    const envUrl = 
+    const envUrl =
       process.env.BASE_URL ||
-      process.env.APP_URL || 
-      process.env.RENDER_EXTERNAL_URL ||
-      (process.env.RENDER_EXTERNAL_HOSTNAME ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME}` : '') ||
+      process.env.APP_URL ||
+      process.env.WEBHOOK_URL ||
+      process.env.PUBLIC_URL ||
       process.env.URL ||
-      'https://ais-pre-5pmvaj2s66z7xu34aogymi-761412699643.asia-east1.run.app';
+      `http://localhost:${process.env.PORT || 3000}`;
     return envUrl.trim().replace(/\/+$/, '');
   }
 
@@ -14568,52 +16976,9 @@ export class TelegramBotManager {
       };
 
       await botStorage.saveAdmin(subAdminAccount);
-      await botStorage.syncToFirebaseCloud();
-
-      // Commit cloned File Bot sub-admin credentials into Firebase RTDB under isolated paths
-      try {
-        const rtdbToken = await mainStorage.getFirebaseAuthToken();
-        const isSecondary = process.env.FIREBASE_PROJECT_PROFILE === 'secondary' || process.env.ACTIVE_BOT_PROFILE === 'secondary';
-        const baseUrl = (process.env.FIREBASE_DATABASE_URL || (isSecondary ? 'https://zexi-official-default-rtdb.asia-southeast1.firebasedatabase.app' : 'https://zexiofficial844-default-rtdb.asia-southeast1.firebasedatabase.app')).replace(/\/+$/, '');
-
-        const subAdminData = {
-          botId,
-          botName: newBot.name,
-          botUsername: newBot.username,
-          botMode: normalizedMode,
-          ownerId: resolvedOwnerTelegramId,
-          ownerUsername: ownerUsername || '',
-          adminUsername: botId,
-          adminPassword,
-          status: 'active',
-          enabled: true,
-          permissions: subAdminAccount.permissions,
-          createdAt: newBot.createdAt,
-          panelUrl
-        };
-
-        const botSubAdminUrl = rtdbToken
-          ? `${baseUrl}/cloned_bots/${botId}/sub_admins/${botId}.json?auth=${encodeURIComponent(rtdbToken)}`
-          : `${baseUrl}/cloned_bots/${botId}/sub_admins/${botId}.json`;
-        fetch(botSubAdminUrl, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(subAdminData)
-        }).catch(() => {});
-
-        const globalSubAdminUrl = rtdbToken
-          ? `${baseUrl}/sub_admins/${botId}.json?auth=${encodeURIComponent(rtdbToken)}`
-          : `${baseUrl}/sub_admins/${botId}.json`;
-        fetch(globalSubAdminUrl, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(subAdminData)
-        }).catch(() => {});
-      } catch (e: any) {
-        console.warn('[TelegramBotManager] Error writing sub-admin to Firebase RTDB:', e?.message || e);
-      }
+      await botStorage.persist(true);
     } else {
-      await botStorage.syncToFirebaseCloud();
+      await botStorage.persist(true);
     }
 
     this.startBotInstance(newBot).catch(() => {});
@@ -14706,7 +17071,7 @@ export class TelegramBotManager {
     }
     BotSingletonLock.clearConflict(cleanId);
 
-    // 3. Destroy isolated StorageManager instance, local JSON files, and isolated Firebase RTDB records
+    // 3. Destroy isolated StorageManager instance and local VPS JSON files
     await StorageManager.destroyStorage(cleanId);
     const removed = await mainStorage.deleteClonedBot(cleanId);
     console.info(`[TelegramBotManager] Deleted cloned bot (${cleanId}): runner destroyed and isolated data purged.`);

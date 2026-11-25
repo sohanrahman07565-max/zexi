@@ -5,9 +5,9 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Ensure Render Web Service can execute `node server.js` directly
+// Ensure Node.js hosts on VPS can execute `node server.js` directly
 const targetScript = path.join(__dirname, 'server.ts');
-console.log('🚀 [Render Boot] Launching server via tsx loader...');
+console.log('🚀 [VPS Boot] Launching server via tsx loader...');
 
 const child = spawn(
   process.execPath,

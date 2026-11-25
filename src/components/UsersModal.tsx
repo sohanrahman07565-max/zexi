@@ -288,7 +288,7 @@ export const UsersModal: React.FC<UsersModalProps> = ({
       className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-5 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-black/85 backdrop-blur-md animate-in fade-in duration-200 overscroll-contain select-none"
     >
       <div 
-        className="w-full max-w-lg max-h-[90dvh] flex flex-col rounded-3xl glass-water-card border border-white/20 shadow-[0_25px_50px_-12px_rgba(0,0,0,0.95),0_0_40px_rgba(255,255,255,0.1)] overflow-hidden relative animate-in zoom-in-95 duration-200 select-text"
+        className="w-full max-w-lg md:max-w-3xl lg:max-w-4xl max-h-[90dvh] flex flex-col rounded-3xl glass-water-card border border-white/20 shadow-[0_25px_50px_-12px_rgba(0,0,0,0.95),0_0_40px_rgba(255,255,255,0.1)] overflow-hidden relative animate-in zoom-in-95 duration-200 select-text"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Subtle top card border glow accent */}
@@ -581,14 +581,14 @@ export const UsersModal: React.FC<UsersModalProps> = ({
             </div>
 
             {/* Users List Body (Scrollable Middle Area) */}
-            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-4 space-y-2.5 pb-4 sm:pb-5">
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-3 sm:p-4 grid grid-cols-1 md:grid-cols-2 gap-2.5 md:gap-3 content-start pb-4 sm:pb-5">
               {loading && users.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-zinc-400">
+                <div className="md:col-span-2 flex flex-col items-center justify-center py-12 text-zinc-400">
                   <RefreshCw className="w-6 h-6 animate-spin text-red-500 mb-2" />
                   <p className="text-xs">Loading bot users...</p>
                 </div>
               ) : filteredUsers.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-12 text-center text-zinc-400">
+                <div className="md:col-span-2 flex flex-col items-center justify-center py-12 text-center text-zinc-400">
                   {userTab === 'banned' ? (
                     <Ban className="w-8 h-8 text-red-500/50 mb-2" />
                   ) : (

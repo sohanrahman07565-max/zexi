@@ -205,7 +205,7 @@ const BottomNavComponent: React.FC<BottomNavProps> = ({
     isDragging && dragIndexFloat !== null ? dragIndexFloat * 100 : safeIndex * 100;
 
   return (
-    <div className="lg-nav-shell">
+    <div className="lg-nav-shell md:hidden">
       <nav
         ref={navRef}
         aria-label="Bottom Navigation"

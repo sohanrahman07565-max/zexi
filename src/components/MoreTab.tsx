@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { 
-  AdminUser, MessageTemplate, BotSettings, UserReportRecord, FraudKeywordRule, JoinRequestRecord, AllowedChatEntry, KeyPoolRecord, KeyPoolMode, KeyGeneratorCharType, api 
+  AdminUser, MessageTemplate, BotSettings, ModerationDurationPreset, UserReportRecord, FraudKeywordRule, JoinRequestRecord, AllowedChatEntry, KeyPoolRecord, KeyPoolMode, KeyGeneratorCharType, api 
 } from '../lib/api';
 import { toast } from '../lib/toast';
 import { 
@@ -460,14 +460,20 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     linkDeleteEnabled: settings?.linkDeleteEnabled ?? false,
     banEnabled: settings?.banEnabled ?? true,
     muteEnabled: settings?.muteEnabled ?? true,
+    cleanServiceEnabled: settings?.cleanServiceEnabled ?? false,
+    moderationDurations: Array.isArray(settings?.moderationDurations)
+      ? settings.moderationDurations
+      : [{ label: '1 Day', value: '1d' }, { label: '5 Days', value: '5d' }],
     groupWarningLimit: settings?.groupWarningLimit ?? 3,
     autoApproveJoinRequests: settings?.autoApproveJoinRequests ?? true,
     requiredChannels: settings?.requiredChannels || [],
     adminNewPassword: ''
   });
   const [warningLimitInput, setWarningLimitInput] = useState<number>(settings?.groupWarningLimit ?? 3);
+  const [newDurationValue, setNewDurationValue] = useState('');
+  const [newDurationLabel, setNewDurationLabel] = useState('');
   const [botStatusMsg, setBotStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [savingSection, setSavingSection] = useState<'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'ban' | 'mute' | 'warningLimit' | 'forceSub' | null>(null);
+  const [savingSection, setSavingSection] = useState<'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'ban' | 'mute' | 'cleanService' | 'moderationDurations' | 'warningLimit' | 'forceSub' | null>(null);
   const [botRuntimeStatus, setBotRuntimeStatus] = useState<'active' | 'stopped'>(settings?.botStopped ? 'stopped' : 'active');
   const [botRuntimePolling, setBotRuntimePolling] = useState<boolean>(!settings?.botStopped);
   const [botLifecycleBusy, setBotLifecycleBusy] = useState<'start' | 'stop' | 'restart' | 'clean-memory' | null>(null);
@@ -519,6 +525,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         syncIfChanged('linkDeleteEnabled', settings.linkDeleteEnabled ?? false);
         syncIfChanged('banEnabled', settings.banEnabled ?? true);
         syncIfChanged('muteEnabled', settings.muteEnabled ?? true);
+        syncIfChanged('cleanServiceEnabled', settings.cleanServiceEnabled ?? false);
+        syncIfChanged(
+          'moderationDurations',
+          Array.isArray(settings.moderationDurations)
+            ? settings.moderationDurations
+            : [{ label: '1 Day', value: '1d' }, { label: '5 Days', value: '5d' }]
+        );
         syncIfChanged('groupWarningLimit', settings.groupWarningLimit ?? 3);
         syncIfChanged('autoApproveJoinRequests', settings.autoApproveJoinRequests ?? true);
         syncIfChanged('requiredChannels', Array.isArray(settings.requiredChannels) ? settings.requiredChannels : []);
@@ -682,7 +695,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   };
 
   const savePartialBotSetting = async (
-    section: 'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'ban' | 'mute' | 'warningLimit' | 'forceSub',
+    section: 'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'ban' | 'mute' | 'cleanService' | 'moderationDurations' | 'warningLimit' | 'forceSub',
     partialPayload: Record<string, any>,
     successText: string,
     rollback?: () => void
@@ -984,7 +997,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       >
         <div
           onClick={(e) => e.stopPropagation()}
-          className="glass-panel w-full max-w-lg max-h-[90dvh] overflow-y-auto overscroll-contain rounded-3xl p-4 sm:p-5 border border-red-500/35 shadow-[0_0_50px_-10px_rgba(239,68,68,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-auto relative animate-in zoom-in-95 duration-200"
+          className="glass-panel w-full max-w-lg md:max-w-2xl max-h-[90dvh] overflow-y-auto overscroll-contain rounded-3xl p-4 sm:p-5 border border-red-500/35 shadow-[0_0_50px_-10px_rgba(239,68,68,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-auto relative animate-in zoom-in-95 duration-200"
         >
           {/* Subtle top border glow */}
           <div
@@ -1032,8 +1045,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             />
           </div>
 
-          {/* Rich Media Attachment for /start Welcome Message */}
-          {editingTemplate.key === 'START_MESSAGE' && (
+          {/* Rich Media Attachment for /start & Group Welcome Messages */}
+          {(editingTemplate.key === 'START_MESSAGE' || editingTemplate.key === 'GROUP_WELCOME_MESSAGE') && (
             <div className="p-3.5 rounded-2xl bg-[#0f0f18] border border-zinc-800 space-y-2.5">
               <div className="flex items-center justify-between">
                 <label className="text-xs font-semibold text-white">Attached Media Header</label>
@@ -1597,7 +1610,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   // -------------------------------------------------------------
   if (subView === 'menu') {
     return (
-      <div className="space-y-4 pb-28">
+      <div className="space-y-4 pb-28 md:pb-8">
         {/* Admin Profile Header Card (Liquid Glass Capsule with 7-Tap Webhook Setup Gesture) */}
         <div 
           onClick={handleHeaderSecretTap}
@@ -1725,12 +1738,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         )}
 
         {/* Menu Items */}
-        <div className="glass-panel lg-rise rounded-[24px] divide-y divide-white/10 overflow-hidden">
+        <div className="more-menu-grid lg-rise">
           {/* Switch Bot & Fleet Management (Main Panel Only) */}
           {onOpenBotSwitcher && (
             <button
               onClick={() => onOpenBotSwitcher()}
-              className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer bg-white/[0.02]"
+              className="more-menu-item tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer bg-white/[0.02]"
             >
               <div className="flex items-center gap-3 min-w-0 flex-1">
                 <div
@@ -1758,7 +1771,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {/* Templates */}
           <button
             onClick={() => setSubView('templates')}
-            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="more-menu-item tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3 min-w-0 flex-1">
               <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #60a5fa 20%, rgba(255,255,255,.06))' }}>
@@ -1774,7 +1787,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {/* Admins */}
           <button
             onClick={() => setSubView('admins')}
-            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="more-menu-item tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3 min-w-0 flex-1">
               <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #818cf8 20%, rgba(255,255,255,.06))' }}>
@@ -1790,7 +1803,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {/* Bot Settings */}
           <button
             onClick={() => setSubView('settings')}
-            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="more-menu-item tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3 min-w-0 flex-1">
               <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #fbbf24 20%, rgba(255,255,255,.06))' }}>
@@ -1806,7 +1819,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {/* Sub Force */}
           <button
             onClick={() => setSubView('sub_force')}
-            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="more-menu-item tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3 min-w-0 flex-1">
               <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #6366f1 22%, rgba(255,255,255,.06))' }}>
@@ -1833,7 +1846,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {/* Group Management */}
           <button
             onClick={() => setSubView('group_management')}
-            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="more-menu-item tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3 min-w-0 flex-1">
               <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #38bdf8 22%, rgba(255,255,255,.06))' }}>
@@ -1859,7 +1872,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {/* Broadcast Notification System */}
           <button
             onClick={() => setSubView('broadcast')}
-            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="more-menu-item tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3 min-w-0 flex-1">
               <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #c084fc 22%, rgba(255,255,255,.06))' }}>
@@ -1880,7 +1893,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {/* User Reports & Moderation */}
           <button
             onClick={() => setSubView('reports')}
-            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="more-menu-item tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3 min-w-0 flex-1">
               <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #fb7185 20%, rgba(255,255,255,.06))' }}>
@@ -1907,7 +1920,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {/* Fraud Protection & Word Filter */}
           <button
             onClick={() => setSubView('fraud')}
-            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="more-menu-item tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3 min-w-0 flex-1">
               <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #fbbf24 20%, rgba(255,255,255,.06))' }}>
@@ -1928,7 +1941,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {/* Chat Ignore / Whitelist */}
           <button
             onClick={() => setSubView('whitelist')}
-            className="tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="more-menu-item tap w-full p-4 flex items-center justify-between hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3 min-w-0">
               <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #34d3ee 20%, rgba(255,255,255,.06))' }}>
@@ -1955,7 +1968,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {/* Key Generator */}
           <button
             onClick={() => setSubView('key_generator')}
-            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="more-menu-item tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3 min-w-0 flex-1">
               <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #10b981 20%, rgba(255,255,255,.06))' }}>
@@ -1976,7 +1989,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           {/* Emoji Store */}
           <button
             onClick={() => setSubView('emoji')}
-            className="tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+            className="more-menu-item tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
           >
             <div className="flex items-center gap-3 min-w-0 flex-1">
               <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #f472b6 20%, rgba(255,255,255,.06))' }}>
@@ -1998,7 +2011,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         {/* Logout */}
         <button
           onClick={onLogout}
-          className="glass tap lg-rise w-full p-3.5 rounded-[20px] border-rose-400/25 text-rose-300 hover:bg-rose-500/15 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+          className="glass tap lg-rise w-full md:w-auto md:px-6 p-3.5 rounded-[20px] border-rose-400/25 text-rose-300 hover:bg-rose-500/15 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
         >
           <LogOut className="w-4 h-4" />
           <span>Sign Out of Admin Portal</span>
@@ -2030,10 +2043,18 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   // -------------------------------------------------------------
   if (subView === 'templates') {
     const startTemplate = templates.START_MESSAGE;
-    const otherTemplates = Object.values(templates).filter((t) => t.key !== 'START_MESSAGE' && t.key !== 'WEB_CODE_MESSAGE');
+    const welcomeTemplate = templates.GROUP_WELCOME_MESSAGE;
+    const groupInfoTemplate = templates.GROUP_INFO_MESSAGE;
+    const otherTemplates = Object.values(templates).filter(
+      (t) =>
+        t.key !== 'START_MESSAGE' &&
+        t.key !== 'GROUP_WELCOME_MESSAGE' &&
+        t.key !== 'GROUP_INFO_MESSAGE' &&
+        t.key !== 'WEB_CODE_MESSAGE'
+    );
 
     return (
-      <div className="space-y-4 pb-28">
+      <div className="space-y-4 pb-28 md:pb-8">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             {renderSubViewBackButton('menu', 'Back to More')}
@@ -2042,60 +2063,159 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           <span className="text-xs text-zinc-400 shrink-0">Live Bot Messages</span>
         </div>
 
-        {/* Featured: Start Message Template (/start) */}
-        {startTemplate && (
-          <div className="p-4 rounded-2xl bg-gradient-to-br from-sky-500/15 via-indigo-500/10 to-zinc-900 border border-red-500/40 shadow-lg space-y-3">
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5 flex-wrap mb-1">
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-500/20 text-sky-300 border border-red-500/30">
-                    /start Command
-                  </span>
-                  <span className="text-[10px] text-emerald-400 flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" /> Active
-                  </span>
+        {/* Featured Templates: /start, Group Welcome & Group Info */}
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-3.5 items-stretch">
+          {startTemplate && (
+            <div className="p-4 rounded-2xl bg-gradient-to-br from-sky-500/15 via-indigo-500/10 to-zinc-900 border border-red-500/40 shadow-lg space-y-3">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-500/20 text-sky-300 border border-red-500/30">
+                      /start Command
+                    </span>
+                    {startTemplate.mediaType && startTemplate.mediaType !== 'none' && startTemplate.mediaUrl && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-800 text-zinc-200 border border-zinc-700">
+                        {startTemplate.mediaType === 'video' ? '🎥 Video' : '📸 Photo'}
+                      </span>
+                    )}
+                  </div>
+                  <h3 className="text-sm font-bold text-white break-words">{startTemplate.name}</h3>
                 </div>
-                <h3 className="text-sm font-bold text-white break-words">{startTemplate.name}</h3>
+                <button
+                  onClick={() => {
+                    setEditingTemplate(startTemplate);
+                    setTemplateContent(startTemplate.content);
+                    setTemplateMediaType(startTemplate.mediaType || 'none');
+                    setTemplateMediaUrl(startTemplate.mediaUrl || '');
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm"
+                >
+                  <Edit2 className="w-3.5 h-3.5" />
+                  <span>Edit /start Msg</span>
+                </button>
               </div>
-              <button
-                onClick={() => {
-                  setEditingTemplate(startTemplate);
-                  setTemplateContent(startTemplate.content);
-                  setTemplateMediaType(startTemplate.mediaType || 'none');
-                  setTemplateMediaUrl(startTemplate.mediaUrl || '');
-                }}
-                className="px-3 py-1.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm"
+
+              <div
+                data-no-tab-swipe="true"
+                onTouchStart={(e) => e.stopPropagation()}
+                onTouchEnd={(e) => e.stopPropagation()}
+                className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 text-xs font-mono text-zinc-200 whitespace-pre-wrap break-words overflow-x-auto"
               >
-                <Edit2 className="w-3.5 h-3.5" />
-                <span>Edit /start Msg</span>
-              </button>
-            </div>
+                {startTemplate.content}
+              </div>
 
-            <div
-              data-no-tab-swipe="true"
-              onTouchStart={(e) => e.stopPropagation()}
-              onTouchEnd={(e) => e.stopPropagation()}
-              className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 text-xs font-mono text-zinc-200 whitespace-pre-wrap break-words overflow-x-auto"
-            >
-              {startTemplate.content}
+              <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-zinc-400 pt-0.5">
+                <span className="text-zinc-500 font-medium">Placeholders:</span>
+                {(startTemplate.variables || ['user_name', 'user_id', 'bot_name']).map((v) => (
+                  <span key={v} className="bg-zinc-800 border border-zinc-700/60 px-1.5 py-0.5 rounded text-red-400 font-mono">
+                    {`{${v}}`}
+                  </span>
+                ))}
+              </div>
             </div>
+          )}
 
-            <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-zinc-400 pt-0.5">
-              <span className="text-zinc-500 font-medium">Placeholders:</span>
-              {(startTemplate.variables || ['user_name', 'user_id', 'bot_name']).map((v) => (
-                <span key={v} className="bg-zinc-800 border border-zinc-700/60 px-1.5 py-0.5 rounded text-red-400 font-mono">
-                  {`{${v}}`}
-                </span>
-              ))}
+          {welcomeTemplate && (
+            <div className="p-4 rounded-2xl bg-gradient-to-br from-emerald-500/15 via-teal-500/10 to-zinc-900 border border-emerald-500/40 shadow-lg space-y-3">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                      Group Join
+                    </span>
+                    {welcomeTemplate.mediaType && welcomeTemplate.mediaType !== 'none' && welcomeTemplate.mediaUrl && (
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-zinc-800 text-zinc-200 border border-zinc-700">
+                        {welcomeTemplate.mediaType === 'video' ? '🎥 Video' : '📸 Photo'}
+                      </span>
+                    )}
+                  </div>
+                  <h3 className="text-sm font-bold text-white break-words">{welcomeTemplate.name}</h3>
+                </div>
+                <button
+                  onClick={() => {
+                    setEditingTemplate(welcomeTemplate);
+                    setTemplateContent(welcomeTemplate.content);
+                    setTemplateMediaType(welcomeTemplate.mediaType || 'none');
+                    setTemplateMediaUrl(welcomeTemplate.mediaUrl || '');
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm"
+                >
+                  <Edit2 className="w-3.5 h-3.5" />
+                  <span>Edit Welcome Msg</span>
+                </button>
+              </div>
+
+              <div
+                data-no-tab-swipe="true"
+                onTouchStart={(e) => e.stopPropagation()}
+                onTouchEnd={(e) => e.stopPropagation()}
+                className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 text-xs font-mono text-zinc-200 whitespace-pre-wrap break-words overflow-x-auto"
+              >
+                {welcomeTemplate.content}
+              </div>
+
+              <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-zinc-400 pt-0.5">
+                <span className="text-zinc-500 font-medium">Placeholders:</span>
+                {(welcomeTemplate.variables || ['username', 'first_name', 'last_name', 'user_id']).map((v) => (
+                  <span key={v} className="bg-zinc-800 border border-zinc-700/60 px-1.5 py-0.5 rounded text-emerald-300 font-mono">
+                    {`{${v}}`}
+                  </span>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          )}
+
+          {groupInfoTemplate && (
+            <div className="p-4 rounded-2xl bg-gradient-to-br from-blue-500/15 via-cyan-500/10 to-zinc-900 border border-blue-500/40 shadow-lg space-y-3">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 flex-wrap mb-1">
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-500/20 text-sky-300 border border-blue-500/30">
+                      /info Command
+                    </span>
+                  </div>
+                  <h3 className="text-sm font-bold text-white break-words">{groupInfoTemplate.name}</h3>
+                </div>
+                <button
+                  onClick={() => {
+                    setEditingTemplate(groupInfoTemplate);
+                    setTemplateContent(groupInfoTemplate.content);
+                    setTemplateMediaType(groupInfoTemplate.mediaType || 'none');
+                    setTemplateMediaUrl(groupInfoTemplate.mediaUrl || '');
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-blue-500 hover:bg-blue-400 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 shadow-sm"
+                >
+                  <Edit2 className="w-3.5 h-3.5" />
+                  <span>Edit Group Info</span>
+                </button>
+              </div>
+
+              <div
+                data-no-tab-swipe="true"
+                onTouchStart={(e) => e.stopPropagation()}
+                onTouchEnd={(e) => e.stopPropagation()}
+                className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 text-xs font-mono text-zinc-200 whitespace-pre-wrap break-words overflow-x-auto"
+              >
+                {groupInfoTemplate.content}
+              </div>
+
+              <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-zinc-400 pt-0.5">
+                <span className="text-zinc-500 font-medium">Placeholders:</span>
+                {(groupInfoTemplate.variables || ['chat_id', 'group_name', 'member_count', 'admins_list', 'admin_count']).map((v) => (
+                  <span key={v} className="bg-zinc-800 border border-zinc-700/60 px-1.5 py-0.5 rounded text-sky-300 font-mono">
+                    {`{${v}}`}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
 
         <div className="text-xs font-semibold text-zinc-400 px-1 pt-2">
           Other Bot Templates
         </div>
 
-        <div className="space-y-2.5">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 items-start">
           {(otherTemplates.length > 0 ? otherTemplates : Object.values(templates)).map((tpl) => (
             <div
               key={tpl.key}
@@ -2155,7 +2275,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     const categories = ['Files & Media', 'Links & Web', 'Bot Messages', 'System Control'];
 
     return (
-      <div className="space-y-4 pb-28">
+      <div className="space-y-4 pb-28 md:pb-8">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             {renderSubViewBackButton('menu', 'Back to More')}
@@ -2218,7 +2338,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             <span>Loading admin accounts...</span>
           </div>
         ) : (
-          <div className="space-y-3">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5 items-start">
             {adminsList.map((adm) => {
               const activePermCount = ALL_PERMISSIONS.filter(p => adm.role === 'owner' || adm.permissions?.[p.key]).length;
               const isOwner = adm.role === 'owner';
@@ -2359,7 +2479,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           >
             <div
               onClick={(e) => e.stopPropagation()}
-              className="glass-panel w-full max-w-lg max-h-[90dvh] overflow-y-auto overscroll-contain rounded-3xl p-4 sm:p-5 border border-sky-500/35 shadow-[0_0_50px_-10px_rgba(14,165,233,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-auto relative animate-in zoom-in-95 duration-200"
+              className="glass-panel w-full max-w-lg md:max-w-2xl lg:max-w-3xl max-h-[90dvh] overflow-y-auto overscroll-contain rounded-3xl p-4 sm:p-5 border border-sky-500/35 shadow-[0_0_50px_-10px_rgba(14,165,233,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-auto relative animate-in zoom-in-95 duration-200"
             >
               <div className="flex items-center justify-between gap-2 pb-2 border-b border-zinc-800">
                 <div className="flex items-center gap-2.5 min-w-0 flex-1">
@@ -2559,7 +2679,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           >
             <div
               onClick={(e) => e.stopPropagation()}
-              className="glass-panel w-full max-w-lg max-h-[90dvh] overflow-y-auto overscroll-contain rounded-3xl p-4 sm:p-5 border border-blue-500/35 shadow-[0_0_50px_-10px_rgba(59,130,246,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-auto relative animate-in zoom-in-95 duration-200"
+              className="glass-panel w-full max-w-lg md:max-w-2xl lg:max-w-3xl max-h-[90dvh] overflow-y-auto overscroll-contain rounded-3xl p-4 sm:p-5 border border-blue-500/35 shadow-[0_0_50px_-10px_rgba(59,130,246,0.35),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-auto relative animate-in zoom-in-95 duration-200"
             >
               <div className="flex items-center justify-between gap-2 pb-2 border-b border-zinc-800">
                 <div className="flex items-center gap-2.5 min-w-0 flex-1">
@@ -2739,7 +2859,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   // -------------------------------------------------------------
   if (subView === 'settings') {
     return (
-      <div className="space-y-4 pb-28">
+      <div className="space-y-4 pb-28 md:pb-8">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             {renderSubViewBackButton('menu', 'Back to More')}
@@ -2765,8 +2885,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </div>
         )}
 
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
         {/* 1. Bot Process & Memory Control Card */}
-        <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-3">
+        <div className="lg:col-span-2 glass-panel rounded-2xl p-4 border border-zinc-800 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2.5 min-w-0">
               <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
@@ -3109,6 +3230,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             </div>
           </div>
         </div>
+        </div>
       </div>
     );
   }
@@ -3126,7 +3248,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     };
 
     return (
-      <div className="space-y-4 pb-28 animate-tab-fade-in">
+      <div className="space-y-4 pb-28 md:pb-8 animate-tab-fade-in">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0 flex-1">
             {renderSubViewBackButton('menu', 'Back to More')}
@@ -3224,6 +3346,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             </div>
           )}
 
+          {/* Force Join Mode & Auto-Approve Grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-start">
           {/* Force Join Mode Toggle */}
           <div className="p-3 rounded-xl bg-zinc-950/70 border border-indigo-500/30 space-y-2">
             <div className="text-xs font-bold text-white">Force Join Mode</div>
@@ -3395,6 +3519,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               </div>
             )}
           </div>
+          </div>
 
           {/* Add Channel Form */}
           <div className="pt-1">
@@ -3486,7 +3611,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 </div>
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 items-start">
                 {requiredList.map((ch: any) => {
                   const isChanActive = ch.enabled !== false;
                   const isAuto = ch.isAutoDetected !== false;
@@ -3605,7 +3730,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                 </span>
               </div>
 
-              <div className="space-y-1.5 pt-0.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5 pt-0.5">
                 {activeChannels.map((c: any, idx: number) => (
                   <div
                     key={c.id}
@@ -3648,30 +3773,86 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       Boolean(botSettings.linkDeleteEnabled),
       Boolean(botSettings.antiForwardEnabled),
       botSettings.banEnabled !== false,
-      botSettings.muteEnabled !== false
+      botSettings.muteEnabled !== false,
+      Boolean(botSettings.cleanServiceEnabled)
     ].filter(Boolean).length;
 
+    const currentModerationPresets: ModerationDurationPreset[] = Array.isArray(botSettings.moderationDurations)
+      ? botSettings.moderationDurations
+      : [{ label: '1 Day', value: '1d' }, { label: '5 Days', value: '5d' }];
+
+    const handleAddModerationPreset = async () => {
+      const cleanVal = newDurationValue.trim().toLowerCase().replace(/\s+/g, '');
+      const m = cleanVal.match(/^(\d+(?:\.\d+)?)(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)$/);
+      if (!m) {
+        toast.error('Use format like 30m, 12h, 1d, 5d, or 1w');
+        return;
+      }
+      const num = parseFloat(m[1]);
+      if (!Number.isFinite(num) || num <= 0) {
+        toast.error('Duration must be positive');
+        return;
+      }
+      const u = m[2];
+      const shortUnit = u.startsWith('w') ? 'w' : u.startsWith('d') ? 'd' : u.startsWith('h') ? 'h' : u.startsWith('s') ? 's' : 'm';
+      const compactVal = `${num}${shortUnit}`;
+      if (currentModerationPresets.some((p) => p.value === compactVal)) {
+        toast.error('Preset already exists');
+        return;
+      }
+      if (currentModerationPresets.length >= 12) {
+        toast.error('Maximum 12 presets allowed');
+        return;
+      }
+      const unitWord =
+        shortUnit === 'w' ? (num === 1 ? 'Week' : 'Weeks') :
+        shortUnit === 'd' ? (num === 1 ? 'Day' : 'Days') :
+        shortUnit === 'h' ? (num === 1 ? 'Hour' : 'Hours') :
+        shortUnit === 's' ? (num === 1 ? 'Second' : 'Seconds') :
+        (num === 1 ? 'Minute' : 'Minutes');
+      const finalLabel = newDurationLabel.trim().slice(0, 28) || `${num} ${unitWord}`;
+      const prevPresets = currentModerationPresets;
+      const nextPresets = [...currentModerationPresets, { label: finalLabel, value: compactVal }];
+      setBotSettings((prev: any) => ({ ...prev, moderationDurations: nextPresets }));
+      setNewDurationValue('');
+      setNewDurationLabel('');
+      await savePartialBotSetting(
+        'moderationDurations',
+        { moderationDurations: nextPresets },
+        `Added preset: ${finalLabel}`,
+        () => setBotSettings((prev: any) => ({ ...prev, moderationDurations: prevPresets }))
+      );
+    };
+
+    const handleRemoveModerationPreset = async (valueToRemove: string) => {
+      const prevPresets = currentModerationPresets;
+      const nextPresets = currentModerationPresets.filter((p) => p.value !== valueToRemove);
+      setBotSettings((prev: any) => ({ ...prev, moderationDurations: nextPresets }));
+      await savePartialBotSetting(
+        'moderationDurations',
+        { moderationDurations: nextPresets },
+        'Preset removed',
+        () => setBotSettings((prev: any) => ({ ...prev, moderationDurations: prevPresets }))
+      );
+    };
+
     return (
-      <div className="space-y-4 pb-28 animate-tab-fade-in">
+      <div className="space-y-4 pb-28 md:pb-8 animate-tab-fade-in">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0 flex-1">
             {renderSubViewBackButton('menu', 'Back to More')}
-            <div className="min-w-0">
-              <h2 className="text-base font-bold text-white flex items-center gap-1.5 truncate">
-                <ShieldCheck className="w-4 h-4 text-sky-400 shrink-0" />
-                <span className="truncate">Group Management</span>
-              </h2>
-              <p className="text-[11px] text-zinc-400 truncate">
-                Automated group moderation, spam deletion &amp; member restriction controls
-              </p>
-            </div>
+            <h2 className="text-base font-bold text-white flex items-center gap-1.5 truncate">
+              <ShieldCheck className="w-4 h-4 text-sky-400 shrink-0" />
+              <span className="truncate">Group Management</span>
+            </h2>
           </div>
 
           <span className="text-[11px] px-2.5 py-1 rounded-xl bg-sky-500/15 border border-sky-500/30 text-sky-300 font-semibold font-mono tabular-nums whitespace-nowrap shrink-0">
-            {activeGroupModsCount}/4 Active
+            {activeGroupModsCount}/5 Active
           </span>
         </div>
 
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 items-stretch">
         {/* 1. Link Delete */}
         <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-rose-950/25 via-zinc-900/80 to-zinc-950/90 border border-rose-500/30">
           <div className="flex items-center justify-between gap-2.5">
@@ -3690,9 +3871,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     {botSettings.linkDeleteEnabled ? 'ON' : 'OFF'}
                   </span>
                 </div>
-                <p className="text-[10px] text-zinc-400 mt-0.5">
-                  Automatically delete unauthorized links &amp; URLs sent by non-admin members in groups with {botSettings.groupWarningLimit ?? 3}-warning auto-ban
-                </p>
               </div>
             </div>
 
@@ -3737,9 +3915,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     {botSettings.antiForwardEnabled ? 'ON' : 'OFF'}
                   </span>
                 </div>
-                <p className="text-[10px] text-zinc-400 mt-0.5">
-                  Detect and delete external forwarded messages from other chats, channels, or users in groups
-                </p>
               </div>
             </div>
 
@@ -3784,9 +3959,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     {botSettings.banEnabled !== false ? 'ON' : 'OFF'}
                   </span>
                 </div>
-                <p className="text-[10px] text-zinc-400 mt-0.5">
-                  Allow <code className="text-amber-300">/ban</code> &amp; <code className="text-amber-300">/unban</code> moderation commands and automatic {botSettings.groupWarningLimit ?? 3}-warning bans in groups
-                </p>
               </div>
             </div>
 
@@ -3831,9 +4003,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     {botSettings.muteEnabled !== false ? 'ON' : 'OFF'}
                   </span>
                 </div>
-                <p className="text-[10px] text-zinc-400 mt-0.5">
-                  Allow <code className="text-sky-300">/mute [1m|10m|1h]</code> &amp; <code className="text-sky-300">/unmute</code> group member restrictions
-                </p>
               </div>
             </div>
 
@@ -3860,7 +4029,52 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </div>
         </div>
 
-        {/* 5. Warning Limit */}
+        {/* 5. Clean Service */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-emerald-950/20 via-zinc-900/80 to-zinc-950/90 border border-emerald-500/30">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <div className="w-9 h-9 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0">
+                <Trash2 className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>Clean Service</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                    botSettings.cleanServiceEnabled
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                  }`}>
+                    {botSettings.cleanServiceEnabled ? 'ON' : 'OFF'}
+                  </span>
+                </div>
+                <p className="text-[10px] text-zinc-400 mt-0.5">Delete join &amp; leave service messages</p>
+              </div>
+            </div>
+
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={Boolean(botSettings.cleanServiceEnabled)}
+                disabled={savingSection === 'cleanService'}
+                onChange={async (e) => {
+                  const nextEnabled = e.target.checked;
+                  const prevEnabled = Boolean(botSettings.cleanServiceEnabled);
+                  setBotSettings((prev: any) => ({ ...prev, cleanServiceEnabled: nextEnabled }));
+                  await savePartialBotSetting(
+                    'cleanService',
+                    { cleanServiceEnabled: nextEnabled },
+                    nextEnabled ? 'Clean Service turned ON' : 'Clean Service turned OFF',
+                    () => setBotSettings((prev: any) => ({ ...prev, cleanServiceEnabled: prevEnabled }))
+                  );
+                }}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
+            </label>
+          </div>
+        </div>
+
+        {/* 6. Warning Limit */}
         <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-orange-950/20 via-zinc-900/80 to-zinc-950/90 border border-orange-500/30 space-y-3">
           <div className="flex items-center justify-between gap-2.5">
             <div className="flex items-center gap-2.5 min-w-0 flex-1">
@@ -3874,9 +4088,6 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                     {botSettings.groupWarningLimit ?? 3} Warnings
                   </span>
                 </div>
-                <p className="text-[10px] text-zinc-400 mt-0.5">
-                  Auto-ban member after reaching this warning limit for group violations
-                </p>
               </div>
             </div>
           </div>
@@ -3952,22 +4163,90 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </div>
         </div>
 
-        {/* Group Scope & Command Reference */}
+        {/* 7. Ban / Mute Duration Presets */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-indigo-950/20 via-zinc-900/80 to-zinc-950/90 border border-indigo-500/30 space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-9 h-9 rounded-xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
+                <Clock className="w-4 h-4" />
+              </div>
+              <span className="text-xs font-bold text-white truncate">Ban / Mute Duration Presets</span>
+            </div>
+            <span className="text-[10px] px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-300 font-mono tabular-nums shrink-0">
+              {currentModerationPresets.length} Presets
+            </span>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5">
+            {currentModerationPresets.length === 0 ? (
+              <span className="text-[11px] text-zinc-500">No preset buttons</span>
+            ) : (
+              currentModerationPresets.map((preset) => (
+                <div
+                  key={preset.value}
+                  className="inline-flex items-center gap-1.5 pl-2.5 pr-1.5 py-1 rounded-xl bg-indigo-500/15 border border-indigo-500/35 text-xs text-indigo-200"
+                >
+                  <span className="font-semibold">{preset.label}</span>
+                  <span className="text-[10px] font-mono text-indigo-300/80">({preset.value})</span>
+                  <button
+                    type="button"
+                    disabled={savingSection === 'moderationDurations'}
+                    onClick={() => handleRemoveModerationPreset(preset.value)}
+                    className="w-4 h-4 rounded-md bg-indigo-950/60 hover:bg-rose-500/30 text-indigo-300 hover:text-rose-200 flex items-center justify-center cursor-pointer transition-colors"
+                    title="Remove preset"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_auto] gap-2">
+            <input
+              type="text"
+              value={newDurationValue}
+              onChange={(e) => setNewDurationValue(e.target.value)}
+              placeholder="Duration (e.g. 12h, 3d)"
+              className="px-3 py-1.5 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+            />
+            <input
+              type="text"
+              value={newDurationLabel}
+              onChange={(e) => setNewDurationLabel(e.target.value)}
+              placeholder="Label (optional)"
+              className="px-3 py-1.5 rounded-xl bg-zinc-950 border border-zinc-800 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-indigo-500"
+            />
+            <button
+              type="button"
+              disabled={savingSection === 'moderationDurations' || !newDurationValue.trim()}
+              onClick={handleAddModerationPreset}
+              className="px-3.5 py-1.5 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-bold flex items-center justify-center gap-1 whitespace-nowrap cursor-pointer disabled:opacity-50"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add</span>
+            </button>
+          </div>
+        </div>
+
+        {/* 8. Group Scope & Command Reference */}
         <div className="glass-panel rounded-2xl p-4 border border-zinc-800 space-y-2.5 text-[11px] text-zinc-400">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-bold text-white">Group Moderation Info</span>
+            <span className="text-xs font-bold text-white">Group Moderation Commands</span>
             <span className="text-[10px] px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-300 font-mono tabular-nums">
               {chatWhitelistEnabled ? `${allowedChats.length} Allowed Chat(s)` : 'All Connected Groups'}
             </span>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 pt-1">
-            <div><code className="text-sky-300">/ban [user]</code> — Ban permanently</div>
-            <div><code className="text-sky-300">/unban &lt;id_or_@user&gt;</code> — Unban user</div>
-            <div><code className="text-sky-300">/mute [user] [1m|1h]</code> — Mute user</div>
-            <div><code className="text-sky-300">/unmute &lt;id_or_@user&gt;</code> — Unmute user</div>
-            <div><code className="text-sky-300">/linkdelete [on|off]</code> — Toggle link delete</div>
-            <div><code className="text-sky-300">/allowchat &lt;chat_id&gt;</code> — Whitelist group</div>
+            <div><code className="text-sky-300">/ban [user] [time] [reason]</code></div>
+            <div><code className="text-sky-300">/unban &lt;id_or_@user&gt;</code></div>
+            <div><code className="text-sky-300">/mute [user] [time] [reason]</code></div>
+            <div><code className="text-sky-300">/unmute &lt;id_or_@user&gt;</code></div>
+            <div><code className="text-sky-300">/cleanservice [on|off]</code></div>
+            <div><code className="text-sky-300">/linkdelete [on|off]</code></div>
+            <div><code className="text-sky-300">/info</code></div>
           </div>
+        </div>
         </div>
       </div>
     );
@@ -3978,7 +4257,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   // -------------------------------------------------------------
   if (subView === 'webhook') {
     return (
-      <div className="space-y-4 pb-28">
+      <div className="space-y-4 pb-28 md:pb-8 md:max-w-2xl">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             {renderSubViewBackButton('menu', 'Back to More')}
@@ -4065,7 +4344,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   // -------------------------------------------------------------
   if (subView === 'broadcast') {
     return (
-      <div className="space-y-4 pb-28">
+      <div className="space-y-4 pb-28 md:pb-8 md:max-w-4xl">
         {/* Navigation Bar */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
@@ -4514,7 +4793,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     const dismissedCount = reportsList.filter((r) => r.status === 'dismissed').length;
 
     return (
-      <div className="space-y-4 pb-28">
+      <div className="space-y-4 pb-28 md:pb-8">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             {renderSubViewBackButton('menu', 'Back to More')}
@@ -4596,7 +4875,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             </p>
           </div>
         ) : (
-          <div className="space-y-3">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5 items-start">
             {filteredReports.map((report) => (
               <div
                 key={report.id}
@@ -4722,7 +5001,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   // -------------------------------------------------------------
   if (subView === 'fraud') {
     return (
-      <div className="space-y-4 pb-28">
+      <div className="space-y-4 pb-28 md:pb-8">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             {renderSubViewBackButton('menu', 'Back to More')}
@@ -5089,7 +5368,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             </p>
           </div>
         ) : (
-          <div className="space-y-3">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5 items-start">
             {fraudRulesList.map((rule) => (
               <div
                 key={rule.id}
@@ -5268,7 +5547,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     );
 
     return (
-      <div className="space-y-4 animate-tab-fade-in">
+      <div className="space-y-4 pb-28 md:pb-8 animate-tab-fade-in">
         {/* Header */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -5293,6 +5572,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </button>
         </div>
 
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+        <div className="lg:col-span-5 space-y-4">
         {/* Master Guard Card */}
         <div className="p-4 rounded-2xl glass-panel border border-zinc-800 space-y-3">
           <div className="flex flex-col min-[380px]:flex-row min-[380px]:items-center justify-between gap-3">
@@ -5376,7 +5657,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             </button>
           </div>
         </form>
+        </div>
 
+        <div className="lg:col-span-7 space-y-4">
         {/* Quick Allow from Connected Channels */}
         {connectedCandidates.length > 0 && (
           <div className="p-4 rounded-2xl glass-panel border border-zinc-800 space-y-2.5">
@@ -5483,6 +5766,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           <div><code className="text-cyan-300">/allowchat &lt;chat_id&gt; [name]</code> — Whitelist chat &amp; activate guard</div>
           <div><code className="text-cyan-300">/ignorechat &lt;chat_id&gt;</code> — Remove chat so bot ignores it</div>
           <div><code className="text-cyan-300">/allowedchats</code> — View current whitelist status in DM</div>
+        </div>
+        </div>
         </div>
       </div>
     );
@@ -5740,7 +6025,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     };
 
     return (
-      <div className="space-y-4 pb-28 animate-tab-fade-in">
+      <div className="space-y-4 pb-28 md:pb-8 animate-tab-fade-in">
         {/* Header */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -5763,8 +6048,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </button>
         </div>
 
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
         {/* Mode Switcher + Create Key Link Form */}
-        <form onSubmit={handleCreateKeyPool} className="p-4 rounded-2xl glass-panel border border-emerald-500/25 space-y-3.5">
+        <form onSubmit={handleCreateKeyPool} className="lg:col-span-5 lg:sticky lg:top-6 p-4 rounded-2xl glass-panel border border-emerald-500/25 space-y-3.5">
           {/* Three Distinct Modes Switcher */}
           <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl bg-zinc-950 border border-zinc-800">
             <button
@@ -6078,6 +6364,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         </form>
 
         {/* Strictly Isolated Created Links Section (Only Active Mode Shown, Serial Order) */}
+        <div className="lg:col-span-7 min-w-0">
         {(() => {
           const activeList =
             keyGenMode === 'generator'
@@ -6355,6 +6642,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             </div>
           );
         })()}
+        </div>
+        </div>
 
         {/* Edit Key Pool Modal */}
         {editingKeyPool && createPortal(
@@ -6365,7 +6654,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             <form
               onSubmit={handleSaveEditedKeyPool}
               onClick={(e) => e.stopPropagation()}
-              className="glass-panel w-full max-w-md max-h-[90dvh] overflow-y-auto rounded-[24px] p-4 sm:p-5 text-white space-y-3.5"
+              className="glass-panel w-full max-w-md md:max-w-xl max-h-[90dvh] overflow-y-auto rounded-[24px] p-4 sm:p-5 text-white space-y-3.5"
             >
               <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-white/10">
                 <div className="flex items-center gap-2 min-w-0">

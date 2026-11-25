@@ -148,6 +148,11 @@ export interface AllowedChatEntry {
   addedBy?: string;
 }
 
+export interface ModerationDurationPreset {
+  label: string;
+  value: string;
+}
+
 export interface BotSettings {
   botToken: string;
   botUsername: string;
@@ -171,6 +176,8 @@ export interface BotSettings {
   linkDeleteEnabled?: boolean;
   banEnabled?: boolean;
   muteEnabled?: boolean;
+  cleanServiceEnabled?: boolean;
+  moderationDurations?: ModerationDurationPreset[];
   groupWarningLimit?: number;
   botMode?: BotOperationalMode;
   chatWhitelistEnabled?: boolean;
@@ -444,27 +451,6 @@ export const api = {
     const data = await res.json();
     if (!res.ok) {
       const err: any = new Error(data.error || 'Login failed');
-      err.field = data.field;
-      throw err;
-    }
-    if (data.token) {
-      storeToken(data.token);
-    }
-    if (data.botId) {
-      setActiveBotId(data.botId);
-    }
-    return data;
-  },
-
-  async firebaseLogin(payload: { idToken?: string; email?: string | null; displayName?: string | null; password?: string }): Promise<{ success: boolean; admin: AdminUser; token?: string; botId?: string; error?: string }> {
-    const res = await authFetch('/api/auth/firebase-login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      const err: any = new Error(data.error || 'Firebase authentication failed');
       err.field = data.field;
       throw err;
     }
@@ -1293,22 +1279,6 @@ export const api = {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to restore snapshot');
-    return data;
-  },
-
-  async getFirebaseRules(): Promise<{
-    success: boolean;
-    rtdbRules: any;
-    rtdbRulesFormatted: string;
-    authorizedAdmins: string[];
-    publicAccessBlocked: boolean;
-    backendSyncSecured: boolean;
-    primaryProject: string;
-    secondaryProject: string;
-  }> {
-    const res = await authFetch('/api/firebase-rules');
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to fetch Firebase rules');
     return data;
   },
 
