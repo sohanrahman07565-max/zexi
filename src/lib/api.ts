@@ -187,6 +187,19 @@ export interface BotSettings {
   allowedChats?: AllowedChatEntry[];
   guestLikesEnabled?: boolean;
   botStopped?: boolean;
+  customEmojiMap?: Record<string, string>;
+  customEmojiRules?: CustomEmojiRule[];
+  effectiveCustomEmojiMap?: Record<string, string>;
+}
+
+export interface CustomEmojiRule {
+  id: string;
+  emoji: string;
+  customEmojiId: string;
+  enabled: boolean;
+  label?: string;
+  slotKey?: string;
+  updatedAt?: string;
 }
 
 export interface JoinRequestRecord {
@@ -305,11 +318,22 @@ export interface KeyPoolRecord {
   deepLink: string;
 }
 
+export interface CustomEmojiSlotDef {
+  key: string;
+  fallback: string;
+  label: string;
+}
+
 export interface GuestAccountRecord {
   id: string;
   guestUid: string;
+  accountName?: string;
   maskedPassword: string;
   enabled: boolean;
+  isBanned?: boolean;
+  banType?: string;
+  banReason?: string;
+  banCheckedAt?: string;
   createdAt: string;
   updatedAt: string;
   lastUsedAt?: string;
@@ -1313,14 +1337,14 @@ export const api = {
     return data.bots || [];
   },
 
-  async cloneBot(token: string, owner?: string, botMode: BotOperationalMode = 'post_bot'): Promise<any> {
+  async cloneBot(token: string, owner?: string, _botMode: BotOperationalMode = 'file_bot'): Promise<any> {
     const cleanOwner = owner?.trim();
     const res = await authFetch('/api/bots/clone', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         token: token.trim(),
-        botMode,
+        botMode: 'file_bot',
         ...(cleanOwner ? { owner: cleanOwner } : {})
       })
     });
@@ -1456,16 +1480,63 @@ export const api = {
   },
 
   // Free Fire Guest Accounts Manager
-  async getGuestAccounts(): Promise<{
+  async getGuestAccounts(forceRefresh = false): Promise<{
     success: boolean;
     enabled: boolean;
     total: number;
     activeCount: number;
     accounts: GuestAccountRecord[];
   }> {
-    const res = await authFetch('/api/guest-accounts');
+    const res = await authFetch(forceRefresh ? '/api/guest-accounts?refresh=1' : '/api/guest-accounts');
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to load guest accounts');
+    return data;
+  },
+
+  async refreshGuestAccounts(): Promise<{
+    success: boolean;
+    enabled: boolean;
+    total: number;
+    activeCount: number;
+    accounts: GuestAccountRecord[];
+  }> {
+    const res = await authFetch('/api/guest-accounts/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to refresh guest accounts');
+    return data;
+  },
+
+  async getCustomEmojis(): Promise<{
+    success: boolean;
+    slots: CustomEmojiSlotDef[];
+    rules: CustomEmojiRule[];
+    customEmojiMap: Record<string, string>;
+    effectiveCustomEmojiMap: Record<string, string>;
+  }> {
+    const res = await authFetch('/api/custom-emojis');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load custom emojis');
+    return data;
+  },
+
+  async saveCustomEmojis(payload: CustomEmojiRule[] | Record<string, string>): Promise<{
+    success: boolean;
+    slots: CustomEmojiSlotDef[];
+    rules: CustomEmojiRule[];
+    customEmojiMap: Record<string, string>;
+    effectiveCustomEmojiMap: Record<string, string>;
+  }> {
+    const body = Array.isArray(payload) ? { rules: payload } : { customEmojiMap: payload };
+    const res = await authFetch('/api/custom-emojis', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save custom emojis');
     return data;
   },
 
@@ -1500,6 +1571,8 @@ export const api = {
     detectedCount: number;
     addedCount: number;
     updatedCount: number;
+    bannedCount?: number;
+    unauthorizedCount?: number;
     total: number;
     accounts: GuestAccountRecord[];
   }> {

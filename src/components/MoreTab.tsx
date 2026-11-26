@@ -142,6 +142,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   );
   const [guestAccounts, setGuestAccounts] = useState<GuestAccountRecord[]>([]);
   const [guestAccountsLoading, setGuestAccountsLoading] = useState<boolean>(false);
+  const [refreshingGuestAccounts, setRefreshingGuestAccounts] = useState<boolean>(false);
   const [togglingGuestSystem, setTogglingGuestSystem] = useState<boolean>(false);
   const [togglingGuestId, setTogglingGuestId] = useState<string | null>(null);
   const [showAddGuestForm, setShowAddGuestForm] = useState<boolean>(false);
@@ -154,6 +155,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [savingEditGuest, setSavingEditGuest] = useState<boolean>(false);
   const [deletingGuestId, setDeletingGuestId] = useState<string | null>(null);
   const [uploadingGuestFile, setUploadingGuestFile] = useState<boolean>(false);
+  const [guestActionError, setGuestActionError] = useState<string | null>(null);
   const guestFileInputRef = useRef<HTMLInputElement | null>(null);
 
 
@@ -794,6 +796,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       loadFraudRules();
     } else if (subView === 'key_generator') {
       loadKeyPools();
+    } else if (subView === 'guest_accounts') {
+      loadGuestAccounts(true);
     }
   }, [subView]);
 
@@ -834,6 +838,25 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     }
   };
 
+  const handleRefreshGuestAccounts = async () => {
+    setGuestActionError(null);
+    setRefreshingGuestAccounts(true);
+    try {
+      const res = await api.refreshGuestAccounts();
+      setGuestAccounts(Array.isArray(res.accounts) ? res.accounts : []);
+      if (res.enabled !== undefined) {
+        setGuestLikesEnabled(Boolean(res.enabled));
+      }
+      toast.success('Guest accounts synced');
+    } catch (err: any) {
+      const msg = err?.message || 'Failed to refresh guest accounts';
+      setGuestActionError(msg);
+      toast.error(msg);
+    } finally {
+      setRefreshingGuestAccounts(false);
+    }
+  };
+
   const handleToggleGuestSystem = async (nextEnabled: boolean) => {
     const prev = guestLikesEnabled;
     setGuestLikesEnabled(nextEnabled);
@@ -859,6 +882,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       toast.error('Guest UID and Guest Password are required');
       return;
     }
+    setGuestActionError(null);
     setSavingGuestAccount(true);
     try {
       const res = await api.addGuestAccount(cleanUid, cleanPass);
@@ -868,7 +892,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       await loadGuestAccounts(true);
       toast.success(res.updatedExisting ? 'Guest account updated' : 'Guest account saved');
     } catch (err: any) {
-      toast.error(err?.message || 'Failed to save guest account');
+      const msg = err?.message || 'Failed to save guest account';
+      setGuestActionError(msg);
+      toast.error(msg);
     } finally {
       setSavingGuestAccount(false);
     }
@@ -879,6 +905,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     e.target.value = '';
     if (!file) return;
 
+    setGuestActionError(null);
     setUploadingGuestFile(true);
     try {
       const res = await api.uploadGuestAccountFile(file);
@@ -894,8 +921,20 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       toast.success(
         `Detected ${res.detectedCount}: ${res.addedCount} added${res.updatedCount > 0 ? `, ${res.updatedCount} updated` : ''}`
       );
+      const banned = Number(res.bannedCount || 0);
+      const unauth = Number(res.unauthorizedCount || 0);
+      if (banned > 0 || unauth > 0) {
+        const parts: string[] = [];
+        if (banned > 0) parts.push(`${banned} Account Banned`);
+        if (unauth > 0) parts.push(`${unauth} Unauthorized`);
+        const skipMsg = `Skipped: ${parts.join(', ')}`;
+        setGuestActionError(skipMsg);
+        toast.error(skipMsg);
+      }
     } catch (err: any) {
-      toast.error(err?.message || 'Failed to upload guest file');
+      const msg = err?.message || 'Failed to upload guest file';
+      setGuestActionError(msg);
+      toast.error(msg);
     } finally {
       setUploadingGuestFile(false);
     }
@@ -912,7 +951,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       setGuestAccounts((prev) =>
         prev.map((item) => (item.id === acc.id ? res.account : item))
       );
-      toast.success(nextEnabled ? `Guest account ${acc.guestUid} enabled` : `Guest account ${acc.guestUid} disabled`);
+      const label = acc.accountName || 'Guest account';
+      toast.success(nextEnabled ? `${label} enabled` : `${label} disabled`);
     } catch (err: any) {
       setGuestAccounts((prev) =>
         prev.map((item) => (item.id === acc.id ? { ...item, enabled: acc.enabled } : item))
@@ -924,6 +964,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   };
 
   const handleStartEditGuestAccount = (acc: GuestAccountRecord) => {
+    setGuestActionError(null);
     setEditingGuestId(acc.id);
     setEditGuestUidInput(acc.guestUid);
     setEditGuestPasswordInput('');
@@ -937,6 +978,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       toast.error('Guest UID cannot be empty');
       return;
     }
+    setGuestActionError(null);
     setSavingEditGuest(true);
     try {
       const updates: { guestUid: string; guestPassword?: string } = { guestUid: cleanUid };
@@ -948,7 +990,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       await loadGuestAccounts(true);
       toast.success('Guest account updated');
     } catch (err: any) {
-      toast.error(err?.message || 'Failed to update guest account');
+      const msg = err?.message || 'Failed to update guest account';
+      setGuestActionError(msg);
+      toast.error(msg);
     } finally {
       setSavingEditGuest(false);
     }
@@ -7294,7 +7338,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         <input
           ref={guestFileInputRef}
           type="file"
-          accept=".dat,.json,.txt,.xml,application/json,text/plain"
+          accept=".dat,.json,application/octet-stream,application/json,text/plain,*/*"
           onChange={handleUploadGuestFile}
           className="hidden"
         />
@@ -7314,7 +7358,18 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
-              disabled={uploadingGuestFile}
+              disabled={refreshingGuestAccounts || uploadingGuestFile || savingGuestAccount}
+              onClick={handleRefreshGuestAccounts}
+              aria-label="Refresh guest accounts"
+              title="Refresh names & ban status"
+              className="p-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-300 hover:text-white cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${refreshingGuestAccounts ? 'animate-spin text-amber-400' : ''}`} />
+            </button>
+
+            <button
+              type="button"
+              disabled={uploadingGuestFile || savingGuestAccount}
               onClick={() => guestFileInputRef.current?.click()}
               className="px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-amber-500/35 text-amber-300 text-xs font-bold flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50"
             >
@@ -7323,12 +7378,15 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               ) : (
                 <Upload className="w-3.5 h-3.5" />
               )}
-              <span>Upload File</span>
+              <span>{uploadingGuestFile ? 'Resolving...' : 'Upload File'}</span>
             </button>
 
             <button
               type="button"
-              onClick={() => setShowAddGuestForm((prev) => !prev)}
+              onClick={() => {
+                setGuestActionError(null);
+                setShowAddGuestForm((prev) => !prev);
+              }}
               className="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
             >
               {showAddGuestForm ? <X className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
@@ -7336,6 +7394,31 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             </button>
           </div>
         </div>
+
+        {(savingGuestAccount || uploadingGuestFile || refreshingGuestAccounts) && (
+          <div className="p-3 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center gap-2.5 text-xs font-semibold text-amber-200">
+            <Loader2 className="w-4 h-4 animate-spin text-amber-400 shrink-0" />
+            <span>
+              {refreshingGuestAccounts
+                ? 'Syncing account names & ban status...'
+                : 'Verifying account & resolving profile name...'}
+            </span>
+          </div>
+        )}
+
+        {guestActionError && (
+          <div className="p-3 rounded-2xl bg-rose-500/15 border border-rose-500/35 flex items-center justify-between gap-2 text-xs font-semibold text-rose-200">
+            <span>{guestActionError}</span>
+            <button
+              type="button"
+              onClick={() => setGuestActionError(null)}
+              className="p-1 rounded-lg hover:bg-rose-500/20 text-rose-300 cursor-pointer shrink-0"
+              aria-label="Dismiss error"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
 
         {/* Master On / Off Card */}
         <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-amber-950/20 via-zinc-900/80 to-zinc-950/90 border border-amber-500/30">
@@ -7384,8 +7467,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   value={guestUidInput}
                   onChange={(e) => setGuestUidInput(e.target.value)}
                   placeholder="Guest UID"
+                  disabled={savingGuestAccount || uploadingGuestFile}
                   required
-                  className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-amber-400"
+                  className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-amber-400 disabled:opacity-60"
                 />
               </div>
               <div>
@@ -7397,15 +7481,16 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   value={guestPasswordInput}
                   onChange={(e) => setGuestPasswordInput(e.target.value)}
                   placeholder="Guest Password"
+                  disabled={savingGuestAccount || uploadingGuestFile}
                   required
-                  className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-amber-400"
+                  className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-amber-400 disabled:opacity-60"
                 />
               </div>
             </div>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <button
                 type="button"
-                disabled={uploadingGuestFile}
+                disabled={uploadingGuestFile || savingGuestAccount}
                 onClick={() => guestFileInputRef.current?.click()}
                 className="px-3.5 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-amber-500/35 text-amber-300 text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
               >
@@ -7431,7 +7516,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                   className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                 >
                   {savingGuestAccount && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                  <span>Save</span>
+                  <span>{savingGuestAccount ? 'Resolving...' : 'Save'}</span>
                 </button>
               </div>
             </div>
@@ -7463,16 +7548,25 @@ export const MoreTab: React.FC<MoreTabProps> = ({
               {guestAccounts.map((acc) => {
                 const isAccountOn = acc.enabled !== false;
                 const isEditing = editingGuestId === acc.id;
+                const banLabel = acc.isBanned
+                  ? acc.banType === 'Permanent'
+                    ? 'Permanent Ban'
+                    : acc.banType
+                    ? `${acc.banType} Ban`
+                    : 'Banned'
+                  : null;
                 return (
                   <div
                     key={acc.id}
-                    className="p-3.5 rounded-2xl glass-panel border border-zinc-800 space-y-2.5"
+                    className={`p-3.5 rounded-2xl glass-panel border space-y-2.5 ${
+                      acc.isBanned ? 'border-rose-500/40 bg-rose-950/10' : 'border-zinc-800'
+                    }`}
                   >
                     <div className="flex items-center justify-between gap-2.5">
                       <div className="min-w-0 flex-1 space-y-1">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-xs font-mono font-bold text-white truncate">
-                            {acc.guestUid}
+                          <span className="text-xs font-bold text-white truncate">
+                            {acc.accountName || 'Guest Account'}
                           </span>
                           <span
                             className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
@@ -7483,7 +7577,16 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                           >
                             {isAccountOn ? 'ON' : 'OFF'}
                           </span>
-                          {acc.lastStatus && (
+                          {banLabel && (
+                            <span
+                              title={acc.banReason || 'Account Banned'}
+                              className="text-[10px] px-1.5 py-0.5 rounded font-semibold border bg-rose-500/20 text-rose-300 border-rose-500/40 flex items-center gap-1"
+                            >
+                              <Ban className="w-2.5 h-2.5" />
+                              <span>{banLabel}</span>
+                            </span>
+                          )}
+                          {acc.lastStatus && !acc.isBanned && (
                             <span
                               className={`text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase ${
                                 acc.lastStatus === 'ok'
@@ -7519,7 +7622,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                               ? setEditingGuestId(null)
                               : handleStartEditGuestAccount(acc)
                           }
-                          aria-label={`Edit guest account ${acc.guestUid}`}
+                          aria-label={`Edit ${acc.accountName || 'guest account'}`}
                           className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white cursor-pointer"
                         >
                           <Edit2 className="w-3.5 h-3.5" />
@@ -7529,7 +7632,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
                           type="button"
                           onClick={() => handleDeleteGuestAccount(acc.id)}
                           disabled={deletingGuestId === acc.id}
-                          aria-label={`Delete guest account ${acc.guestUid}`}
+                          aria-label={`Delete ${acc.accountName || 'guest account'}`}
                           className="p-2 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 hover:bg-rose-500/20 cursor-pointer disabled:opacity-50"
                         >
                           {deletingGuestId === acc.id ? (

@@ -18,7 +18,7 @@
       "key": "GROUP_WELCOME_MESSAGE",
       "name": "Welcome Message",
       "description": "Automatic welcome message sent in groups when a new member joins (or configured via /setwelcome)",
-      "content": "👋 <b>Welcome to the group, {first_name}!</b>\n\n👤 <b>Username:</b> {username}\n🆔 <b>User ID:</b> <code>{user_id}</code>",
+      "content": "<tg-emoji emoji-id=\"5368324170671202286\">🔥</tg-emoji> <b>Welcome</b> {first}!",
       "variables": [
         "username",
         "first_name",
@@ -29,7 +29,16 @@
         "id"
       ],
       "mediaType": "none",
-      "mediaUrl": ""
+      "mediaUrl": "",
+      "entities": [
+        {
+          "type": "custom_emoji",
+          "offset": 0,
+          "length": 2,
+          "custom_emoji_id": "5368324170671202286"
+        }
+      ],
+      "rawText": "🔥 Welcome {first}!"
     },
     "GROUP_INFO_MESSAGE": {
       "key": "GROUP_INFO_MESSAGE",
@@ -196,12 +205,22 @@
   },
   "admins": [],
   "sessions": [],
+  "clonedBots": [],
   "trackedMessages": {},
   "scheduledDeletions": [],
   "uploadedFilesIndex": {},
-  "clonedBots": [],
   "addSessions": {},
-  "botUsers": {},
+  "botUsers": {
+    "8153757163": {
+      "id": "8153757163",
+      "firstName": "Root",
+      "firstSeenAt": "2026-11-26T09:33:34.809Z",
+      "lastActiveAt": "2026-11-26T09:33:34.819Z",
+      "isOnline": true,
+      "interactionCount": 4,
+      "isAdmin": true
+    }
+  },
   "groupModeration": {},
   "reports": [],
   "fraudRules": [],
@@ -274,7 +293,60 @@
     "chatWhitelistEnabled": false,
     "allowedChats": [],
     "guestLikesEnabled": true,
-    "botStopped": false
+    "botStopped": false,
+    "customEmojiRules": [
+      {
+        "id": "r_fire",
+        "emoji": "🔥",
+        "customEmojiId": "510000000000000001",
+        "enabled": true,
+        "label": "Fire",
+        "slotKey": "fire",
+        "updatedAt": "2026-11-26T10:01:54.557Z"
+      },
+      {
+        "id": "r_shield",
+        "emoji": "🛡",
+        "customEmojiId": "510000000000000002",
+        "enabled": true,
+        "label": "Shield",
+        "slotKey": "shield",
+        "updatedAt": "2026-11-26T10:01:54.558Z"
+      },
+      {
+        "id": "r_bolt",
+        "emoji": "⚡",
+        "customEmojiId": "510000000000000003",
+        "enabled": false,
+        "label": "Bolt Paused",
+        "slotKey": "bolt",
+        "updatedAt": "2026-11-26T10:01:54.558Z"
+      },
+      {
+        "id": "r_one",
+        "emoji": "1️⃣",
+        "customEmojiId": "510000000000000004",
+        "enabled": true,
+        "label": "One",
+        "updatedAt": "2026-11-26T10:01:54.558Z"
+      },
+      {
+        "id": "r_fox",
+        "emoji": "🦊",
+        "customEmojiId": "510000000000000005",
+        "enabled": true,
+        "label": "Fox",
+        "updatedAt": "2026-11-26T10:01:54.558Z"
+      }
+    ],
+    "customEmojiMap": {
+      "🔥": "510000000000000001",
+      "fire": "510000000000000001",
+      "🛡": "510000000000000002",
+      "shield": "510000000000000002",
+      "1️⃣": "510000000000000004",
+      "🦊": "510000000000000005"
+    }
   },
   "backupServer": {
     "enabled": false,
@@ -285,39 +357,5 @@
     "syncIntervalMinutes": 5,
     "lastSyncStatus": "idle",
     "lastSyncMessage": "No synchronization performed yet"
-  },
-  "pendingModerationActions": {
-    "tok1234": {
-      "token": "tok1234",
-      "chatId": -1001234567890,
-      "action": "ban",
-      "targetId": "555444333",
-      "targetName": "SpammerGuy",
-      "targetUsername": "",
-      "reason": "Sending spam",
-      "adminId": "999888777",
-      "stage": "select_duration",
-      "keypadDigits": "",
-      "keypadUnit": "h",
-      "isPermanent": false,
-      "replyToMessageId": 500,
-      "promptMessageId": 501,
-      "createdAt": 1795673659076
-    },
-    "tok_kp": {
-      "token": "tok_kp",
-      "chatId": -1001234567890,
-      "action": "mute",
-      "targetId": "222333444",
-      "targetName": "NoisyUser",
-      "targetUsername": "",
-      "adminId": "999888777",
-      "stage": "custom_keypad",
-      "keypadDigits": "45",
-      "keypadUnit": "m",
-      "isPermanent": false,
-      "promptMessageId": 502,
-      "createdAt": 1795673659119
-    }
   }
 }

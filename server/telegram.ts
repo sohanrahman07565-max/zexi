@@ -3,25 +3,32 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { storage, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord, SharedStorageService, AdminUser, BotOperationalMode, UserReportRecord, AdminReportMessageRef, DEFAULT_MODERATION_DURATIONS, sanitizeModerationDurations } from './storage';
+import { storage, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord, SharedStorageService, AdminUser, BotOperationalMode, UserReportRecord, AdminReportMessageRef, TelegramMessageEntityRecord, DEFAULT_MODERATION_DURATIONS, sanitizeModerationDurations } from './storage';
 import { hashPassword, signSessionToken } from './auth';
 import { PostBotEngine } from './postBot';
 import { ImageUrlBotEngine } from './imageUrlBot';
 import { resolveRealBannerImage } from './ffBannerGenerator';
 import { FreeFireGuestService } from './ffGuestApi';
+import {
+  formatCustomEmoji,
+  applyCustomEmojisToHtml,
+  getEffectiveCustomEmojiMap,
+  stripCustomEmojiTags,
+  sanitizeButtonLabel,
+  sanitizeReplyMarkupForTelegram
+} from './customEmoji';
 
 export const botTokenContext = new AsyncLocalStorage<string>();
 export const botIdContext = new AsyncLocalStorage<string>();
 export const senderUsernameContext = new AsyncLocalStorage<string>();
 
 interface CloneSession {
-  token: string;
-  botInfo: any;
+  token?: string;
+  botInfo?: any;
   chatId: string;
   createdBy: string;
   createdAt: number;
-  stage: 'awaiting_mode' | 'awaiting_owner';
-  botMode?: BotOperationalMode;
+  stage: 'awaiting_token' | 'awaiting_owner';
   promptMessageId?: number;
 }
 
@@ -163,6 +170,13 @@ interface UpdateItemSession {
   createdAt: number;
 }
 
+interface EmojiIdSession {
+  chatId: string;
+  userId: string;
+  createdAt: number;
+  promptMessageId?: number;
+}
+
 const activeEditSessions: Map<string, { templateKey: string }> = new Map();
 const activeSetChannelSessions: Map<string, { timestamp: number }> = new Map();
 const activeCloneSessions: Map<string, CloneSession> = new Map();
@@ -170,6 +184,7 @@ const activeAddKeySessions: Map<string, KeyCreationSession> = new Map();
 const pendingGroupModerationMap: Map<string, PendingModerationAction> = new Map();
 const activeGroupTempModSessions: Map<string, PendingModerationAction> = new Map();
 const activeUpdateSessions: Map<string, UpdateItemSession> = new Map();
+const activeEmojiIdSessions: Map<string, EmojiIdSession> = new Map();
 const recentGroupWelcomes: Map<string, number> = new Map();
 
 // Deduplication map to prevent repeated deliveries from retried webhooks
@@ -815,6 +830,7 @@ export class TelegramService {
       !sanitizedPayload.parse_mode &&
       (method === 'sendMessage' ||
         method === 'editMessageText' ||
+        method === 'editMessageCaption' ||
         method === 'sendPhoto' ||
         method === 'sendVideo' ||
         method === 'sendDocument' ||
@@ -823,6 +839,87 @@ export class TelegramService {
         method === 'sendVoice')
     ) {
       sanitizedPayload.parse_mode = 'HTML';
+    }
+
+    const needsEmojiApplyForSingle =
+      sanitizedPayload.parse_mode === 'HTML' &&
+      (typeof sanitizedPayload.text === 'string' || typeof sanitizedPayload.caption === 'string');
+    const needsEmojiApplyForMediaGroup =
+      method === 'sendMediaGroup' &&
+      Array.isArray(sanitizedPayload.media) &&
+      sanitizedPayload.media.some(
+        (item: any) =>
+          item &&
+          typeof item === 'object' &&
+          item.parse_mode === 'HTML' &&
+          typeof item.caption === 'string' &&
+          !(Array.isArray(item.caption_entities) && item.caption_entities.length > 0)
+      );
+    const needsEmojiApplyForInlineQuery =
+      method === 'answerInlineQuery' &&
+      Array.isArray(sanitizedPayload.results) &&
+      sanitizedPayload.results.some(
+        (resItem: any) =>
+          resItem &&
+          typeof resItem === 'object' &&
+          ((resItem.parse_mode === 'HTML' && typeof resItem.caption === 'string') ||
+            (resItem.input_message_content?.parse_mode === 'HTML' &&
+              typeof resItem.input_message_content?.message_text === 'string'))
+      );
+
+    if (needsEmojiApplyForSingle || needsEmojiApplyForMediaGroup || needsEmojiApplyForInlineQuery) {
+      const settingsForEmoji = await storage.getSettings().catch(() => null);
+      const effectiveEmojiMap = getEffectiveCustomEmojiMap(
+        settingsForEmoji?.customEmojiMap,
+        settingsForEmoji?.customEmojiRules
+      );
+      if (needsEmojiApplyForSingle) {
+        if (typeof sanitizedPayload.text === 'string') {
+          sanitizedPayload.text = applyCustomEmojisToHtml(sanitizedPayload.text, effectiveEmojiMap);
+        }
+        if (typeof sanitizedPayload.caption === 'string') {
+          sanitizedPayload.caption = applyCustomEmojisToHtml(sanitizedPayload.caption, effectiveEmojiMap);
+        }
+      }
+      if (needsEmojiApplyForMediaGroup) {
+        sanitizedPayload.media = sanitizedPayload.media.map((item: any) => {
+          if (
+            item &&
+            typeof item === 'object' &&
+            item.parse_mode === 'HTML' &&
+            typeof item.caption === 'string' &&
+            !(Array.isArray(item.caption_entities) && item.caption_entities.length > 0)
+          ) {
+            return { ...item, caption: applyCustomEmojisToHtml(item.caption, effectiveEmojiMap) };
+          }
+          return item;
+        });
+      }
+      if (needsEmojiApplyForInlineQuery) {
+        sanitizedPayload.results = sanitizedPayload.results.map((resItem: any) => {
+          if (!resItem || typeof resItem !== 'object') return resItem;
+          const nextRes = { ...resItem };
+          if (nextRes.parse_mode === 'HTML' && typeof nextRes.caption === 'string') {
+            nextRes.caption = applyCustomEmojisToHtml(nextRes.caption, effectiveEmojiMap);
+          }
+          if (
+            nextRes.input_message_content &&
+            typeof nextRes.input_message_content === 'object' &&
+            nextRes.input_message_content.parse_mode === 'HTML' &&
+            typeof nextRes.input_message_content.message_text === 'string'
+          ) {
+            nextRes.input_message_content = {
+              ...nextRes.input_message_content,
+              message_text: applyCustomEmojisToHtml(nextRes.input_message_content.message_text, effectiveEmojiMap)
+            };
+          }
+          return nextRes;
+        });
+      }
+    }
+
+    if (sanitizedPayload.reply_markup) {
+      sanitizedPayload.reply_markup = sanitizeReplyMarkupForTelegram(sanitizedPayload.reply_markup);
     }
 
     // Adaptive timeout: for long-polling (getUpdates), allow payload.timeout + 15s. Standard calls allow 15s.
@@ -861,7 +958,7 @@ export class TelegramService {
       let currentPayload: Record<string, any> = { ...sanitizedPayload };
       let data = await executeRequest(currentPayload);
 
-      // Chained error-resilient fallback retries (handles combined parse_mode, reply_to_message_id, thread_id, and inline style rejections)
+      // Chained error-resilient fallback retries (handles custom emoji rejection, parse_mode, reply_to_message_id, thread_id, and inline style rejections)
       for (let retryPass = 0; retryPass < 4 && data && !data.ok; retryPass++) {
         const desc = typeof data.description === 'string' ? data.description.toLowerCase() : '';
         let modified = false;
@@ -878,7 +975,57 @@ export class TelegramService {
           break;
         }
 
-        if (currentPayload.parse_mode && (desc.includes('parse entities') || desc.includes("can't parse"))) {
+        const hasTgEmojiInPayload =
+          (typeof currentPayload.text === 'string' && /<tg-emoji\b/i.test(currentPayload.text)) ||
+          (typeof currentPayload.caption === 'string' && /<tg-emoji\b/i.test(currentPayload.caption)) ||
+          (Array.isArray(currentPayload.media) &&
+            currentPayload.media.some((item: any) => typeof item?.caption === 'string' && /<tg-emoji\b/i.test(item.caption))) ||
+          (Array.isArray(currentPayload.results) &&
+            currentPayload.results.some(
+              (resItem: any) =>
+                (typeof resItem?.caption === 'string' && /<tg-emoji\b/i.test(resItem.caption)) ||
+                (typeof resItem?.input_message_content?.message_text === 'string' &&
+                  /<tg-emoji\b/i.test(resItem.input_message_content.message_text))
+            ));
+
+        if (
+          hasTgEmojiInPayload &&
+          (desc.includes('custom') || desc.includes('emoji') || desc.includes('parse entities') || desc.includes("can't parse"))
+        ) {
+          console.warn(`[Telegram] ${method} rejected custom emoji tags (${data.description}). Retrying with fallback emojis in HTML...`);
+          const nextPayload = { ...currentPayload };
+          if (typeof nextPayload.text === 'string') {
+            nextPayload.text = stripCustomEmojiTags(nextPayload.text);
+          }
+          if (typeof nextPayload.caption === 'string') {
+            nextPayload.caption = stripCustomEmojiTags(nextPayload.caption);
+          }
+          if (Array.isArray(nextPayload.media)) {
+            nextPayload.media = nextPayload.media.map((item: any) =>
+              item && typeof item === 'object' && typeof item.caption === 'string'
+                ? { ...item, caption: stripCustomEmojiTags(item.caption) }
+                : item
+            );
+          }
+          if (Array.isArray(nextPayload.results)) {
+            nextPayload.results = nextPayload.results.map((resItem: any) => {
+              if (!resItem || typeof resItem !== 'object') return resItem;
+              const nextRes = { ...resItem };
+              if (typeof nextRes.caption === 'string') {
+                nextRes.caption = stripCustomEmojiTags(nextRes.caption);
+              }
+              if (typeof nextRes.input_message_content?.message_text === 'string') {
+                nextRes.input_message_content = {
+                  ...nextRes.input_message_content,
+                  message_text: stripCustomEmojiTags(nextRes.input_message_content.message_text)
+                };
+              }
+              return nextRes;
+            });
+          }
+          currentPayload = nextPayload;
+          modified = true;
+        } else if (currentPayload.parse_mode && (desc.includes('parse entities') || desc.includes("can't parse"))) {
           console.warn(`[Telegram] ${method} failed with entity parsing (${data.description}). Retrying without parse_mode...`);
           const nextPayload = { ...currentPayload };
           delete nextPayload.parse_mode;
@@ -1143,6 +1290,21 @@ export class TelegramService {
 
   public static formatItalic(value: string | number | undefined | null): string {
     return `<i>${this.escapeHtml(String(value ?? ''))}</i>`;
+  }
+
+  public static tgEmoji(
+    slotOrEmoji: string,
+    fallbackEmoji?: string,
+    customMap?: Record<string, string> | null
+  ): string {
+    return formatCustomEmoji(slotOrEmoji, fallbackEmoji, customMap);
+  }
+
+  public static formatHtmlWithCustomEmojis(
+    html: string,
+    customMap?: Record<string, string> | null
+  ): string {
+    return applyCustomEmojisToHtml(html, customMap);
   }
 
   public static formatHeader(title: string, icon?: string): string {
@@ -2554,7 +2716,15 @@ export class TelegramService {
     }
 
     const welcomeTpl = await storage.getTemplate('GROUP_WELCOME_MESSAGE');
-    const rawContent = String(welcomeTpl?.content || '').trim();
+    let rawContent = String(welcomeTpl?.content || '').trim();
+    if (
+      welcomeTpl?.rawText &&
+      Array.isArray(welcomeTpl?.entities) &&
+      welcomeTpl.entities.length > 0 &&
+      !/<tg-emoji\b/i.test(rawContent)
+    ) {
+      rawContent = this.convertTelegramEntitiesToHtml(welcomeTpl.rawText, welcomeTpl.entities, 0);
+    }
     const mediaType = welcomeTpl?.mediaType || 'none';
     const mediaUrl = String(welcomeTpl?.mediaUrl || '').trim();
 
@@ -2754,20 +2924,22 @@ export class TelegramService {
       // Post Bot & Image URL Bot run purely as isolated Telegram bots BEFORE any File Bot
       // middlewares (whitelist, force-sub, scheduled file deletion, join requests, ban checks, maintenance).
       const settings = await storage.getSettings();
-      if (settings.botMode === 'post_bot') {
-        await PostBotEngine.handleUpdate(update, canonicalBotId, {
-          callTelegramApi: (method, body, tkn) => this.callTelegramApi(method, body, tkn),
-          isAuthorizedAdmin: (uid, uname) => this.isAuthorizedAdmin(uid, uname)
-        });
-        return;
-      }
-      if (settings.botMode === 'image_url_bot') {
-        await ImageUrlBotEngine.handleUpdate(update, canonicalBotId, {
-          callTelegramApi: (method, body, tkn) => this.callTelegramApi(method, body, tkn),
-          getBotToken: () => this.getBotToken(),
-          isAuthorizedAdmin: (uid, uname) => this.isAuthorizedAdmin(uid, uname)
-        });
-        return;
+      if (canonicalBotId === 'main') {
+        if (settings.botMode === 'post_bot') {
+          await PostBotEngine.handleUpdate(update, canonicalBotId, {
+            callTelegramApi: (method, body, tkn) => this.callTelegramApi(method, body, tkn),
+            isAuthorizedAdmin: (uid, uname) => this.isAuthorizedAdmin(uid, uname)
+          });
+          return;
+        }
+        if (settings.botMode === 'image_url_bot') {
+          await ImageUrlBotEngine.handleUpdate(update, canonicalBotId, {
+            callTelegramApi: (method, body, tkn) => this.callTelegramApi(method, body, tkn),
+            getBotToken: () => this.getBotToken(),
+            isAuthorizedAdmin: (uid, uname) => this.isAuthorizedAdmin(uid, uname)
+          });
+          return;
+        }
       }
 
       // Ignore edited messages for commands and general replies to prevent double replies on edit
@@ -3207,7 +3379,7 @@ export class TelegramService {
       `• <code>/setwelcome &lt;text&gt;</code> — Set group welcome message (supports photo/video &amp; reply)`,
       `• <code>/setpassword &lt;password&gt;</code> — Set/change Web Panel password`,
       `• <code>/broadcast</code> · <code>/settings</code> — Panel broadcast &amp; filter guide`,
-      ...(isMainBot ? [`• <code>/clone &lt;bot_token&gt;</code> — Clone an isolated bot instance`] : []),
+      ...(isMainBot ? [`• <code>/clone</code> — Clone a File Bot instance`] : []),
       ``,
       `🤖 <b>BOT LIFECYCLE &amp; MEMORY CONTROL</b>`,
       `• <code>/botstatus</code> — Check live polling status &amp; RAM usage`,
@@ -4851,7 +5023,7 @@ export class TelegramService {
       }
     }
 
-    if (!text && !message.document && !message.photo && !message.video && !message.audio) return;
+    if (!text && !message.document && !message.photo && !message.video && !message.audio && !message.sticker) return;
 
     // 0. Check /allfile or /allfiles command (STRICTLY ADMIN-ONLY)
     const earlyAllFileCmd = this.parseAllFileCommand(text);
@@ -4894,6 +5066,37 @@ export class TelegramService {
       // Route the setup interaction strictly to the admin's private DM (fromId)
       await this.handleActiveAddSessionMessage(message, fromId, fromId, text, addSession);
       return;
+    }
+
+    // 1a-emoji. /emojiid or /emoji id Custom Emoji ID Detector in Group
+    const groupEmojiCmd = this.parseEmojiIdCommand(text);
+    if (groupEmojiCmd.matched) {
+      await this.handleEmojiIdCommand(message, groupEmojiCmd, true);
+      return;
+    }
+
+    const groupEmojiSessionKey = `${String(message.chat.id)}:${fromId}`;
+    const pendingGroupEmojiSession = activeEmojiIdSessions.get(groupEmojiSessionKey);
+    if (pendingGroupEmojiSession) {
+      if (Date.now() - pendingGroupEmojiSession.createdAt > 10 * 60 * 1000) {
+        activeEmojiIdSessions.delete(groupEmojiSessionKey);
+      } else if (/^\/cancel(?:@\w+)?(?:\s|$)/i.test(text)) {
+        activeEmojiIdSessions.delete(groupEmojiSessionKey);
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: '❌ <b>Emoji ID inspection cancelled.</b>',
+          parse_mode: 'HTML',
+          ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+          ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+        });
+        return;
+      } else if (!text.startsWith('/')) {
+        activeEmojiIdSessions.delete(groupEmojiSessionKey);
+        await this.handleEmojiIdInspectionMessage(message, true);
+        return;
+      } else {
+        activeEmojiIdSessions.delete(groupEmojiSessionKey);
+      }
     }
 
     // 1b. Check if the initiating or authorized moderator is typing a Ban/Mute Reason in this group
@@ -5200,16 +5403,33 @@ export class TelegramService {
           );
           return;
         }
-        const groupCloneMatch = text.match(/^\/clone(?:@\w+)?(?:\s+(.+))?$/i);
+        const groupCloneMatch = text.match(/^\/clone(?:@\w+)?(?:\s+([\s\S]+))?$/i);
         const tokenArg = groupCloneMatch?.[1]?.trim();
         await executeWithPrivateDelivery(
           async () => {
             if (!tokenArg) {
-              await this.callTelegramApi('sendMessage', {
+              const dmSession: CloneSession = {
+                chatId: String(fromId),
+                createdBy: fromId,
+                createdAt: Date.now(),
+                stage: 'awaiting_token'
+              };
+              const promptRes = await this.callTelegramApi('sendMessage', {
                 chat_id: fromId,
-                text: `ℹ️ <b>How to Clone Telegram Bot</b>\n\n1. Open <code>@BotFather</code> on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>You will then choose File Bot, Post Bot, or Image URL Bot to launch your bot.</i>`,
-                parse_mode: 'HTML'
+                text:
+                  `🤖 <b>Clone File Bot — Step 1/2</b>\n\n` +
+                  `Send the <b>Bot Token</b> from <code>@BotFather</code>.`,
+                parse_mode: 'HTML',
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
+                  ]
+                }
               });
+              if (promptRes?.ok && promptRes.result?.message_id) {
+                dmSession.promptMessageId = promptRes.result.message_id;
+              }
+              activeCloneSessions.set(fromId, dmSession);
               return;
             }
 
@@ -5232,27 +5452,20 @@ export class TelegramService {
               chatId: String(fromId),
               createdBy: fromId,
               createdAt: Date.now(),
-              stage: 'awaiting_mode'
+              stage: 'awaiting_owner'
             };
 
             const promptRes = await this.callTelegramApi('sendMessage', {
               chat_id: fromId,
               text:
-                `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(check.info.username || check.info.first_name || 'Bot')}</code>\n\n` +
-                `⚙️ <b>Choose Bot Mode for this clone:</b>\n\n` +
-                `• 📁 <b>File Bot</b> — Standard file delivery, filters &amp; indexing mode\n` +
-                `• 📝 <b>Post Bot</b> — Channel post maker, inline buttons &amp; post editing mode\n` +
-                `• 🖼️ <b>Image URL Bot</b> — Photo-to-URL converter with link manager &amp; auto-expiry`,
+                `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(check.info.username || check.info.first_name || 'Bot')}</code>\n` +
+                `⚙️ <b>Mode:</b> <code>📁 File Bot</code>\n\n` +
+                `👑 <b>Step 2/2 — Assign Owner</b>\n` +
+                `Send the <b>Owner Telegram ID</b> or <b>@username</b> (e.g. <code>123456789</code> or <code>@username</code>).`,
               parse_mode: 'HTML',
               reply_markup: {
                 inline_keyboard: [
-                  [
-                    { text: '📁 File Bot', callback_data: `clone_mode:${fromId}:file_bot`, style: 'primary' },
-                    { text: '📝 Post Bot', callback_data: `clone_mode:${fromId}:post_bot`, style: 'primary' }
-                  ],
-                  [
-                    { text: '🖼️ Image URL Bot', callback_data: `clone_mode:${fromId}:image_url_bot`, style: 'success' }
-                  ],
+                  [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${fromId}`, style: 'primary' }],
                   [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
                 ]
               }
@@ -5528,9 +5741,9 @@ export class TelegramService {
     // MODERATION, BAN/UNBAN, REPORT & ANTI-FRAUD IN GROUPS
     // =========================================================================
 
-    // Pending /clone owner assignment reply in group chat (main primary bot & authorized admin only)
+    // Pending /clone interactive reply in group chat (main primary bot & authorized admin only)
     const pendingGroupClone = activeCloneSessions.get(fromId);
-    if (pendingGroupClone && pendingGroupClone.chatId === String(message.chat.id) && (text || message.reply_to_message?.from) && !text.startsWith('/')) {
+    if (pendingGroupClone && pendingGroupClone.chatId === String(message.chat.id) && (text || message.reply_to_message?.from || message.forward_from) && !text.startsWith('/')) {
       if (!this.isMainBotContext()) {
         activeCloneSessions.delete(fromId);
       } else {
@@ -6264,7 +6477,7 @@ export class TelegramService {
       const payload = getItemPayload(matchedItem);
       const deepLink = `https://t.me/${cleanBotUsername}?start=${payload}`;
 
-      const buttonText = buttonTemplate.content?.trim() || (isTextOnly ? '💬 View Message Privately' : '📁 Get File Privately');
+      const buttonText = sanitizeButtonLabel(buttonTemplate.content || '') || (isTextOnly ? '💬 View Message Privately' : '📁 Get File Privately');
       const keyboard = [[{ text: buttonText, url: deepLink, style: 'primary' }]];
 
       const res = await this.sendGroupTriggerReply(
@@ -6292,7 +6505,7 @@ export class TelegramService {
       const payload = getItemPayload(matchedItem);
       const deepLink = `https://t.me/${cleanBotUsername}?start=${payload}`;
 
-      const buttonText = buttonTemplate.content?.trim() || '🔗 Open Privately';
+      const buttonText = sanitizeButtonLabel(buttonTemplate.content || '') || '🔗 Open Privately';
       const keyboard = [[{ text: buttonText, url: deepLink, style: 'primary' }]];
 
       const res = await this.sendGroupTriggerReply(
@@ -6381,6 +6594,14 @@ export class TelegramService {
     const templates = await storage.getTemplates();
     const startTemplate = templates.START_MESSAGE;
     let startMsg = startTemplate?.content || "👋 <b>Welcome, <code>{user_name}</code>!</b>\n\n🆔 <b>User ID:</b> <code>{user_id}</code>\n🤖 <b>Bot:</b> <code>{bot_name}</code>\n\n✨ <i>Send any configured trigger hashtag in your group or here to receive your files privately.</i>";
+    if (
+      startTemplate?.rawText &&
+      Array.isArray(startTemplate?.entities) &&
+      startTemplate.entities.length > 0 &&
+      !/<tg-emoji\b/i.test(startMsg)
+    ) {
+      startMsg = this.convertTelegramEntitiesToHtml(startTemplate.rawText, startTemplate.entities, 0);
+    }
     
     // Comprehensive Username & Name variables
     const cleanUsername = message?.from?.username ? `@${message.from.username.replace(/^@+/, '')}` : '';
@@ -6492,16 +6713,13 @@ export class TelegramService {
   }
 
   private static formatBotModeDisplay(mode?: BotOperationalMode): string {
-    if (mode === 'post_bot') return '📝 Post Bot';
-    if (mode === 'image_url_bot') return '🖼️ Image URL Bot';
     return '📁 File Bot';
   }
 
-  private static async finalizeBotCloneWithMode(
+  private static async finalizeFileBotClone(
     chatId: number | string,
     fromId: string,
     session: CloneSession,
-    selectedMode: BotOperationalMode,
     options?: {
       senderUsername?: string;
       editMessageId?: number;
@@ -6512,21 +6730,29 @@ export class TelegramService {
     }
   ): Promise<void> {
     activeCloneSessions.delete(fromId);
-    const isBotOnly = selectedMode === 'post_bot' || selectedMode === 'image_url_bot';
-    const modeDisplay = this.formatBotModeDisplay(selectedMode);
+    if (!session.token) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: '❌ <b>Clone Session Expired:</b> Please send <code>/clone</code> again.',
+        parse_mode: 'HTML'
+      });
+      return;
+    }
+
+    const botLabel = this.escapeHtml(session.botInfo?.username ? `@${session.botInfo.username}` : (session.botInfo?.first_name || 'File Bot'));
 
     let statusMessageId: number | undefined;
     if (options?.editMessageId) {
       await this.callTelegramApi('editMessageText', {
         chat_id: chatId,
         message_id: options.editMessageId,
-        text: `⏳ <b>Launching Cloned Bot...</b>\n<i>Configuring <code>@${this.escapeHtml(session.botInfo?.username || session.botInfo?.first_name || 'Bot')}</code> in ${this.escapeHtml(modeDisplay)} mode.</i>`,
+        text: `⏳ <b>Launching File Bot...</b>\n<i>Configuring <code>${botLabel}</code>...</i>`,
         parse_mode: 'HTML'
       }).catch(() => {});
     } else {
       const statusNotice = await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `⏳ <b>Launching Cloned Bot...</b>\n<i>Configuring <code>@${this.escapeHtml(session.botInfo?.username || session.botInfo?.first_name || 'Bot')}</code> in ${this.escapeHtml(modeDisplay)} mode.</i>`,
+        text: `⏳ <b>Launching File Bot...</b>\n<i>Configuring <code>${botLabel}</code>...</i>`,
         parse_mode: 'HTML'
       });
       if (statusNotice?.ok && statusNotice.result?.message_id) {
@@ -6539,10 +6765,10 @@ export class TelegramService {
       fromId,
       undefined,
       {
-        ownerId: options?.ownerId || fromId,
-        ownerUsername: options?.ownerUsername || options?.senderUsername || undefined
+        ownerId: options?.ownerId,
+        ownerUsername: options?.ownerUsername
       },
-      selectedMode
+      'file_bot'
     );
 
     if (statusMessageId) {
@@ -6573,40 +6799,25 @@ export class TelegramService {
     }
 
     const bot = result.bot;
-    let successText: string;
+    const ownerDisplay = bot.ownerUsername && bot.ownerId && bot.ownerId !== bot.ownerUsername
+      ? `<code>@${this.escapeHtml(bot.ownerUsername)}</code> (<code>${this.escapeHtml(bot.ownerId)}</code>)`
+      : (bot.ownerUsername
+          ? `<code>@${this.escapeHtml(bot.ownerUsername)}</code>`
+          : `<code>${this.escapeHtml(bot.ownerId || options?.ownerId || fromId)}</code>`);
+    const cleanBotId = String(bot.adminUsername || bot.id).replace(/^clone_/i, '').replace(/[:_-]/g, '');
 
-    if (isBotOnly) {
-      const assignedAdmin = bot.ownerUsername && bot.ownerId && bot.ownerId !== bot.ownerUsername
-        ? `<code>@${this.escapeHtml(bot.ownerUsername)}</code> (<code>${this.escapeHtml(bot.ownerId)}</code>)`
-        : (bot.ownerUsername ? `<code>@${this.escapeHtml(bot.ownerUsername)}</code>` : `<code>${this.escapeHtml(bot.ownerId || options?.ownerId || fromId)}</code>`);
-      successText =
-        `✅ <b>Telegram Bot Successfully Cloned</b>\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `• 🤖 <b>Bot Name:</b> <code>${this.escapeHtml(bot.name)}</code>\n` +
-        `• 🔗 <b>Bot Username:</b> <code>@${this.escapeHtml(bot.username)}</code>\n` +
-        `• ⚙️ <b>Mode:</b> <code>${this.escapeHtml(modeDisplay)}</code>\n` +
-        `• 👤 <b>Bot Admin:</b> ${assignedAdmin}\n` +
-        `• 📡 <b>Status:</b> <code>Active &amp; Polling</code> 🟢\n\n` +
-        `<i>Running cleanly as a standalone Telegram bot.</i>`;
-    } else {
-      const ownerDisplay = bot.ownerUsername && bot.ownerId && bot.ownerId !== bot.ownerUsername
-        ? `<code>@${this.escapeHtml(bot.ownerUsername)}</code> (<code>${this.escapeHtml(bot.ownerId)}</code>)`
-        : (bot.ownerUsername ? `<code>@${this.escapeHtml(bot.ownerUsername)}</code>` : `<code>${this.escapeHtml(bot.ownerId || fromId)}</code>`);
-      const cleanBotId = String(bot.id).replace(/^clone_/i, '').replace(/[:_-]/g, '');
-      successText =
-        `✅ <b>Telegram Bot Successfully Cloned</b>\n` +
-        `━━━━━━━━━━━━━━━━━━━━\n` +
-        `• 🤖 <b>Bot Name:</b> <code>${this.escapeHtml(bot.name)}</code>\n` +
-        `• 🔗 <b>Bot Username:</b> <code>@${this.escapeHtml(bot.username)}</code>\n` +
-        `• ⚙️ <b>Mode:</b> <code>${this.escapeHtml(modeDisplay)}</code>\n` +
-        `• 👑 <b>Official Owner:</b> ${ownerDisplay}\n` +
-        `• 📡 <b>Status:</b> <code>Active &amp; Polling</code> 🟢\n\n` +
-        `🔐 <b>Sub-Admin Panel Credentials</b>\n` +
-        `• 🌐 <b>Panel URL:</b> <code>${this.escapeHtml(bot.panelUrl || 'N/A')}</code>\n` +
-        `• 🆔 <b>Bot ID:</b> <code>${this.escapeHtml(cleanBotId)}</code>\n` +
-        `• 🔑 <b>Password:</b> <code>${this.escapeHtml(bot.adminPassword || 'N/A')}</code>\n\n` +
-        `<i>The assigned Owner can log in to the web panel using the Bot ID and Password above.</i>`;
-    }
+    const successText =
+      `✅ <b>File Bot Successfully Cloned</b>\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `• 🤖 <b>Bot Name:</b> <code>${this.escapeHtml(bot.name)}</code>\n` +
+      `• 🔗 <b>Bot Username:</b> <code>@${this.escapeHtml(bot.username)}</code>\n` +
+      `• ⚙️ <b>Mode:</b> <code>📁 File Bot</code>\n` +
+      `• 👑 <b>Owner:</b> ${ownerDisplay}\n` +
+      `• 📡 <b>Status:</b> <code>Active &amp; Polling</code> 🟢\n\n` +
+      `🔐 <b>Admin Panel Credentials</b>\n` +
+      `• 🌐 <b>Panel URL:</b> <code>${this.escapeHtml(bot.panelUrl || 'N/A')}</code>\n` +
+      `• 🆔 <b>Login ID:</b> <code>${this.escapeHtml(cleanBotId)}</code>\n` +
+      `• 🔑 <b>Password:</b> <code>${this.escapeHtml(bot.adminPassword || 'N/A')}</code>`;
 
     if (options?.editMessageId) {
       await this.callTelegramApi('editMessageText', {
@@ -6639,7 +6850,7 @@ export class TelegramService {
       if (dmRes?.ok) {
         await this.sendAutoDeletingNotice(
           chatId,
-          `✅ <b>Bot Cloned:</b> <code>@${this.escapeHtml(bot.username)}</code>\n• <b>Mode:</b> <code>${this.escapeHtml(modeDisplay)}</code>\n<i>Confirmation sent to your private DM.</i>`,
+          `✅ <b>File Bot Cloned:</b> <code>@${this.escapeHtml(bot.username)}</code>\n<i>Owner &amp; Admin credentials sent to your private DM.</i>`,
           7000
         );
       } else {
@@ -6659,7 +6870,7 @@ export class TelegramService {
   }
 
   // =========================================================================
-  // INTERACTIVE CLONE COMPLETION
+  // INTERACTIVE CLONE COMPLETION (FILE BOT ONLY: TOKEN -> OWNER)
   // =========================================================================
   private static async completeInteractiveClone(
     chatId: number | string,
@@ -6674,90 +6885,85 @@ export class TelegramService {
     }
     const trimmed = (rawText || '').trim();
 
-    if (session.stage === 'awaiting_mode') {
-      const lower = trimmed.toLowerCase();
-      let selectedMode: BotOperationalMode | null = null;
-      if (/^(?:1|file|file\s*bot)$/i.test(lower)) {
-        selectedMode = 'file_bot';
-      } else if (/^(?:2|post|post\s*bot)$/i.test(lower)) {
-        selectedMode = 'post_bot';
-      } else if (/^(?:3|image|img|url|image\s*url|image\s*url\s*bot|img\s*url)$/i.test(lower)) {
-        selectedMode = 'image_url_bot';
-      }
-      if (!selectedMode) {
-        const modePrompt =
-          `⚠️ <b>Invalid Mode Selection</b>\n\n` +
-          `⚙️ <b>Choose Bot Mode for this clone:</b>\n\n` +
-          `Tap one of the buttons below or reply with <code>File Bot</code>, <code>Post Bot</code>, or <code>Image URL Bot</code>:`;
-        const modeKeyboard = [
-          [
-            { text: '📁 File Bot', callback_data: `clone_mode:${fromId}:file_bot`, style: 'primary' },
-            { text: '📝 Post Bot', callback_data: `clone_mode:${fromId}:post_bot`, style: 'primary' }
-          ],
-          [
-            { text: '🖼️ Image URL Bot', callback_data: `clone_mode:${fromId}:image_url_bot`, style: 'success' }
-          ],
-          [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
-        ];
+    if (session.stage === 'awaiting_token') {
+      if (!trimmed) {
+        const retryPrompt =
+          `⚠️ <b>Invalid Token</b>\n\n` +
+          `Send the <b>Bot Token</b> from <code>@BotFather</code>.`;
+        const cancelKeyboard = [[{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]];
         activeCloneSessions.set(fromId, session);
         if (!isGroup && session.promptMessageId) {
-          const msgId = await this.sendOrEditKeyWizardPrompt(chatId, modePrompt, modeKeyboard, session.promptMessageId);
+          const msgId = await this.sendOrEditKeyWizardPrompt(chatId, retryPrompt, cancelKeyboard, session.promptMessageId);
           if (msgId) session.promptMessageId = msgId;
         } else {
           const sent = await this.callTelegramApi('sendMessage', {
             chat_id: chatId,
-            text: modePrompt,
+            text: retryPrompt,
             parse_mode: 'HTML',
-            reply_markup: { inline_keyboard: modeKeyboard }
+            reply_markup: { inline_keyboard: cancelKeyboard }
           });
           if (sent?.result?.message_id) session.promptMessageId = sent.result.message_id;
         }
         return;
       }
 
-      if (selectedMode === 'post_bot' || selectedMode === 'image_url_bot') {
-        session.botMode = selectedMode;
-        session.stage = 'awaiting_owner';
+      const check = await TelegramBotManager.validateCloneToken(trimmed);
+      if (!check.ok || !check.info || !check.cleanToken) {
+        const errorText = check.error === 'Already this bot is already running.'
+          ? '❌ <b>Already Running:</b> <i>This bot instance is already active. Send another Bot Token or tap Cancel.</i>'
+          : `❌ <b>Invalid Bot Token</b>\n<code>${this.escapeHtml(check.error || 'Failed to verify token with Telegram.')}</code>\n\nSend a valid <b>Bot Token</b> or tap Cancel.`;
+        const cancelKeyboard = [[{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]];
         activeCloneSessions.set(fromId, session);
-        const modeLabel = this.formatBotModeDisplay(selectedMode);
-        const ownerPrompt =
-          `✅ <b>Mode Selected:</b> <code>${this.escapeHtml(modeLabel)}</code>\n\n` +
-          `👤 <b>Assign Bot Admin</b>\n` +
-          `<i>Send the Telegram User ID (or <code>@username</code>) of who should be the Admin of this cloned bot, or tap Assign Myself below.</i>\n\n` +
-          `• <b>Examples:</b> <code>123456789</code> or <code>@username</code>`;
-        const ownerKeyboard = [
-          [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${fromId}`, style: 'primary' }],
-          [
-            { text: '⬅️ Back', callback_data: `clone_back:${fromId}`, style: 'primary' },
-            { text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }
-          ]
-        ];
         if (!isGroup && session.promptMessageId) {
-          const msgId = await this.sendOrEditKeyWizardPrompt(chatId, ownerPrompt, ownerKeyboard, session.promptMessageId);
+          const msgId = await this.sendOrEditKeyWizardPrompt(chatId, errorText, cancelKeyboard, session.promptMessageId);
           if (msgId) session.promptMessageId = msgId;
         } else {
           const sent = await this.callTelegramApi('sendMessage', {
             chat_id: chatId,
-            text: ownerPrompt,
+            text: errorText,
             parse_mode: 'HTML',
-            reply_markup: { inline_keyboard: ownerKeyboard }
+            reply_markup: { inline_keyboard: cancelKeyboard }
           });
           if (sent?.result?.message_id) session.promptMessageId = sent.result.message_id;
         }
         return;
       }
 
-      await this.finalizeBotCloneWithMode(chatId, fromId, session, selectedMode, {
-        senderUsername: message?.from?.username,
-        replyMessageId: message?.message_id,
-        editMessageId: isGroup ? undefined : session.promptMessageId,
-        isGroup
-      });
+      session.token = check.cleanToken;
+      session.botInfo = check.info;
+      session.stage = 'awaiting_owner';
+      activeCloneSessions.set(fromId, session);
+
+      const ownerPrompt =
+        `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(check.info.username || check.info.first_name || 'Bot')}</code>\n` +
+        `⚙️ <b>Mode:</b> <code>📁 File Bot</code>\n\n` +
+        `👑 <b>Step 2/2 — Assign Owner</b>\n` +
+        `Send the <b>Owner Telegram ID</b> or <b>@username</b> (e.g. <code>123456789</code> or <code>@username</code>).`;
+      const ownerKeyboard = [
+        [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${fromId}`, style: 'primary' }],
+        [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
+      ];
+      if (!isGroup && session.promptMessageId) {
+        const msgId = await this.sendOrEditKeyWizardPrompt(chatId, ownerPrompt, ownerKeyboard, session.promptMessageId);
+        if (msgId) session.promptMessageId = msgId;
+      } else {
+        const sent = await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: ownerPrompt,
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: ownerKeyboard }
+        });
+        if (sent?.result?.message_id) session.promptMessageId = sent.result.message_id;
+      }
       return;
     }
 
     let ownerId = '';
     let ownerUsername = '';
+
+    const textMentionUser = Array.isArray(message?.entities)
+      ? message.entities.find((e: any) => e?.type === 'text_mention' && e?.user && !e.user.is_bot)?.user
+      : undefined;
 
     if (/^\d{4,20}$/.test(trimmed)) {
       ownerId = trimmed;
@@ -6771,6 +6977,9 @@ export class TelegramService {
       ownerUsername = trimmed.replace(/^@+/, '').trim();
     } else if (/^[a-zA-Z][a-zA-Z0-9_]{2,31}$/.test(trimmed)) {
       ownerUsername = trimmed;
+    } else if (textMentionUser?.id) {
+      ownerId = String(textMentionUser.id).trim();
+      ownerUsername = (textMentionUser.username || '').replace(/^@+/, '').trim();
     } else if (!trimmed && message?.forward_from && !message.forward_from.is_bot) {
       ownerId = String(message.forward_from.id || '').trim();
       ownerUsername = (message.forward_from.username || '').replace(/^@+/, '').trim();
@@ -6782,16 +6991,12 @@ export class TelegramService {
     if (!ownerId && !ownerUsername) {
       activeCloneSessions.set(fromId, session);
       const invalidMsg =
-        `⚠️ <b>Invalid Format</b>\n\n` +
-        `👤 <b>Assign Bot Admin</b>\n` +
-        `Please reply with a valid <b>Telegram User ID</b> or <b>@username</b>, or tap <b>Assign Myself</b> below.\n\n` +
-        `• <b>Examples:</b> <code>123456789</code> or <code>@username</code>`;
+        `⚠️ <b>Invalid Owner Format</b>\n\n` +
+        `👑 <b>Assign Clone Bot Owner</b>\n` +
+        `Send a valid <b>Telegram User ID</b> or <b>@username</b> (e.g. <code>123456789</code> or <code>@username</code>).`;
       const ownerKeyboard = [
         [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${fromId}`, style: 'primary' }],
-        [
-          { text: '⬅️ Back', callback_data: `clone_back:${fromId}`, style: 'primary' },
-          { text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }
-        ]
+        [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
       ];
       if (isGroup) {
         await this.sendAutoDeletingNotice(chatId, invalidMsg, 8000, message?.message_id);
@@ -6809,8 +7014,7 @@ export class TelegramService {
       return;
     }
 
-    const selectedMode: BotOperationalMode = session.botMode === 'image_url_bot' ? 'image_url_bot' : (session.botMode === 'post_bot' ? 'post_bot' : 'file_bot');
-    await this.finalizeBotCloneWithMode(chatId, fromId, session, selectedMode, {
+    await this.finalizeFileBotClone(chatId, fromId, session, {
       ownerId: ownerId || undefined,
       ownerUsername: ownerUsername || undefined,
       replyMessageId: message?.message_id,
@@ -6834,8 +7038,21 @@ export class TelegramService {
 
     // Check if user is in an active /editthismessage session (allow built-in slash commands to bypass cleanly)
     const editSession = activeEditSessions.get(fromId);
-    if (editSession && text && !/^\/(?:cancel|start|filters?|allfiles?|u|uid)(?:@\w+)?(?:\s|$)/i.test(text.trim())) {
-      await storage.updateTemplate(editSession.templateKey, text);
+    if (editSession && (text || message.sticker) && !/^\/(?:cancel|start|filters?|allfiles?|u|uid|emojiid|emoji)(?:@\w+)?(?:\s|$)/i.test(text.trim())) {
+      const isTextSrc = typeof message?.text === 'string' && message.text.length > 0;
+      const rawEditBody = isTextSrc ? String(message.text) : String(message?.caption || text || '');
+      const editEntities = isTextSrc
+        ? (Array.isArray(message?.entities) ? message.entities : [])
+        : (Array.isArray(message?.caption_entities) ? message.caption_entities : []);
+      const isButtonTemplate =
+        editSession.templateKey === 'GET_FILE_BUTTON' || editSession.templateKey === 'GET_LINK_BUTTON';
+      const convertedHtml = isButtonTemplate
+        ? sanitizeButtonLabel(rawEditBody)
+        : this.convertTelegramEntitiesToHtml(rawEditBody, editEntities, 0);
+      const slicedEntities = isButtonTemplate ? [] : this.sliceTelegramEntities(rawEditBody, editEntities, 0);
+      await storage.updateTemplate(editSession.templateKey, convertedHtml, {
+        ...(slicedEntities.length > 0 ? { rawText: rawEditBody.replace(/\s+$/, ''), entities: slicedEntities } : {})
+      });
       activeEditSessions.delete(fromId);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
@@ -6903,8 +7120,8 @@ export class TelegramService {
       return;
     }
 
-    // Admin /clone command in private chat: /clone <bot_token> (Main primary bot & authorized admins only)
-    const cloneMatch = text.match(/^\/clone(?:@\w+)?(?:\s+(.+))?$/i);
+    // Admin /clone command in private chat (Main primary bot & authorized admins only)
+    const cloneMatch = text.match(/^\/clone(?:@\w+)?(?:\s+([\s\S]+))?$/i);
     if (cloneMatch) {
       const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
       if (!isAdmin) {
@@ -6926,11 +7143,28 @@ export class TelegramService {
 
       const tokenArg = cloneMatch[1]?.trim();
       if (!tokenArg) {
-        await this.callTelegramApi('sendMessage', {
+        const session: CloneSession = {
+          chatId: String(chatId),
+          createdBy: fromId,
+          createdAt: Date.now(),
+          stage: 'awaiting_token'
+        };
+        const promptRes = await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: `ℹ️ <b>How to Clone Telegram Bot</b>\n\n1. Open <code>@BotFather</code> on Telegram and create a new bot using <code>/newbot</code>\n2. Copy the HTTP API Token\n3. Send the command here:\n<code>/clone &lt;your_bot_token&gt;</code>\n\n<i>You will then choose File Bot, Post Bot, or Image URL Bot to launch your bot.</i>`,
-          parse_mode: 'HTML'
+          text:
+            `🤖 <b>Clone File Bot — Step 1/2</b>\n\n` +
+            `Send the <b>Bot Token</b> from <code>@BotFather</code>.`,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
+            ]
+          }
         });
+        if (promptRes?.ok && promptRes.result?.message_id) {
+          session.promptMessageId = promptRes.result.message_id;
+        }
+        activeCloneSessions.set(fromId, session);
         return;
       }
 
@@ -6953,27 +7187,20 @@ export class TelegramService {
         chatId: String(chatId),
         createdBy: fromId,
         createdAt: Date.now(),
-        stage: 'awaiting_mode'
+        stage: 'awaiting_owner'
       };
 
       const promptRes = await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
         text:
-          `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(check.info.username || check.info.first_name || 'Bot')}</code>\n\n` +
-          `⚙️ <b>Choose Bot Mode for this clone:</b>\n\n` +
-          `• 📁 <b>File Bot</b> — Standard file delivery, filters &amp; indexing mode\n` +
-          `• 📝 <b>Post Bot</b> — Channel post maker, inline buttons &amp; post editing mode\n` +
-          `• 🖼️ <b>Image URL Bot</b> — Photo-to-URL converter with link manager &amp; auto-expiry`,
+          `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(check.info.username || check.info.first_name || 'Bot')}</code>\n` +
+          `⚙️ <b>Mode:</b> <code>📁 File Bot</code>\n\n` +
+          `👑 <b>Step 2/2 — Assign Owner</b>\n` +
+          `Send the <b>Owner Telegram ID</b> or <b>@username</b> (e.g. <code>123456789</code> or <code>@username</code>).`,
         parse_mode: 'HTML',
         reply_markup: {
           inline_keyboard: [
-            [
-              { text: '📁 File Bot', callback_data: `clone_mode:${fromId}:file_bot`, style: 'primary' },
-              { text: '📝 Post Bot', callback_data: `clone_mode:${fromId}:post_bot`, style: 'primary' }
-            ],
-            [
-              { text: '🖼️ Image URL Bot', callback_data: `clone_mode:${fromId}:image_url_bot`, style: 'success' }
-            ],
+            [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${fromId}`, style: 'primary' }],
             [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
           ]
         }
@@ -7324,6 +7551,13 @@ export class TelegramService {
       return;
     }
 
+    // 2g. Custom Emoji ID Detector (/emojiid or /emoji id) in Private Chat
+    const privEmojiCmd = this.parseEmojiIdCommand(text);
+    if (privEmojiCmd.matched) {
+      await this.handleEmojiIdCommand(message, privEmojiCmd, false);
+      return;
+    }
+
     // 3. Command: /setstartmsg or /startmsg
     if (/^\/(?:setstartmsg|startmsg)(?:@\w+)?(?:\s|$)/i.test(text)) {
       await this.handleSetStartMessageCommand(fromId, chatId, text, message);
@@ -7545,6 +7779,7 @@ export class TelegramService {
       activeAddSessions.delete(fromId);
       await storage.deleteAddSession(fromId);
       activeEditSessions.delete(fromId);
+      activeEmojiIdSessions.delete(`${String(chatId)}:${fromId}`);
 
       await this.deleteUserMessage(chatId, message?.message_id);
 
@@ -7566,6 +7801,21 @@ export class TelegramService {
 
       await this.callTelegramApi('sendMessage', { chat_id: chatId, text: cancelMsg, parse_mode: 'HTML' });
       return;
+    }
+
+    // 7a-0. Check if user is responding to /emojiid or /emoji id prompt in Private Chat
+    const privEmojiKey = `${String(chatId)}:${fromId}`;
+    const pendingPrivEmoji = activeEmojiIdSessions.get(privEmojiKey);
+    if (pendingPrivEmoji) {
+      if (Date.now() - pendingPrivEmoji.createdAt > 10 * 60 * 1000) {
+        activeEmojiIdSessions.delete(privEmojiKey);
+      } else if (!text.startsWith('/')) {
+        activeEmojiIdSessions.delete(privEmojiKey);
+        await this.handleEmojiIdInspectionMessage(message, false);
+        return;
+      } else {
+        activeEmojiIdSessions.delete(privEmojiKey);
+      }
     }
 
     // 7a. Check if user is completing an interactive /clone owner assignment (Main bot & authorized admin only)
@@ -8777,7 +9027,7 @@ export class TelegramService {
         }
       } else if (item.type === 'link') {
         const messageText = item.replyMessage || `🔗 <b>${this.escapeHtml(item.name)}</b>`;
-        const buttonText = (item.buttonText && item.buttonText.trim()) || (item.openMode === 'webapp' ? '📱 Launch App' : '🌐 Open Link');
+        const buttonText = sanitizeButtonLabel(item.buttonText || '') || (item.openMode === 'webapp' ? '📱 Launch App' : '🌐 Open Link');
 
         const isHttps = /^https:\/\//i.test(item.url || '');
         const canUseWebApp = item.openMode === 'webapp' && isHttps;
@@ -8897,8 +9147,8 @@ export class TelegramService {
     const keyboard = {
       inline_keyboard: [
         [
-          { text: item.setupVideoButtonText?.trim() || '🎬 Setup Video', callback_data: `sv_vid_${item.id}`, style: 'primary' },
-          { text: item.setupResourceButtonText?.trim() || (item.type === 'file' ? '📁 Get File' : '🔗 Open Link'), callback_data: `sv_item_${item.id}`, style: 'primary' }
+          { text: sanitizeButtonLabel(item.setupVideoButtonText || '') || '🎬 Setup Video', callback_data: `sv_vid_${item.id}`, style: 'primary' },
+          { text: sanitizeButtonLabel(item.setupResourceButtonText || '') || (item.type === 'file' ? '📁 Get File' : '🔗 Open Link'), callback_data: `sv_item_${item.id}`, style: 'primary' }
         ]
       ]
     };
@@ -9267,11 +9517,18 @@ export class TelegramService {
         fieldName = 'voice';
       }
 
-      const sendMultipart = async (useReply: boolean, useHtml: boolean) => {
+      const settingsForEmoji = caption ? await storage.getSettings().catch(() => null) : null;
+      const effectiveEmojiMap = caption
+        ? getEffectiveCustomEmojiMap(settingsForEmoji?.customEmojiMap, settingsForEmoji?.customEmojiRules)
+        : undefined;
+      let formattedHtmlCaption = caption ? applyCustomEmojisToHtml(caption, effectiveEmojiMap) : caption;
+
+      const sendMultipart = async (useReply: boolean, useHtml: boolean, htmlCap?: string) => {
         const formData = new FormData();
         formData.append('chat_id', chatId);
         if (caption) {
-          formData.append('caption', useHtml ? caption : caption.replace(/<[^>]+>/g, ''));
+          const capText = htmlCap ?? formattedHtmlCaption ?? caption;
+          formData.append('caption', useHtml ? capText : stripCustomEmojiTags(capText).replace(/<[^>]+>/g, ''));
           if (useHtml) formData.append('parse_mode', 'HTML');
         }
         if (useReply && replyToMessageId) {
@@ -9294,12 +9551,22 @@ export class TelegramService {
       };
 
       try {
-        let data = await sendMultipart(true, true);
+        let data = await sendMultipart(true, true, formattedHtmlCaption);
+        if (
+          !data.ok &&
+          formattedHtmlCaption &&
+          /<tg-emoji\b/i.test(formattedHtmlCaption) &&
+          typeof data.description === 'string' &&
+          /custom|emoji|parse entities|can't parse/i.test(data.description)
+        ) {
+          formattedHtmlCaption = stripCustomEmojiTags(formattedHtmlCaption);
+          data = await sendMultipart(true, true, formattedHtmlCaption);
+        }
         if (!data.ok && replyToMessageId) {
-          data = await sendMultipart(false, true);
+          data = await sendMultipart(false, true, formattedHtmlCaption);
         }
         if (!data.ok && caption) {
-          data = await sendMultipart(Boolean(replyToMessageId), false);
+          data = await sendMultipart(Boolean(replyToMessageId), false, formattedHtmlCaption);
         }
         if (data.ok && params.pinMessage && data.result?.message_id) {
           await this.callTelegramApi('pinChatMessage', {
@@ -9480,11 +9747,17 @@ export class TelegramService {
       return { ok: false, description: 'Bot token not configured' };
     }
 
-    const sendMultipart = async (useReply: boolean) => {
+    const settingsForEmoji = params.caption ? await storage.getSettings().catch(() => null) : null;
+    let formattedCaption = params.caption
+      ? applyCustomEmojisToHtml(params.caption, getEffectiveCustomEmojiMap(settingsForEmoji?.customEmojiMap, settingsForEmoji?.customEmojiRules))
+      : undefined;
+    const safeReplyMarkup = params.replyMarkup ? sanitizeReplyMarkupForTelegram(params.replyMarkup) : undefined;
+
+    const sendMultipart = async (useReply: boolean, cap?: string) => {
       const formData = new FormData();
       formData.append('chat_id', String(params.chatId));
-      if (params.caption) {
-        formData.append('caption', params.caption);
+      if (cap) {
+        formData.append('caption', cap);
         formData.append('parse_mode', 'HTML');
       }
       if (useReply && params.replyToMessageId) {
@@ -9493,8 +9766,8 @@ export class TelegramService {
       if (params.threadId) {
         formData.append('message_thread_id', String(params.threadId));
       }
-      if (params.replyMarkup) {
-        formData.append('reply_markup', JSON.stringify(params.replyMarkup));
+      if (safeReplyMarkup) {
+        formData.append('reply_markup', typeof safeReplyMarkup === 'string' ? safeReplyMarkup : JSON.stringify(safeReplyMarkup));
       }
 
       const blob = new Blob([new Uint8Array(params.photoBuffer)] as any, {
@@ -9510,9 +9783,19 @@ export class TelegramService {
     };
 
     try {
-      let data = await sendMultipart(true);
+      let data = await sendMultipart(true, formattedCaption);
+      if (
+        !data?.ok &&
+        formattedCaption &&
+        /<tg-emoji\b/i.test(formattedCaption) &&
+        typeof data?.description === 'string' &&
+        /custom|emoji|parse entities|can't parse/i.test(data.description)
+      ) {
+        formattedCaption = stripCustomEmojiTags(formattedCaption);
+        data = await sendMultipart(true, formattedCaption);
+      }
       if (!data?.ok && params.replyToMessageId) {
-        data = await sendMultipart(false);
+        data = await sendMultipart(false, formattedCaption);
       }
       return data;
     } catch (err: any) {
@@ -10138,6 +10421,7 @@ export class TelegramService {
       json?.banUntil ??
       json?.expires_at ??
       json?.expire_at ??
+      json?.period ??
       container?.ban_time ??
       container?.banTime ??
       container?.ban_duration ??
@@ -10145,9 +10429,11 @@ export class TelegramService {
       container?.remaining_time ??
       container?.ban_until ??
       container?.expires_at ??
+      container?.period ??
       pObj?.ban_time ??
       pObj?.ban_duration ??
-      pObj?.ban_until;
+      pObj?.ban_until ??
+      pObj?.period;
 
     const rawMsg =
       typeof json?.msg === 'string' &&
@@ -10172,7 +10458,7 @@ export class TelegramService {
     if (this.isPresentValue(rawBanType)) {
       const s = String(rawBanType).trim();
       banType = /temp/i.test(s) ? 'Temporary' : /perm/i.test(s) ? 'Permanent' : s;
-    } else if (this.isPresentValue(rawBanTime) && !/^(perm|permanent|forever|lifetime|0)$/i.test(String(rawBanTime).trim())) {
+    } else if (this.isPresentValue(rawBanTime) && !/^(perm|permanent|forever|lifetime|0|-1)$/i.test(String(rawBanTime).trim())) {
       banType = 'Temporary';
     }
 
@@ -10778,6 +11064,220 @@ export class TelegramService {
   }
 
   // =========================================================================
+  // /emojiid AND /emoji id CUSTOM EMOJI ID DETECTOR
+  // =========================================================================
+  public static parseEmojiIdCommand(rawText: string): {
+    matched: boolean;
+    inlineArg: string;
+    inlineOffset: number;
+  } {
+    const raw = String(rawText || '');
+    const m = raw.match(/^\s*\/(?:emojiid|emoji\s+id)(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i);
+    if (!m) {
+      return { matched: false, inlineArg: '', inlineOffset: 0 };
+    }
+    const inlineArg = (m[1] || '').trim();
+    const cmdPrefix = raw.match(/^\s*\/(?:emojiid|emoji\s+id)(?:@[a-z0-9_]+)?(?:\s+)?/i);
+    const inlineOffset = cmdPrefix ? cmdPrefix[0].length : raw.length;
+    return { matched: true, inlineArg, inlineOffset };
+  }
+
+  public static extractCustomEmojiItems(
+    msg: any,
+    sliceOffset: number = 0
+  ): Array<{ customEmojiId: string; fallbackEmoji: string }> {
+    if (!msg || typeof msg !== 'object') return [];
+    const results: Array<{ customEmojiId: string; fallbackEmoji: string }> = [];
+
+    const candidates = [
+      msg,
+      msg.message,
+      msg.msg,
+      msg.update?.message,
+      msg.update?.edited_message
+    ].filter((c) => c && typeof c === 'object');
+
+    for (const candidate of candidates) {
+      const isTextSrc = typeof candidate.text === 'string' && candidate.text.length > 0;
+      const bodyText = isTextSrc ? String(candidate.text) : String(candidate.caption || '');
+      const entities = isTextSrc
+        ? (Array.isArray(candidate.entities) ? candidate.entities : [])
+        : (Array.isArray(candidate.caption_entities) ? candidate.caption_entities : []);
+
+      for (const ent of entities) {
+        if (!ent || String(ent.type || '') !== 'custom_emoji') continue;
+        const customEmojiId = String(ent.custom_emoji_id ?? ent.customEmojiId ?? '').trim();
+        if (!customEmojiId) continue;
+        const offset = Number(ent.offset);
+        const length = Number(ent.length);
+        if (sliceOffset > 0 && Number.isFinite(offset) && offset < sliceOffset) continue;
+        let fallbackEmoji = '⭐';
+        if (bodyText && Number.isFinite(offset) && Number.isFinite(length) && length > 0) {
+          const sliced = bodyText.slice(Math.max(0, offset), Math.max(0, offset + length)).trim();
+          if (sliced) fallbackEmoji = sliced;
+        }
+        results.push({ customEmojiId, fallbackEmoji });
+      }
+
+      if (results.length === 0 && candidate.sticker?.custom_emoji_id) {
+        results.push({
+          customEmojiId: String(candidate.sticker.custom_emoji_id).trim(),
+          fallbackEmoji: String(candidate.sticker.emoji || '⭐').trim() || '⭐'
+        });
+      }
+
+      if (results.length > 0) break;
+    }
+
+    // Deduplicate consecutive/identical IDs while preserving order
+    const seen = new Set<string>();
+    return results.filter((item) => {
+      if (!item.customEmojiId || seen.has(item.customEmojiId)) return false;
+      seen.add(item.customEmojiId);
+      return true;
+    });
+  }
+
+  public static buildEmojiIdInspectorReply(
+    items: Array<{ customEmojiId: string; fallbackEmoji: string }>,
+    rawTextSample: string
+  ): string {
+    if (items.length > 0) {
+      const blocks = items.map((item) => {
+        const safeId = this.escapeHtml(item.customEmojiId);
+        const safeEmoji = this.escapeHtml(item.fallbackEmoji || '⭐');
+        const snippet = `&lt;tg-emoji emoji-id=&quot;${safeId}&quot;&gt;${safeEmoji}&lt;/tg-emoji&gt;`;
+        return [
+          `<tg-emoji emoji-id="${safeId}">${safeEmoji}</tg-emoji> <b>Custom Emoji Found</b>`,
+          `• <b>ID:</b> <code>${safeId}</code>`,
+          `• <b>Tag:</b> <code>${snippet}</code>`
+        ].join('\n');
+      });
+      return blocks.join('\n\n');
+    }
+
+    const hasStandardEmoji = /[\p{Emoji_Presentation}\p{Extended_Pictographic}]/u.test(rawTextSample || '');
+    if (hasStandardEmoji) {
+      return [
+        'ℹ️ <b>Standard Emoji Detected</b>',
+        '',
+        'This is a standard Unicode emoji and has no <code>custom_emoji_id</code>.'
+      ].join('\n');
+    }
+
+    return [
+      '⚠️ <b>No Custom Emoji Found</b>',
+      '',
+      'Please send a Telegram custom emoji (from a custom emoji pack) to extract its <code>custom_emoji_id</code>.'
+    ].join('\n');
+  }
+
+  private static async handleEmojiIdCommand(
+    message: any,
+    cmd: { matched: boolean; inlineArg: string; inlineOffset: number },
+    isGroup: boolean
+  ): Promise<void> {
+    const chatId = message?.chat?.id;
+    const fromId = String(message?.from?.id || '').trim();
+    if (!chatId || !fromId) return;
+    const threadId = message?.message_thread_id;
+
+    // 1. Inspect emojis included directly after `/emojiid` or `/emoji id`, or in the replied message
+    const inlineItems = cmd.inlineArg
+      ? this.extractCustomEmojiItems(message, cmd.inlineOffset)
+      : [];
+    if (inlineItems.length > 0) {
+      const replyHtml = this.buildEmojiIdInspectorReply(inlineItems, cmd.inlineArg);
+      const sent = await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: replyHtml,
+        parse_mode: 'HTML',
+        ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+        ...(threadId ? { message_thread_id: threadId } : {})
+      });
+      if (isGroup && sent?.ok && sent.result?.message_id) {
+        this.trackAndLimitMessage(Number(chatId), sent.result.message_id).catch(() => {});
+      }
+      return;
+    }
+
+    if (cmd.inlineArg) {
+      const replyHtml = this.buildEmojiIdInspectorReply([], cmd.inlineArg);
+      const sent = await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: replyHtml,
+        parse_mode: 'HTML',
+        ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+        ...(threadId ? { message_thread_id: threadId } : {})
+      });
+      if (isGroup && sent?.ok && sent.result?.message_id) {
+        this.trackAndLimitMessage(Number(chatId), sent.result.message_id).catch(() => {});
+      }
+      return;
+    }
+
+    if (message?.reply_to_message) {
+      const rep = message.reply_to_message;
+      const repText = String(rep.text || rep.caption || '');
+      const repItems = this.extractCustomEmojiItems(rep, 0);
+      if (repItems.length > 0 || repText || rep.sticker) {
+        const replyHtml = this.buildEmojiIdInspectorReply(repItems, repText);
+        const sent = await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: replyHtml,
+          parse_mode: 'HTML',
+          ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+          ...(threadId ? { message_thread_id: threadId } : {})
+        });
+        if (isGroup && sent?.ok && sent.result?.message_id) {
+          this.trackAndLimitMessage(Number(chatId), sent.result.message_id).catch(() => {});
+        }
+        return;
+      }
+    }
+
+    // 2. Otherwise prompt the user and wait for their next message in this chat
+    const sessionKey = `${String(chatId)}:${fromId}`;
+    const promptRes = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: '🎨 <b>Custom Emoji ID Detector</b>\n\nSend an emoji now to get its <code>custom_emoji_id</code>.',
+      parse_mode: 'HTML',
+      ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+      ...(threadId ? { message_thread_id: threadId } : {})
+    });
+
+    activeEmojiIdSessions.set(sessionKey, {
+      chatId: String(chatId),
+      userId: fromId,
+      createdAt: Date.now(),
+      promptMessageId: promptRes?.result?.message_id
+    });
+  }
+
+  private static async handleEmojiIdInspectionMessage(
+    message: any,
+    isGroup: boolean
+  ): Promise<void> {
+    const chatId = message?.chat?.id;
+    if (!chatId) return;
+    const threadId = message?.message_thread_id;
+    const rawTextSample = String(message?.text || message?.caption || '');
+    const items = this.extractCustomEmojiItems(message, 0);
+    const replyHtml = this.buildEmojiIdInspectorReply(items, rawTextSample);
+
+    const sent = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text: replyHtml,
+      parse_mode: 'HTML',
+      ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+      ...(threadId ? { message_thread_id: threadId } : {})
+    });
+    if (isGroup && sent?.ok && sent.result?.message_id) {
+      this.trackAndLimitMessage(Number(chatId), sent.result.message_id).catch(() => {});
+    }
+  }
+
+  // =========================================================================
   // FREE FIRE LIKE COMMAND (/like <uid>)
   // =========================================================================
   public static parseFreeFireLikeCommand(rawText: string): { matched: boolean; uid: string | null } {
@@ -10909,7 +11409,9 @@ export class TelegramService {
       return;
     }
 
-    const guestAccounts = (allGuestAccounts || []).filter((acc) => acc.enabled !== false);
+    const guestAccounts = (allGuestAccounts || []).filter(
+      (acc) => acc.enabled !== false && acc.isBanned !== true
+    );
     if (guestAccounts.length === 0) {
       await this.setBotReaction(chatId, messageId, '😢').catch(() => {});
       const emptyHtml = [
@@ -14868,84 +15370,17 @@ export class TelegramService {
       return;
     }
 
-    // SELECT BOT MODE DURING INTERACTIVE CLONE WIZARD
-    if (data && data.startsWith('clone_mode:')) {
-      if (!this.isMainBotContext()) {
-        await this.callTelegramApi('answerCallbackQuery', {
-          callback_query_id: cb.id,
-          text: 'Cloning is only available on the main primary bot.',
-          show_alert: true
-        });
-        return;
-      }
-      const parts = data.split(':');
-      const targetAdminId = parts[1]?.trim() || fromId;
-      const rawMode = parts[2]?.trim();
-      const chosenMode: BotOperationalMode =
-        rawMode === 'image_url_bot' ? 'image_url_bot' : (rawMode === 'file_bot' ? 'file_bot' : 'post_bot');
-      if (targetAdminId !== fromId && !(await this.isAuthorizedAdmin(fromId, cb.from?.username))) {
-        await this.callTelegramApi('answerCallbackQuery', {
-          callback_query_id: cb.id,
-          text: 'Only the admin who started cloning can select the mode.',
-          show_alert: true
-        });
-        return;
-      }
-      const session = activeCloneSessions.get(targetAdminId) || activeCloneSessions.get(fromId);
-      if (!session) {
-        await this.callTelegramApi('answerCallbackQuery', {
-          callback_query_id: cb.id,
-          text: 'Clone session expired. Send /clone <token> again.',
-          show_alert: true
-        });
-        return;
-      }
-      const modeShortLabel = chosenMode === 'image_url_bot' ? 'Image URL Bot' : (chosenMode === 'post_bot' ? 'Post Bot' : 'File Bot');
+    // LEGACY CLONE MODE CALLBACKS (Cloned bots are strictly File Bot only)
+    if (data && (data.startsWith('clone_mode:') || data.startsWith('clone_back:'))) {
       await this.callTelegramApi('answerCallbackQuery', {
         callback_query_id: cb.id,
-        text: `Mode selected: ${modeShortLabel}`
+        text: 'Cloned bots run in File Bot mode only. Send /clone to start.',
+        show_alert: true
       });
-
-      if (chosenMode === 'post_bot' || chosenMode === 'image_url_bot') {
-        session.botMode = chosenMode;
-        session.stage = 'awaiting_owner';
-        activeCloneSessions.set(targetAdminId, session);
-        const modeLabel = this.formatBotModeDisplay(chosenMode);
-        if (chatId && cb.message?.message_id) {
-          await this.callTelegramApi('editMessageText', {
-            chat_id: chatId,
-            message_id: cb.message.message_id,
-            text:
-              `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(session.botInfo?.username || session.botInfo?.first_name || 'Bot')}</code>\n` +
-              `⚙️ <b>Selected Mode:</b> <code>${this.escapeHtml(modeLabel)}</code>\n\n` +
-              `👤 <b>Assign Bot Admin</b>\n` +
-              `<i>Reply with the Telegram User ID (or <code>@username</code>) of who should be assigned as the Admin of this cloned bot, or tap Assign Myself below.</i>\n\n` +
-              `• <b>Examples:</b> <code>123456789</code> or <code>@username</code>`,
-            parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${targetAdminId}`, style: 'primary' }],
-                [
-                  { text: '⬅️ Back', callback_data: `clone_back:${targetAdminId}`, style: 'primary' },
-                  { text: '❌ Cancel', callback_data: `clone_cancel:${targetAdminId}`, style: 'danger' }
-                ]
-              ]
-            }
-          }).catch(() => {});
-        }
-        return;
-      }
-
-      if (chatId) {
-        await this.finalizeBotCloneWithMode(chatId, targetAdminId, session, chosenMode, {
-          senderUsername: cb.from?.username,
-          editMessageId: cb.message?.message_id
-        });
-      }
       return;
     }
 
-    // ASSIGN SELF AS BOT ADMIN DURING /clone FOR POST BOT / IMAGE URL BOT
+    // ASSIGN SELF AS CLONE BOT OWNER DURING /clone
     if (data && data.startsWith('clone_admin_self:')) {
       if (!this.isMainBotContext()) {
         await this.callTelegramApi('answerCallbackQuery', {
@@ -14959,85 +15394,31 @@ export class TelegramService {
       if (targetAdminId !== fromId && !(await this.isAuthorizedAdmin(fromId, cb.from?.username))) {
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
-          text: 'Only the admin who started cloning can assign the bot admin.',
+          text: 'Only the admin who started cloning can assign the clone owner.',
           show_alert: true
         });
         return;
       }
       const session = activeCloneSessions.get(targetAdminId) || activeCloneSessions.get(fromId);
-      if (!session) {
+      if (!session || !session.token) {
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
-          text: 'Clone session expired. Send /clone <token> again.',
+          text: 'Clone session expired. Send /clone again.',
           show_alert: true
         });
         return;
       }
-      const selectedMode: BotOperationalMode =
-        session.botMode === 'image_url_bot' ? 'image_url_bot' : (session.botMode === 'post_bot' ? 'post_bot' : 'file_bot');
       await this.callTelegramApi('answerCallbackQuery', {
         callback_query_id: cb.id,
-        text: `Assigned Bot Admin: ${fromId}`
+        text: `Assigned Owner: ${fromId}`
       });
       if (chatId) {
-        await this.finalizeBotCloneWithMode(chatId, targetAdminId, session, selectedMode, {
+        await this.finalizeFileBotClone(chatId, targetAdminId, session, {
           ownerId: fromId,
           ownerUsername: cb.from?.username,
           senderUsername: cb.from?.username,
           editMessageId: cb.message?.message_id
         });
-      }
-      return;
-    }
-
-    // BACK TO BOT MODE SELECTION DURING INTERACTIVE CLONE WIZARD
-    if (data && data.startsWith('clone_back:')) {
-      const targetAdminId = data.slice('clone_back:'.length).trim() || fromId;
-      if (targetAdminId !== fromId && !(await this.isAuthorizedAdmin(fromId, cb.from?.username))) {
-        await this.callTelegramApi('answerCallbackQuery', {
-          callback_query_id: cb.id,
-          text: 'Only the admin who started cloning can go back.',
-          show_alert: true
-        });
-        return;
-      }
-      const session = activeCloneSessions.get(targetAdminId) || activeCloneSessions.get(fromId);
-      if (!session) {
-        await this.callTelegramApi('answerCallbackQuery', {
-          callback_query_id: cb.id,
-          text: 'Clone session expired. Send /clone <token> again.',
-          show_alert: true
-        });
-        return;
-      }
-      session.stage = 'awaiting_mode';
-      session.botMode = undefined;
-      activeCloneSessions.set(targetAdminId, session);
-      await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id });
-      if (chatId && cb.message?.message_id) {
-        await this.callTelegramApi('editMessageText', {
-          chat_id: chatId,
-          message_id: cb.message.message_id,
-          text:
-            `🤖 <b>Bot Token Verified:</b> <code>@${this.escapeHtml(session.botInfo?.username || session.botInfo?.first_name || 'Bot')}</code>\n\n` +
-            `⚙️ <b>Choose Bot Mode for this clone:</b>\n\n` +
-            `• 📁 <b>File Bot</b> — Standard file delivery, filters &amp; indexing mode\n` +
-            `• 📝 <b>Post Bot</b> — Channel post maker, inline buttons &amp; post editing mode\n` +
-            `• 🖼️ <b>Image URL Bot</b> — Photo-to-URL converter with link manager &amp; auto-expiry`,
-          parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [
-              [
-                { text: '📁 File Bot', callback_data: `clone_mode:${targetAdminId}:file_bot`, style: 'primary' },
-                { text: '📝 Post Bot', callback_data: `clone_mode:${targetAdminId}:post_bot`, style: 'primary' }
-              ],
-              [
-                { text: '🖼️ Image URL Bot', callback_data: `clone_mode:${targetAdminId}:image_url_bot`, style: 'success' }
-              ],
-              [{ text: '❌ Cancel', callback_data: `clone_cancel:${targetAdminId}`, style: 'danger' }]
-            ]
-          }
-        }).catch(() => {});
       }
       return;
     }
@@ -16859,6 +17240,63 @@ export class TelegramService {
   // =========================================================================
   // /setwelcome COMMAND (Group Welcome Message with Media & Placeholders)
   // =========================================================================
+  private static sliceTelegramEntities(
+    rawText: string,
+    entities: any[] = [],
+    sliceOffset: number = 0
+  ): TelegramMessageEntityRecord[] {
+    const body = rawText.slice(Math.max(0, sliceOffset)).replace(/\s+$/, '');
+    if (!body || !Array.isArray(entities) || entities.length === 0) return [];
+
+    const out: TelegramMessageEntityRecord[] = [];
+    for (const e of entities) {
+      if (!e || !e.type) continue;
+      const start = Math.max(0, Number(e.offset) - sliceOffset);
+      const end = Math.min(body.length, Number(e.offset) + Number(e.length) - sliceOffset);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+      const customEmojiId = e.custom_emoji_id ?? e.customEmojiId;
+      out.push({
+        type: String(e.type),
+        offset: start,
+        length: end - start,
+        ...(typeof e.url === 'string' ? { url: e.url } : {}),
+        ...(typeof e.language === 'string' ? { language: e.language } : {}),
+        ...(customEmojiId !== undefined && customEmojiId !== null && String(customEmojiId).trim()
+          ? { custom_emoji_id: String(customEmojiId).trim() }
+          : {}),
+        ...(e.user && e.user.id !== undefined
+          ? {
+              user: {
+                id: e.user.id,
+                ...(e.user.first_name ? { first_name: e.user.first_name } : {}),
+                ...(e.user.username ? { username: e.user.username } : {})
+              }
+            }
+          : {})
+      });
+    }
+    return out;
+  }
+
+  private static escapeTextPreservingSafeTgHtml(text: string): string {
+    if (!text) return '';
+    const tgTagRegex = /<(?:\/(?:b|strong|i|em|u|ins|s|strike|del|code|pre|blockquote|tg-spoiler|tg-emoji|a)\s*|(?:b|strong|i|em|u|ins|s|strike|del|pre|tg-spoiler)\s*|blockquote(?:\s+expandable)?\s*|code(?:\s+class=(?:"language-[a-zA-Z0-9_-]+"|'language-[a-zA-Z0-9_-]+'))?\s*|tg-emoji\s+emoji-id=(?:"\d+"|'\d+')\s*|a\s+href=(?:"(?:https?:\/\/|tg:\/\/)[^"<>\s]+"|'(?:https?:\/\/|tg:\/\/)[^'<>\s]+')\s*)>/gi;
+    let out = '';
+    let last = 0;
+    let match: RegExpExecArray | null;
+    while ((match = tgTagRegex.exec(text)) !== null) {
+      if (match.index > last) {
+        out += this.escapeHtml(text.slice(last, match.index));
+      }
+      out += match[0];
+      last = match.index + match[0].length;
+    }
+    if (last < text.length) {
+      out += this.escapeHtml(text.slice(last));
+    }
+    return out;
+  }
+
   private static convertTelegramEntitiesToHtml(
     rawText: string,
     entities: any[] = [],
@@ -16887,25 +17325,28 @@ export class TelegramService {
       .map((e, idx) => {
         const start = Math.max(0, Number(e.offset) - sliceOffset);
         const end = Math.min(body.length, Number(e.offset) + Number(e.length) - sliceOffset);
+        const rawCustomId = e.custom_emoji_id ?? e.customEmojiId;
         return {
           idx,
           type: String(e.type),
           start,
           end,
-          url: typeof e.url === 'string' ? e.url : undefined,
+          url: typeof e.url === 'string' ? e.url.trim() : undefined,
           language: typeof e.language === 'string' ? e.language : undefined,
-          custom_emoji_id: typeof e.custom_emoji_id === 'string' ? e.custom_emoji_id : undefined,
+          custom_emoji_id: rawCustomId !== undefined && rawCustomId !== null ? String(rawCustomId).trim() : undefined,
           userId: e.user?.id !== undefined ? String(e.user.id) : undefined
         };
       })
       .filter((e) => e.end > e.start);
 
-    // If no Telegram formatting entities are present, preserve raw text (including explicit HTML tags)
+    // If no Telegram formatting entities are present, preserve safe explicit Telegram HTML tags while escaping unsafe markup
     if (normalized.length === 0) {
-      return body;
+      return this.escapeTextPreservingSafeTgHtml(body);
     }
 
     normalized.sort((a, b) => (a.start - b.start) || ((b.end - b.start) - (a.end - a.start)) || (a.idx - b.idx));
+
+    const isSafeLinkUrl = (u?: string): boolean => Boolean(u && /^(?:https?:\/\/|tg:\/\/)/i.test(u));
 
     const openTag = (e: typeof normalized[number]): string => {
       switch (e.type) {
@@ -16916,7 +17357,7 @@ export class TelegramService {
         case 'spoiler': return '<tg-spoiler>';
         case 'code': return '<code>';
         case 'pre': return e.language ? `<pre><code class="language-${this.escapeHtml(e.language)}">` : '<pre>';
-        case 'text_link': return `<a href="${this.escapeHtml(e.url || '')}">`;
+        case 'text_link': return isSafeLinkUrl(e.url) ? `<a href="${this.escapeHtml(e.url || '')}">` : '';
         case 'text_mention': return `<a href="tg://user?id=${this.escapeHtml(e.userId || '')}">`;
         case 'blockquote': return '<blockquote>';
         case 'expandable_blockquote': return '<blockquote expandable>';
@@ -16934,7 +17375,7 @@ export class TelegramService {
         case 'spoiler': return '</tg-spoiler>';
         case 'code': return '</code>';
         case 'pre': return e.language ? '</code></pre>' : '</pre>';
-        case 'text_link': return '</a>';
+        case 'text_link': return isSafeLinkUrl(e.url) ? '</a>' : '';
         case 'text_mention': return '</a>';
         case 'blockquote': return '</blockquote>';
         case 'expandable_blockquote': return '</blockquote>';
@@ -16984,7 +17425,11 @@ export class TelegramService {
       if (i < points.length - 1) {
         const nextPos = points[i + 1];
         if (nextPos > pos) {
-          html += this.escapeHtml(body.slice(pos, nextPos));
+          const segment = body.slice(pos, nextPos);
+          const insideCode = stack.some((item) => item.type === 'code' || item.type === 'pre');
+          html += insideCode
+            ? this.escapeHtml(segment)
+            : this.escapeTextPreservingSafeTgHtml(segment);
         }
       }
     }
@@ -17076,6 +17521,8 @@ export class TelegramService {
     const cmdPrefixMatch = ownRawText.match(/^\s*\/setwelcome(?:@\w+)?(?:[ \t]*\r?\n|[ \t]+)?/i);
     const prefixLen = cmdPrefixMatch ? cmdPrefixMatch[0].length : 0;
     const ownBodyHtml = this.convertTelegramEntitiesToHtml(ownRawText, ownEntities, prefixLen);
+    let savedRawText = ownRawText.slice(prefixLen).replace(/\s+$/, '');
+    let savedEntities = this.sliceTelegramEntities(ownRawText, ownEntities, prefixLen);
 
     let detectedMedia = await this.extractWelcomeMediaFromMessage(message);
     if (!detectedMedia && message?.reply_to_message) {
@@ -17093,6 +17540,8 @@ export class TelegramService {
       const repPrefixMatch = repRawText.match(/^\s*\/setwelcome(?:@\w+)?(?:[ \t]*\r?\n|[ \t]+)?/i);
       const repSliceOffset = repPrefixMatch ? repPrefixMatch[0].length : 0;
       finalContent = this.convertTelegramEntitiesToHtml(repRawText, repEntities, repSliceOffset);
+      savedRawText = repRawText.slice(repSliceOffset).replace(/\s+$/, '');
+      savedEntities = this.sliceTelegramEntities(repRawText, repEntities, repSliceOffset);
     }
 
     if (!finalContent && !detectedMedia) {
@@ -17113,7 +17562,9 @@ export class TelegramService {
 
     await storage.updateTemplate('GROUP_WELCOME_MESSAGE', finalContent, {
       mediaType: detectedMedia ? detectedMedia.mediaType : 'none',
-      mediaUrl: detectedMedia ? detectedMedia.mediaUrl : ''
+      mediaUrl: detectedMedia ? detectedMedia.mediaUrl : '',
+      rawText: savedRawText,
+      entities: savedEntities
     });
 
     await replyWithThread('The new welcome message has been saved!');
@@ -17161,9 +17612,27 @@ export class TelegramService {
       detectedMediaUrl = mediaMsg.animation.file_id;
     }
 
-    // Extract new content after command: /setstartmsg <new text> or /startmsg <new text>
-    const match = text.match(/^\/(?:setstartmsg|startmsg)(?:@\w+)?(?:\s+([\s\S]+))?$/i);
-    const newContent = match && match[1] ? match[1].trim() : (mediaMsg?.caption?.replace(/^\/(?:setstartmsg|startmsg)(?:@\w+)?\s*/i, '').trim() || '');
+    const ownIsText = typeof message?.text === 'string' && message.text.length > 0;
+    const ownRawText = ownIsText ? String(message.text) : String(message?.caption || '');
+    const ownEntities = ownIsText
+      ? (Array.isArray(message?.entities) ? message.entities : [])
+      : (Array.isArray(message?.caption_entities) ? message.caption_entities : []);
+    const ownPrefixMatch = ownRawText.match(/^\s*\/(?:setstartmsg|startmsg)(?:@\w+)?(?:[ \t]*\r?\n|[ \t]+)?/i);
+    const ownSliceOffset = ownPrefixMatch ? ownPrefixMatch[0].length : 0;
+
+    let newContent = this.convertTelegramEntitiesToHtml(ownRawText, ownEntities, ownSliceOffset);
+    let savedRawText = ownRawText.slice(ownSliceOffset).replace(/\s+$/, '');
+    let savedEntities = this.sliceTelegramEntities(ownRawText, ownEntities, ownSliceOffset);
+
+    if (!newContent && mediaMsg && mediaMsg !== message) {
+      const mediaCaption = String(mediaMsg.caption || '');
+      const mediaEntities = Array.isArray(mediaMsg.caption_entities) ? mediaMsg.caption_entities : [];
+      const mediaPrefixMatch = mediaCaption.match(/^\s*\/(?:setstartmsg|startmsg)(?:@\w+)?(?:[ \t]*\r?\n|[ \t]+)?/i);
+      const mediaOffset = mediaPrefixMatch ? mediaPrefixMatch[0].length : 0;
+      newContent = this.convertTelegramEntitiesToHtml(mediaCaption, mediaEntities, mediaOffset);
+      savedRawText = mediaCaption.slice(mediaOffset).replace(/\s+$/, '');
+      savedEntities = this.sliceTelegramEntities(mediaCaption, mediaEntities, mediaOffset);
+    }
 
     const templates = await storage.getTemplates();
     const currentTemplate = templates.START_MESSAGE;
@@ -17182,6 +17651,10 @@ export class TelegramService {
     if (detectedMediaUrl) {
       extra.mediaType = detectedMediaType;
       extra.mediaUrl = detectedMediaUrl;
+    }
+    if (newContent) {
+      extra.rawText = savedRawText;
+      extra.entities = savedEntities;
     }
 
     await storage.updateTemplate('START_MESSAGE', finalContent, extra);
@@ -17473,40 +17946,58 @@ export class TelegramService {
       buf = Buffer.from(uploadedFile.buffer);
     }
 
-    const formData = new FormData();
-    formData.append('chat_id', String(chatId));
-    if (caption) {
-      formData.append('caption', caption);
-      if (options?.parseMode) formData.append('parse_mode', options.parseMode);
+    let formattedCaption = caption;
+    if (caption && options?.parseMode === 'HTML') {
+      const settingsForEmoji = await storage.getSettings().catch(() => null);
+      formattedCaption = applyCustomEmojisToHtml(caption, getEffectiveCustomEmojiMap(settingsForEmoji?.customEmojiMap, settingsForEmoji?.customEmojiRules));
     }
-    if (options?.threadId) formData.append('message_thread_id', String(options.threadId));
-    if (replyMarkup) formData.append('reply_markup', typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup));
 
-    const blob = new Blob([new Uint8Array(buf)] as any, { type: uploadedFile.mimeType || 'application/octet-stream' });
-    formData.append(fieldName, blob, uploadedFile.fileName || 'file');
+    const safeReplyMarkup = replyMarkup ? sanitizeReplyMarkupForTelegram(replyMarkup) : undefined;
+
+    const buildForm = (cap?: string, docOnly = false) => {
+      const fd = new FormData();
+      fd.append('chat_id', String(chatId));
+      if (cap) {
+        fd.append('caption', cap);
+        if (options?.parseMode) fd.append('parse_mode', options.parseMode);
+      }
+      if (options?.threadId) fd.append('message_thread_id', String(options.threadId));
+      if (safeReplyMarkup) {
+        fd.append('reply_markup', typeof safeReplyMarkup === 'string' ? safeReplyMarkup : JSON.stringify(safeReplyMarkup));
+      }
+      const blob = new Blob([new Uint8Array(buf)] as any, { type: uploadedFile.mimeType || 'application/octet-stream' });
+      fd.append(docOnly ? 'document' : fieldName, blob, uploadedFile.fileName || 'file');
+      return fd;
+    };
 
     try {
       const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
         method: 'POST',
-        body: formData
+        body: buildForm(formattedCaption, false)
       });
       let data = await res.json();
+
+      if (
+        !data.ok &&
+        formattedCaption &&
+        /<tg-emoji\b/i.test(formattedCaption) &&
+        typeof data.description === 'string' &&
+        /custom|emoji|parse entities|can't parse/i.test(data.description)
+      ) {
+        formattedCaption = stripCustomEmojiTags(formattedCaption);
+        const retryRes = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+          method: 'POST',
+          body: buildForm(formattedCaption, false)
+        });
+        data = await retryRes.json();
+      }
       
       // If photo/video/audio method failed, retry automatically as sendDocument!
       if (!data.ok && method !== 'sendDocument') {
         console.warn(`[Telegram] ${method} returned error (${data.description}), falling back to sendDocument...`);
-        const docFormData = new FormData();
-        docFormData.append('chat_id', String(chatId));
-        if (caption) {
-          docFormData.append('caption', caption);
-          if (options?.parseMode) docFormData.append('parse_mode', options.parseMode);
-        }
-        if (options?.threadId) docFormData.append('message_thread_id', String(options.threadId));
-        if (replyMarkup) docFormData.append('reply_markup', typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup));
-        docFormData.append('document', blob, uploadedFile.fileName || 'file');
         const docRes = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
           method: 'POST',
-          body: docFormData
+          body: buildForm(formattedCaption, true)
         });
         data = await docRes.json();
       }
@@ -19099,7 +19590,9 @@ export class TelegramBotManager {
   }
 
   public static async validateCloneToken(token: string): Promise<{ ok: boolean; cleanToken?: string; info?: any; error?: string }> {
-    const cleanToken = token.trim().replace(/^["']|["']$/g, '');
+    const rawClean = token.trim().replace(/^["']|["']$/g, '');
+    const tokenPatternMatch = rawClean.match(/\b(\d{5,16}:[A-Za-z0-9_-]{20,})\b/);
+    const cleanToken = tokenPatternMatch ? tokenPatternMatch[1] : rawClean;
     const verification = await this.verifyBotToken(cleanToken);
     if (!verification.ok || !verification.info) {
       return { ok: false, error: verification.error || 'Invalid bot token' };
@@ -19134,7 +19627,7 @@ export class TelegramBotManager {
     createdBy?: string,
     customBaseUrl?: string,
     ownerInput?: { ownerId?: string; ownerUsername?: string },
-    botMode: BotOperationalMode = 'file_bot'
+    _botMode: BotOperationalMode = 'file_bot'
   ): Promise<{ success: boolean; bot?: ClonedBotRecord; error?: string }> {
     const validation = await this.validateCloneToken(token);
     if (!validation.ok || !validation.info || !validation.cleanToken) {
@@ -19144,9 +19637,8 @@ export class TelegramBotManager {
     const cleanToken = validation.cleanToken;
     const info = validation.info;
     const botId = String(info.id).replace(/[^a-zA-Z0-9]/g, '');
-    const normalizedMode: BotOperationalMode =
-      botMode === 'post_bot' ? 'post_bot' : (botMode === 'image_url_bot' ? 'image_url_bot' : 'file_bot');
-    const isBotOnlyMode = normalizedMode === 'post_bot' || normalizedMode === 'image_url_bot';
+    // Cloned bots operate strictly in File Bot mode only
+    const normalizedMode: BotOperationalMode = 'file_bot';
 
     // Ensure tombstone flags are cleared if this bot ID is being freshly cloned
     this.deletedBotIds.delete(botId);
@@ -19154,7 +19646,7 @@ export class TelegramBotManager {
     this.stoppedBotIds.delete(botId);
     this.stoppedBotIds.delete(`clone_${botId}`);
 
-    // 1. Resolve Telegram admin ID internally (without exposing Admin Panel / Credentials for bot-only modes)
+    // 1. Resolve Clone Bot Owner (ID or @username)
     const mainStorage = StorageManager.getMainStorage();
     const mainSettings = await mainStorage.getSettings().catch(() => ({} as any));
     let ownerId = (ownerInput?.ownerId || '').trim().replace(/^@+/, '');
@@ -19169,8 +19661,36 @@ export class TelegramBotManager {
     if (lookupKey) {
       const foundUser = await mainStorage.findUserByIdOrUsername(lookupKey).catch(() => null);
       if (foundUser) {
-        if (!ownerId && foundUser.id) ownerId = String(foundUser.id).trim();
-        if (!ownerUsername && foundUser.username) ownerUsername = foundUser.username.replace(/^@+/, '').trim();
+        if (!ownerId && foundUser.id && /^\d+$/.test(String(foundUser.id))) {
+          ownerId = String(foundUser.id).trim();
+        }
+        if (!ownerUsername && foundUser.username) {
+          ownerUsername = foundUser.username.replace(/^@+/, '').trim();
+        }
+      }
+      if (!ownerId || !ownerUsername) {
+        const mainAdmins = await mainStorage.getAdmins().catch(() => []);
+        const cleanKey = lookupKey.toLowerCase();
+        const matchedAdmin = mainAdmins.find((a) =>
+          String(a.telegramId || '').trim().toLowerCase() === cleanKey ||
+          String(a.id || '').trim().toLowerCase() === cleanKey ||
+          String(a.username || '').replace(/^@+/, '').trim().toLowerCase() === cleanKey ||
+          String(a.name || '').replace(/^@+/, '').trim().toLowerCase() === cleanKey
+        );
+        if (matchedAdmin) {
+          if (!ownerId && matchedAdmin.telegramId && /^\d+$/.test(String(matchedAdmin.telegramId))) {
+            ownerId = String(matchedAdmin.telegramId).trim();
+          }
+          if (!ownerUsername && matchedAdmin.username) {
+            ownerUsername = matchedAdmin.username.replace(/^@+/, '').trim();
+          }
+        }
+      }
+      if (ownerId && /^\d+$/.test(ownerId) && !ownerUsername) {
+        const chatLookup = await TelegramService.callTelegramApi('getChat', { chat_id: ownerId }).catch(() => null);
+        if (chatLookup?.ok && chatLookup.result?.username) {
+          ownerUsername = String(chatLookup.result.username).replace(/^@+/, '').trim();
+        }
       }
     }
 
@@ -19178,16 +19698,12 @@ export class TelegramBotManager {
     const mainRootAdminId = String(process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || mainSettings?.rootAdminId || '8153757163').trim();
     const resolvedOwnerTelegramId = ownerId || ownerUsername || numericCreatedBy || mainRootAdminId || String(info.id);
 
-    // 2. Generate web sub-admin credentials ONLY for standard File Bot mode (never for Post Bot / Image URL Bot)
-    let adminPassword: string | undefined;
-    let panelUrl: string | undefined;
-    if (!isBotOnlyMode) {
-      const randPart = Math.random().toString(36).substring(2, 6).toUpperCase();
-      const numPart = Math.floor(100 + Math.random() * 900);
-      adminPassword = `Dark#${randPart}${numPart}`;
-      const baseDomain = this.getActiveBaseUrl(customBaseUrl);
-      panelUrl = `${baseDomain}/panel?bot_id=${botId}`;
-    }
+    // 2. Generate CSPRNG Admin Panel credentials for the File Bot clone
+    const randHex = crypto.randomBytes(4).toString('hex').toUpperCase();
+    const randNum = crypto.randomInt(100, 1000);
+    const adminPassword = `Dark#${randHex}${randNum}`;
+    const baseDomain = this.getActiveBaseUrl(customBaseUrl);
+    const panelUrl = `${baseDomain}/panel?bot_id=${botId}`;
 
     const newBot: ClonedBotRecord = {
       id: botId,
@@ -19202,16 +19718,14 @@ export class TelegramBotManager {
       ownerUsername: ownerUsername || undefined,
       filesCount: 0,
       usersCount: 0,
-      ...(isBotOnlyMode ? {} : {
-        adminUsername: botId,
-        adminPassword,
-        panelUrl
-      })
+      adminUsername: botId,
+      adminPassword,
+      panelUrl
     };
 
     await mainStorage.saveClonedBot(newBot);
 
-    // 3. Initialize isolated storage for this cloned bot & persist operational mode + assigned Bot Admin
+    // 3. Initialize isolated storage for this cloned File Bot & persist owner + settings in DATA_DIR
     const botStorage = StorageManager.getStorage(botId);
     await botStorage.init();
     await botStorage.updateSettings({
@@ -19221,47 +19735,29 @@ export class TelegramBotManager {
       botMode: normalizedMode
     });
 
-    if (normalizedMode === 'image_url_bot') {
-      const existingImgData = await botStorage.getImageUrlBotData().catch(() => undefined);
-      await botStorage.saveImageUrlBotData({
-        nextLinkId: Number(existingImgData?.nextLinkId) > 0 ? Number(existingImgData?.nextLinkId) : 1,
-        adminTelegramId: resolvedOwnerTelegramId,
-        adminUsername: ownerUsername || undefined,
-        users: existingImgData?.users || {},
-        links: Array.isArray(existingImgData?.links) ? existingImgData.links : [],
-        userSettings: existingImgData?.userSettings || {},
-        sessions: existingImgData?.sessions || {}
-      });
-    }
+    // 4. Register official Owner strictly inside isolated File Bot storage with full administrative permissions
+    const subAdminAccount: AdminUser = {
+      id: /^\d+$/.test(resolvedOwnerTelegramId) ? resolvedOwnerTelegramId : `owner_${botId}`,
+      telegramId: resolvedOwnerTelegramId,
+      name: ownerUsername ? `@${ownerUsername}` : `${info.first_name || 'Bot'} Owner`,
+      username: ownerUsername || botId,
+      role: 'owner',
+      passwordHash: await hashPassword(adminPassword),
+      permissions: {
+        files_view: true, files_add: true, files_edit: true, files_delete: true,
+        links_view: true, links_add: true, links_edit: true, links_delete: true,
+        messages_view: true, messages_edit: true, admins_manage: true,
+        design_edit: true, settings_edit: true, cleanup_manage: true
+      },
+      enabled: true,
+      createdAt: new Date().toISOString()
+    };
 
-    if (!isBotOnlyMode && adminPassword && panelUrl) {
-      // 4. Register official Owner strictly inside isolated File Bot storage with full administrative permissions
-      const subAdminAccount = {
-        id: /^\d+$/.test(resolvedOwnerTelegramId) ? resolvedOwnerTelegramId : `owner${botId}`,
-        telegramId: resolvedOwnerTelegramId,
-        name: ownerUsername ? `@${ownerUsername}` : `${info.first_name || 'Bot'} Owner`,
-        username: ownerUsername || botId,
-        role: 'owner' as const,
-        passwordHash: await hashPassword(adminPassword),
-        permissions: {
-          files_view: true, files_add: true, files_edit: true, files_delete: true,
-          links_view: true, links_add: true, links_edit: true, links_delete: true,
-          messages_view: true, messages_edit: true, admins_manage: true,
-          design_edit: true, settings_edit: true, cleanup_manage: true
-        },
-        status: 'active' as const,
-        enabled: true,
-        createdAt: new Date().toISOString()
-      };
-
-      await botStorage.saveAdmin(subAdminAccount);
-      await botStorage.persist(true);
-    } else {
-      await botStorage.persist(true);
-    }
+    await botStorage.saveAdmin(subAdminAccount);
+    await botStorage.persist(true);
 
     this.startBotInstance(newBot).catch(() => {});
-    console.info(`[TelegramBotManager] Cloned bot @${newBot.username} (${newBot.id}) started in ${normalizedMode} mode! Admin: ${resolvedOwnerTelegramId}`);
+    console.info(`[TelegramBotManager] Cloned File Bot @${newBot.username} (${newBot.id}) started! Owner: ${resolvedOwnerTelegramId}`);
     return { success: true, bot: newBot };
   }
 
@@ -19277,7 +19773,11 @@ export class TelegramBotManager {
     }
 
     if (this.isBotDeleted(cleanId)) {
-      return { ok: false, botMode: nextMode, error: 'Cloned bot has been deleted.' };
+      return { ok: false, botMode: 'file_bot', error: 'Cloned bot has been deleted.' };
+    }
+
+    if (nextMode !== 'file_bot') {
+      return { ok: false, botMode: 'file_bot', error: 'Cloned bots run strictly in File Bot mode.' };
     }
 
     const mainStorage = StorageManager.getMainStorage();
@@ -19285,34 +19785,18 @@ export class TelegramBotManager {
     const cleanNorm = this.normalizeBotKey(cleanId);
     const target = cloned.find(b => b.id === cleanId || this.normalizeBotKey(b.id) === cleanNorm);
     if (!target) {
-      return { ok: false, botMode: nextMode, error: 'Cloned bot not found.' };
+      return { ok: false, botMode: 'file_bot', error: 'Cloned bot not found.' };
     }
 
-    target.botMode = nextMode;
-    await mainStorage.saveClonedBot({ ...target, botMode: nextMode });
+    target.botMode = 'file_bot';
+    await mainStorage.saveClonedBot({ ...target, botMode: 'file_bot' });
 
     const botStorage = StorageManager.getStorage(target.id);
     await botStorage.init().catch(() => {});
-    const curSettings = await botStorage.updateSettings({ botMode: nextMode });
-    if (nextMode === 'image_url_bot') {
-      const existingImgData = await botStorage.getImageUrlBotData().catch(() => undefined);
-      const fallbackOwner = String(target.ownerId || curSettings.rootAdminId || '').trim();
-      const fallbackUname = String(target.ownerUsername || '').replace(/^@+/, '').trim() || undefined;
-      if (!existingImgData || (!existingImgData.adminTelegramId && fallbackOwner)) {
-        await botStorage.saveImageUrlBotData({
-          nextLinkId: Number(existingImgData?.nextLinkId) > 0 ? Number(existingImgData?.nextLinkId) : 1,
-          adminTelegramId: existingImgData?.adminTelegramId || fallbackOwner || undefined,
-          adminUsername: existingImgData?.adminUsername || fallbackUname,
-          users: existingImgData?.users || {},
-          links: Array.isArray(existingImgData?.links) ? existingImgData.links : [],
-          userSettings: existingImgData?.userSettings || {},
-          sessions: existingImgData?.sessions || {}
-        }).catch(() => {});
-      }
-    }
+    await botStorage.updateSettings({ botMode: 'file_bot' });
 
-    console.info(`[TelegramBotManager] Bot ${target.id} (@${target.username}) switched mode to ${nextMode}`);
-    return { ok: true, botMode: nextMode };
+    console.info(`[TelegramBotManager] Cloned bot ${target.id} (@${target.username}) ensured in file_bot mode`);
+    return { ok: true, botMode: 'file_bot' };
   }
 
   public static async deleteClonedBot(id: string): Promise<boolean> {
@@ -19394,34 +19878,27 @@ export class TelegramBotManager {
     for (const c of cloned) {
       if (this.isBotDeleted(c.id)) continue;
       const cStorage = StorageManager.getStorage(c.id);
-      const cSettings = await cStorage.getSettings().catch(() => ({} as any));
       const cItems = await cStorage.getItems().catch(() => []);
       const cUsers = await cStorage.getBotUsers().catch(() => []);
-      const cleanBotId = String(c.id).replace(/^clone_/i, '').replace(/[:_-]/g, '');
+      const cleanBotId = String(c.adminUsername || c.id).replace(/^clone_/i, '').replace(/[:_-]/g, '');
       const isStopped = c.status === 'stopped' || this.isBotStopped(c.id);
-      const rawEffective = cSettings?.botMode || c.botMode;
-      const effectiveMode: BotOperationalMode =
-        rawEffective === 'post_bot' ? 'post_bot' : (rawEffective === 'image_url_bot' ? 'image_url_bot' : 'file_bot');
-      const isBotOnly = effectiveMode === 'post_bot' || effectiveMode === 'image_url_bot';
       list.push({
         id: c.id,
         name: c.name || `@${c.username}`,
         username: c.username,
         isMain: false,
         status: isStopped ? 'stopped' : 'active',
-        botMode: effectiveMode,
+        botMode: 'file_bot',
         filesCount: cItems.length,
         usersCount: cUsers.length,
         createdAt: c.createdAt,
-        ...(isBotOnly ? {} : {
-          ownerId: c.ownerId,
-          ownerUsername: c.ownerUsername,
-          adminUsername: cleanBotId,
-          adminPassword: c.adminPassword,
-          panelUrl: (c.panelUrl && c.panelUrl.startsWith('http'))
-            ? c.panelUrl
-            : `${this.getActiveBaseUrl()}${c.panelUrl || `/panel?bot_id=${cleanBotId}`}`
-        })
+        ownerId: c.ownerId,
+        ownerUsername: c.ownerUsername,
+        adminUsername: cleanBotId,
+        adminPassword: c.adminPassword,
+        panelUrl: (c.panelUrl && c.panelUrl.startsWith('http'))
+          ? c.panelUrl
+          : `${this.getActiveBaseUrl()}${c.panelUrl || `/panel?bot_id=${cleanBotId}`}`
       });
     }
 

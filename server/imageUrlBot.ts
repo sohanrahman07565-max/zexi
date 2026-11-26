@@ -1120,16 +1120,6 @@ export class ImageUrlBotEngine {
       if (mainSettings?.botMode === 'image_url_bot' && !mainSettings?.botStopped) {
         targets.push({ botId: 'main', storageInstance: mainStorage });
       }
-      const cloned = await mainStorage.getClonedBots().catch(() => []);
-      for (const bot of cloned) {
-        if (bot.status === 'stopped') continue;
-        const cStorage = StorageManager.getStorage(bot.id);
-        const cSettings = await cStorage.getSettings().catch(() => null);
-        const effectiveMode = cSettings?.botMode || bot.botMode || 'file_bot';
-        if (effectiveMode === 'image_url_bot' && bot.token) {
-          targets.push({ botId: bot.id, storageInstance: cStorage, tokenOverride: bot.token });
-        }
-      }
     } catch {
       return;
     }

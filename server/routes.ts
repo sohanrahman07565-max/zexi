@@ -8,6 +8,16 @@ import { storage, StorageManager, storageContext, AdminUser, ItemRecord, ItemFil
 import { TelegramService, TelegramBotManager, BotSingletonLock, getItemPayload } from './telegram';
 import { hashPassword, verifyPassword, signSessionToken, verifySessionToken } from './auth';
 import { FreeFireGuestService } from './ffGuestApi';
+import {
+  CUSTOM_EMOJI_SLOTS,
+  CustomEmojiRule,
+  sanitizeCustomEmojiMap,
+  sanitizeCustomEmojiRules,
+  mergeCustomEmojiRules,
+  buildCustomEmojiMapFromRules,
+  getEffectiveCustomEmojiMap,
+  sanitizeButtonLabel
+} from './customEmoji';
 
 dotenv.config({ override: true });
 
@@ -283,14 +293,9 @@ async function findClonedBotAuth(cleanId: string, requestedBotId?: string): Prom
     return null;
   }
 
-  // Load the targeted cloned bot's isolated storage
+  // Load the targeted cloned bot's isolated storage (all cloned bots operate strictly as File Bot)
   const botStorage = StorageManager.getStorage(target.id);
   await botStorage.loadLatest(false);
-  const targetSettings = await botStorage.getSettings().catch(() => null);
-  const effectiveMode = normalizeBotMode(targetSettings?.botMode || target.botMode);
-  if (effectiveMode === 'post_bot' || effectiveMode === 'image_url_bot') {
-    return null;
-  }
   const botAdmins = await botStorage.getAdmins();
 
   const rawNumericBotId = target.id.replace(/^clone_/, '').toLowerCase();
@@ -312,15 +317,15 @@ async function findClonedBotAuth(cleanId: string, requestedBotId?: string): Prom
     adminUser = botAdmins.find(a => a.role === 'owner');
   }
 
-  if (!adminUser && isTargetBotIdMatch) {
+  if (!adminUser && isTargetBotIdMatch && target.adminPassword) {
     const resolvedTgId = target.ownerId || target.ownerUsername || target.id.replace(/^clone_/, '');
     adminUser = {
       id: /^\d+$/.test(resolvedTgId) ? resolvedTgId : `owner_${target.id.replace(/^clone_/, '')}`,
       telegramId: resolvedTgId,
       name: target.ownerUsername ? `@${target.ownerUsername.replace(/^@+/, '')}` : `${target.name || 'Bot'} Owner`,
-      username: target.id,
+      username: target.ownerUsername ? target.ownerUsername.replace(/^@+/, '') : target.id,
       role: 'owner',
-      passwordHash: await hashPassword(target.adminPassword || 'Dark#Admin123'),
+      passwordHash: await hashPassword(target.adminPassword),
       permissions: {
         files_view: true, files_add: true, files_edit: true, files_delete: true,
         links_view: true, links_add: true, links_edit: true, links_delete: true,
@@ -2091,8 +2096,13 @@ function sanitizeGuestAccountResponse(acc: FreeFireGuestAccountRecord) {
   return {
     id: acc.id,
     guestUid: acc.guestUid,
+    accountName: acc.accountName || 'Guest Account',
     maskedPassword: maskGuestPassword(acc.guestPassword),
     enabled: acc.enabled !== false,
+    isBanned: Boolean(acc.isBanned),
+    ...(acc.banType ? { banType: acc.banType } : {}),
+    ...(acc.banReason ? { banReason: acc.banReason } : {}),
+    ...(acc.banCheckedAt ? { banCheckedAt: acc.banCheckedAt } : {}),
     createdAt: acc.createdAt,
     updatedAt: acc.updatedAt,
     ...(acc.lastUsedAt ? { lastUsedAt: acc.lastUsedAt } : {}),
@@ -2101,9 +2111,80 @@ function sanitizeGuestAccountResponse(acc: FreeFireGuestAccountRecord) {
   };
 }
 
+const guestSyncInFlight = new Map<string, Promise<void>>();
+
+async function syncMissingGuestAccountDetails(forceRefresh: boolean = false): Promise<void> {
+  const storageKey = storage.getDataDir();
+  const existingTask = guestSyncInFlight.get(storageKey);
+  if (existingTask) {
+    await existingTask;
+    if (!forceRefresh) return;
+  }
+
+  const task = (async () => {
+    const accounts = await storage.getGuestAccounts();
+    const targets = forceRefresh
+      ? accounts
+      : accounts.filter(
+          (acc) =>
+            !acc.accountName ||
+            acc.accountName.trim() === '' ||
+            acc.accountName.trim() === 'Guest Account' ||
+            !acc.banCheckedAt
+        );
+
+    for (let i = 0; i < targets.length; i++) {
+      const acc = targets[i];
+      try {
+        const info = await FreeFireGuestService.inspectGuestAccount(acc.guestUid, acc.guestPassword);
+        const nowIso = new Date().toISOString();
+        const updates: Parameters<typeof storage.updateGuestAccount>[1] = {
+          banCheckedAt: nowIso
+        };
+
+        if (info.nameResolved && info.accountName && info.accountName !== 'Guest Account') {
+          updates.accountName = info.accountName;
+        } else if (!acc.accountName) {
+          updates.accountName = 'Guest Account';
+        }
+        if (info.inGameUid) {
+          updates.inGameUid = info.inGameUid;
+        }
+        if (info.isBanned) {
+          updates.isBanned = true;
+          updates.banType = info.banType || 'Permanent';
+          updates.banReason = info.banReason || 'Account Banned';
+        } else if (info.authOk) {
+          updates.isBanned = false;
+          updates.banType = '';
+          updates.banReason = '';
+        }
+
+        await storage.updateGuestAccount(acc.id, updates);
+      } catch {
+        // Keep existing record on transient network failures
+      }
+
+      if (i < targets.length - 1) {
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    }
+  })().finally(() => {
+    if (guestSyncInFlight.get(storageKey) === task) {
+      guestSyncInFlight.delete(storageKey);
+    }
+  });
+
+  guestSyncInFlight.set(storageKey, task);
+  await task;
+}
+
 // GET /api/guest-accounts
-apiRouter.get('/guest-accounts', authenticate, async (_req: Request, res: Response) => {
+apiRouter.get('/guest-accounts', authenticate, async (req: Request, res: Response) => {
   try {
+    const forceRefresh = req.query.refresh === '1' || req.query.refresh === 'true';
+    await syncMissingGuestAccountDetails(forceRefresh).catch(() => {});
+
     const [accounts, settings] = await Promise.all([
       storage.getGuestAccounts(),
       storage.getSettings()
@@ -2117,6 +2198,31 @@ apiRouter.get('/guest-accounts', authenticate, async (_req: Request, res: Respon
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message || 'Failed to load guest accounts' });
+  }
+});
+
+// POST /api/guest-accounts/refresh
+apiRouter.post('/guest-accounts/refresh', authenticate, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).admin as AdminUser;
+    if (admin.role !== 'owner' && !admin.permissions?.settings_edit) {
+      return res.status(403).json({ error: 'Insufficient permissions to refresh guest accounts' });
+    }
+
+    await syncMissingGuestAccountDetails(true);
+    const [accounts, settings] = await Promise.all([
+      storage.getGuestAccounts(),
+      storage.getSettings()
+    ]);
+    return res.json({
+      success: true,
+      enabled: settings?.guestLikesEnabled !== false,
+      total: accounts.length,
+      activeCount: accounts.filter((a) => a.enabled !== false).length,
+      accounts: accounts.map(sanitizeGuestAccountResponse)
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to refresh guest accounts' });
   }
 });
 
@@ -2162,7 +2268,40 @@ apiRouter.post('/guest-accounts', authenticate, async (req: Request, res: Respon
       return res.status(400).json({ error: 'Guest Password is required' });
     }
 
-    const result = await storage.addGuestAccount(guestUid, guestPassword);
+    const validation = await FreeFireGuestService.validateAndResolveGuestAccount(guestUid, guestPassword);
+    if (!validation.ok) {
+      if (validation.code === 'ACCOUNT_BANNED') {
+        const existingList = await storage.getGuestAccounts();
+        const existingMatch = existingList.find((a) => a.guestUid === guestUid);
+        if (existingMatch) {
+          await storage.updateGuestAccount(existingMatch.id, {
+            ...(validation.accountName && validation.accountName !== 'Guest Account' ? { accountName: validation.accountName } : {}),
+            ...(validation.inGameUid ? { inGameUid: validation.inGameUid } : {}),
+            isBanned: true,
+            banType: validation.banType || 'Permanent',
+            banReason: validation.banReason || 'Account Banned',
+            banCheckedAt: new Date().toISOString()
+          });
+        }
+        return res.status(403).json({
+          error: validation.banType ? `Account Banned (${validation.banType})` : 'Account Banned',
+          code: 'ACCOUNT_BANNED',
+          ...(validation.banType ? { banType: validation.banType } : {}),
+          ...(validation.banReason ? { reason: validation.banReason } : {})
+        });
+      }
+      return res.status(401).json({
+        error: 'Unauthorized',
+        code: 'UNAUTHORIZED'
+      });
+    }
+
+    const result = await storage.addGuestAccount(guestUid, guestPassword, {
+      accountName: validation.accountName,
+      inGameUid: validation.inGameUid,
+      isBanned: false,
+      banCheckedAt: new Date().toISOString()
+    });
     const settings = await storage.getSettings();
     return res.json({
       success: true,
@@ -2390,6 +2529,30 @@ export function parseGuestCredentialsFromBuffer(
     }
   }
 
+  // Strategy 3b: Binary / length-prefixed .dat control-byte normalized scan
+  if (results.size === 0) {
+    const spaced = rawBuffer
+      .toString('utf8')
+      .replace(/[\x00-\x1f\x7f-\x9f]+/g, ' ')
+      .replace(/\s+/g, ' ');
+    const uidMatches: Array<{ val: string; idx: number }> = [];
+    const passMatches: Array<{ val: string; idx: number }> = [];
+    const binUidRe = /(?:com\.garena\.msdk\.)?(?:guest_?uid|guestuid|account_?uid)[\s:="']*?(\d{5,25})/gi;
+    const binPassRe = /(?:com\.garena\.msdk\.)?(?:guest_?password|guestpassword|guest_?pass)[\s:="']*?([A-Za-z0-9_!@#$%^&*+=.-]{4,256})/gi;
+    let um: RegExpExecArray | null;
+    while ((um = binUidRe.exec(spaced)) !== null) {
+      uidMatches.push({ val: um[1], idx: um.index });
+    }
+    let pm: RegExpExecArray | null;
+    while ((pm = binPassRe.exec(spaced)) !== null) {
+      passMatches.push({ val: pm[1], idx: pm.index });
+    }
+    const count = Math.min(uidMatches.length, passMatches.length);
+    for (let idx = 0; idx < count; idx++) {
+      addPair(uidMatches[idx].val, passMatches[idx].val);
+    }
+  }
+
   // Strategy 4: Delimited plain-text lines (uid:password / uid|password / uid,password)
   if (results.size === 0) {
     const lines = text.split(/\r?\n/);
@@ -2445,7 +2608,89 @@ apiRouter.post(
         });
       }
 
-      const saved = await storage.addGuestAccountsBatch(detected);
+      const validEntries: Array<{
+        guestUid: string;
+        guestPassword: string;
+        accountName: string;
+        inGameUid?: string;
+        isBanned?: boolean;
+        banType?: string;
+        banReason?: string;
+        banCheckedAt?: string;
+      }> = [];
+      let bannedCount = 0;
+      let unauthorizedCount = 0;
+
+      const existingAccounts = await storage.getGuestAccounts();
+
+      for (let i = 0; i < detected.length; i++) {
+        const entry = detected[i];
+        const validation = await FreeFireGuestService.validateAndResolveGuestAccount(
+          entry.guestUid,
+          entry.guestPassword
+        );
+        const nowIso = new Date().toISOString();
+
+        if (validation.ok) {
+          validEntries.push({
+            guestUid: entry.guestUid,
+            guestPassword: entry.guestPassword,
+            accountName: validation.accountName,
+            ...(validation.inGameUid ? { inGameUid: validation.inGameUid } : {}),
+            isBanned: false,
+            banCheckedAt: nowIso
+          });
+        } else if (validation.code === 'ACCOUNT_BANNED') {
+          bannedCount++;
+          const existingMatch = existingAccounts.find((a) => a.guestUid === entry.guestUid);
+          if (existingMatch) {
+            await storage.updateGuestAccount(existingMatch.id, {
+              ...(validation.accountName && validation.accountName !== 'Guest Account' ? { accountName: validation.accountName } : {}),
+              ...(validation.inGameUid ? { inGameUid: validation.inGameUid } : {}),
+              isBanned: true,
+              banType: validation.banType || 'Permanent',
+              banReason: validation.banReason || 'Account Banned',
+              banCheckedAt: nowIso
+            });
+          }
+        } else {
+          unauthorizedCount++;
+        }
+
+        if (i < detected.length - 1) {
+          await new Promise((r) => setTimeout(r, 150));
+        }
+      }
+
+      if (validEntries.length === 0) {
+        if (bannedCount > 0 && unauthorizedCount === 0) {
+          return res.status(403).json({
+            error: 'Account Banned',
+            code: 'ACCOUNT_BANNED',
+            detectedCount: detected.length,
+            bannedCount,
+            unauthorizedCount
+          });
+        }
+        if (unauthorizedCount > 0 && bannedCount === 0) {
+          return res.status(401).json({
+            error: 'Unauthorized',
+            code: 'UNAUTHORIZED',
+            detectedCount: detected.length,
+            bannedCount,
+            unauthorizedCount
+          });
+        }
+        return res.status(400).json({
+          error: `Account Banned (${bannedCount}) / Unauthorized (${unauthorizedCount})`,
+          code: 'VALIDATION_FAILED',
+          detectedCount: detected.length,
+          bannedCount,
+          unauthorizedCount
+        });
+      }
+
+      const saved = await storage.addGuestAccountsBatch(validEntries);
       const [allAccounts, settings] = await Promise.all([
         storage.getGuestAccounts(),
         storage.getSettings()
@@ -2457,6 +2702,8 @@ apiRouter.post(
         detectedCount: detected.length,
         addedCount: saved.addedCount,
         updatedCount: saved.updatedCount,
+        bannedCount,
+        unauthorizedCount,
         total: saved.total,
         accounts: allAccounts.map(sanitizeGuestAccountResponse)
       });
@@ -2475,7 +2722,17 @@ const handleUpdateGuestAccount = async (req: Request, res: Response) => {
     }
 
     const { guestUid, guest_uid, uid, guestPassword, guest_password, password, enabled } = req.body || {};
-    const updates: { guestUid?: string; guestPassword?: string; enabled?: boolean } = {};
+    const updates: {
+      guestUid?: string;
+      guestPassword?: string;
+      accountName?: string;
+      inGameUid?: string;
+      enabled?: boolean;
+      isBanned?: boolean;
+      banType?: string;
+      banReason?: string;
+      banCheckedAt?: string;
+    } = {};
     if (guestUid !== undefined || guest_uid !== undefined || uid !== undefined) {
       updates.guestUid = String(guestUid ?? guest_uid ?? uid ?? '').trim();
     }
@@ -2487,6 +2744,47 @@ const handleUpdateGuestAccount = async (req: Request, res: Response) => {
     }
     if (enabled !== undefined) {
       updates.enabled = Boolean(enabled);
+    }
+
+    if (updates.guestUid !== undefined || updates.guestPassword !== undefined) {
+      const allAccounts = await storage.getGuestAccounts();
+      const existing = allAccounts.find((a) => a.id === req.params.id);
+      if (!existing) {
+        return res.status(404).json({ error: 'Guest account not found' });
+      }
+      const nextUid = updates.guestUid ?? existing.guestUid;
+      const nextPass = updates.guestPassword ?? existing.guestPassword;
+      const validation = await FreeFireGuestService.validateAndResolveGuestAccount(nextUid, nextPass);
+      if (!validation.ok) {
+        if (validation.code === 'ACCOUNT_BANNED') {
+          await storage.updateGuestAccount(existing.id, {
+            ...(validation.accountName && validation.accountName !== 'Guest Account' ? { accountName: validation.accountName } : {}),
+            ...(validation.inGameUid ? { inGameUid: validation.inGameUid } : {}),
+            isBanned: true,
+            banType: validation.banType || 'Permanent',
+            banReason: validation.banReason || 'Account Banned',
+            banCheckedAt: new Date().toISOString()
+          });
+          return res.status(403).json({
+            error: validation.banType ? `Account Banned (${validation.banType})` : 'Account Banned',
+            code: 'ACCOUNT_BANNED',
+            ...(validation.banType ? { banType: validation.banType } : {}),
+            ...(validation.banReason ? { reason: validation.banReason } : {})
+          });
+        }
+        return res.status(401).json({
+          error: 'Unauthorized',
+          code: 'UNAUTHORIZED'
+        });
+      }
+      updates.accountName = validation.accountName;
+      if (validation.inGameUid) {
+        updates.inGameUid = validation.inGameUid;
+      }
+      updates.isBanned = false;
+      updates.banType = '';
+      updates.banReason = '';
+      updates.banCheckedAt = new Date().toISOString();
     }
 
     const updated = await storage.updateGuestAccount(req.params.id, updates);
@@ -3323,7 +3621,16 @@ apiRouter.put('/templates/:key', authenticate, requirePermission('messages_edit'
   if (typeof content !== 'string') {
     return res.status(400).json({ error: 'Template content must be a string' });
   }
-  await storage.updateTemplate(key, content, { mediaType, mediaUrl, buttons });
+  const isButtonTemplate = key === 'GET_FILE_BUTTON' || key === 'GET_LINK_BUTTON';
+  const safeContent = isButtonTemplate ? sanitizeButtonLabel(content) : content;
+  const safeButtons = Array.isArray(buttons)
+    ? buttons.map((b: any) =>
+        b && typeof b === 'object' && typeof b.text === 'string'
+          ? { ...b, text: sanitizeButtonLabel(b.text) }
+          : b
+      )
+    : buttons;
+  await storage.updateTemplate(key, safeContent, { mediaType, mediaUrl, buttons: safeButtons });
   const updated = await storage.getTemplate(key);
   return res.json({ success: true, template: updated });
 });
@@ -3499,6 +3806,11 @@ apiRouter.get('/settings', authenticate, async (_req: Request, res: Response) =>
     requiredChannels: Array.isArray(settings.requiredChannels) ? settings.requiredChannels : [],
     chatWhitelistEnabled: settings.chatWhitelistEnabled ?? false,
     guestLikesEnabled: settings.guestLikesEnabled !== undefined ? Boolean(settings.guestLikesEnabled) : true,
+    customEmojiRules: mergeCustomEmojiRules(settings.customEmojiRules, settings.customEmojiMap),
+    customEmojiMap: Array.isArray(settings.customEmojiRules)
+      ? buildCustomEmojiMapFromRules(mergeCustomEmojiRules(settings.customEmojiRules, settings.customEmojiMap))
+      : sanitizeCustomEmojiMap(settings.customEmojiMap),
+    effectiveCustomEmojiMap: getEffectiveCustomEmojiMap(settings.customEmojiMap, settings.customEmojiRules),
     allowedChats: (Array.isArray(settings.allowedChats) ? settings.allowedChats : []).map((entry: any) => ({
       ...entry,
       chatId: entry.chatId || entry.id || ''
@@ -3566,6 +3878,15 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
   if (req.body.chatWhitelistEnabled !== undefined) updates.chatWhitelistEnabled = Boolean(req.body.chatWhitelistEnabled);
   if (req.body.guestLikesEnabled !== undefined) updates.guestLikesEnabled = Boolean(req.body.guestLikesEnabled);
   if (req.body.botMode !== undefined) updates.botMode = normalizeBotMode(req.body.botMode);
+  if (req.body.customEmojiRules !== undefined) {
+    const sanitizedRules = sanitizeCustomEmojiRules(req.body.customEmojiRules);
+    updates.customEmojiRules = sanitizedRules;
+    updates.customEmojiMap = buildCustomEmojiMapFromRules(sanitizedRules);
+  } else if (req.body.customEmojiMap !== undefined) {
+    const sanitizedMap = sanitizeCustomEmojiMap(req.body.customEmojiMap);
+    updates.customEmojiMap = sanitizedMap;
+    updates.customEmojiRules = mergeCustomEmojiRules(undefined, sanitizedMap);
+  }
   if (requiredChannels !== undefined) {
     if (Array.isArray(requiredChannels)) {
       updates.requiredChannels = requiredChannels
@@ -3631,12 +3952,73 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
       requiredChannels: Array.isArray(newSettings.requiredChannels) ? newSettings.requiredChannels : [],
       chatWhitelistEnabled: newSettings.chatWhitelistEnabled ?? false,
       guestLikesEnabled: newSettings.guestLikesEnabled !== undefined ? Boolean(newSettings.guestLikesEnabled) : true,
+      customEmojiRules: mergeCustomEmojiRules(newSettings.customEmojiRules, newSettings.customEmojiMap),
+      customEmojiMap: Array.isArray(newSettings.customEmojiRules)
+        ? buildCustomEmojiMapFromRules(mergeCustomEmojiRules(newSettings.customEmojiRules, newSettings.customEmojiMap))
+        : sanitizeCustomEmojiMap(newSettings.customEmojiMap),
+      effectiveCustomEmojiMap: getEffectiveCustomEmojiMap(newSettings.customEmojiMap, newSettings.customEmojiRules),
       allowedChats: (Array.isArray(newSettings.allowedChats) ? newSettings.allowedChats : []).map((entry: any) => ({
         ...entry,
         chatId: entry.chatId || entry.id || ''
       }))
     } 
   });
+});
+
+// =========================================================================
+// CUSTOM EMOJI ID MAPPING ROUTES
+// =========================================================================
+apiRouter.get('/custom-emojis', authenticate, async (_req: Request, res: Response) => {
+  try {
+    const settings = await storage.getSettings();
+    const rules = mergeCustomEmojiRules(settings.customEmojiRules, settings.customEmojiMap);
+    const customEmojiMap = Array.isArray(settings.customEmojiRules)
+      ? buildCustomEmojiMapFromRules(rules)
+      : sanitizeCustomEmojiMap(settings.customEmojiMap);
+    return res.json({
+      success: true,
+      slots: CUSTOM_EMOJI_SLOTS,
+      rules,
+      customEmojiMap,
+      effectiveCustomEmojiMap: getEffectiveCustomEmojiMap(settings.customEmojiMap, settings.customEmojiRules)
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to load custom emojis' });
+  }
+});
+
+apiRouter.put('/custom-emojis', authenticate, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).admin as AdminUser;
+    if (admin.role !== 'owner' && !admin.permissions?.settings_edit && !admin.permissions?.messages_edit) {
+      return res.status(403).json({ error: 'Insufficient permissions to update custom emojis' });
+    }
+    let rules: CustomEmojiRule[];
+    let customEmojiMap: Record<string, string>;
+    if (Array.isArray(req.body?.rules)) {
+      rules = sanitizeCustomEmojiRules(req.body.rules);
+      customEmojiMap = buildCustomEmojiMapFromRules(rules);
+    } else {
+      const rawMap = req.body?.customEmojiMap !== undefined ? req.body.customEmojiMap : req.body;
+      customEmojiMap = sanitizeCustomEmojiMap(rawMap);
+      rules = mergeCustomEmojiRules(undefined, customEmojiMap);
+    }
+    const updated = await storage.updateSettings({
+      customEmojiRules: rules,
+      customEmojiMap
+    });
+    const storedRules = mergeCustomEmojiRules(updated.customEmojiRules, updated.customEmojiMap);
+    const storedMap = buildCustomEmojiMapFromRules(storedRules);
+    return res.json({
+      success: true,
+      slots: CUSTOM_EMOJI_SLOTS,
+      rules: storedRules,
+      customEmojiMap: storedMap,
+      effectiveCustomEmojiMap: getEffectiveCustomEmojiMap(updated.customEmojiMap, updated.customEmojiRules)
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to save custom emojis' });
+  }
 });
 
 // =========================================================================
@@ -4035,7 +4417,10 @@ apiRouter.post('/bots/clone', authenticate, requirePermission('settings_edit'), 
     if (!token || typeof token !== 'string' || !token.trim()) {
       return res.status(400).json({ error: 'Valid Telegram bot token is required' });
     }
-    const normalizedMode = normalizeBotMode(botMode || 'post_bot');
+    if (botMode && botMode !== 'file_bot') {
+      return res.status(400).json({ error: 'Cloned bots only support File Bot mode.' });
+    }
+    const normalizedMode = 'file_bot';
 
     const admin = (req as any).admin;
     const createdBy = admin?.username || admin?.name || 'admin';
@@ -4208,9 +4593,12 @@ const handleBotModeChange = async (req: Request, res: Response) => {
     if (rawMode !== 'file_bot' && rawMode !== 'post_bot' && rawMode !== 'image_url_bot') {
       return res.status(400).json({ error: 'Invalid botMode. Must be "file_bot", "post_bot", or "image_url_bot".' });
     }
+    if (targetId !== 'main' && rawMode !== 'file_bot') {
+      return res.status(400).json({ error: 'Cloned bots only support File Bot mode.' });
+    }
     const result = await TelegramBotManager.setBotMode(targetId, rawMode);
     if (!result.ok) {
-      return res.status(404).json({ error: result.error || 'Bot instance not found.' });
+      return res.status(400).json({ error: result.error || 'Bot instance not found.' });
     }
     invalidateBotInfoCache(targetId);
     const label =
@@ -4297,9 +4685,7 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
           }
         }
 
-        const cStorage = StorageManager.getStorage(currentCloned.id);
-        const cSettings = await cStorage.getSettings().catch(() => ({} as any));
-        const effectiveBotMode = normalizeBotMode(cSettings?.botMode || currentCloned.botMode);
+        const effectiveBotMode = 'file_bot';
 
         const payload = {
           ok: true,
@@ -4823,7 +5209,7 @@ apiRouter.post('/simulate', authenticate, async (req: Request, res: Response) =>
         text: replyText,
         buttons: [
           {
-            text: (btnTpl?.content || (matchedItem.type === 'file' ? 'Get File Privately' : 'Open Privately')).replace(/^🔒\s*/, ''),
+            text: sanitizeButtonLabel(btnTpl?.content || (matchedItem.type === 'file' ? 'Get File Privately' : 'Open Privately')).replace(/^🔒\s*/, ''),
             url: deepLink,
             deepLinkPayload: payload,
             style: 'primary'

@@ -40,6 +40,35 @@ export type GuestBancheckResult =
       error: string;
     };
 
+export type GuestAccountValidationResult =
+  | {
+      ok: true;
+      guestUid: string;
+      inGameUid?: string;
+      accountName: string;
+    }
+  | {
+      ok: false;
+      code: 'ACCOUNT_BANNED' | 'UNAUTHORIZED';
+      error: string;
+      accountName?: string;
+      inGameUid?: string;
+      banType?: string;
+      banReason?: string;
+    };
+
+export interface GuestAccountInspectionResult {
+  authOk: boolean;
+  guestUid: string;
+  inGameUid?: string;
+  accountName: string;
+  nameResolved: boolean;
+  isBanned: boolean;
+  banType?: string;
+  banReason?: string;
+  unauthorized?: boolean;
+}
+
 function isPresent(val: unknown): boolean {
   if (val === null || val === undefined) return false;
   if (typeof val === 'string') {
@@ -96,6 +125,7 @@ function extractBanMeta(
     json?.banUntil ??
     json?.expires_at ??
     json?.expire_at ??
+    json?.period ??
     container?.ban_time ??
     container?.banTime ??
     container?.ban_duration ??
@@ -103,9 +133,11 @@ function extractBanMeta(
     container?.remaining_time ??
     container?.ban_until ??
     container?.expires_at ??
+    container?.period ??
     pObj?.ban_time ??
     pObj?.ban_duration ??
-    pObj?.ban_until;
+    pObj?.ban_until ??
+    pObj?.period;
 
   const rawMsg =
     typeof json?.msg === 'string' &&
@@ -130,7 +162,7 @@ function extractBanMeta(
   if (isPresent(rawBanType)) {
     const s = String(rawBanType).trim();
     banType = /temp/i.test(s) ? 'Temporary' : /perm/i.test(s) ? 'Permanent' : s;
-  } else if (isPresent(rawBanTime) && !/^(perm|permanent|forever|lifetime|0)$/i.test(String(rawBanTime).trim())) {
+  } else if (isPresent(rawBanTime) && !/^(perm|permanent|forever|lifetime|0|-1)$/i.test(String(rawBanTime).trim())) {
     banType = 'Temporary';
   }
 
@@ -381,76 +413,101 @@ export class FreeFireGuestService {
     | { ok: true; session: GuestSessionRecord }
     | { ok: false; code: 'INVALID_GUEST_CREDENTIALS'; error: string }
   > {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 14000);
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 14000);
 
-      const formParams = new URLSearchParams({
-        uid: creds.guestUid,
-        password: creds.guestPassword,
-        response_type: 'token',
-        client_id: '100067',
-        client_type: '2',
-        redirect_uri: 'https://api.ff.garena.co.id/auth/auth/callback_n?site=https://api-ticket.ff.garena.co.id'
-      });
+        const formParams = new URLSearchParams({
+          uid: creds.guestUid,
+          password: creds.guestPassword,
+          response_type: 'token',
+          client_id: '100067',
+          client_type: '2',
+          redirect_uri: 'https://api.ff.garena.co.id/auth/auth/callback_n?site=https://api-ticket.ff.garena.co.id'
+        });
 
-      const res = await fetch(creds.loginUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          Accept: 'application/json',
-          'User-Agent': 'GarenaMSDK/4.0.19P8(Redmi Note 8 ;Android 11;en;US;)'
-        },
-        body: formParams.toString(),
-        signal: controller.signal
-      });
-      clearTimeout(timer);
+        const res = await fetch(creds.loginUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            Accept: 'application/json',
+            'User-Agent': 'GarenaMSDK/4.0.19P8(Redmi Note 8 ;Android 11;en;US;)'
+          },
+          body: formParams.toString(),
+          signal: controller.signal
+        });
+        clearTimeout(timer);
 
-      const json: any = await res.json().catch(() => null);
-      const token =
-        json?.access_token ||
-        json?.token ||
-        json?.jwt ||
-        json?.data?.access_token ||
-        json?.data?.token;
+        const json: any = await res.json().catch(() => null);
+        const token =
+          json?.access_token ||
+          json?.token ||
+          json?.jwt ||
+          json?.data?.access_token ||
+          json?.data?.token;
 
-      if (!res.ok || !token || typeof token !== 'string') {
-        const errCode = String(json?.error || json?.msg || '').trim();
+        if (!res.ok || !token || typeof token !== 'string') {
+          if ((res.status === 429 || res.status >= 500) && attempt < 2) {
+            await new Promise((r) => setTimeout(r, 350));
+            continue;
+          }
+          const errCode = [
+            json?.error,
+            json?.error_description,
+            json?.msg,
+            json?.message,
+            json?.reason
+          ]
+            .filter((v) => typeof v === 'string' && v.trim())
+            .join(' ')
+            .trim();
+          return {
+            ok: false,
+            code: 'INVALID_GUEST_CREDENTIALS',
+            error: errCode
+              ? `Free Fire Guest login rejected (${errCode}). Verify FF_GUEST_UID and FF_GUEST_PASSWORD.`
+              : 'Free Fire Guest login failed. Verify FF_GUEST_UID and FF_GUEST_PASSWORD in .env.'
+          };
+        }
+
+        const now = Date.now();
+        const expiresInSec = Number(json?.expires_in || json?.data?.expires_in || 0);
+        const jwtExp = decodeJwtExpMs(token);
+        const expiresAt =
+          jwtExp && jwtExp > now
+            ? jwtExp
+            : now + (Number.isFinite(expiresInSec) && expiresInSec > 60 ? expiresInSec * 1000 : 6 * 3600 * 1000);
+
+        const session: GuestSessionRecord = {
+          token,
+          openId: String(json?.open_id || json?.data?.open_id || creds.guestOpenId || '').trim() || undefined,
+          guestUid: creds.guestUid,
+          obtainedAt: now,
+          expiresAt,
+          source: 'guest_login',
+          credentialFingerprint: creds.fingerprint
+        };
+
+        return { ok: true, session };
+      } catch (err: any) {
+        if (attempt < 2) {
+          await new Promise((r) => setTimeout(r, 350));
+          continue;
+        }
         return {
           ok: false,
           code: 'INVALID_GUEST_CREDENTIALS',
-          error: errCode
-            ? `Free Fire Guest login rejected (${errCode}). Verify FF_GUEST_UID and FF_GUEST_PASSWORD.`
-            : 'Free Fire Guest login failed. Verify FF_GUEST_UID and FF_GUEST_PASSWORD in .env.'
+          error: `Free Fire Guest authentication request failed: ${err?.message || 'network error'}`
         };
       }
-
-      const now = Date.now();
-      const expiresInSec = Number(json?.expires_in || json?.data?.expires_in || 0);
-      const jwtExp = decodeJwtExpMs(token);
-      const expiresAt =
-        jwtExp && jwtExp > now
-          ? jwtExp
-          : now + (Number.isFinite(expiresInSec) && expiresInSec > 60 ? expiresInSec * 1000 : 6 * 3600 * 1000);
-
-      const session: GuestSessionRecord = {
-        token,
-        openId: String(json?.open_id || json?.data?.open_id || creds.guestOpenId || '').trim() || undefined,
-        guestUid: creds.guestUid,
-        obtainedAt: now,
-        expiresAt,
-        source: 'guest_login',
-        credentialFingerprint: creds.fingerprint
-      };
-
-      return { ok: true, session };
-    } catch (err: any) {
-      return {
-        ok: false,
-        code: 'INVALID_GUEST_CREDENTIALS',
-        error: `Free Fire Guest authentication request failed: ${err?.message || 'network error'}`
-      };
     }
+
+    return {
+      ok: false,
+      code: 'INVALID_GUEST_CREDENTIALS',
+      error: 'Free Fire Guest authentication failed.'
+    };
   }
 
   private static async fetchPlayerProfile(
@@ -889,7 +946,110 @@ export class FreeFireGuestService {
     return { jwtToken, serverUrl, accountRegion };
   }
 
-  private static async resolveOpenIdFromToken(accessToken: string): Promise<string | undefined> {
+  private static extractMajorLoginDetails(buf: Buffer): {
+    jwtToken?: string;
+    serverUrl?: string;
+    accountRegion?: string;
+    inGameUid?: string;
+    nickname?: string;
+    isBannedHint: boolean;
+  } {
+    const base = this.extractLoginTokenAndUrl(buf);
+    const strings = this.extractProtobufStrings(buf);
+    const rawUtf8 = buf.toString('utf8');
+    const isBannedHint =
+      strings.some((s) => /\b(banned|account_banned|suspended|t_p_ban)\b/i.test(s)) ||
+      /\b(account_banned|t_p_ban|err_account_banned)\b/i.test(rawUtf8);
+
+    let inGameUid: string | undefined;
+    let nickname: string | undefined;
+    let accountRegion = base.accountRegion;
+
+    if (base.jwtToken) {
+      try {
+        const parts = base.jwtToken.split('.');
+        if (parts.length === 3) {
+          const payloadJson = Buffer.from(parts[1], 'base64url').toString('utf8');
+          const payload = JSON.parse(payloadJson);
+          const rawId = payload?.account_id ?? payload?.accountId ?? payload?.uid;
+          if (rawId !== undefined && rawId !== null && /^\d{5,20}$/.test(String(rawId).trim())) {
+            inGameUid = String(rawId).trim();
+          }
+          const rawNick = payload?.nickname ?? payload?.name ?? payload?.account_name ?? payload?.username;
+          if (isPresent(rawNick)) {
+            nickname = String(rawNick).trim();
+          }
+          const rawReg = payload?.lock_region ?? payload?.noti_region ?? payload?.region;
+          if (!accountRegion && isPresent(rawReg)) {
+            accountRegion = String(rawReg).trim().toUpperCase();
+          }
+        }
+      } catch {}
+    }
+
+    // Fallback: parse top-level protobuf field 1 (varint uint64 account_id) from MajorLoginRes
+    if (!inGameUid && buf.length > 2) {
+      try {
+        let pos = 0;
+        while (pos < buf.length) {
+          let tag = 0n;
+          let shift = 0n;
+          while (pos < buf.length && shift <= 56n) {
+            const b = BigInt(buf[pos++]);
+            tag |= (b & 0x7fn) << shift;
+            if ((b & 0x80n) === 0n) break;
+            shift += 7n;
+          }
+          const fieldNum = Number(tag >> 3n);
+          const wireType = Number(tag & 0x07n);
+          if (wireType === 0) {
+            let val = 0n;
+            let vShift = 0n;
+            while (pos < buf.length && vShift <= 63n) {
+              const b = BigInt(buf[pos++]);
+              val |= (b & 0x7fn) << vShift;
+              if ((b & 0x80n) === 0n) break;
+              vShift += 7n;
+            }
+            if (fieldNum === 1 && val >= 10000n) {
+              inGameUid = val.toString();
+              break;
+            }
+          } else if (wireType === 1) {
+            pos += 8;
+          } else if (wireType === 2) {
+            let len = 0;
+            let lShift = 0;
+            while (pos < buf.length && lShift <= 35) {
+              const b = buf[pos++];
+              len += (b & 0x7f) * 2 ** lShift;
+              if ((b & 0x80) === 0) break;
+              lShift += 7;
+            }
+            if (len < 0 || pos + len > buf.length) break;
+            pos += len;
+          } else if (wireType === 5) {
+            pos += 4;
+          } else {
+            break;
+          }
+        }
+      } catch {}
+    }
+
+    return {
+      jwtToken: base.jwtToken,
+      serverUrl: base.serverUrl,
+      accountRegion,
+      inGameUid,
+      nickname,
+      isBannedHint
+    };
+  }
+
+  private static async resolveTokenInspectInfo(
+    accessToken: string
+  ): Promise<{ openId?: string; nickname?: string; uid?: string }> {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 10000);
@@ -906,11 +1066,531 @@ export class FreeFireGuestService {
       );
       clearTimeout(timer);
       const json: any = await res.json().catch(() => null);
-      const openId = String(json?.open_id || json?.openId || json?.data?.open_id || '').trim();
-      return openId || undefined;
+      const openId = String(json?.open_id || json?.openId || json?.data?.open_id || '').trim() || undefined;
+      const rawNick = json?.nickname ?? json?.name ?? json?.username ?? json?.data?.nickname ?? json?.data?.name;
+      const nickname = isPresent(rawNick) ? String(rawNick).trim() : undefined;
+      const rawUid = json?.uid ?? json?.account_id ?? json?.data?.uid;
+      const uid = rawUid && /^\d{5,20}$/.test(String(rawUid).trim()) ? String(rawUid).trim() : undefined;
+      return { openId, nickname, uid };
     } catch {
-      return undefined;
+      return {};
     }
+  }
+
+  private static async resolveOpenIdFromToken(accessToken: string): Promise<string | undefined> {
+    const info = await this.resolveTokenInspectInfo(accessToken);
+    return info.openId;
+  }
+
+  private static async checkDirectBanStatus(
+    uid: string,
+    session?: GuestSessionRecord
+  ): Promise<{
+    notFound?: boolean;
+    isBanned: boolean | null;
+    banType?: string;
+    banReason?: string;
+    playerName?: string;
+  }> {
+    const cleanUid = String(uid || '').trim();
+    if (!/^\d{5,20}$/.test(cleanUid)) {
+      return { isBanned: null };
+    }
+
+    const upstreamOverride = (process.env.FF_BANCHECK_UPSTREAM_URL || '').trim();
+    const targetUrl = upstreamOverride
+      ? (upstreamOverride.includes('{uid}')
+          ? upstreamOverride.replace(/\{uid\}/g, encodeURIComponent(cleanUid))
+          : `${upstreamOverride}${upstreamOverride.includes('?') ? '&' : '?'}uid=${encodeURIComponent(cleanUid)}`)
+      : `https://ff.garena.com/api/antihack/check_banned?lang=en&uid=${encodeURIComponent(cleanUid)}`;
+
+    const headers: Record<string, string> = {
+      Accept: 'application/json',
+      'User-Agent': 'Mozilla/5.0'
+    };
+    if (!upstreamOverride) {
+      headers.Referer = 'https://ff.garena.com/en/support/';
+      headers['x-requested-with'] = 'B6FksShzIgjfrYImLpTsadjS86sddhFH';
+    }
+    if (session?.token) {
+      headers.Authorization = `Bearer ${session.token}`;
+      if (session.openId) headers['X-Open-Id'] = session.openId;
+      if (session.guestUid) headers['X-Guest-Uid'] = session.guestUid;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(targetUrl, { method: 'GET', headers, signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) return { isBanned: null };
+
+      const json: any = await res.json().catch(() => null);
+      if (!json) return { isBanned: null };
+      if (json?.msg === 'T_P_WRONG_ACCOUNT') {
+        return { notFound: true, isBanned: null };
+      }
+
+      const container = json?.data && typeof json.data === 'object' ? json.data : json;
+      const rawStatus =
+        json?.is_banned ??
+        json?.isBanned ??
+        json?.banned ??
+        container?.is_banned ??
+        container?.isBanned ??
+        container?.banned ??
+        (json?.status !== 'success' && json?.status !== 'error' ? json?.status : undefined);
+      const isBanned = parseBanBoolean(rawStatus);
+      const pObj = json?.player && typeof json.player === 'object' ? json.player : container;
+      const banMeta = extractBanMeta(json, container, pObj, isBanned);
+      const playerName = isPresent(pObj?.username || pObj?.nickname || pObj?.name)
+        ? String(pObj.username || pObj.nickname || pObj.name).trim()
+        : undefined;
+
+      return {
+        isBanned,
+        banType: banMeta.banType,
+        banReason: banMeta.banReason,
+        playerName
+      };
+    } catch {
+      return { isBanned: null };
+    }
+  }
+
+  private static extractPlayerStatsFromPersonalShow(buf: Buffer): {
+    nickname?: string;
+    region?: string;
+    likes?: number;
+  } {
+    const readFields = (slice: Buffer): Array<{ fieldNum: number; wireType: number; varint?: bigint; data?: Buffer }> => {
+      const fields: Array<{ fieldNum: number; wireType: number; varint?: bigint; data?: Buffer }> = [];
+      let pos = 0;
+      const readVarBig = (): bigint | null => {
+        let res = 0n;
+        let shift = 0n;
+        while (pos < slice.length && shift <= 63n) {
+          const b = BigInt(slice[pos++]);
+          res |= (b & 0x7fn) << shift;
+          if ((b & 0x80n) === 0n) return res;
+          shift += 7n;
+        }
+        return null;
+      };
+      while (pos < slice.length) {
+        const tag = readVarBig();
+        if (tag === null) break;
+        const fieldNum = Number(tag >> 3n);
+        const wireType = Number(tag & 0x07n);
+        if (wireType === 0) {
+          const val = readVarBig();
+          if (val === null) break;
+          fields.push({ fieldNum, wireType, varint: val });
+        } else if (wireType === 1) {
+          pos += 8;
+        } else if (wireType === 2) {
+          const lenBig = readVarBig();
+          if (lenBig === null) break;
+          const len = Number(lenBig);
+          if (!Number.isFinite(len) || len < 0 || pos + len > slice.length) break;
+          const data = slice.subarray(pos, pos + len);
+          pos += len;
+          fields.push({ fieldNum, wireType, data });
+        } else if (wireType === 5) {
+          pos += 4;
+        } else {
+          break;
+        }
+      }
+      return fields;
+    };
+
+    try {
+      const topFields = readFields(buf);
+      const basicInfo = topFields.find((f) => f.fieldNum === 1 && f.wireType === 2 && f.data);
+      if (basicInfo?.data) {
+        const innerFields = readFields(basicInfo.data);
+        let nickname: string | undefined;
+        let region: string | undefined;
+        let likes: number | undefined;
+
+        const nickField = innerFields.find((f) => f.fieldNum === 3 && f.wireType === 2 && f.data);
+        if (nickField?.data && nickField.data.length > 0 && nickField.data.length <= 64) {
+          const text = nickField.data.toString('utf8').replace(/\0/g, '').trim();
+          if (isPresent(text) && !/^https?:\/\//i.test(text)) {
+            nickname = text;
+          }
+        }
+
+        const regionField = innerFields.find((f) => f.fieldNum === 5 && f.wireType === 2 && f.data);
+        if (regionField?.data && regionField.data.length > 0 && regionField.data.length <= 16) {
+          const regText = regionField.data.toString('utf8').replace(/\0/g, '').trim().toUpperCase();
+          if (/^[A-Z]{2,6}$/.test(regText)) {
+            region = regText;
+          }
+        }
+
+        const likesField = innerFields.find((f) => f.fieldNum === 21 && f.wireType === 0 && f.varint !== undefined);
+        if (likesField?.varint !== undefined) {
+          const likesNum = Number(likesField.varint);
+          if (Number.isFinite(likesNum) && likesNum >= 0) {
+            likes = likesNum;
+          }
+        }
+
+        return { nickname, region, likes };
+      }
+    } catch {}
+    return {};
+  }
+
+  private static extractNicknameFromPersonalShow(buf: Buffer): string | undefined {
+    return this.extractPlayerStatsFromPersonalShow(buf).nickname;
+  }
+
+  private static async fetchPlayerStatsViaGameServer(
+    serverUrl: string,
+    jwtToken: string,
+    targetUid: string
+  ): Promise<{ nickname?: string; region?: string; likes?: number }> {
+    if (!serverUrl || !jwtToken || !/^\d{5,20}$/.test(targetUid)) return {};
+    try {
+      const payload = Buffer.concat([
+        this.encodeProtobufVarintField(1, BigInt(targetUid)),
+        this.encodeProtobufVarintField(2, 1)
+      ]);
+      const encrypted = this.aesEncryptFreeFire(payload);
+      const endpoint = `${serverUrl.replace(/\/+$/, '')}/GetPlayerPersonalShow`;
+      const releaseVer = (process.env.FF_RELEASE_VERSION || 'OB49').trim() || 'OB49';
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 11; Redmi Note 8 Build/RKQ1.200826.002)',
+          Connection: 'Keep-Alive',
+          'Accept-Encoding': 'gzip',
+          Authorization: `Bearer ${jwtToken}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Unity-Version': '2018.4.11f1',
+          'X-GA': 'v1 1',
+          ReleaseVersion: releaseVer
+        },
+        body: new Uint8Array(encrypted),
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+
+      if (!res.ok) return {};
+      const rawBuf = Buffer.from(await res.arrayBuffer());
+      if (rawBuf.length === 0) return {};
+      return this.extractPlayerStatsFromPersonalShow(rawBuf);
+    } catch {
+      return {};
+    }
+  }
+
+  private static async fetchPlayerNameViaGameServer(
+    serverUrl: string,
+    jwtToken: string,
+    inGameUid: string
+  ): Promise<string | undefined> {
+    const stats = await this.fetchPlayerStatsViaGameServer(serverUrl, jwtToken, inGameUid);
+    return stats.nickname;
+  }
+
+  private static async performMajorLoginHandshake(session: GuestSessionRecord): Promise<{
+    ok: boolean;
+    banned?: boolean;
+    unauthorized?: boolean;
+    jwtToken?: string;
+    serverUrl?: string;
+    accountRegion?: string;
+    inGameUid?: string;
+    nickname?: string;
+    error?: string;
+  }> {
+    const openId = session.openId || (await this.resolveOpenIdFromToken(session.token)) || session.guestUid || '';
+    const loginPayload = this.aesEncryptFreeFire(this.buildMajorLoginPayload(openId, session.token));
+
+    const loginEndpoints = [
+      'https://loginbp.ggblueshark.com/MajorLogin',
+      'https://loginbp.common.ggbluefox.com/MajorLogin'
+    ];
+
+    let lastErr = 'MajorLogin handshake failed';
+    let sawUnauthorized = false;
+    let preservedUid: string | undefined;
+    let preservedNick: string | undefined;
+    let preservedRegion: string | undefined;
+
+    for (const loginEndpoint of loginEndpoints) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 12000);
+        const res = await fetch(loginEndpoint, {
+          method: 'POST',
+          headers: {
+            'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 11; Redmi Note 8 Build/RKQ1.200826.002)',
+            Connection: 'Keep-Alive',
+            'Accept-Encoding': 'gzip',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-Unity-Version': '2018.4.11f1',
+            'X-GA': 'v1 1',
+            ReleaseVersion: 'OB49'
+          },
+          body: new Uint8Array(loginPayload),
+          signal: controller.signal
+        });
+        clearTimeout(timer);
+
+        const rawBuf = Buffer.from(await res.arrayBuffer());
+        const rawText = rawBuf.toString('utf8');
+        const details = rawBuf.length > 0 ? this.extractMajorLoginDetails(rawBuf) : { isBannedHint: false };
+
+        if (details.inGameUid && !preservedUid) preservedUid = details.inGameUid;
+        if (details.nickname && !preservedNick) preservedNick = details.nickname;
+        if (details.accountRegion && !preservedRegion) preservedRegion = details.accountRegion;
+
+        if (/\b(banned|account_banned|suspended|t_p_ban)\b/i.test(rawText) || details.isBannedHint) {
+          return {
+            ok: false,
+            banned: true,
+            inGameUid: preservedUid,
+            nickname: preservedNick,
+            accountRegion: preservedRegion,
+            error: 'Account Banned'
+          };
+        }
+
+        if (res.status === 401 || res.status === 403) {
+          sawUnauthorized = true;
+          lastErr = `MajorLogin HTTP ${res.status}`;
+          continue;
+        }
+
+        if (!res.ok || rawBuf.length === 0) {
+          lastErr = `MajorLogin HTTP ${res.status}`;
+          continue;
+        }
+
+        if (details.jwtToken) {
+          return {
+            ok: true,
+            jwtToken: details.jwtToken,
+            serverUrl: details.serverUrl || this.getRegionServerUrl(details.accountRegion || 'IND'),
+            accountRegion: details.accountRegion || 'IND',
+            inGameUid: details.inGameUid,
+            nickname: details.nickname
+          };
+        }
+      } catch (err: any) {
+        lastErr = err?.message || 'MajorLogin network error';
+      }
+    }
+
+    return {
+      ok: false,
+      unauthorized: sawUnauthorized,
+      inGameUid: preservedUid,
+      nickname: preservedNick,
+      accountRegion: preservedRegion,
+      error: lastErr
+    };
+  }
+
+  public static async inspectGuestAccount(
+    guestUid: string,
+    guestPassword: string
+  ): Promise<GuestAccountInspectionResult> {
+    const cleanUid = String(guestUid || '').trim();
+    const cleanPassword = String(guestPassword || '').trim();
+
+    if (!cleanUid || !cleanPassword) {
+      return {
+        authOk: false,
+        guestUid: cleanUid,
+        accountName: 'Guest Account',
+        nameResolved: false,
+        isBanned: false,
+        unauthorized: true
+      };
+    }
+
+    const authRes = await this.authenticateGuestCredentials(cleanUid, cleanPassword);
+    if (!authRes.ok) {
+      const authBanMatch = /\b(ban|banned|suspend|suspended|freeze|locked)\b/i.test(authRes.error || '');
+      let directBan: {
+        notFound?: boolean;
+        isBanned: boolean | null;
+        banType?: string;
+        banReason?: string;
+        playerName?: string;
+      } = { isBanned: null };
+      let liveName = '';
+
+      if (/^\d{5,20}$/.test(cleanUid)) {
+        const [banCheck, livePlayer] = await Promise.all([
+          this.checkDirectBanStatus(cleanUid).catch(() => ({ isBanned: null as boolean | null })),
+          this.fetchLivePlayerForLike(cleanUid).catch(() => null)
+        ]);
+        directBan = banCheck;
+        if (livePlayer?.found && isPresent(livePlayer.name) && livePlayer.name !== 'Unknown') {
+          liveName = livePlayer.name;
+        }
+        if (!liveName && isPresent((banCheck as any)?.playerName)) {
+          liveName = String((banCheck as any).playerName).trim();
+        }
+      }
+
+      if (authBanMatch || directBan.isBanned === true) {
+        return {
+          authOk: false,
+          guestUid: cleanUid,
+          accountName: liveName || 'Guest Account',
+          nameResolved: Boolean(liveName),
+          isBanned: true,
+          banType: directBan.banType || 'Permanent',
+          banReason: directBan.banReason || 'Account Banned'
+        };
+      }
+
+      return {
+        authOk: false,
+        guestUid: cleanUid,
+        accountName: liveName || 'Guest Account',
+        nameResolved: Boolean(liveName),
+        isBanned: false,
+        unauthorized: true
+      };
+    }
+
+    const [majorRes, inspectInfo] = await Promise.all([
+      this.performMajorLoginHandshake(authRes.session),
+      this.resolveTokenInspectInfo(authRes.session.token)
+    ]);
+
+    const candidateUid =
+      majorRes.inGameUid ||
+      inspectInfo.uid ||
+      (/^\d{5,20}$/.test(cleanUid) ? cleanUid : '');
+
+    let isBanned = Boolean(majorRes.banned);
+    let banType: string | undefined = isBanned ? 'Permanent' : undefined;
+    let banReason: string | undefined = isBanned ? 'Account Banned' : undefined;
+    let banPlayerName: string | undefined;
+
+    if (candidateUid) {
+      const banRes = await this.checkDirectBanStatus(candidateUid, authRes.session);
+      if (isPresent(banRes.playerName)) banPlayerName = banRes.playerName;
+      if (banRes.isBanned === true) {
+        isBanned = true;
+        banType = banRes.banType || 'Permanent';
+        banReason = banRes.banReason || 'Account Banned';
+      } else if (banRes.isBanned === null && candidateUid !== cleanUid && /^\d{5,20}$/.test(cleanUid)) {
+        const cleanBanRes = await this.checkDirectBanStatus(cleanUid, authRes.session);
+        if (!banPlayerName && isPresent(cleanBanRes.playerName)) banPlayerName = cleanBanRes.playerName;
+        if (cleanBanRes.isBanned === true) {
+          isBanned = true;
+          banType = cleanBanRes.banType || 'Permanent';
+          banReason = cleanBanRes.banReason || 'Account Banned';
+        }
+      }
+    }
+
+    let resolvedName = '';
+    if (candidateUid) {
+      const livePlayer = await this.fetchLivePlayerForLike(candidateUid).catch(() => null);
+      if (livePlayer?.found && isPresent(livePlayer.name) && livePlayer.name !== 'Unknown') {
+        resolvedName = livePlayer.name;
+      }
+      if (!isBanned && livePlayer?.isBanned === true) {
+        isBanned = true;
+        banType = banType || 'Permanent';
+        banReason = banReason || 'Account Banned';
+      }
+    }
+
+    if (!resolvedName && /^\d{5,20}$/.test(cleanUid) && candidateUid !== cleanUid) {
+      const liveCleanPlayer = await this.fetchLivePlayerForLike(cleanUid).catch(() => null);
+      if (liveCleanPlayer?.found && isPresent(liveCleanPlayer.name) && liveCleanPlayer.name !== 'Unknown') {
+        resolvedName = liveCleanPlayer.name;
+      }
+      if (!isBanned && liveCleanPlayer?.isBanned === true) {
+        isBanned = true;
+        banType = banType || 'Permanent';
+        banReason = banReason || 'Account Banned';
+      }
+    }
+
+    if (!resolvedName && majorRes.jwtToken && majorRes.serverUrl && candidateUid) {
+      const showName = await this.fetchPlayerNameViaGameServer(
+        majorRes.serverUrl,
+        majorRes.jwtToken,
+        candidateUid
+      ).catch(() => undefined);
+      if (isPresent(showName)) {
+        resolvedName = showName!;
+      }
+    }
+
+    if (!resolvedName && isPresent(banPlayerName)) {
+      resolvedName = banPlayerName!;
+    }
+    if (!resolvedName && isPresent(majorRes.nickname)) {
+      resolvedName = majorRes.nickname!;
+    }
+    if (!resolvedName && isPresent(inspectInfo.nickname)) {
+      resolvedName = inspectInfo.nickname!;
+    }
+
+    const isUnauth = Boolean(!isBanned && majorRes.unauthorized && !majorRes.jwtToken);
+
+    return {
+      authOk: !isBanned && !isUnauth,
+      guestUid: cleanUid,
+      ...(candidateUid ? { inGameUid: candidateUid } : {}),
+      accountName: resolvedName || 'Guest Account',
+      nameResolved: Boolean(resolvedName),
+      isBanned,
+      ...(isBanned ? { banType: banType || 'Permanent', banReason: banReason || 'Account Banned' } : {}),
+      ...(isUnauth ? { unauthorized: true } : {})
+    };
+  }
+
+  public static async validateAndResolveGuestAccount(
+    guestUid: string,
+    guestPassword: string
+  ): Promise<GuestAccountValidationResult> {
+    const inspected = await this.inspectGuestAccount(guestUid, guestPassword);
+
+    if (inspected.isBanned) {
+      return {
+        ok: false,
+        code: 'ACCOUNT_BANNED',
+        error: 'Account Banned',
+        accountName: inspected.accountName,
+        ...(inspected.inGameUid ? { inGameUid: inspected.inGameUid } : {}),
+        banType: inspected.banType || 'Permanent',
+        banReason: inspected.banReason || 'Account Banned'
+      };
+    }
+
+    if (!inspected.authOk || inspected.unauthorized) {
+      return {
+        ok: false,
+        code: 'UNAUTHORIZED',
+        error: 'Unauthorized'
+      };
+    }
+
+    return {
+      ok: true,
+      guestUid: inspected.guestUid,
+      ...(inspected.inGameUid ? { inGameUid: inspected.inGameUid } : {}),
+      accountName: inspected.accountName
+    };
   }
 
   public static async authenticateGuestCredentials(
@@ -1044,66 +1724,29 @@ export class FreeFireGuestService {
     session: GuestSessionRecord,
     targetUid: string,
     regionCode: string
-  ): Promise<{ ok: boolean; error?: string }> {
-    const openId = session.openId || (await this.resolveOpenIdFromToken(session.token)) || session.guestUid || '';
-    const loginPayload = this.aesEncryptFreeFire(this.buildMajorLoginPayload(openId, session.token));
-
-    const loginEndpoints = [
-      'https://loginbp.ggblueshark.com/MajorLogin',
-      'https://loginbp.common.ggbluefox.com/MajorLogin'
-    ];
-
-    let jwtToken: string | undefined;
-    let serverUrl: string | undefined;
-    let accountRegion = regionCode;
-    let lastLoginErr = 'MajorLogin handshake failed';
-
-    for (const loginEndpoint of loginEndpoints) {
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 14000);
-        const res = await fetch(loginEndpoint, {
-          method: 'POST',
-          headers: {
-            'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 11; Redmi Note 8 Build/RKQ1.200826.002)',
-            Connection: 'Keep-Alive',
-            'Accept-Encoding': 'gzip',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'X-Unity-Version': '2018.4.11f1',
-            'X-GA': 'v1 1',
-            ReleaseVersion: 'OB49'
-          },
-          body: new Uint8Array(loginPayload),
-          signal: controller.signal
-        });
-        clearTimeout(timer);
-
-        const rawBuf = Buffer.from(await res.arrayBuffer());
-        if (!res.ok || rawBuf.length === 0) {
-          lastLoginErr = `MajorLogin HTTP ${res.status}`;
-          continue;
-        }
-
-        const parsed = this.extractLoginTokenAndUrl(rawBuf);
-        if (parsed.jwtToken) {
-          jwtToken = parsed.jwtToken;
-          serverUrl = parsed.serverUrl || this.getRegionServerUrl(parsed.accountRegion || regionCode);
-          if (parsed.accountRegion) {
-            accountRegion = parsed.accountRegion;
-          }
-          break;
-        }
-      } catch (err: any) {
-        lastLoginErr = err?.message || 'MajorLogin network error';
-      }
+  ): Promise<{
+    ok: boolean;
+    banned?: boolean;
+    jwtToken?: string;
+    serverUrl?: string;
+    accountRegion?: string;
+    error?: string;
+  }> {
+    const majorRes = await this.performMajorLoginHandshake(session);
+    if (!majorRes.ok || !majorRes.jwtToken) {
+      return {
+        ok: false,
+        banned: Boolean(majorRes.banned),
+        error: majorRes.error || 'MajorLogin handshake failed'
+      };
     }
 
-    if (!jwtToken || !serverUrl) {
-      return { ok: false, error: lastLoginErr };
-    }
+    const resolvedRegion = (regionCode || majorRes.accountRegion || 'IND').trim().toUpperCase() || 'IND';
+    const serverUrl = majorRes.serverUrl || this.getRegionServerUrl(majorRes.accountRegion || resolvedRegion);
+    const releaseVer = (process.env.FF_RELEASE_VERSION || 'OB49').trim() || 'OB49';
 
     const encryptedLike = this.aesEncryptFreeFire(
-      this.buildLikeProfilePayload(targetUid, accountRegion || regionCode)
+      this.buildLikeProfilePayload(targetUid, resolvedRegion)
     );
     const likeEndpoint = `${serverUrl.replace(/\/+$/, '')}/LikeProfile`;
 
@@ -1116,36 +1759,65 @@ export class FreeFireGuestService {
           'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 11; Redmi Note 8 Build/RKQ1.200826.002)',
           Connection: 'Keep-Alive',
           'Accept-Encoding': 'gzip',
-          Authorization: `Bearer ${jwtToken}`,
+          Authorization: `Bearer ${majorRes.jwtToken}`,
           'Content-Type': 'application/x-www-form-urlencoded',
           'X-Unity-Version': '2018.4.11f1',
           'X-GA': 'v1 1',
-          ReleaseVersion: 'OB49'
+          ReleaseVersion: releaseVer
         },
         body: new Uint8Array(encryptedLike),
         signal: controller.signal
       });
       clearTimeout(timer);
 
-      if (!likeRes.ok) {
-        return { ok: false, error: `LikeProfile HTTP ${likeRes.status}` };
-      }
-
       const respBuf = Buffer.from(await likeRes.arrayBuffer());
       const respText = respBuf.toString('utf8');
-      if (/\b(limit|already|error|invalid|banned)\b/i.test(respText)) {
-        return { ok: false, error: 'Daily like limit reached or target rejected' };
+
+      if (!likeRes.ok) {
+        return {
+          ok: false,
+          jwtToken: majorRes.jwtToken,
+          serverUrl,
+          accountRegion: majorRes.accountRegion,
+          error: `LikeProfile HTTP ${likeRes.status}`
+        };
       }
 
-      return { ok: true };
+      if (
+        /(?:^|[^a-z])(limit|already|error|err|fail|failed|invalid|banned|suspend|denied|reject|cooldown|not_found|wrong_account)(?:[^a-z]|$)/i.test(respText) ||
+        /(?:BR_LIKE_|ERR_|T_P_)/i.test(respText)
+      ) {
+        const isBanErr = /(?:account_banned|t_p_ban|banned|suspend)/i.test(respText);
+        return {
+          ok: false,
+          banned: isBanErr,
+          jwtToken: majorRes.jwtToken,
+          serverUrl,
+          accountRegion: majorRes.accountRegion,
+          error: isBanErr ? 'Account Banned' : 'Daily like limit reached or target rejected'
+        };
+      }
+
+      return {
+        ok: true,
+        jwtToken: majorRes.jwtToken,
+        serverUrl,
+        accountRegion: majorRes.accountRegion || resolvedRegion
+      };
     } catch (err: any) {
-      return { ok: false, error: err?.message || 'LikeProfile request failed' };
+      return {
+        ok: false,
+        jwtToken: majorRes.jwtToken,
+        serverUrl,
+        accountRegion: majorRes.accountRegion,
+        error: err?.message || 'LikeProfile request failed'
+      };
     }
   }
 
   private static async fetchLivePlayerForLike(
     uid: string
-  ): Promise<{ found: boolean; name: string; regionCode: string; regionDisplay: string; likes: number }> {
+  ): Promise<{ found: boolean; name: string; regionCode: string; regionDisplay: string; likes: number; isBanned?: boolean | null }> {
     const cleanUid = String(uid || '').trim();
     const customPlayerUrl = (process.env.FF_GUEST_PLAYER_URL || '').trim();
     const candidates: string[] = [];
@@ -1161,59 +1833,78 @@ export class FreeFireGuestService {
     );
 
     for (const url of candidates) {
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 14000);
-        const res = await fetch(url, {
-          method: 'GET',
-          headers: {
-            Accept: 'application/json',
-            'Cache-Control': 'no-cache'
-          },
-          signal: controller.signal
-        });
-        clearTimeout(timer);
-        if (!res.ok) continue;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 14000);
+          const res = await fetch(url, {
+            method: 'GET',
+            headers: {
+              Accept: 'application/json',
+              'Cache-Control': 'no-cache'
+            },
+            signal: controller.signal
+          });
+          clearTimeout(timer);
 
-        const json: any = await res.json().catch(() => null);
-        if (!json || json.success === false || json.error) continue;
+          if (!res.ok) {
+            if ((res.status === 429 || res.status >= 500) && attempt < 2) {
+              await new Promise((r) => setTimeout(r, 400));
+              continue;
+            }
+            break;
+          }
 
-        const p = json.player && typeof json.player === 'object' && !json.player.error ? json.player : json;
-        const name = isPresent(p?.name)
-          ? String(p.name).trim()
-          : isPresent(json?.name)
-            ? String(json.name).trim()
-            : isPresent(p?.nickname)
-              ? String(p.nickname).trim()
-              : '';
-        if (!name && !isPresent(p?.uid) && !isPresent(json?.uid)) continue;
+          const json: any = await res.json().catch(() => null);
+          if (!json || json.success === false || json.error) break;
 
-        const rawLikes = String(p?.likes ?? json?.likes ?? '0').replace(/[^\d]/g, '');
-        const likesNum = rawLikes ? Number(rawLikes) : 0;
+          const p = json.player && typeof json.player === 'object' && !json.player.error ? json.player : json;
+          const rawNameCandidate =
+            p?.name ??
+            p?.nickname ??
+            p?.username ??
+            json?.name ??
+            json?.nickname ??
+            json?.username;
+          const name = isPresent(rawNameCandidate) ? String(rawNameCandidate).trim() : '';
+          if (!name && !isPresent(p?.uid) && !isPresent(json?.uid)) break;
 
-        const regionFlag = isPresent(p?.region_flag || json?.region_flag)
-          ? String(p?.region_flag || json?.region_flag).trim()
-          : '';
-        const regionName = isPresent(p?.region_name || json?.region_name)
-          ? String(p?.region_name || json?.region_name).trim()
-          : '';
-        const regionCode = isPresent(p?.region || json?.region)
-          ? String(p?.region || json?.region).trim().toUpperCase()
-          : 'IND';
-        const regionText =
-          regionName && regionCode && regionName.toLowerCase() !== regionCode.toLowerCase()
-            ? `${regionName} (${regionCode})`
-            : regionName || regionCode || 'Unknown';
-        const regionDisplay = regionFlag ? `${regionFlag} ${regionText}` : regionText;
+          const rawLikes = String(p?.likes ?? json?.likes ?? '0').replace(/[^\d]/g, '');
+          const likesNum = rawLikes ? Number(rawLikes) : 0;
 
-        return {
-          found: true,
-          name: name || 'Unknown',
-          regionCode,
-          regionDisplay,
-          likes: Number.isFinite(likesNum) ? likesNum : 0
-        };
-      } catch {}
+          const regionFlag = isPresent(p?.region_flag || json?.region_flag)
+            ? String(p?.region_flag || json?.region_flag).trim()
+            : '';
+          const regionName = isPresent(p?.region_name || json?.region_name)
+            ? String(p?.region_name || json?.region_name).trim()
+            : '';
+          const regionCode = isPresent(p?.region || json?.region)
+            ? String(p?.region || json?.region).trim().toUpperCase()
+            : 'IND';
+          const regionText =
+            regionName && regionCode && regionName.toLowerCase() !== regionCode.toLowerCase()
+              ? `${regionName} (${regionCode})`
+              : regionName || regionCode || 'Unknown';
+          const regionDisplay = regionFlag ? `${regionFlag} ${regionText}` : regionText;
+
+          const isBanned = parseBanBoolean(
+            p?.is_banned ?? p?.isBanned ?? p?.banned ?? json?.is_banned ?? json?.isBanned ?? json?.banned
+          );
+
+          return {
+            found: true,
+            name: name || 'Unknown',
+            regionCode,
+            regionDisplay,
+            likes: Number.isFinite(likesNum) ? likesNum : 0,
+            isBanned
+          };
+        } catch {
+          if (attempt < 2) {
+            await new Promise((r) => setTimeout(r, 400));
+          }
+        }
+      }
     }
 
     return {
@@ -1221,13 +1912,14 @@ export class FreeFireGuestService {
       name: 'Unknown',
       regionCode: 'IND',
       regionDisplay: 'Unknown',
-      likes: 0
+      likes: 0,
+      isBanned: null
     };
   }
 
   public static async processLikesForUid(
     rawUid: string,
-    guestAccounts: Array<{ id: string; guestUid: string; guestPassword: string }>,
+    guestAccounts: Array<{ id: string; guestUid: string; guestPassword: string; enabled?: boolean; isBanned?: boolean }>,
     onAccountProgress?: (completed: number, total: number, succeeded: number) => Promise<void> | void
   ): Promise<
     | {
@@ -1261,7 +1953,10 @@ export class FreeFireGuestService {
       };
     }
 
-    if (!Array.isArray(guestAccounts) || guestAccounts.length === 0) {
+    const activeAccounts = (Array.isArray(guestAccounts) ? guestAccounts : []).filter(
+      (acc) => acc && acc.enabled !== false && acc.isBanned !== true
+    );
+    if (activeAccounts.length === 0) {
       return {
         ok: false,
         code: 'NO_GUEST_ACCOUNTS',
@@ -1269,80 +1964,145 @@ export class FreeFireGuestService {
       };
     }
 
-    const beforePlayer = await this.fetchLivePlayerForLike(cleanUid);
+    // Step 1: Fetch target player profile & initial likes before running guest accounts
+    let beforePlayer = await this.fetchLivePlayerForLike(cleanUid);
     if (!beforePlayer.found) {
-      return {
-        ok: false,
-        code: 'PLAYER_NOT_FOUND',
-        error: `No Free Fire account found for UID ${cleanUid}.`,
-        uid: cleanUid
+      const banFallback = await this.checkDirectBanStatus(cleanUid).catch(() => ({
+        notFound: true,
+        isBanned: null as boolean | null,
+        playerName: undefined as string | undefined
+      }));
+      if (banFallback.notFound || banFallback.isBanned === null) {
+        return {
+          ok: false,
+          code: 'PLAYER_NOT_FOUND',
+          error: `No Free Fire account found for UID ${cleanUid}.`,
+          uid: cleanUid
+        };
+      }
+      beforePlayer = {
+        found: true,
+        name: banFallback.playerName || 'Unknown',
+        regionCode: 'IND',
+        regionDisplay: 'Unknown',
+        likes: 0
       };
     }
+
+    console.info(
+      `[FFLike] Step 1 target=${cleanUid} name="${beforePlayer.name}" region=${beforePlayer.regionCode} likesBefore=${beforePlayer.likes} accounts=${activeAccounts.length}`
+    );
 
     const customLikeApiUrl = (process.env.FF_LIKE_API_URL || process.env.LIKE_API_URL || '').trim();
     const customLikeApiKey = (process.env.FF_LIKE_API_KEY || process.env.LIKE_API_KEY || '').trim();
 
     let succeededAccounts = 0;
     let failedAccounts = 0;
-    let lastError = '';
+    let lastActiveJwt: { jwtToken: string; serverUrl: string } | null = null;
     const statusUpdates: Array<{
       id: string;
       status: 'ok' | 'auth_failed' | 'like_failed';
       message?: string;
       usedAt: string;
+      isBanned?: boolean;
+      banType?: string;
+      banReason?: string;
     }> = [];
 
-    for (let i = 0; i < guestAccounts.length; i++) {
-      const account = guestAccounts[i];
+    // Step 2 & 3: Authenticate each enabled, non-banned guest account and send LikeProfileReq sequentially
+    for (let i = 0; i < activeAccounts.length; i++) {
+      const account = activeAccounts[i];
       const usedAt = new Date().toISOString();
 
-      const authRes = await this.authenticateGuestCredentials(account.guestUid, account.guestPassword);
-      if (!authRes.ok) {
+      try {
+        const authRes = await this.authenticateGuestCredentials(account.guestUid, account.guestPassword);
+        if (!authRes.ok) {
+          failedAccounts++;
+          const authBan = /\b(ban|banned|suspend|suspended|freeze|locked)\b/i.test(authRes.error || '');
+          console.warn(`[FFLike] Account ${i + 1}/${activeAccounts.length} OAuth failed (${authBan ? 'banned' : 'auth_error'})`);
+          statusUpdates.push({
+            id: account.id,
+            status: 'auth_failed',
+            message: authRes.error,
+            usedAt,
+            ...(authBan ? { isBanned: true, banType: 'Permanent', banReason: authRes.error || 'Account Banned' } : {})
+          });
+        } else if (customLikeApiUrl) {
+          const likeRes = await this.sendLikeViaCustomApi(customLikeApiUrl, customLikeApiKey, {
+            targetUid: cleanUid,
+            guestUid: account.guestUid,
+            guestPassword: account.guestPassword,
+            accessToken: authRes.session.token,
+            openId: authRes.session.openId,
+            regionCode: beforePlayer.regionCode
+          });
+          if (likeRes.ok) {
+            succeededAccounts++;
+            statusUpdates.push({
+              id: account.id,
+              status: 'ok',
+              usedAt,
+              isBanned: false
+            });
+          } else {
+            failedAccounts++;
+            const likeErr = likeRes.error || 'Like request failed';
+            const likeBan = /\b(account_banned|banned|suspended)\b/i.test(likeErr);
+            console.warn(`[FFLike] Account ${i + 1}/${activeAccounts.length} custom like failed: ${likeErr}`);
+            statusUpdates.push({
+              id: account.id,
+              status: 'like_failed',
+              message: likeErr,
+              usedAt,
+              ...(likeBan ? { isBanned: true, banType: 'Permanent', banReason: likeErr } : {})
+            });
+          }
+        } else {
+          const likeRes = await this.sendLikeViaDirectFreeFire(authRes.session, cleanUid, beforePlayer.regionCode);
+          if (likeRes.jwtToken && likeRes.serverUrl) {
+            lastActiveJwt = { jwtToken: likeRes.jwtToken, serverUrl: likeRes.serverUrl };
+          }
+
+          if (likeRes.ok) {
+            succeededAccounts++;
+            console.info(`[FFLike] Account ${i + 1}/${activeAccounts.length} LikeProfile succeeded`);
+            statusUpdates.push({
+              id: account.id,
+              status: 'ok',
+              usedAt,
+              isBanned: false
+            });
+          } else {
+            failedAccounts++;
+            const likeErr = likeRes.error || 'Like request failed';
+            const likeBan = Boolean(likeRes.banned) || /(?:account_banned|banned|suspended)/i.test(likeErr);
+            console.warn(`[FFLike] Account ${i + 1}/${activeAccounts.length} LikeProfile skipped: ${likeErr}`);
+            statusUpdates.push({
+              id: account.id,
+              status: 'like_failed',
+              message: likeErr,
+              usedAt,
+              ...(likeBan ? { isBanned: true, banType: 'Permanent', banReason: likeErr } : {})
+            });
+          }
+        }
+      } catch (accountErr: any) {
         failedAccounts++;
-        lastError = authRes.error;
+        console.warn(`[FFLike] Account ${i + 1}/${activeAccounts.length} threw error: ${accountErr?.message || 'error'}`);
         statusUpdates.push({
           id: account.id,
-          status: 'auth_failed',
-          message: authRes.error,
+          status: 'like_failed',
+          message: accountErr?.message || 'Account processing failed',
           usedAt
         });
-      } else {
-        const likeRes = customLikeApiUrl
-          ? await this.sendLikeViaCustomApi(customLikeApiUrl, customLikeApiKey, {
-              targetUid: cleanUid,
-              guestUid: account.guestUid,
-              guestPassword: account.guestPassword,
-              accessToken: authRes.session.token,
-              openId: authRes.session.openId,
-              regionCode: beforePlayer.regionCode
-            })
-          : await this.sendLikeViaDirectFreeFire(authRes.session, cleanUid, beforePlayer.regionCode);
-
-        if (likeRes.ok) {
-          succeededAccounts++;
-          statusUpdates.push({
-            id: account.id,
-            status: 'ok',
-            usedAt
-          });
-        } else {
-          failedAccounts++;
-          lastError = likeRes.error || 'Like request failed';
-          statusUpdates.push({
-            id: account.id,
-            status: 'like_failed',
-            message: lastError,
-            usedAt
-          });
-        }
       }
 
       if (onAccountProgress) {
-        await Promise.resolve(onAccountProgress(i + 1, guestAccounts.length, succeededAccounts)).catch(() => {});
+        await Promise.resolve(onAccountProgress(i + 1, activeAccounts.length, succeededAccounts)).catch(() => {});
       }
 
-      if (i < guestAccounts.length - 1) {
-        await new Promise((r) => setTimeout(r, 140));
+      if (i < activeAccounts.length - 1) {
+        await new Promise((r) => setTimeout(r, 150));
       }
     }
 
@@ -1359,14 +2119,31 @@ export class FreeFireGuestService {
       };
     }
 
-    await new Promise((r) => setTimeout(r, 500));
+    // Step 4: Re-fetch target player profile to calculate likesGiven accurately
+    await new Promise((r) => setTimeout(r, 800));
     const afterPlayer = await this.fetchLivePlayerForLike(cleanUid);
-    const fetchedAfterLikes = afterPlayer.found ? afterPlayer.likes : beforePlayer.likes;
+    let fetchedAfterLikes = afterPlayer.found ? afterPlayer.likes : beforePlayer.likes;
+
+    if ((!afterPlayer.found || fetchedAfterLikes <= beforePlayer.likes) && lastActiveJwt) {
+      const serverStats = await this.fetchPlayerStatsViaGameServer(
+        lastActiveJwt.serverUrl,
+        lastActiveJwt.jwtToken,
+        cleanUid
+      ).catch(() => null);
+      if (serverStats && typeof serverStats.likes === 'number' && serverStats.likes > fetchedAfterLikes) {
+        fetchedAfterLikes = serverStats.likes;
+      }
+    }
+
     const afterLikes =
       fetchedAfterLikes > beforePlayer.likes
         ? fetchedAfterLikes
         : beforePlayer.likes + succeededAccounts;
     const effectiveLikesGiven = Math.max(succeededAccounts, afterLikes - beforePlayer.likes);
+
+    console.info(
+      `[FFLike] Step 4 complete target=${cleanUid} likesBefore=${beforePlayer.likes} likesNow=${afterLikes} likesGiven=+${effectiveLikesGiven} ok=${succeededAccounts} failed=${failedAccounts}`
+    );
 
     return {
       ok: true,
@@ -1376,7 +2153,7 @@ export class FreeFireGuestService {
       beforeLikes: beforePlayer.likes,
       afterLikes,
       likesGiven: effectiveLikesGiven,
-      totalAccounts: guestAccounts.length,
+      totalAccounts: activeAccounts.length,
       succeededAccounts,
       failedAccounts,
       statusLabel: 'Liked By API'

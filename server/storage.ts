@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import dotenv from 'dotenv';
 import { hashPassword, verifyPassword } from './auth';
+import type { CustomEmojiRule } from './customEmoji';
 
 try {
   dotenv.config({ override: true });
@@ -115,11 +116,23 @@ export interface TemplateButton {
   callback_data?: string;
 }
 
+export interface TelegramMessageEntityRecord {
+  type: string;
+  offset: number;
+  length: number;
+  url?: string;
+  user?: { id?: number | string; first_name?: string; username?: string };
+  language?: string;
+  custom_emoji_id?: string;
+}
+
 export interface MessageTemplate {
   key: string;
   name: string;
   description: string;
   content: string;
+  rawText?: string;
+  entities?: TelegramMessageEntityRecord[];
   variables: string[];
   mediaType?: 'none' | 'photo' | 'video';
   mediaUrl?: string;
@@ -250,6 +263,8 @@ export interface BotSettings {
   chatWhitelistEnabled?: boolean;
   allowedChats?: AllowedChatEntry[];
   guestLikesEnabled?: boolean;
+  customEmojiMap?: Record<string, string>;
+  customEmojiRules?: CustomEmojiRule[];
   botStopped?: boolean;
 }
 
@@ -457,6 +472,12 @@ export interface FreeFireGuestAccountRecord {
   id: string;
   guestUid: string;
   guestPassword: string;
+  accountName?: string;
+  inGameUid?: string;
+  isBanned?: boolean;
+  banType?: string;
+  banReason?: string;
+  banCheckedAt?: string;
   enabled?: boolean;
   createdAt: string;
   updatedAt: string;
@@ -2032,9 +2053,13 @@ export class SharedStorageService {
       mediaType?: 'none' | 'photo' | 'video';
       mediaUrl?: string;
       buttons?: TemplateButton[];
+      rawText?: string;
+      entities?: TelegramMessageEntityRecord[];
     }
   ): Promise<boolean> {
     await this.loadLatest(true);
+    const prevContent = this.db.templates[key]?.content;
+    const contentChanged = prevContent !== content;
     if (this.db.templates[key]) {
       this.db.templates[key].content = content;
     } else if (DEFAULT_TEMPLATES[key]) {
@@ -2047,6 +2072,19 @@ export class SharedStorageService {
         content,
         variables: []
       };
+    }
+    if (extraFields?.entities !== undefined) {
+      if (Array.isArray(extraFields.entities) && extraFields.entities.length > 0) {
+        this.db.templates[key].entities = extraFields.entities;
+        this.db.templates[key].rawText = extraFields.rawText !== undefined ? extraFields.rawText : content;
+      } else {
+        delete this.db.templates[key].entities;
+        delete this.db.templates[key].rawText;
+      }
+    } else if (contentChanged) {
+      // Clear stale Telegram entity offsets when HTML content is modified directly without entities
+      delete this.db.templates[key].entities;
+      delete this.db.templates[key].rawText;
     }
     if (extraFields) {
       if (extraFields.mediaType !== undefined) {
@@ -2654,6 +2692,12 @@ export class SharedStorageService {
       groupWarningLimit: settings.groupWarningLimit !== undefined
         ? Math.max(1, Math.min(100, Math.round(Number(settings.groupWarningLimit) || 3)))
         : Math.max(1, Math.min(100, Math.round(Number(this.db.settings.groupWarningLimit) || 3))),
+      customEmojiMap: settings.customEmojiMap !== undefined
+        ? (settings.customEmojiMap && typeof settings.customEmojiMap === 'object' ? { ...settings.customEmojiMap } : {})
+        : (this.db.settings.customEmojiMap || {}),
+      customEmojiRules: settings.customEmojiRules !== undefined
+        ? (Array.isArray(settings.customEmojiRules) ? settings.customEmojiRules.map((r) => ({ ...r })) : [])
+        : (Array.isArray(this.db.settings.customEmojiRules) ? this.db.settings.customEmojiRules.map((r) => ({ ...r })) : undefined),
       requiredChannels: settings.requiredChannels !== undefined && Array.isArray(settings.requiredChannels) 
         ? settings.requiredChannels 
         : (Array.isArray(this.db.settings.requiredChannels) ? this.db.settings.requiredChannels : []),
@@ -5194,7 +5238,15 @@ export class SharedStorageService {
 
   public async addGuestAccount(
     guestUid: string,
-    guestPassword: string
+    guestPassword: string,
+    meta?: {
+      accountName?: string;
+      inGameUid?: string;
+      isBanned?: boolean;
+      banType?: string;
+      banReason?: string;
+      banCheckedAt?: string;
+    }
   ): Promise<{ account: FreeFireGuestAccountRecord; updatedExisting: boolean; total: number }> {
     await this.loadLatest(false);
     if (!Array.isArray(this.db.guestAccounts)) {
@@ -5203,6 +5255,8 @@ export class SharedStorageService {
 
     const cleanUid = String(guestUid || '').trim();
     const cleanPassword = String(guestPassword || '').trim();
+    const cleanAccountName = meta?.accountName ? String(meta.accountName).trim() : '';
+    const cleanInGameUid = meta?.inGameUid ? String(meta.inGameUid).trim() : '';
     if (!cleanUid || !cleanPassword) {
       throw new Error('Guest UID and Guest Password are required');
     }
@@ -5216,6 +5270,19 @@ export class SharedStorageService {
       const existing = this.db.guestAccounts[existingIdx];
       existing.guestUid = cleanUid;
       existing.guestPassword = cleanPassword;
+      if (cleanAccountName) existing.accountName = cleanAccountName;
+      if (cleanInGameUid) existing.inGameUid = cleanInGameUid;
+      if (meta?.isBanned !== undefined) {
+        existing.isBanned = Boolean(meta.isBanned);
+        if (meta.isBanned) {
+          if (meta.banType) existing.banType = meta.banType;
+          if (meta.banReason) existing.banReason = meta.banReason;
+        } else {
+          delete existing.banType;
+          delete existing.banReason;
+        }
+      }
+      if (meta?.banCheckedAt) existing.banCheckedAt = meta.banCheckedAt;
       existing.enabled = existing.enabled !== false;
       existing.updatedAt = nowIso;
       delete existing.lastStatus;
@@ -5239,6 +5306,12 @@ export class SharedStorageService {
       id,
       guestUid: cleanUid,
       guestPassword: cleanPassword,
+      ...(cleanAccountName ? { accountName: cleanAccountName } : {}),
+      ...(cleanInGameUid ? { inGameUid: cleanInGameUid } : {}),
+      ...(meta?.isBanned !== undefined ? { isBanned: Boolean(meta.isBanned) } : {}),
+      ...(meta?.isBanned && meta?.banType ? { banType: meta.banType } : {}),
+      ...(meta?.isBanned && meta?.banReason ? { banReason: meta.banReason } : {}),
+      ...(meta?.banCheckedAt ? { banCheckedAt: meta.banCheckedAt } : {}),
       enabled: true,
       createdAt: nowIso,
       updatedAt: nowIso
@@ -5254,7 +5327,16 @@ export class SharedStorageService {
   }
 
   public async addGuestAccountsBatch(
-    entries: Array<{ guestUid: string; guestPassword: string }>
+    entries: Array<{
+      guestUid: string;
+      guestPassword: string;
+      accountName?: string;
+      inGameUid?: string;
+      isBanned?: boolean;
+      banType?: string;
+      banReason?: string;
+      banCheckedAt?: string;
+    }>
   ): Promise<{
     addedCount: number;
     updatedCount: number;
@@ -5266,12 +5348,31 @@ export class SharedStorageService {
       this.db.guestAccounts = [];
     }
 
-    const deduped = new Map<string, string>();
+    const deduped = new Map<
+      string,
+      {
+        guestPassword: string;
+        accountName?: string;
+        inGameUid?: string;
+        isBanned?: boolean;
+        banType?: string;
+        banReason?: string;
+        banCheckedAt?: string;
+      }
+    >();
     for (const entry of entries || []) {
       const cleanUid = String(entry?.guestUid || '').trim();
       const cleanPassword = String(entry?.guestPassword || '').trim();
       if (!cleanUid || !cleanPassword) continue;
-      deduped.set(cleanUid, cleanPassword);
+      deduped.set(cleanUid, {
+        guestPassword: cleanPassword,
+        ...(entry?.accountName ? { accountName: String(entry.accountName).trim() } : {}),
+        ...(entry?.inGameUid ? { inGameUid: String(entry.inGameUid).trim() } : {}),
+        ...(entry?.isBanned !== undefined ? { isBanned: Boolean(entry.isBanned) } : {}),
+        ...(entry?.banType ? { banType: String(entry.banType).trim() } : {}),
+        ...(entry?.banReason ? { banReason: String(entry.banReason).trim() } : {}),
+        ...(entry?.banCheckedAt ? { banCheckedAt: entry.banCheckedAt } : {})
+      });
     }
 
     if (deduped.size === 0) {
@@ -5283,14 +5384,27 @@ export class SharedStorageService {
     let updatedCount = 0;
     const touchedAccounts: FreeFireGuestAccountRecord[] = [];
 
-    for (const [cleanUid, cleanPassword] of deduped.entries()) {
+    for (const [cleanUid, info] of deduped.entries()) {
       const existing = this.db.guestAccounts.find(
         (a) => String(a.guestUid || '').trim() === cleanUid
       );
 
       if (existing) {
         existing.guestUid = cleanUid;
-        existing.guestPassword = cleanPassword;
+        existing.guestPassword = info.guestPassword;
+        if (info.accountName) existing.accountName = info.accountName;
+        if (info.inGameUid) existing.inGameUid = info.inGameUid;
+        if (info.isBanned !== undefined) {
+          existing.isBanned = Boolean(info.isBanned);
+          if (info.isBanned) {
+            if (info.banType) existing.banType = info.banType;
+            if (info.banReason) existing.banReason = info.banReason;
+          } else {
+            delete existing.banType;
+            delete existing.banReason;
+          }
+        }
+        if (info.banCheckedAt) existing.banCheckedAt = info.banCheckedAt;
         existing.enabled = existing.enabled !== false;
         existing.updatedAt = nowIso;
         delete existing.lastStatus;
@@ -5308,7 +5422,13 @@ export class SharedStorageService {
         const record: FreeFireGuestAccountRecord = {
           id,
           guestUid: cleanUid,
-          guestPassword: cleanPassword,
+          guestPassword: info.guestPassword,
+          ...(info.accountName ? { accountName: info.accountName } : {}),
+          ...(info.inGameUid ? { inGameUid: info.inGameUid } : {}),
+          ...(info.isBanned !== undefined ? { isBanned: Boolean(info.isBanned) } : {}),
+          ...(info.isBanned && info.banType ? { banType: info.banType } : {}),
+          ...(info.isBanned && info.banReason ? { banReason: info.banReason } : {}),
+          ...(info.banCheckedAt ? { banCheckedAt: info.banCheckedAt } : {}),
           enabled: true,
           createdAt: nowIso,
           updatedAt: nowIso
@@ -5333,6 +5453,12 @@ export class SharedStorageService {
     updates: {
       guestUid?: string;
       guestPassword?: string;
+      accountName?: string;
+      inGameUid?: string;
+      isBanned?: boolean;
+      banType?: string;
+      banReason?: string;
+      banCheckedAt?: string;
       enabled?: boolean;
     }
   ): Promise<FreeFireGuestAccountRecord | null> {
@@ -5363,6 +5489,31 @@ export class SharedStorageService {
         delete target.lastStatus;
         delete target.lastMessage;
       }
+    }
+    if (updates.accountName !== undefined) {
+      const cleanName = String(updates.accountName || '').trim();
+      if (cleanName) {
+        target.accountName = cleanName;
+      }
+    }
+    if (updates.inGameUid !== undefined) {
+      const cleanInGameUid = String(updates.inGameUid || '').trim();
+      if (cleanInGameUid) {
+        target.inGameUid = cleanInGameUid;
+      }
+    }
+    if (updates.isBanned !== undefined) {
+      target.isBanned = Boolean(updates.isBanned);
+      if (updates.isBanned) {
+        if (updates.banType) target.banType = updates.banType;
+        if (updates.banReason) target.banReason = updates.banReason;
+      } else {
+        delete target.banType;
+        delete target.banReason;
+      }
+    }
+    if (updates.banCheckedAt !== undefined) {
+      target.banCheckedAt = updates.banCheckedAt;
     }
     if (updates.enabled !== undefined) {
       target.enabled = Boolean(updates.enabled);
@@ -5396,6 +5547,9 @@ export class SharedStorageService {
       status: 'ok' | 'auth_failed' | 'like_failed';
       message?: string;
       usedAt?: string;
+      isBanned?: boolean;
+      banType?: string;
+      banReason?: string;
     }>
   ): Promise<void> {
     if (!Array.isArray(updates) || updates.length === 0) return;
@@ -5412,6 +5566,12 @@ export class SharedStorageService {
           target.lastMessage = u.message;
         } else {
           delete target.lastMessage;
+        }
+        if (u.isBanned !== undefined) {
+          target.isBanned = Boolean(u.isBanned);
+          target.banCheckedAt = u.usedAt || nowIso;
+          if (u.isBanned && u.banType) target.banType = u.banType;
+          if (u.isBanned && u.banReason) target.banReason = u.banReason;
         }
         changed = true;
       }

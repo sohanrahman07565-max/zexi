@@ -1,4 +1,5 @@
 import { storage } from './storage';
+import { sanitizeButtonLabel } from './customEmoji';
 
 type CallTelegramApiFn = (method: string, body?: any, tokenOverride?: string) => Promise<any>;
 type IsAdminFn = (userId: string, username?: string) => Promise<boolean>;
@@ -75,7 +76,8 @@ function grouped(buttons: Array<{ text: string; url: string; row: number; style?
   const m = new Map<number, any[]>();
   for (const b of buttons) {
     if (!m.has(b.row)) m.set(b.row, []);
-    const button: any = { text: b.text, url: b.url };
+    const cleanText = sanitizeButtonLabel(b.text) || 'Button';
+    const button: any = { text: cleanText, url: b.url };
     if (b.style && b.style !== 'default') button.style = b.style;
     m.get(b.row)!.push(button);
   }
@@ -84,7 +86,7 @@ function grouped(buttons: Array<{ text: string; url: string; row: number; style?
 
 function listButtons(d: PostDraft): string {
   return d.buttons.length
-    ? d.buttons.map((b, i) => `${i + 1}. [Row ${b.row}] ${b.text}\n   ${b.url}`).join('\n')
+    ? d.buttons.map((b, i) => `${i + 1}. [Row ${b.row}] ${sanitizeButtonLabel(b.text)}\n   ${b.url}`).join('\n')
     : '(No buttons added yet)';
 }
 
@@ -98,7 +100,7 @@ function editKeys(d: PostDraft) {
   ];
   d.buttons.forEach((b, i) =>
     rows.push([
-      { text: `Edit ${i + 1}: ${b.text}`.slice(0, 60), callback_data: `edit_button:${i}` },
+      { text: `Edit ${i + 1}: ${sanitizeButtonLabel(b.text)}`.slice(0, 60), callback_data: `edit_button:${i}` },
       { text: 'Delete', callback_data: `delete_button:${i}` }
     ])
   );
@@ -1317,12 +1319,13 @@ Set BOT_TOKEN from @BotFather, CHANNEL_ID to your channel username or private nu
         }
 
         if (d.phase === 'button_text') {
-          if (!text || !text.trim() || text.trim().length > 64) {
+          const cleanBtnText = sanitizeButtonLabel(text || '');
+          if (!cleanBtnText || cleanBtnText.length > 64) {
             await clearReplies(chat, d);
             return wizard(chat, d, 'STEP 3 — BUTTON TEXT\n\nButton text must be 1–64 characters. Try again.');
           }
           if (!d.active) d.active = { text: '', url: '', row: 1 };
-          d.active.text = text.trim();
+          d.active.text = cleanBtnText;
           d.active.style = 'default';
           await clearReplies(chat, d);
           return askButtonColor(chat, d);
@@ -1353,11 +1356,12 @@ Set BOT_TOKEN from @BotFather, CHANNEL_ID to your channel username or private nu
         }
 
         if (d.phase === 'edit_button_text') {
-          if (!text || !text.trim() || text.trim().length > 64 || d.editIndex === null || !d.buttons[d.editIndex]) {
+          const cleanEditBtnText = sanitizeButtonLabel(text || '');
+          if (!cleanEditBtnText || cleanEditBtnText.length > 64 || d.editIndex === null || !d.buttons[d.editIndex]) {
             await clearReplies(chat, d);
             return wizard(chat, d, 'EDIT BUTTON TEXT\n\nSend text between 1 and 64 characters.');
           }
-          d.buttons[d.editIndex].text = text.trim();
+          d.buttons[d.editIndex].text = cleanEditBtnText;
           d.editIndex = null;
           await clearReplies(chat, d);
           return preview(chat, d);
