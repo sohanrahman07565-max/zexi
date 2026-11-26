@@ -2160,3 +2160,260 @@ export class FreeFireGuestService {
     };
   }
 }
+
+export function parseGuestCredentialsFromBuffer(
+  rawBuffer: Buffer
+): Array<{ guestUid: string; guestPassword: string }> {
+  if (!rawBuffer || rawBuffer.length === 0) return [];
+
+  let text = '';
+  if (rawBuffer.length >= 2 && rawBuffer[0] === 0xff && rawBuffer[1] === 0xfe) {
+    text = rawBuffer.slice(2).toString('utf16le');
+  } else if (rawBuffer.length >= 2 && rawBuffer[0] === 0xfe && rawBuffer[1] === 0xff) {
+    const swapped = Buffer.alloc(rawBuffer.length - 2);
+    for (let i = 2; i + 1 < rawBuffer.length; i += 2) {
+      swapped[i - 2] = rawBuffer[i + 1];
+      swapped[i - 1] = rawBuffer[i];
+    }
+    text = swapped.toString('utf16le');
+  } else {
+    let nulCount = 0;
+    const sampleLen = Math.min(rawBuffer.length, 512);
+    for (let i = 0; i < sampleLen; i++) {
+      if (rawBuffer[i] === 0) nulCount++;
+    }
+    text = nulCount > sampleLen * 0.25 ? rawBuffer.toString('utf16le') : rawBuffer.toString('utf8');
+  }
+
+  text = text.replace(/^\uFEFF/, '').replace(/\0+/g, '');
+
+  const results = new Map<string, string>();
+  const addPair = (uidRaw: unknown, passRaw: unknown) => {
+    const uid = String(uidRaw ?? '').trim();
+    const pass = String(passRaw ?? '').trim();
+    if (!uid || !pass) return;
+    if (/[\r\n\0]/.test(uid) || /[\r\n\0]/.test(pass)) return;
+    if (uid.length > 128 || pass.length > 512) return;
+    results.set(uid, pass);
+  };
+
+  const UID_KEYS = [
+    'com.garena.msdk.guest_uid',
+    'guest_uid',
+    'guestuid',
+    'account_uid',
+    'accountuid',
+    'uid'
+  ];
+  const PASS_KEYS = [
+    'com.garena.msdk.guest_password',
+    'guest_password',
+    'guestpassword',
+    'guest_pass',
+    'guestpass',
+    'password',
+    'pass',
+    'pwd'
+  ];
+
+  const findCaseInsensitiveValue = (obj: Record<string, any>, candidateKeys: string[]): string | undefined => {
+    const entries = Object.entries(obj);
+    for (const candidate of candidateKeys) {
+      for (const [k, v] of entries) {
+        if (k.toLowerCase() === candidate) {
+          if (typeof v === 'string' || typeof v === 'number') {
+            const trimmed = String(v).trim();
+            if (trimmed) return trimmed;
+          }
+        }
+      }
+    }
+    return undefined;
+  };
+
+  const walkJson = (node: unknown) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      let pendingUid: string | undefined;
+      let pendingPass: string | undefined;
+      for (const item of node) {
+        if (item && typeof item === 'object' && !Array.isArray(item)) {
+          const itemObj = item as Record<string, any>;
+          const keyName = String(itemObj.key ?? itemObj.name ?? '').trim().toLowerCase();
+          const valStr =
+            itemObj.value !== undefined && itemObj.value !== null ? String(itemObj.value).trim() : '';
+          if (keyName && valStr) {
+            if (UID_KEYS.includes(keyName)) pendingUid = valStr;
+            if (PASS_KEYS.includes(keyName)) pendingPass = valStr;
+            if (pendingUid && pendingPass) {
+              addPair(pendingUid, pendingPass);
+              pendingUid = undefined;
+              pendingPass = undefined;
+            }
+          }
+        }
+        walkJson(item);
+      }
+      return;
+    }
+
+    const obj = node as Record<string, any>;
+    const directUid = findCaseInsensitiveValue(obj, UID_KEYS);
+    const directPass = findCaseInsensitiveValue(obj, PASS_KEYS);
+    if (directUid && directPass) {
+      addPair(directUid, directPass);
+    }
+
+    for (const val of Object.values(obj)) {
+      if (val && typeof val === 'object') {
+        walkJson(val);
+      }
+    }
+  };
+
+  // Strategy 1: Whole-document JSON
+  const trimmedText = text.trim();
+  if (trimmedText.startsWith('{') || trimmedText.startsWith('[')) {
+    try {
+      walkJson(JSON.parse(trimmedText));
+    } catch {
+      // Fall through to block & regex extraction
+    }
+  }
+
+  // Strategy 2: Balanced JSON objects/arrays embedded in .dat or multi-JSON files
+  if (results.size === 0) {
+    let i = 0;
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === '{' || ch === '[') {
+        const openChar = ch;
+        const closeChar = ch === '{' ? '}' : ']';
+        let depth = 0;
+        let inStr = false;
+        let escaped = false;
+        let endIdx = -1;
+        for (let j = i; j < text.length; j++) {
+          const c = text[j];
+          if (inStr) {
+            if (escaped) {
+              escaped = false;
+            } else if (c === '\\') {
+              escaped = true;
+            } else if (c === '"') {
+              inStr = false;
+            }
+          } else {
+            if (c === '"') {
+              inStr = true;
+            } else if (c === openChar) {
+              depth++;
+            } else if (c === closeChar) {
+              depth--;
+              if (depth === 0) {
+                endIdx = j;
+                break;
+              }
+            }
+          }
+        }
+        if (endIdx > i) {
+          const candidate = text.slice(i, endIdx + 1);
+          if (/guest_?uid|guest_?password|uid/i.test(candidate)) {
+            try {
+              walkJson(JSON.parse(candidate));
+            } catch {
+              // Ignore malformed JSON slice
+            }
+          }
+          i = endIdx + 1;
+          continue;
+        }
+      }
+      i++;
+    }
+  }
+
+  // Strategy 3: Key/value or XML extraction across raw text / .dat strings
+  if (results.size === 0) {
+    const tokens: Array<{ type: 'uid' | 'pass'; value: string; index: number }> = [];
+    const kvRegex =
+      /(?:["']?(?:com\.garena\.msdk\.)?(guest_?uid|guestuid|guest_?password|guestpassword)["']?\s*[:=]\s*["']?([^\s"',}\]]+)["']?|<string\s+name=["'](?:com\.garena\.msdk\.)?(guest_?uid|guestuid|guest_?password|guestpassword)["'][^>]*>([^<]+)<\/string>)/gi;
+
+    let m: RegExpExecArray | null;
+    while ((m = kvRegex.exec(text)) !== null) {
+      const key = (m[1] || m[3] || '').toLowerCase();
+      const val = (m[2] || m[4] || '').trim();
+      if (!val) continue;
+      if (key.includes('uid')) {
+        tokens.push({ type: 'uid', value: val, index: m.index });
+      } else if (key.includes('pass')) {
+        tokens.push({ type: 'pass', value: val, index: m.index });
+      }
+    }
+
+    let pendingUid: string | null = null;
+    let pendingPass: string | null = null;
+    for (const tok of tokens) {
+      if (tok.type === 'uid') {
+        if (pendingPass !== null) {
+          addPair(tok.value, pendingPass);
+          pendingUid = null;
+          pendingPass = null;
+        } else {
+          pendingUid = tok.value;
+        }
+      } else {
+        if (pendingUid !== null) {
+          addPair(pendingUid, tok.value);
+          pendingUid = null;
+          pendingPass = null;
+        } else {
+          pendingPass = tok.value;
+        }
+      }
+    }
+  }
+
+  // Strategy 3b: Binary / length-prefixed .dat control-byte normalized scan
+  if (results.size === 0) {
+    const spaced = rawBuffer
+      .toString('utf8')
+      .replace(/[\x00-\x1f\x7f-\x9f]+/g, ' ')
+      .replace(/\s+/g, ' ');
+    const uidMatches: Array<{ val: string; idx: number }> = [];
+    const passMatches: Array<{ val: string; idx: number }> = [];
+    const binUidRe = /(?:com\.garena\.msdk\.)?(?:guest_?uid|guestuid|account_?uid)[\s:="']*?(\d{5,25})/gi;
+    const binPassRe = /(?:com\.garena\.msdk\.)?(?:guest_?password|guestpassword|guest_?pass)[\s:="']*?([A-Za-z0-9_!@#$%^&*+=.-]{4,256})/gi;
+    let um: RegExpExecArray | null;
+    while ((um = binUidRe.exec(spaced)) !== null) {
+      uidMatches.push({ val: um[1], idx: um.index });
+    }
+    let pm: RegExpExecArray | null;
+    while ((pm = binPassRe.exec(spaced)) !== null) {
+      passMatches.push({ val: pm[1], idx: pm.index });
+    }
+    const count = Math.min(uidMatches.length, passMatches.length);
+    for (let idx = 0; idx < count; idx++) {
+      addPair(uidMatches[idx].val, passMatches[idx].val);
+    }
+  }
+
+  // Strategy 4: Delimited plain-text lines (uid:password / uid|password / uid,password)
+  if (results.size === 0) {
+    const lines = text.split(/\r?\n/);
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#') || line.startsWith('//')) continue;
+      const lineMatch = line.match(/^(\d{5,25})\s*[:|,;\t]\s*([^\s|,;]+)$/);
+      if (lineMatch) {
+        addPair(lineMatch[1], lineMatch[2]);
+      }
+    }
+  }
+
+  return Array.from(results.entries())
+    .slice(0, 5000)
+    .map(([guestUid, guestPassword]) => ({ guestUid, guestPassword }));
+}
+

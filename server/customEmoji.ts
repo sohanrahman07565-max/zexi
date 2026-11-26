@@ -62,7 +62,7 @@ const SLOT_BY_KEY = new Map<string, CustomEmojiSlotDef>();
 const SLOT_BY_EMOJI = new Map<string, CustomEmojiSlotDef>();
 
 export function stripVariationSelector(s: string): string {
-  return String(s || '').replace(/[\uFE0E\uFE0F]/g, '');
+  return String(s || '').normalize('NFC').replace(/[\uFE0E\uFE0F]/g, '');
 }
 
 for (const slot of CUSTOM_EMOJI_SLOTS) {
@@ -79,7 +79,7 @@ export function isValidCustomEmojiId(value: unknown): value is string {
 
 export function isValidTargetEmoji(value: unknown): value is string {
   if (typeof value !== 'string') return false;
-  const trimmed = value.trim();
+  const trimmed = value.trim().normalize('NFC');
   if (!trimmed || trimmed.length > 32) return false;
   if (/[<>{}\r\n\s]/.test(trimmed)) return false;
   if (/^[\x00-\x7F]+$/.test(trimmed)) return false;
@@ -95,7 +95,7 @@ export function sanitizeCustomEmojiMap(raw: unknown): Record<string, string> {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const cleaned: Record<string, string> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const key = String(k || '').trim();
+    const key = String(k || '').trim().normalize('NFC');
     const id = String(v ?? '').trim();
     if (!key || !isValidCustomEmojiId(id)) continue;
     if (key.length > 64 || /[<>{}\r\n]/.test(key)) continue;
@@ -119,7 +119,7 @@ export function sanitizeCustomEmojiRules(rawRules: unknown): CustomEmojiRule[] {
     const rawSlotKey = typeof item.slotKey === 'string' ? item.slotKey.trim().toLowerCase() : '';
     const slotFromKey = rawSlotKey ? SLOT_BY_KEY.get(rawSlotKey) : undefined;
 
-    let targetEmoji = typeof item.emoji === 'string' ? item.emoji.trim() : '';
+    let targetEmoji = typeof item.emoji === 'string' ? item.emoji.trim().normalize('NFC') : '';
     if (!targetEmoji && slotFromKey) {
       targetEmoji = slotFromKey.fallback;
     }
@@ -277,7 +277,7 @@ export function lookupCustomEmojiId(
   customMap?: Record<string, string> | null
 ): string | undefined {
   if (!customMap) return undefined;
-  const raw = String(slotOrEmoji || '').trim();
+  const raw = String(slotOrEmoji || '').trim().normalize('NFC');
   if (!raw) return undefined;
 
   const lower = raw.toLowerCase();
@@ -353,32 +353,42 @@ function buildEmojiMatchPattern(normEmoji: string): string {
   return codepoints
     .map((cp) => {
       const esc = escapeRegExp(cp);
-      // Consume optional U+FE0E/U+FE0F atomically (cannot backtrack to split ZWJ/modifier sequences)
+      // Consume optional U+FE0E/U+FE0F atomically (cannot backtrack to leave orphan selectors or split ZWJ/modifier sequences)
       if (cp === '\u200D' || cp === '\u20E3' || /^[\u{1F3FB}-\u{1F3FF}]$/u.test(cp)) {
         return esc;
       }
-      return `${esc}(?:[\\uFE0E\\uFE0F]|(?![\\uFE0E\\uFE0F]))`;
+      return `${esc}(?:[\\uFE0E\\uFE0F]+(?![\\uFE0E\\uFE0F])|(?![\\uFE0E\\uFE0F]))`;
     })
     .join('');
 }
 
 function buildNormalizedEmojiMap(customMap?: Record<string, string> | null): Map<string, string> {
-  // Keyed by variation-selector-stripped emoji -> custom_emoji_id
+  // Keyed by NFC + variation-selector-stripped emoji -> custom_emoji_id
   const normalizedReplacements = new Map<string, string>();
   if (!customMap) return normalizedReplacements;
 
+  // Pass 1: slot keys (e.g. from env defaults)
   for (const [rawKey, rawId] of Object.entries(customMap)) {
     if (!isValidCustomEmojiId(rawId)) continue;
     const cleanId = rawId.trim();
-    const slot = SLOT_BY_KEY.get(rawKey.toLowerCase());
+    const slot = SLOT_BY_KEY.get(rawKey.trim().toLowerCase());
     if (slot) {
       const norm = stripVariationSelector(slot.fallback);
       if (norm) normalizedReplacements.set(norm, cleanId);
-    } else if (!/^[a-z0-9_]+$/i.test(rawKey) && isValidTargetEmoji(rawKey)) {
-      const norm = stripVariationSelector(rawKey.trim());
+    }
+  }
+
+  // Pass 2: explicit emoji keys deterministically win over slot defaults regardless of object key order
+  for (const [rawKey, rawId] of Object.entries(customMap)) {
+    if (!isValidCustomEmojiId(rawId)) continue;
+    const cleanId = rawId.trim();
+    const trimmedKey = rawKey.trim().normalize('NFC');
+    if (!/^[a-z0-9_]+$/i.test(trimmedKey) && isValidTargetEmoji(trimmedKey)) {
+      const norm = stripVariationSelector(trimmedKey);
       if (norm) normalizedReplacements.set(norm, cleanId);
     }
   }
+
   return normalizedReplacements;
 }
 
@@ -463,8 +473,9 @@ export function applyCustomEmojisToHtml(
 
       const replacePlainEmojis = (segment: string): string => {
         if (!emojiRegex || !segment) return segment;
+        const normalizedSegment = segment.normalize('NFC');
         emojiRegex.lastIndex = 0;
-        return segment.replace(emojiRegex, (matchedEmoji) => {
+        return normalizedSegment.replace(emojiRegex, (matchedEmoji) => {
           const customId = normalizedReplacements.get(stripVariationSelector(matchedEmoji));
           if (!customId) return matchedEmoji;
           return `<tg-emoji emoji-id="${customId}">${escapeEmojiFallbackHtml(matchedEmoji)}</tg-emoji>`;
@@ -581,23 +592,9 @@ export interface TelegramButtonLike {
   [key: string]: any;
 }
 
-function extractButtonEmojiMatch(
-  cleanText: string,
-  customMap?: Record<string, string> | null
-): { customEmojiId: string; strippedText: string; matchedEmoji: string } | null {
-  if (!cleanText || !customMap) return null;
-  const compiled = buildEmojiRegex(customMap, false);
-  if (!compiled) return null;
-
-  const match = compiled.regex.exec(cleanText);
-  if (!match || typeof match.index !== 'number') return null;
-
-  const matchedEmoji = match[0];
-  const customEmojiId = compiled.normalizedReplacements.get(stripVariationSelector(matchedEmoji));
-  if (!customEmojiId) return null;
-
-  const before = cleanText.slice(0, match.index);
-  const after = cleanText.slice(match.index + matchedEmoji.length);
+function removeSubstringRangeCleanly(text: string, start: number, end: number, matchedFallback: string): string {
+  const before = text.slice(0, start);
+  const after = text.slice(end).replace(/^[\uFE0E\uFE0F]+/, '');
   const needsSpace =
     before.length > 0 &&
     after.length > 0 &&
@@ -606,12 +603,75 @@ function extractButtonEmojiMatch(
     !/[([{"'“‘]$/.test(before) &&
     !/^[)\]}"'.,!?:;”’]/.test(after);
   const remainder = `${before}${needsSpace ? ' ' : ''}${after}`.replace(/\s{2,}/g, ' ').trim();
+  return remainder || matchedFallback;
+}
+
+function extractButtonEmojiMatch(
+  cleanText: string,
+  customMap?: Record<string, string> | null
+): { customEmojiId: string; strippedText: string; matchedEmoji: string } | null {
+  if (!cleanText || !customMap) return null;
+  const normalizedText = cleanText.normalize('NFC');
+  const compiled = buildEmojiRegex(customMap, false);
+  if (!compiled) return null;
+
+  const match = compiled.regex.exec(normalizedText);
+  if (!match || typeof match.index !== 'number') return null;
+
+  const matchedEmoji = match[0];
+  const customEmojiId = compiled.normalizedReplacements.get(stripVariationSelector(matchedEmoji));
+  if (!customEmojiId) return null;
 
   return {
     customEmojiId,
     matchedEmoji,
-    strippedText: remainder || matchedEmoji
+    strippedText: removeSubstringRangeCleanly(
+      normalizedText,
+      match.index,
+      match.index + matchedEmoji.length,
+      matchedEmoji
+    )
   };
+}
+
+function extractExplicitButtonEmojiFromRaw(
+  rawText: string,
+  customMap?: Record<string, string> | null
+): { customEmojiId: string; strippedText: string } | null {
+  if (!rawText) return null;
+
+  const tgEmojiMatch = rawText.match(/<tg-emoji\b[^>]*emoji-id=["'](\d{5,30})["'][^>]*>([\s\S]*?)<\/tg-emoji>/i);
+  if (tgEmojiMatch) {
+    const explicitId = tgEmojiMatch[1].trim();
+    const innerText = tgEmojiMatch[2] || '';
+    const mappedOverride = innerText ? lookupCustomEmojiId(innerText, customMap) : undefined;
+    const customEmojiId = mappedOverride || explicitId;
+    if (isValidCustomEmojiId(customEmojiId)) {
+      const cleanWithoutTag = sanitizeButtonLabel(rawText.replace(tgEmojiMatch[0], '')).normalize('NFC');
+      const fallback = sanitizeButtonLabel(rawText).normalize('NFC');
+      return {
+        customEmojiId,
+        strippedText: cleanWithoutTag || fallback
+      };
+    }
+  }
+
+  const slotTokenMatch = rawText.match(/\{emoji:([a-z0-9_]+)(?:\|([^}]*))?\}/i);
+  if (slotTokenMatch && customMap) {
+    const slotKey = slotTokenMatch[1].trim().toLowerCase();
+    const fallbackInner = (slotTokenMatch[2] || '').trim() || SLOT_BY_KEY.get(slotKey)?.fallback || '';
+    const slotId = lookupCustomEmojiId(slotKey, customMap) || (fallbackInner ? lookupCustomEmojiId(fallbackInner, customMap) : undefined);
+    if (slotId) {
+      const cleanWithoutToken = sanitizeButtonLabel(rawText.replace(slotTokenMatch[0], '')).normalize('NFC');
+      const fallback = sanitizeButtonLabel(rawText).normalize('NFC');
+      return {
+        customEmojiId: slotId,
+        strippedText: cleanWithoutToken || fallback
+      };
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -626,7 +686,7 @@ export function buildInlineKeyboardButton<T extends Record<string, any>>(
   if (!btn || typeof btn !== 'object') return btn;
   if (typeof btn.text !== 'string') return btn;
 
-  const cleanText = sanitizeButtonLabel(btn.text);
+  const cleanText = sanitizeButtonLabel(btn.text).normalize('NFC');
   const existingIconId = typeof btn.icon_custom_emoji_id === 'string' ? btn.icon_custom_emoji_id.trim() : '';
   if (isValidCustomEmojiId(existingIconId)) {
     return {
@@ -642,6 +702,15 @@ export function buildInlineKeyboardButton<T extends Record<string, any>>(
       ...btn,
       text: matched.strippedText,
       icon_custom_emoji_id: matched.customEmojiId
+    };
+  }
+
+  const explicit = extractExplicitButtonEmojiFromRaw(btn.text, customMap);
+  if (explicit) {
+    return {
+      ...btn,
+      text: explicit.strippedText,
+      icon_custom_emoji_id: explicit.customEmojiId
     };
   }
 
@@ -662,12 +731,19 @@ export function buildReplyKeyboardButton<T extends string | Record<string, any>>
   customMap?: Record<string, string> | null
 ): T extends string ? string | TelegramButtonLike : T {
   if (typeof btn === 'string') {
-    const cleanText = sanitizeButtonLabel(btn);
+    const cleanText = sanitizeButtonLabel(btn).normalize('NFC');
     const matched = extractButtonEmojiMatch(cleanText, customMap);
     if (matched) {
       return {
         text: matched.strippedText,
         icon_custom_emoji_id: matched.customEmojiId
+      } as any;
+    }
+    const explicit = extractExplicitButtonEmojiFromRaw(btn, customMap);
+    if (explicit) {
+      return {
+        text: explicit.strippedText,
+        icon_custom_emoji_id: explicit.customEmojiId
       } as any;
     }
     return cleanText as any;
@@ -815,3 +891,63 @@ export function stripIconCustomEmojiFromReplyMarkup<T>(
 
   return isString ? (JSON.stringify(next) as unknown as T) : next;
 }
+
+export function replyMarkupHasStyle(replyMarkup: any): boolean {
+  if (!replyMarkup) return false;
+  let parsed: any = replyMarkup;
+  if (typeof replyMarkup === 'string') {
+    try {
+      parsed = JSON.parse(replyMarkup);
+    } catch {
+      return false;
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') return false;
+
+  const checkRows = (rows: any): boolean =>
+    Array.isArray(rows) &&
+    rows.some(
+      (row: any) =>
+        Array.isArray(row) &&
+        row.some((btn: any) => btn && typeof btn === 'object' && 'style' in btn && btn.style !== undefined)
+    );
+
+  return checkRows(parsed.inline_keyboard) || checkRows(parsed.keyboard);
+}
+
+export function stripStyleFromReplyMarkup<T>(replyMarkup: T): T {
+  if (!replyMarkup) return replyMarkup;
+  const isString = typeof replyMarkup === 'string';
+  let parsed: any = replyMarkup;
+  if (isString) {
+    try {
+      parsed = JSON.parse(replyMarkup as unknown as string);
+    } catch {
+      return replyMarkup;
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') return replyMarkup;
+
+  const stripRows = (rows: any[]): any[] =>
+    rows.map((row: any) =>
+      Array.isArray(row)
+        ? row.map((btn: any) => {
+            if (!btn || typeof btn !== 'object') return btn;
+            if (!('style' in btn)) return btn;
+            const { style: _removed, ...rest } = btn;
+            return rest;
+          })
+        : row
+    );
+
+  const next: any = { ...parsed };
+  if (Array.isArray(parsed.inline_keyboard)) {
+    next.inline_keyboard = stripRows(parsed.inline_keyboard);
+  }
+  if (Array.isArray(parsed.keyboard)) {
+    next.keyboard = stripRows(parsed.keyboard);
+  }
+
+  return isString ? (JSON.stringify(next) as unknown as T) : next;
+}
+

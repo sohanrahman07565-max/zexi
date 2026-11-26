@@ -11,8 +11,8 @@ interface PostDraft {
   fileName?: string;
   caption: string;
   entities: any[];
-  buttons: Array<{ text: string; url: string; row: number; style?: string }>;
-  active: { text: string; url: string; row: number; style?: string } | null;
+  buttons: Array<{ text: string; url: string; row: number; style?: string; customEmojiId?: string }>;
+  active: { text: string; url: string; row: number; style?: string; customEmojiId?: string } | null;
   editIndex: number | null;
   wizardId: number | null;
   userIds: number[];
@@ -72,13 +72,14 @@ function validUrl(s: string): boolean {
   }
 }
 
-function grouped(buttons: Array<{ text: string; url: string; row: number; style?: string }>) {
+function grouped(buttons: Array<{ text: string; url: string; row: number; style?: string; customEmojiId?: string }>) {
   const m = new Map<number, any[]>();
   for (const b of buttons) {
     if (!m.has(b.row)) m.set(b.row, []);
-    const cleanText = sanitizeButtonLabel(b.text) || 'Button';
-    const button: any = { text: cleanText, url: b.url };
+    const hasValidLabel = Boolean(sanitizeButtonLabel(b.text));
+    const button: any = { text: hasValidLabel ? b.text : 'Button', url: b.url };
     if (b.style && b.style !== 'default') button.style = b.style;
+    if (b.customEmojiId) button.icon_custom_emoji_id = b.customEmojiId;
     m.get(b.row)!.push(button);
   }
   return [...m.keys()].sort((a, b) => a - b).map((k) => m.get(k)!);
@@ -1319,13 +1320,29 @@ Set BOT_TOKEN from @BotFather, CHANNEL_ID to your channel username or private nu
         }
 
         if (d.phase === 'button_text') {
-          const cleanBtnText = sanitizeButtonLabel(text || '');
+          const rawBtnText = (text || '').trim();
+          const cleanBtnText = sanitizeButtonLabel(rawBtnText);
           if (!cleanBtnText || cleanBtnText.length > 64) {
             await clearReplies(chat, d);
             return wizard(chat, d, 'STEP 3 — BUTTON TEXT\n\nButton text must be 1–64 characters. Try again.');
           }
+          const firstCustomEntity = Array.isArray(m.entities)
+            ? m.entities.find((e: any) => e?.type === 'custom_emoji' && typeof e.custom_emoji_id === 'string' && e.custom_emoji_id.trim())
+            : undefined;
+          let finalText = rawBtnText;
+          let explicitCustomId: string | undefined;
+          if (firstCustomEntity) {
+            explicitCustomId = firstCustomEntity.custom_emoji_id.trim();
+            const start = Math.max(0, Number(firstCustomEntity.offset) || 0);
+            const len = Math.max(0, Number(firstCustomEntity.length) || 0);
+            if (len > 0) {
+              const withoutEmoji = `${rawBtnText.slice(0, start)}${rawBtnText.slice(start + len)}`.replace(/\s{2,}/g, ' ').trim();
+              if (withoutEmoji) finalText = withoutEmoji;
+            }
+          }
           if (!d.active) d.active = { text: '', url: '', row: 1 };
-          d.active.text = cleanBtnText;
+          d.active.text = finalText;
+          d.active.customEmojiId = explicitCustomId;
           d.active.style = 'default';
           await clearReplies(chat, d);
           return askButtonColor(chat, d);
@@ -1356,12 +1373,28 @@ Set BOT_TOKEN from @BotFather, CHANNEL_ID to your channel username or private nu
         }
 
         if (d.phase === 'edit_button_text') {
-          const cleanEditBtnText = sanitizeButtonLabel(text || '');
+          const rawEditBtnText = (text || '').trim();
+          const cleanEditBtnText = sanitizeButtonLabel(rawEditBtnText);
           if (!cleanEditBtnText || cleanEditBtnText.length > 64 || d.editIndex === null || !d.buttons[d.editIndex]) {
             await clearReplies(chat, d);
             return wizard(chat, d, 'EDIT BUTTON TEXT\n\nSend text between 1 and 64 characters.');
           }
-          d.buttons[d.editIndex].text = cleanEditBtnText;
+          const firstCustomEntity = Array.isArray(m.entities)
+            ? m.entities.find((e: any) => e?.type === 'custom_emoji' && typeof e.custom_emoji_id === 'string' && e.custom_emoji_id.trim())
+            : undefined;
+          let finalText = rawEditBtnText;
+          let explicitCustomId: string | undefined;
+          if (firstCustomEntity) {
+            explicitCustomId = firstCustomEntity.custom_emoji_id.trim();
+            const start = Math.max(0, Number(firstCustomEntity.offset) || 0);
+            const len = Math.max(0, Number(firstCustomEntity.length) || 0);
+            if (len > 0) {
+              const withoutEmoji = `${rawEditBtnText.slice(0, start)}${rawEditBtnText.slice(start + len)}`.replace(/\s{2,}/g, ' ').trim();
+              if (withoutEmoji) finalText = withoutEmoji;
+            }
+          }
+          d.buttons[d.editIndex].text = finalText;
+          d.buttons[d.editIndex].customEmojiId = explicitCustomId;
           d.editIndex = null;
           await clearReplies(chat, d);
           return preview(chat, d);

@@ -3,12 +3,12 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { storage, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord, SharedStorageService, AdminUser, BotOperationalMode, UserReportRecord, AdminReportMessageRef, TelegramMessageEntityRecord, DEFAULT_MODERATION_DURATIONS, sanitizeModerationDurations } from './storage';
+import { storage, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord, SharedStorageService, AdminUser, BotOperationalMode, UserReportRecord, AdminReportMessageRef, TelegramMessageEntityRecord, DEFAULT_MODERATION_DURATIONS, sanitizeModerationDurations, FraudKeywordRule, MessageTemplate } from './storage';
 import { hashPassword, signSessionToken } from './auth';
 import { PostBotEngine } from './postBot';
 import { ImageUrlBotEngine } from './imageUrlBot';
 import { resolveRealBannerImage } from './ffBannerGenerator';
-import { FreeFireGuestService } from './ffGuestApi';
+import { FreeFireGuestService, parseGuestCredentialsFromBuffer } from './ffGuestApi';
 import {
   formatCustomEmoji,
   applyCustomEmojisToHtml,
@@ -21,7 +21,15 @@ import {
   buildReplyKeyboardButton,
   buildTelegramButton,
   replyMarkupHasIconCustomEmoji,
-  stripIconCustomEmojiFromReplyMarkup
+  stripIconCustomEmojiFromReplyMarkup,
+  replyMarkupHasStyle,
+  stripStyleFromReplyMarkup,
+  CustomEmojiRule,
+  sanitizeCustomEmojiRules,
+  buildCustomEmojiMapFromRules,
+  isValidTargetEmoji,
+  isValidCustomEmojiId,
+  stripVariationSelector
 } from './customEmoji';
 
 export const botTokenContext = new AsyncLocalStorage<string>();
@@ -186,6 +194,45 @@ interface EmojiIdSession {
   promptMessageId?: number;
 }
 
+interface MoreSession {
+  chatId: string | number;
+  promptMessageId?: number;
+  view: string;
+  awaiting?:
+    | { kind: 'set_del_timeout' }
+    | { kind: 'set_maint_notice' }
+    | { kind: 'sub_add_channel' }
+    | { kind: 'grp_wel_sec' }
+    | { kind: 'grp_warn_custom' }
+    | { kind: 'grp_add_dur' }
+    | { kind: 'brd_compose'; pin: boolean }
+    | { kind: 'frd_add_kw'; matchType: 'contains' | 'exact' | 'regex'; action: FraudKeywordRule['action'] }
+    | { kind: 'wht_add_chat' }
+    | { kind: 'emj_add_rule' }
+    | { kind: 'gst_add_account' }
+    | { kind: 'tpl_edit'; templateKey: string }
+    | { kind: 'adm_add'; preset: 'full' | 'editor' | 'moderator' };
+  draftBroadcast?: {
+    mediaType: 'text' | 'photo' | 'video' | 'audio' | 'voice';
+    message: string;
+    mediaUrl?: string;
+    pin: boolean;
+  };
+  newFraudConfig?: {
+    matchType: 'contains' | 'exact' | 'regex';
+    action: FraudKeywordRule['action'];
+  };
+  newAdminPreset?: 'full' | 'editor' | 'moderator';
+  repFilter?: 'pending' | 'all' | 'resolved' | 'dismissed';
+  subReqPage?: number;
+  repPage?: number;
+  keyPage?: number;
+  emjPage?: number;
+  gstPage?: number;
+  tplPage?: number;
+  createdAt: number;
+}
+
 const activeEditSessions: Map<string, { templateKey: string }> = new Map();
 const activeSetChannelSessions: Map<string, { timestamp: number }> = new Map();
 const activeCloneSessions: Map<string, CloneSession> = new Map();
@@ -194,7 +241,21 @@ const pendingGroupModerationMap: Map<string, PendingModerationAction> = new Map(
 const activeGroupTempModSessions: Map<string, PendingModerationAction> = new Map();
 const activeUpdateSessions: Map<string, UpdateItemSession> = new Map();
 const activeEmojiIdSessions: Map<string, EmojiIdSession> = new Map();
+const activeMoreSessions: Map<string, MoreSession> = new Map();
 const recentGroupWelcomes: Map<string, number> = new Map();
+
+interface PendingForceSubAction {
+  token: string;
+  botScopeId: string;
+  userId: string;
+  chatId: string | number;
+  kind: 'private_message' | 'group_message' | 'callback_query';
+  message?: any;
+  text?: string;
+  callbackQuery?: any;
+  createdAt: number;
+}
+const pendingForceSubActions: Map<string, PendingForceSubAction> = new Map();
 
 // Deduplication map to prevent repeated deliveries from retried webhooks
 const recentDeliveries = new Map<string, number>();
@@ -1105,6 +1166,11 @@ export class TelegramService {
           (Array.isArray(currentPayload.results) &&
             currentPayload.results.some((resItem: any) => replyMarkupHasIconCustomEmoji(resItem?.reply_markup)));
 
+        const hasButtonStyle =
+          replyMarkupHasStyle(currentPayload.reply_markup) ||
+          (Array.isArray(currentPayload.results) &&
+            currentPayload.results.some((resItem: any) => replyMarkupHasStyle(resItem?.reply_markup)));
+
         const isExplicitButtonEmojiError =
           desc.includes('icon_custom_emoji_id') ||
           desc.includes('button_custom_emoji') ||
@@ -1113,16 +1179,35 @@ export class TelegramService {
           ((desc.includes('button') || desc.includes('reply_markup') || desc.includes('keyboard')) &&
             (desc.includes('custom') || desc.includes('emoji')));
 
-        if (
+        const isNonEmojiMarkupError =
+          desc.includes('style') ||
+          desc.includes('reply_markup') ||
+          desc.includes('button') ||
+          desc.includes('keyboard');
+
+        if (hasButtonStyle && !isExplicitButtonEmojiError && isNonEmojiMarkupError) {
+          console.warn(`[Telegram] ${method} rejected styled reply_markup (${data.description}). Retrying without button style while preserving custom emojis...`);
+          const nextPayload = { ...currentPayload };
+          if (nextPayload.reply_markup && replyMarkupHasStyle(nextPayload.reply_markup)) {
+            nextPayload.reply_markup = stripStyleFromReplyMarkup(nextPayload.reply_markup);
+          }
+          if (Array.isArray(nextPayload.results)) {
+            nextPayload.results = nextPayload.results.map((resItem: any) =>
+              resItem && typeof resItem === 'object' && replyMarkupHasStyle(resItem.reply_markup)
+                ? { ...resItem, reply_markup: stripStyleFromReplyMarkup(resItem.reply_markup) }
+                : resItem
+            );
+          }
+          currentPayload = nextPayload;
+          modified = true;
+        } else if (
           hasButtonCustomEmoji &&
           (isExplicitButtonEmojiError ||
-            (!hasTgEmojiInPayload &&
+            (!hasButtonStyle &&
+              !hasTgEmojiInPayload &&
               !hasAutoEntitiesPendingFallback &&
-              (desc.includes('custom') ||
-                desc.includes('emoji') ||
-                desc.includes('button') ||
-                desc.includes('reply_markup') ||
-                desc.includes('keyboard'))))
+              isNonEmojiMarkupError) ||
+            (!hasButtonStyle && (desc.includes('custom') || desc.includes('emoji'))))
         ) {
           console.warn(`[Telegram] ${method} rejected button icon_custom_emoji_id (${data.description}). Retrying with Unicode fallback button labels...`);
           const nextPayload = { ...currentPayload };
@@ -3319,8 +3404,16 @@ export class TelegramService {
           }
         }
 
-        // Handle Inline Button Clicks (Callback queries from /add flow and setup video navigation)
+        // Handle Inline Button Clicks (Callback queries) — Enforce global Sub Force gate BEFORE execution
         if (update.callback_query) {
+          const blockedCb = await this.enforceGlobalSubForceGate({
+            kind: 'callback_query',
+            callbackQuery: update.callback_query,
+            fromId,
+            senderUname,
+            settings
+          });
+          if (blockedCb) return;
           await this.handleCallbackQuery(update.callback_query);
           return;
         }
@@ -3337,6 +3430,16 @@ export class TelegramService {
         if (isGroup) {
           await this.handleGroupMessage(message, text);
         } else if (isPrivate) {
+          // Enforce strict global Sub Force gate BEFORE any command, trigger, or private interaction
+          const blockedDm = await this.enforceGlobalSubForceGate({
+            kind: 'private_message',
+            message,
+            text,
+            fromId,
+            senderUname,
+            settings
+          });
+          if (blockedDm) return;
           await this.handlePrivateMessage(message, text);
         }
       });
@@ -3615,6 +3718,7 @@ export class TelegramService {
       `• <code>/clearstartmedia</code> — Remove media from <code>/start</code> message`,
       `• <code>/setwelcome &lt;text&gt;</code> — Set group welcome message (supports photo/video &amp; reply)`,
       `• <code>/setpassword &lt;password&gt;</code> — Set/change Web Panel password`,
+      `• <code>/more</code> — Interactive More settings &amp; controls menu`,
       `• <code>/broadcast</code> · <code>/settings</code> — Panel broadcast &amp; filter guide`,
       ...(isMainBot ? [`• <code>/clone</code> — Clone a File Bot instance`] : []),
       ``,
@@ -4598,27 +4702,230 @@ export class TelegramService {
     );
   }
 
+  private static savePendingForceSubAction(
+    params: Omit<PendingForceSubAction, 'token' | 'createdAt' | 'botScopeId'>
+  ): string {
+    const botScopeId = String((storage as any)?.botId || 'main').trim() || 'main';
+    const now = Date.now();
+    if (pendingForceSubActions.size > 500) {
+      for (const [k, v] of pendingForceSubActions.entries()) {
+        if (now - v.createdAt > 30 * 60 * 1000) {
+          pendingForceSubActions.delete(k);
+        }
+      }
+    }
+    const token = `act_${crypto.randomBytes(5).toString('hex')}`;
+    pendingForceSubActions.set(token, {
+      ...params,
+      token,
+      botScopeId,
+      createdAt: now
+    });
+    return token;
+  }
+
+  private static isCallbackExemptFromForceSub(data: string | undefined): boolean {
+    if (!data) return false;
+    return data.startsWith('forcesub_verify:');
+  }
+
+  private static async enforceGlobalSubForceGate(ctx:
+    | {
+        kind: 'callback_query';
+        callbackQuery: any;
+        fromId: string;
+        senderUname: string;
+        settings: any;
+      }
+    | {
+        kind: 'private_message';
+        message: any;
+        text: string;
+        fromId: string;
+        senderUname: string;
+        settings: any;
+      }
+    | {
+        kind: 'group_message';
+        message: any;
+        text: string;
+        fromId: string;
+        senderUname: string;
+        settings: any;
+      }
+  ): Promise<boolean> {
+    const { settings, fromId, senderUname } = ctx;
+    if (!settings?.forceSubEnabled || !Array.isArray(settings?.requiredChannels)) {
+      return false;
+    }
+    const activeChannels = settings.requiredChannels.filter((c: ForceSubChannel) => c && c.enabled !== false);
+    if (activeChannels.length === 0 || !fromId) {
+      return false;
+    }
+
+    // Exempt authorized bot administrators from Sub Force restrictions
+    if (await this.isAuthorizedAdmin(fromId, senderUname)) {
+      return false;
+    }
+
+    if (ctx.kind === 'callback_query') {
+      const cb = ctx.callbackQuery;
+      const data = String(cb?.data || '');
+      const chatId = cb?.message?.chat?.id;
+      if (this.isCallbackExemptFromForceSub(data)) {
+        return false;
+      }
+      // Allow authorized group moderators / owners to operate moderation panels & controls
+      if (
+        data.startsWith('modp:') ||
+        data.startsWith('moda:') ||
+        data.startsWith('modt:') ||
+        data.startsWith('modk:') ||
+        data.startsWith('modr:') ||
+        data.startsWith('modc:')
+      ) {
+        if (await this.isAuthorizedModerationActor(chatId, fromId, cb?.from?.username)) {
+          return false;
+        }
+      }
+      if (data.startsWith('adm_') && (await this.canOpenGroupDashboard(chatId, fromId, cb?.from?.username))) {
+        return false;
+      }
+
+      const forceCheck = await this.checkUserForceSub(fromId, senderUname, { forceFresh: true });
+      if (forceCheck.allJoined) {
+        return false;
+      }
+
+      const isRequestOnly = forceCheck.mode === 'request_only';
+      await this.callTelegramApi('answerCallbackQuery', {
+        callback_query_id: cb.id,
+        text: isRequestOnly
+          ? 'Please send a join request to all required channels and groups first.'
+          : 'Please join all required channels and groups first.',
+        show_alert: true
+      }).catch(() => {});
+
+      if (chatId) {
+        const token = this.savePendingForceSubAction({
+          kind: 'callback_query',
+          userId: fromId,
+          chatId,
+          callbackQuery: cb
+        });
+        await this.sendForceSubPrompt(
+          chatId,
+          forceCheck.unjoinedChannels,
+          token,
+          undefined,
+          cb.from,
+          { threadId: cb.message?.message_thread_id }
+        );
+      }
+      return true;
+    }
+
+    if (ctx.kind === 'private_message') {
+      const { message, text } = ctx;
+      const chatId = message?.chat?.id;
+      if (!chatId) return false;
+
+      const forceCheck = await this.checkUserForceSub(fromId, senderUname, { forceFresh: true });
+      if (forceCheck.allJoined) {
+        return false;
+      }
+
+      let targetPayload = '';
+      const startMatch = text.match(/^\/start(?:@\w+)?(?:\s+(.+))?$/i);
+      if (startMatch) {
+        const rawPayload = startMatch[1]?.trim() || 'start';
+        if (Buffer.byteLength(`forcesub_verify:${rawPayload}`, 'utf8') <= 64) {
+          targetPayload = rawPayload;
+        }
+      }
+
+      if (!targetPayload) {
+        targetPayload = this.savePendingForceSubAction({
+          kind: 'private_message',
+          userId: fromId,
+          chatId,
+          message,
+          text
+        });
+      }
+
+      await this.sendForceSubPrompt(
+        chatId,
+        forceCheck.unjoinedChannels,
+        targetPayload,
+        undefined,
+        message?.from
+      );
+      return true;
+    }
+
+    // Group message bot-action Sub Force gate
+    const { message, text } = ctx;
+    const chatId = message?.chat?.id;
+    if (!chatId) return false;
+
+    const forceCheck = await this.checkUserForceSub(fromId, senderUname, { forceFresh: true });
+    if (forceCheck.allJoined) {
+      return false;
+    }
+
+    const token = this.savePendingForceSubAction({
+      kind: 'group_message',
+      userId: fromId,
+      chatId,
+      message,
+      text
+    });
+
+    await this.sendForceSubPrompt(
+      chatId,
+      forceCheck.unjoinedChannels,
+      token,
+      undefined,
+      message?.from,
+      {
+        replyToMessageId: message?.message_id,
+        threadId: message?.message_thread_id
+      }
+    );
+    return true;
+  }
+
   public static async checkUserForceSub(
     userId: string | number,
     username?: string,
     options?: { forceFresh?: boolean; allowCache?: boolean }
   ): Promise<{ allJoined: boolean; unjoinedChannels: ForceSubChannel[]; mode?: 'auto_join' | 'request_only' }> {
+    let fallbackEnabled = false;
+    let fallbackActiveChannels: ForceSubChannel[] = [];
+    let fallbackMode: 'auto_join' | 'request_only' = 'auto_join';
     try {
       const settings = await storage.getSettings();
       const forceJoinMode: 'auto_join' | 'request_only' =
         settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join';
+      fallbackMode = forceJoinMode;
 
       if (!settings.forceSubEnabled || !settings.requiredChannels || settings.requiredChannels.length === 0) {
         return { allJoined: true, unjoinedChannels: [], mode: forceJoinMode };
       }
 
-      const activeChannels = settings.requiredChannels.filter(c => c.enabled !== false);
+      const activeChannels = settings.requiredChannels.filter(c => c && c.enabled !== false);
       if (activeChannels.length === 0) {
         return { allJoined: true, unjoinedChannels: [], mode: forceJoinMode };
       }
 
+      fallbackEnabled = true;
+      fallbackActiveChannels = activeChannels;
+
       const cleanUserId = String(userId).trim();
-      if (!cleanUserId) return { allJoined: true, unjoinedChannels: [], mode: forceJoinMode };
+      if (!cleanUserId) {
+        return { allJoined: false, unjoinedChannels: activeChannels, mode: forceJoinMode };
+      }
 
       const botScopeId = (storage as any)?.botId || 'main';
       const cacheKey = `${botScopeId}_${forceJoinMode}_${cleanUserId}`;
@@ -4647,9 +4954,9 @@ export class TelegramService {
 
       const numericUserId = Number(cleanUserId) || cleanUserId;
 
-      // Parallelize live channel membership / pending join-request verification (never rely solely on stale cache)
+      // Check EVERY configured & active channel/group in Sub Force via live getChatMember
       const checks = await Promise.all(activeChannels.map(async (channel) => {
-        let rawChatId = (channel.chatId || '').trim();
+        let rawChatId = (channel.chatId || channel.username || '').trim();
         if (!rawChatId) return null;
 
         if (rawChatId.startsWith('https://t.me/')) {
@@ -4661,36 +4968,24 @@ export class TelegramService {
         }
 
         const targetChat = /^-?\d+$/.test(rawChatId) ? Number(rawChatId) : rawChatId;
-        if (settings.chatWhitelistEnabled) {
-          let allowed = await storage.isChatWhitelisted(String(targetChat), channel.type);
-          if (!allowed && typeof targetChat === 'string' && targetChat.startsWith('@')) {
-            try {
-              const infoRes = await this.callTelegramApi('getChat', { chat_id: targetChat });
-              if (infoRes?.ok && infoRes.result?.id) {
-                allowed = await storage.isChatWhitelisted(String(infoRes.result.id), infoRes.result.type || channel.type);
-              }
-            } catch {}
-          }
-          if (!allowed) {
-            return null;
-          }
-        }
         let isMember = false;
         let memberStatus = '';
+        let lookupSucceeded = false;
 
-        // 1. Live channel membership query via Telegram getChatMember
+        // 1. Live channel/group membership query via Telegram getChatMember
         try {
           const res = await this.callTelegramApi('getChatMember', {
             chat_id: targetChat,
             user_id: numericUserId
           });
           if (res && res.ok && res.result) {
+            lookupSucceeded = true;
             memberStatus = String(res.result.status || '').trim();
             isMember =
               memberStatus === 'creator' ||
               memberStatus === 'administrator' ||
               memberStatus === 'member' ||
-              (memberStatus === 'restricted' && res.result.is_member !== false);
+              (memberStatus === 'restricted' && res.result.is_member === true);
           }
         } catch (err: any) {
           console.warn(`[ForceSub] Error querying getChatMember for ${cleanUserId} in ${targetChat}:`, err?.message);
@@ -4709,7 +5004,13 @@ export class TelegramService {
           return channel;
         }
 
-        // 2. Live fallback handling when user is not currently a channel member
+        // Lookup failures must be treated strictly as NOT joined
+        if (!lookupSucceeded) {
+          this.clearCachedPendingJoinRequest(String(botScopeId), channel, cleanUserId, effectiveUsername, String(targetChat));
+          return channel;
+        }
+
+        // 2. Live fallback handling when user is not currently a channel/group member
         if (!isMember) {
           let resolvedChatId = String(targetChat);
           let resolvedUsername = channel.username;
@@ -4739,8 +5040,6 @@ export class TelegramService {
               if (storedRecord.status === 'pending') {
                 isMember = true;
               } else {
-                // If status was 'approved' but live getChatMember said 'left', they left the channel after approval!
-                // If status was 'rejected', their request was dismissed/declined!
                 this.clearCachedPendingJoinRequest(String(botScopeId), channel, cleanUserId, effectiveUsername, resolvedChatId);
                 await storage.invalidateJoinRequest(
                   resolvedChatId || String(targetChat),
@@ -4752,7 +5051,6 @@ export class TelegramService {
                 isMember = false;
               }
             } else {
-              // No record in persistent storage: only accept an immediate in-flight chat_join_request within 10s while DB persists
               const hasFreshInFlight = this.hasCachedPendingJoinRequest(
                 String(botScopeId),
                 channel,
@@ -4764,9 +5062,7 @@ export class TelegramService {
               isMember = hasFreshInFlight;
             }
           } else if (forceJoinMode === 'auto_join') {
-            // Live getChatMember confirmed user is NOT a member (e.g. 'left')
-            // Only approve if an active pending join request exists right now and Telegram approves it live
-            if (settings.autoApproveJoinRequests !== false) {
+            if (settings.autoApproveJoinRequests !== false && memberStatus === 'left') {
               try {
                 const approveRes = await this.callTelegramApi('approveChatJoinRequest', {
                   chat_id: targetChat,
@@ -4787,7 +5083,6 @@ export class TelegramService {
             }
 
             if (!isMember) {
-              // Invalidate any stale approved/pending record since live getChatMember confirmed they are not in the channel
               this.clearCachedPendingJoinRequest(String(botScopeId), channel, cleanUserId, effectiveUsername, resolvedChatId);
               await storage.invalidateJoinRequest(
                 resolvedChatId || String(targetChat),
@@ -4817,8 +5112,11 @@ export class TelegramService {
       }
       return result;
     } catch (err: any) {
-      console.error('[ForceSub] Unexpected error in checkUserForceSub:', err);
-      return { allJoined: true, unjoinedChannels: [], mode: 'auto_join' };
+      console.error('[ForceSub] Unexpected error in checkUserForceSub (failing closed):', err);
+      if (fallbackEnabled && fallbackActiveChannels.length > 0) {
+        return { allJoined: false, unjoinedChannels: fallbackActiveChannels, mode: fallbackMode };
+      }
+      return { allJoined: true, unjoinedChannels: [], mode: fallbackMode };
     }
   }
 
@@ -4827,13 +5125,14 @@ export class TelegramService {
     unjoinedChannels: ForceSubChannel[],
     targetPayload: string = 'start',
     messageIdToEdit?: number,
-    userInfo?: { id?: string | number; firstName?: string; first_name?: string; lastName?: string; last_name?: string; username?: string; [key: string]: any }
+    userInfo?: { id?: string | number; firstName?: string; first_name?: string; lastName?: string; last_name?: string; username?: string; [key: string]: any },
+    options?: { replyToMessageId?: number; threadId?: number }
   ): Promise<void> {
     const settings = await storage.getSettings();
     const isRequestOnly = settings.forceJoinMode === 'request_only';
     const keyboardRows: any[][] = [];
 
-    // Channel Join / Request Buttons: Grid layout with 2 buttons per row
+    // Channel/Group Join / Request Buttons: Grid layout with 2 buttons per row
     const channelButtons: any[] = [];
     for (let i = 0; i < unjoinedChannels.length; i++) {
       const ch = unjoinedChannels[i];
@@ -4874,14 +5173,15 @@ export class TelegramService {
           channelUrl = 'https://t.me';
         }
       }
+      const isGrp = ch.type === 'group' || ch.type === 'supergroup';
       channelButtons.push({
-        text: `Join Channel ${i + 1}`,
+        text: `Join ${isGrp ? 'Group' : 'Channel'} ${i + 1}`,
         url: channelUrl,
         style: 'primary'
       });
     }
 
-    // Chunk channel buttons into pairs of 2 per row
+    // Chunk buttons into pairs of 2 per row
     for (let i = 0; i < channelButtons.length; i += 2) {
       keyboardRows.push(channelButtons.slice(i, i + 2));
     }
@@ -4895,12 +5195,15 @@ export class TelegramService {
       }
     ]);
 
-    // Dynamic unjoined channels enumeration for {channel_list} placeholder
+    // Dynamic unjoined channels & groups enumeration for {channel_list} placeholder
     const channelNames = unjoinedChannels
-      .map((c, i) => `  🔹 <b>Channel ${i + 1}:</b> <code>${this.escapeHtml(c.name)}</code>`)
+      .map((c, i) => {
+        const label = (c.type === 'group' || c.type === 'supergroup') ? 'Group' : 'Channel';
+        return `  🔹 <b>${label} ${i + 1}:</b> <code>${this.escapeHtml(c.name)}</code>`;
+      })
       .join('\n');
 
-    // Load Editable Message Template from storage (Requirement 2)
+    // Load Editable Message Template from storage
     const templates = await storage.getTemplates();
     const template = templates['FORCESUB_PROMPT'];
     const botName = await this.getBotUsername();
@@ -4911,22 +5214,29 @@ export class TelegramService {
       `{channel_list}\n\n` +
       `👇 <i>Tap the button(s) above to join, then press <b>Verify / Try Again</b> below.</i>`;
 
-    const defaultAutoJoinPrompt =
+    const prevAutoJoinPrompt =
       `🔒 <b>Channel Membership Required</b>\n\n` +
       `To use <code>{bot_name}</code> and access your requested content, please join our official channel(s) below:\n\n` +
       `{channel_list}\n\n` +
       `👇 <i>Tap the channel buttons below to join, then press <b>Verify / Try Again</b>.</i>`;
 
+    const defaultAutoJoinPrompt =
+      `🔒 <b>Membership Required</b>\n\n` +
+      `Please join all required channels and groups below to use <code>{bot_name}</code>:\n\n` +
+      `{channel_list}\n\n` +
+      `👇 <i>Join all above, then tap <b>Verify / Try Again</b>.</i>`;
+
     const defaultRequestOnlyPrompt =
       `🔒 <b>Join Request Required</b>\n\n` +
-      `To use <code>{bot_name}</code> and access your requested content, please send a join request to our official channel(s) below first:\n\n` +
+      `Please send a join request to all required channels and groups below to use <code>{bot_name}</code>:\n\n` +
       `{channel_list}\n\n` +
-      `👇 <i>Tap the channel buttons below to send your join request, then press <b>Verify / Try Again</b>.</i>`;
+      `👇 <i>Send join request(s) above, then tap <b>Verify / Try Again</b>.</i>`;
 
     const trimmedTemplate = template?.content?.trim() || '';
     const isUsingDefaultTemplate =
       !trimmedTemplate ||
       trimmedTemplate === defaultAutoJoinPrompt.trim() ||
+      trimmedTemplate === prevAutoJoinPrompt.trim() ||
       trimmedTemplate === legacyAutoJoinPrompt.trim();
     let promptText = isUsingDefaultTemplate
       ? (isRequestOnly ? defaultRequestOnlyPrompt : defaultAutoJoinPrompt)
@@ -4961,7 +5271,6 @@ export class TelegramService {
       } catch {}
     }
 
-    // Dynamic real name: prioritize user's actual real name (e.g. "Sohan"), then username, then ID
     const realUserName = userDisplayName || userMention || 'User';
     const safeUserName = this.escapeHtml(realUserName);
     const safeUserMention = this.escapeHtml(userMention || realUserName);
@@ -4987,20 +5296,22 @@ export class TelegramService {
           reply_markup: { inline_keyboard: keyboardRows }
         });
         if (editRes && editRes.ok) return;
-        // If Telegram returns "message is not modified", the content is already up-to-date.
-        // We MUST NOT send a new message, which would clutter and spam the user's chat!
         return;
       } catch {
         return;
       }
     }
 
-    await this.callTelegramApi('sendMessage', {
+    const sendPayload: any = {
       chat_id: chatId,
       text: promptText,
       parse_mode: 'HTML',
       reply_markup: { inline_keyboard: keyboardRows }
-    });
+    };
+    if (options?.replyToMessageId) sendPayload.reply_to_message_id = options.replyToMessageId;
+    if (options?.threadId) sendPayload.message_thread_id = options.threadId;
+
+    await this.callTelegramApi('sendMessage', sendPayload);
   }
 
   // =========================================================================
@@ -5092,8 +5403,13 @@ export class TelegramService {
   // =========================================================================
   // GROUP MESSAGE HANDLING (EXACT TRIGGER MATCHING & STRICT GROUP PRIVACY)
   // =========================================================================
-  private static async handleGroupMessage(message: any, text: string): Promise<void> {
+  private static async handleGroupMessage(
+    message: any,
+    text: string,
+    options?: { skipForceSubCheck?: boolean }
+  ): Promise<void> {
     const fromId = message.from?.id !== undefined && message.from?.id !== null ? String(message.from.id).trim() : '';
+    const senderUname = String(message.from?.username || '').replace(/^@+/, '').toLowerCase().trim();
     const groupSettings = await storage.getSettings();
 
     if (message.chat?.id && message.from && !message.from.is_bot && fromId) {
@@ -5308,6 +5624,19 @@ export class TelegramService {
     // 1a-emoji. /emojiid or /emoji id Custom Emoji ID Detector in Group
     const groupEmojiCmd = this.parseEmojiIdCommand(text);
     if (groupEmojiCmd.matched) {
+      if (
+        !options?.skipForceSubCheck &&
+        (await this.enforceGlobalSubForceGate({
+          kind: 'group_message',
+          message,
+          text,
+          fromId,
+          senderUname,
+          settings: groupSettings
+        }))
+      ) {
+        return;
+      }
       await this.handleEmojiIdCommand(message, groupEmojiCmd, true);
       return;
     }
@@ -5328,6 +5657,19 @@ export class TelegramService {
         });
         return;
       } else if (!text.startsWith('/')) {
+        if (
+          !options?.skipForceSubCheck &&
+          (await this.enforceGlobalSubForceGate({
+            kind: 'group_message',
+            message,
+            text,
+            fromId,
+            senderUname,
+            settings: groupSettings
+          }))
+        ) {
+          return;
+        }
         activeEmojiIdSessions.delete(groupEmojiSessionKey);
         await this.handleEmojiIdInspectionMessage(message, true);
         return;
@@ -5505,6 +5847,7 @@ export class TelegramService {
     const isSettingsCommand = /^\/(?:settings|config|setfilter|addfilter|delfilter|delfile|delete|del|editthismessage)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isBotLifecycleCommand = /^\/(?:botstart|startbot|botstop|stopbot|botrestart|restartbot|botstatus|memclean|cleanmemory|clearcache)(?:@\w+)?(?:\s+|$)/i.test(text);
     const isGrantRevokeCommand = /^\/(?:grantadmin|promote|addadmin|revokeadmin|demote|removeadmin|deladmin)(?:@\w+)?(?:\s+|$)/i.test(text);
+    const isMoreCommand = /^\/more(?:@\w+)?(?:\s+|$)/i.test(text);
     const isHelpCommand = /^\/help(?:@\w+)?(?:\s+|$)/i.test(text);
 
     const isAdminCommand =
@@ -5531,6 +5874,7 @@ export class TelegramService {
       isSettingsCommand ||
       isBotLifecycleCommand ||
       isGrantRevokeCommand ||
+      isMoreCommand ||
       isHelpCommand;
 
     if (isAdminCommand) {
@@ -5607,6 +5951,16 @@ export class TelegramService {
             await this.handleOwnerGrantRevokeCommand(fromId, fromId, text, message);
           },
           'Admin permission update sent to your private messages.'
+        );
+        return;
+      }
+
+      if (isMoreCommand) {
+        await executeWithPrivateDelivery(
+          async () => {
+            await this.handleMoreCommand(fromId, fromId);
+          },
+          'More settings menu sent to your private messages.'
         );
         return;
       }
@@ -5821,6 +6175,7 @@ export class TelegramService {
             activeEditSessions.delete(fromId);
             activeCloneSessions.delete(fromId);
             activeUpdateSessions.delete(fromId);
+            this.clearMoreSession(fromId);
             const templates = await storage.getTemplates();
             const cancelMsg = templates.CANCEL_MESSAGE?.content || '❌ <b>Operation Cancelled</b>\n<i>Current action has been aborted.</i>';
             if (addSession?.lastPromptMessageId) {
@@ -6279,6 +6634,19 @@ export class TelegramService {
 
     // 2d. /info Command: Display group chat ID, title, member count, and full admins list
     if (/^\/info(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
+      if (
+        !options?.skipForceSubCheck &&
+        (await this.enforceGlobalSubForceGate({
+          kind: 'group_message',
+          message,
+          text,
+          fromId,
+          senderUname,
+          settings: groupSettings
+        }))
+      ) {
+        return;
+      }
       await this.handleGroupInfoCommand(message);
       return;
     }
@@ -6286,6 +6654,19 @@ export class TelegramService {
     // 3. /report Command: User replies to a message with /report <reason>, or sends /report <@username_or_id> <reason>
     const reportMatch = text.match(/^\/report(?:@\w+)?(?:\s+(.+))?$/i);
     if (reportMatch || text.trim().toLowerCase().startsWith('/report')) {
+      if (
+        !options?.skipForceSubCheck &&
+        (await this.enforceGlobalSubForceGate({
+          kind: 'group_message',
+          message,
+          text,
+          fromId,
+          senderUname,
+          settings: groupSettings
+        }))
+      ) {
+        return;
+      }
       let targetUser: any = null;
       let reason = reportMatch?.[1]?.trim() || '';
       let reportedContent = '';
@@ -6632,13 +7013,49 @@ export class TelegramService {
       }
     }
 
+    // Check all public bot features & trigger commands in groups under strict global Sub Force gate
+    const isTranslationTrigger = Boolean(this.parseTranslationTrigger(text));
+    const groupFfCmd = this.parseFreeFireUidCommand(text);
+    const groupBanInfoCmd = this.parseBanInfoCommand(text);
+    const groupLikeCmd = this.parseFreeFireLikeCommand(text);
+    const isFilters = /^\/(?:filters|filter)(?:@\w+)?$/i.test(text.trim());
+    const botUsernameForGroup = await this.getBotUsername();
+    const cleanGroupBot = (botUsernameForGroup || '').replace(/^@+/, '').trim();
+    const isStartInGroup = Boolean(
+      cleanGroupBot && new RegExp(`^\\/start@${cleanGroupBot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`, 'i').test(text)
+    );
+    const matchedItem = text ? await storage.findItemByTrigger(text) : null;
+
+    if (
+      isTranslationTrigger ||
+      groupFfCmd.matched ||
+      groupBanInfoCmd.matched ||
+      groupLikeCmd.matched ||
+      isFilters ||
+      isStartInGroup ||
+      matchedItem
+    ) {
+      if (
+        !options?.skipForceSubCheck &&
+        (await this.enforceGlobalSubForceGate({
+          kind: 'group_message',
+          message,
+          text,
+          fromId,
+          senderUname,
+          settings: groupSettings
+        }))
+      ) {
+        return;
+      }
+    }
+
     // Multi-Language Translation Trigger in Groups (Method A: `tran bd|ind|eng` | Method B: `/translate bd|ind|eng`, `/bd`, `/ind`, `/eng`)
-    if (await this.handleTranslationCommand(message, text, true)) {
+    if (isTranslationTrigger && (await this.handleTranslationCommand(message, text, true))) {
       return;
     }
 
     // Free Fire UID Checker (/u <uid> or /uid <uid>) in Groups
-    const groupFfCmd = this.parseFreeFireUidCommand(text);
     if (groupFfCmd.matched) {
       await this.handleFreeFireUidCommand(
         message.chat.id,
@@ -6651,7 +7068,6 @@ export class TelegramService {
     }
 
     // Free Fire Bancheck Info (/baninfo <uid>) in Groups
-    const groupBanInfoCmd = this.parseBanInfoCommand(text);
     if (groupBanInfoCmd.matched) {
       await this.handleBanInfoCommand(
         message.chat.id,
@@ -6664,7 +7080,6 @@ export class TelegramService {
     }
 
     // Free Fire Profile Likes (/like <uid>) in Groups
-    const groupLikeCmd = this.parseFreeFireLikeCommand(text);
     if (groupLikeCmd.matched) {
       await this.handleFreeFireLikeCommand(
         message.chat.id,
@@ -6677,14 +7092,23 @@ export class TelegramService {
     }
 
     // Check /filters command in groups (strictly requires '/' prefix)
-    const isFilters = /^\/(?:filters|filter)(?:@\w+)?$/i.test(text.trim());
     if (isFilters) {
       await this.handleFiltersCommand(message.chat.id, message.message_id, true);
       return;
     }
 
+    if (isStartInGroup) {
+      await this.callTelegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: `👋 <b>Welcome!</b> Tap below or send <code>/filters</code> to view available commands.`,
+        parse_mode: 'HTML',
+        ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+        ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+      });
+      return;
+    }
+
     // EXACT TRIGGER MATCHING: Look up item where triggers includes exact text
-    const matchedItem = await storage.findItemByTrigger(text);
     if (!matchedItem) {
       // RULE: If not configured, DO NOTHING! Bot remains completely silent!
       return;
@@ -6714,7 +7138,8 @@ export class TelegramService {
       const payload = getItemPayload(matchedItem);
       const deepLink = `https://t.me/${cleanBotUsername}?start=${payload}`;
 
-      const buttonText = sanitizeButtonLabel(buttonTemplate.content || '') || (isTextOnly ? '💬 View Message Privately' : '📁 Get File Privately');
+      const rawBtnText = buttonTemplate.content || '';
+      const buttonText = sanitizeButtonLabel(rawBtnText) ? rawBtnText : (isTextOnly ? '💬 View Message Privately' : '📁 Get File Privately');
       const keyboard = [[{ text: buttonText, url: deepLink, style: 'primary' }]];
 
       const res = await this.sendGroupTriggerReply(
@@ -6742,7 +7167,8 @@ export class TelegramService {
       const payload = getItemPayload(matchedItem);
       const deepLink = `https://t.me/${cleanBotUsername}?start=${payload}`;
 
-      const buttonText = sanitizeButtonLabel(buttonTemplate.content || '') || '🔗 Open Privately';
+      const rawBtnText = buttonTemplate.content || '';
+      const buttonText = sanitizeButtonLabel(rawBtnText) ? rawBtnText : '🔗 Open Privately';
       const keyboard = [[{ text: buttonText, url: deepLink, style: 'primary' }]];
 
       const res = await this.sendGroupTriggerReply(
@@ -7263,7 +7689,11 @@ export class TelegramService {
   // =========================================================================
   // PRIVATE MESSAGE HANDLING
   // =========================================================================
-  private static async handlePrivateMessage(message: any, text: string): Promise<void> {
+  private static async handlePrivateMessage(
+    message: any,
+    text: string,
+    options?: { skipForceSubCheck?: boolean }
+  ): Promise<void> {
     const fromId = String(message.from?.id || '');
     const chatId = message.chat.id;
 
@@ -7284,7 +7714,7 @@ export class TelegramService {
       const isButtonTemplate =
         editSession.templateKey === 'GET_FILE_BUTTON' || editSession.templateKey === 'GET_LINK_BUTTON';
       const convertedHtml = isButtonTemplate
-        ? sanitizeButtonLabel(rawEditBody)
+        ? (sanitizeButtonLabel(rawEditBody) ? this.convertTelegramEntitiesToHtml(rawEditBody, editEntities, 0) : sanitizeButtonLabel(rawEditBody))
         : this.convertTelegramEntitiesToHtml(rawEditBody, editEntities, 0);
       const slicedEntities = isButtonTemplate ? [] : this.sliceTelegramEntities(rawEditBody, editEntities, 0);
       await storage.updateTemplate(editSession.templateKey, convertedHtml, {
@@ -7304,29 +7734,23 @@ export class TelegramService {
     if (startMatch) {
       const rawPayload = startMatch[1]?.trim();
 
-      // If payload targets a specific file/link that is disabled (Off) or under Maintenance, handle before Force Sub
-      if (rawPayload && rawPayload !== 'start' && !rawPayload.startsWith('k_')) {
-        const directItem = await storage.resolveItemAnyStatus(rawPayload);
-        if (directItem) {
-          if (directItem.status === 'disabled') {
-            return;
-          }
-          if (directItem.maintenance === true) {
-            await this.callTelegramApi('sendMessage', {
-              chat_id: chatId,
-              text: this.buildItemMaintenanceMessage(),
-              parse_mode: 'HTML'
-            });
-            return;
-          }
+      // Mandatory Channel Join (Force Sub) live check (global gate also runs before handlePrivateMessage)
+      if (!options?.skipForceSubCheck) {
+        const forceCheck = await this.checkUserForceSub(fromId, message?.from?.username, { forceFresh: true });
+        if (!forceCheck.allJoined) {
+          const fallbackPayload =
+            rawPayload && Buffer.byteLength(`forcesub_verify:${rawPayload}`, 'utf8') <= 64
+              ? rawPayload
+              : this.savePendingForceSubAction({
+                  kind: 'private_message',
+                  userId: fromId,
+                  chatId,
+                  message,
+                  text
+                });
+          await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, fallbackPayload, undefined, message?.from);
+          return;
         }
-      }
-
-      // Mandatory Channel Join (Force Sub) live check
-      const forceCheck = await this.checkUserForceSub(fromId, message?.from?.username, { forceFresh: true });
-      if (!forceCheck.allJoined) {
-        await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, rawPayload || 'start', undefined, message?.from);
-        return;
       }
 
       if (rawPayload) {
@@ -7897,6 +8321,21 @@ export class TelegramService {
       return;
     }
 
+    if (/^\/more(?:@\w+)?(?:\s|$)/i.test(text)) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: '⛔ <b>Access Denied</b>\n<i>Only authorized administrators can access <code>/more</code>.</i>',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+      await this.deleteUserMessage(chatId, message?.message_id);
+      await this.handleMoreCommand(fromId, chatId);
+      return;
+    }
+
     if (/^\/(?:settings|config|setfilter|addfilter|delfilter|delfile|delete|del)(?:@\w+)?(?:\s|$)/i.test(text)) {
       const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
       if (!isAdmin) {
@@ -8017,6 +8456,7 @@ export class TelegramService {
       await storage.deleteAddSession(fromId);
       activeEditSessions.delete(fromId);
       activeEmojiIdSessions.delete(`${String(chatId)}:${fromId}`);
+      this.clearMoreSession(fromId);
 
       await this.deleteUserMessage(chatId, message?.message_id);
 
@@ -8052,6 +8492,18 @@ export class TelegramService {
         return;
       } else {
         activeEmojiIdSessions.delete(privEmojiKey);
+      }
+    }
+
+    // 7a-0b. Check if admin is replying to an active /more interactive prompt
+    const pendingMore = this.getActiveMoreSession(fromId);
+    if (pendingMore?.awaiting && !/^\/(?:cancel|start|more|add|update|help|addkey|genkey|textlink|clone)(?:@\w+)?(?:\s|$)/i.test(text.trim())) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
+      if (!isAdmin) {
+        this.clearMoreSession(fromId);
+      } else {
+        await this.handleActiveMoreSessionInput(message, fromId, chatId, text, pendingMore);
+        return;
       }
     }
 
@@ -9264,7 +9716,8 @@ export class TelegramService {
         }
       } else if (item.type === 'link') {
         const messageText = item.replyMessage || `🔗 <b>${this.escapeHtml(item.name)}</b>`;
-        const buttonText = sanitizeButtonLabel(item.buttonText || '') || (item.openMode === 'webapp' ? '📱 Launch App' : '🌐 Open Link');
+        const rawLinkBtnText = item.buttonText || '';
+        const buttonText = sanitizeButtonLabel(rawLinkBtnText) ? rawLinkBtnText : (item.openMode === 'webapp' ? '📱 Launch App' : '🌐 Open Link');
 
         const isHttps = /^https:\/\//i.test(item.url || '');
         const canUseWebApp = item.openMode === 'webapp' && isHttps;
@@ -9381,11 +9834,13 @@ export class TelegramService {
   ): Promise<void> {
     const defaultText = `🎬 <b>Setup Video &amp; Resource Menu</b>\n\n• 📦 <b>Item:</b> <code>${this.escapeHtml(item.name)}</code>\n\n<i>Choose an option below to watch the setup tutorial or access your ${item.type === 'file' ? 'file' : 'link'}:</i>`;
     const text = item.setupVideoMessage?.trim() || defaultText;
+    const rawSvVidBtn = item.setupVideoButtonText || '';
+    const rawSvResBtn = item.setupResourceButtonText || '';
     const keyboard = {
       inline_keyboard: [
         [
-          { text: sanitizeButtonLabel(item.setupVideoButtonText || '') || '🎬 Setup Video', callback_data: `sv_vid_${item.id}`, style: 'primary' },
-          { text: sanitizeButtonLabel(item.setupResourceButtonText || '') || (item.type === 'file' ? '📁 Get File' : '🔗 Open Link'), callback_data: `sv_item_${item.id}`, style: 'primary' }
+          { text: sanitizeButtonLabel(rawSvVidBtn) ? rawSvVidBtn : '🎬 Setup Video', callback_data: `sv_vid_${item.id}`, style: 'primary' },
+          { text: sanitizeButtonLabel(rawSvResBtn) ? rawSvResBtn : (item.type === 'file' ? '📁 Get File' : '🔗 Open Link'), callback_data: `sv_item_${item.id}`, style: 'primary' }
         ]
       ]
     };
@@ -10027,6 +10482,17 @@ export class TelegramService {
 
     try {
       let data = await sendMultipart(true, formattedCaption, safeReplyMarkup);
+      if (
+        !data?.ok &&
+        safeReplyMarkup &&
+        replyMarkupHasStyle(safeReplyMarkup) &&
+        typeof data?.description === 'string' &&
+        !/icon_custom_emoji_id|button_custom_emoji|not enough rights|premium|custom|emoji/i.test(data.description) &&
+        /style|button|reply_markup|keyboard/i.test(data.description)
+      ) {
+        safeReplyMarkup = stripStyleFromReplyMarkup(safeReplyMarkup);
+        data = await sendMultipart(true, formattedCaption, safeReplyMarkup);
+      }
       if (
         !data?.ok &&
         safeReplyMarkup &&
@@ -13016,7 +13482,53 @@ export class TelegramService {
     return '📄';
   }
 
+  private static switchAddContentType(session: AddSession, target: 'file' | 'link' | 'text'): void {
+    const prevMode: 'file' | 'link' | 'text' | null = session.isTextOnly
+      ? 'text'
+      : session.type === 'link'
+      ? 'link'
+      : session.type === 'file'
+      ? 'file'
+      : null;
+
+    if (prevMode && prevMode !== target) {
+      if (target !== 'file') {
+        delete session.fileData;
+        delete session.filesData;
+        if (!session.fileName?.startsWith('Text:')) {
+          delete session.fileName;
+        }
+      }
+      if (target !== 'link') {
+        delete session.linkData;
+        delete session.replyMessage;
+        delete session.buttonText;
+        delete session.openMode;
+      }
+      if (target !== 'text') {
+        delete session.textResponse;
+        if (session.fileName?.startsWith('Text:')) {
+          delete session.fileName;
+        }
+      }
+      delete session.caption;
+    }
+
+    if (target === 'file') {
+      session.type = 'file';
+      session.isTextOnly = false;
+      session.filesData = Array.isArray(session.filesData) ? session.filesData : [];
+    } else if (target === 'link') {
+      session.type = 'link';
+      session.isTextOnly = false;
+    } else {
+      session.type = 'file';
+      session.isTextOnly = true;
+    }
+  }
+
   private static appendFileToSession(session: AddSession, media: AddFileEntry): boolean {
+    this.switchAddContentType(session, 'file');
     if (!Array.isArray(session.filesData)) {
       session.filesData = session.fileData ? [session.fileData] : [];
     }
@@ -13028,12 +13540,6 @@ export class TelegramService {
       session.filesData.push(media);
     }
     session.fileData = session.filesData[0];
-    session.type = 'file';
-    session.isTextOnly = false;
-    delete session.textResponse;
-    if (session.fileName?.startsWith('Text:')) {
-      delete session.fileName;
-    }
     return !alreadyExists;
   }
 
@@ -13340,7 +13846,7 @@ export class TelegramService {
       }
 
       case 'awaiting_setup_video_choice': {
-        await this.promptSetupVideoChoice(fromId, chatId, session);
+        await this.promptSetupVideoChoice(fromId, chatId, session, errorNotice);
         return;
       }
 
@@ -14605,8 +15111,7 @@ export class TelegramService {
         const urlMatch = rawInput.match(/https?:\/\/[^\s]+/i);
         if (urlMatch) {
           this.pushAddHistory(session, 'awaiting_content');
-          session.type = 'link';
-          session.isTextOnly = false;
+          this.switchAddContentType(session, 'link');
           session.linkData = { ...(session.linkData || {}), url: urlMatch[0] };
           await this.promptTriggerTypeStep(fromId, chatId, session);
           return;
@@ -14615,8 +15120,7 @@ export class TelegramService {
         // If user typed normal text (no file and no URL), automatically treat it as a Text Response!
         if (rawInput) {
           this.pushAddHistory(session, 'awaiting_content');
-          session.type = 'file';
-          session.isTextOnly = true;
+          this.switchAddContentType(session, 'text');
           session.caption = rawInput;
           session.textResponse = rawInput;
           session.fileName = 'Text: ' + (rawInput.slice(0, 25).replace(/\n/g, ' '));
@@ -14965,15 +15469,20 @@ export class TelegramService {
   private static async promptSetupVideoChoice(
     fromId: string,
     chatId: string | number,
-    session: AddSession
+    session: AddSession,
+    customHeaderText?: string
   ): Promise<void> {
     session.stage = 'awaiting_setup_video_choice';
     activeAddSessions.set(fromId, session);
     await storage.saveAddSession(fromId, session);
 
+    const promptBody =
+      customHeaderText ||
+      `🎬 <b>Setup Video Configuration</b>\n\nDo you want to add a setup video? (Yes / No)\n\n<i>When enabled, users will see an interactive menu with [ 🎬 Setup Video ] and [ ${session.type === 'file' ? '📁 Get File' : '🔗 Open Link'} ] buttons.</i>`;
+
     const promptId = await TelegramService.sendOrEditSetupPrompt(
       chatId,
-      `🎬 <b>Setup Video Configuration</b>\n\nDo you want to add a setup video? (Yes / No)\n\n<i>When enabled, users will see an interactive menu with [ 🎬 Setup Video ] and [ ${session.type === 'file' ? '📁 Get File' : '🔗 Open Link'} ] buttons.</i>`,
+      promptBody,
       {
         inline_keyboard: [
           [
@@ -15294,7 +15803,10 @@ export class TelegramService {
   // =========================================================================
   // CALLBACK QUERY HANDLING (Inline Buttons)
   // =========================================================================
-  private static async handleCallbackQuery(cb: any): Promise<void> {
+  private static async handleCallbackQuery(
+    cb: any,
+    options?: { skipForceSubCheck?: boolean; replayedAfterVerify?: boolean }
+  ): Promise<void> {
     const fromId = cb.from?.id !== undefined && cb.from?.id !== null ? String(cb.from.id).trim() : '';
     const data = cb.data;
     const chatId = cb.message?.chat?.id;
@@ -15716,8 +16228,8 @@ export class TelegramService {
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
           text: isRequestOnly
-            ? 'Please send a join request to the channel first.'
-            : 'Please join all channels or groups to use this bot.',
+            ? 'Please send a join request to all required channels and groups first.'
+            : 'Please join all required channels and groups first.',
           show_alert: true
         });
         if (chatId && cb.message?.message_id) {
@@ -15726,7 +16238,18 @@ export class TelegramService {
         return;
       }
 
-      // User has joined / sent join requests for all required channels!
+      const botScopeId = String((storage as any)?.botId || 'main').trim() || 'main';
+      const pending = targetPayload.startsWith('act_') ? pendingForceSubActions.get(targetPayload) : undefined;
+      if (pending && String(pending.userId) !== String(fromId)) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: '✅ Membership verified!',
+          show_alert: false
+        });
+        return;
+      }
+
+      // User has joined / sent join requests for ALL required channels and groups!
       await this.callTelegramApi('answerCallbackQuery', {
         callback_query_id: cb.id,
         text: isRequestOnly
@@ -15745,13 +16268,38 @@ export class TelegramService {
         } catch {}
       }
 
-      if (targetPayload && targetPayload !== 'start') {
+      if (pending && pending.botScopeId === botScopeId) {
+        pendingForceSubActions.delete(targetPayload);
+        if (pending.kind === 'private_message' && pending.message) {
+          await this.handlePrivateMessage(pending.message, pending.text || '', { skipForceSubCheck: true });
+        } else if (pending.kind === 'group_message' && pending.message) {
+          await this.handleGroupMessage(pending.message, pending.text || '', { skipForceSubCheck: true });
+        } else if (pending.kind === 'callback_query' && pending.callbackQuery) {
+          await this.handleCallbackQuery(pending.callbackQuery, { skipForceSubCheck: true, replayedAfterVerify: true });
+        }
+        return;
+      }
+
+      if (targetPayload && targetPayload !== 'start' && !targetPayload.startsWith('act_')) {
         await this.handleDeepLinkDelivery(chatId, targetPayload, {
           skipForceSubCheck: true,
           username: cb.from?.username
         });
+      } else if (targetPayload.startsWith('act_')) {
+        const isGroupChat = cb.message?.chat?.type === 'group' || cb.message?.chat?.type === 'supergroup';
+        if (chatId) {
+          if (isGroupChat) {
+            await this.sendAutoDeletingNotice(chatId, '✅ <b>Verified!</b> Send your command again.', 4000, undefined);
+          } else {
+            await this.callTelegramApi('sendMessage', {
+              chat_id: chatId,
+              text: '✅ <b>Membership Verified</b>\nPlease send your command again.',
+              parse_mode: 'HTML'
+            });
+          }
+        }
       } else {
-        await this.sendStartWelcomeMessage(chatId, fromId, cb.message);
+        await this.sendStartWelcomeMessage(chatId, fromId, { ...cb.message, from: cb.from });
       }
       return;
     }
@@ -15897,6 +16445,25 @@ export class TelegramService {
         fallbackMessageId: cb.message?.message_id,
         fallbackPlainText: cb.message?.text
       });
+      return;
+    }
+
+    // =========================================================================
+    // INTERACTIVE /more ADMIN SETTINGS MENU CALLBACKS
+    // =========================================================================
+    if (data && data.startsWith('more:')) {
+      const isAdmin = await this.isAuthorizedAdmin(fromId, cb.from?.username);
+      if (!isAdmin) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Access denied.',
+          show_alert: true
+        }).catch(() => {});
+        return;
+      }
+      if (chatId) {
+        await this.handleMoreCallback(cb, fromId, chatId, data);
+      }
       return;
     }
 
@@ -16958,7 +17525,9 @@ export class TelegramService {
       if (chatId) {
         await this.handleDeepLinkDelivery(chatId, itemId, {
           includeBackButton: true,
-          messageIdToEdit: cb.message?.message_id
+          messageIdToEdit: cb.message?.message_id,
+          skipForceSubCheck: true,
+          username: cb.from?.username
         });
       }
       return;
@@ -17049,13 +17618,7 @@ export class TelegramService {
         const curSession = activeAddSessions.get(fromId) || session;
         if (!curSession) return;
         this.pushAddHistory(curSession, 'awaiting_content');
-        curSession.type = 'file';
-        curSession.isTextOnly = false;
-        delete curSession.textResponse;
-        if (curSession.fileName?.startsWith('Text:')) {
-          delete curSession.fileName;
-        }
-        curSession.filesData = curSession.filesData || [];
+        this.switchAddContentType(curSession, 'file');
         curSession.stage = 'awaiting_file_content';
         if (chatId) {
           await this.renderAddStage(fromId, chatId, curSession);
@@ -17111,8 +17674,7 @@ export class TelegramService {
         const curSession = activeAddSessions.get(fromId) || session;
         if (!curSession) return;
         this.pushAddHistory(curSession, 'awaiting_content');
-        curSession.type = 'link';
-        curSession.isTextOnly = false;
+        this.switchAddContentType(curSession, 'link');
         curSession.stage = 'awaiting_link_url';
         if (chatId) {
           await this.renderAddStage(fromId, chatId, curSession);
@@ -17143,8 +17705,7 @@ export class TelegramService {
         const curSession = activeAddSessions.get(fromId) || session;
         if (!curSession) return;
         this.pushAddHistory(curSession, 'awaiting_content');
-        curSession.type = 'file';
-        curSession.isTextOnly = true;
+        this.switchAddContentType(curSession, 'text');
         curSession.stage = 'awaiting_text_content';
         if (chatId) {
           await this.renderAddStage(fromId, chatId, curSession);
@@ -18175,6 +18736,22 @@ export class TelegramService {
       if (
         !data.ok &&
         safeReplyMarkup &&
+        replyMarkupHasStyle(safeReplyMarkup) &&
+        typeof data.description === 'string' &&
+        !/icon_custom_emoji_id|button_custom_emoji|not enough rights|premium|custom|emoji/i.test(data.description) &&
+        /style|button|reply_markup|keyboard/i.test(data.description)
+      ) {
+        safeReplyMarkup = stripStyleFromReplyMarkup(safeReplyMarkup);
+        const retryStyleRes = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+          method: 'POST',
+          body: buildForm(formattedCaption, false, safeReplyMarkup)
+        });
+        data = await retryStyleRes.json();
+      }
+
+      if (
+        !data.ok &&
+        safeReplyMarkup &&
         replyMarkupHasIconCustomEmoji(safeReplyMarkup) &&
         typeof data.description === 'string' &&
         /icon_custom_emoji_id|custom|emoji|premium|not enough rights|button|reply_markup|keyboard/i.test(data.description)
@@ -18728,6 +19305,8 @@ export class TelegramService {
       activeEditSessions.size +
       activeSetChannelSessions.size +
       activeCloneSessions.size +
+      activeMoreSessions.size +
+      pendingForceSubActions.size +
       recentDeliveries.size +
       expiredProcessedCleared +
       this.forceSubCache.size +
@@ -18740,6 +19319,8 @@ export class TelegramService {
     activeEditSessions.clear();
     activeSetChannelSessions.clear();
     activeCloneSessions.clear();
+    activeMoreSessions.clear();
+    pendingForceSubActions.clear();
     recentDeliveries.clear();
     // Preserve inFlightUpdateKeys and recent (<2m) processedUpdateKeys to block duplicate update replay on restart
     this.forceSubCache.clear();
@@ -19203,6 +19784,2220 @@ export class TelegramService {
         this.activePollingPromise = null;
         delete activeBots['main'];
       }
+    }
+  }
+
+  // =========================================================================
+  // INTERACTIVE /more BOT SETTINGS MENU (ALL MORE TAB SETTINGS AS BUTTONS)
+  // =========================================================================
+  private static getMoreSessionKey(fromId: string): string {
+    const botId = String((storage as any)?.botId || 'main').trim() || 'main';
+    return `${botId}:${String(fromId).trim()}`;
+  }
+
+  private static getActiveMoreSession(fromId: string): MoreSession | undefined {
+    const key = this.getMoreSessionKey(fromId);
+    const session = activeMoreSessions.get(key);
+    if (!session) return undefined;
+    if (Date.now() - session.createdAt > 2 * 60 * 60 * 1000) {
+      activeMoreSessions.delete(key);
+      return undefined;
+    }
+    return session;
+  }
+
+  private static clearMoreSession(fromId: string): void {
+    activeMoreSessions.delete(this.getMoreSessionKey(fromId));
+  }
+
+  private static setMoreSession(fromId: string, session: MoreSession): void {
+    session.createdAt = Date.now();
+    activeMoreSessions.set(this.getMoreSessionKey(fromId), session);
+  }
+
+  private static buildSubAdminPresetPerms(preset: 'full' | 'editor' | 'moderator') {
+    if (preset === 'full') {
+      return {
+        files_view: true, files_add: true, files_edit: true, files_delete: true,
+        links_view: true, links_add: true, links_edit: true, links_delete: true,
+        messages_view: true, messages_edit: true, admins_manage: false,
+        design_edit: true, settings_edit: true, cleanup_manage: true
+      };
+    }
+    if (preset === 'moderator') {
+      return {
+        files_view: true, files_add: false, files_edit: false, files_delete: false,
+        links_view: true, links_add: false, links_edit: false, links_delete: false,
+        messages_view: true, messages_edit: false, admins_manage: false,
+        design_edit: false, settings_edit: false, cleanup_manage: true
+      };
+    }
+    return {
+      files_view: true, files_add: true, files_edit: true, files_delete: false,
+      links_view: true, links_add: true, links_edit: true, links_delete: false,
+      messages_view: true, messages_edit: true, admins_manage: false,
+      design_edit: false, settings_edit: false, cleanup_manage: false
+    };
+  }
+
+  private static async sendOrEditMorePrompt(
+    fromId: string,
+    chatId: string | number,
+    text: string,
+    replyMarkup: any,
+    session: MoreSession,
+    forceNew: boolean = false
+  ): Promise<void> {
+    if (!forceNew && session.promptMessageId) {
+      const editRes = await this.callTelegramApi('editMessageText', {
+        chat_id: chatId,
+        message_id: session.promptMessageId,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        reply_markup: replyMarkup
+      }).catch(() => null);
+      const desc = String(editRes?.description || '').toLowerCase();
+      if (editRes?.ok || desc.includes('message is not modified')) {
+        this.setMoreSession(fromId, session);
+        return;
+      }
+    }
+
+    const sendRes = await this.callTelegramApi('sendMessage', {
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: replyMarkup
+    }).catch(() => null);
+    if (sendRes?.ok && sendRes.result?.message_id) {
+      session.promptMessageId = sendRes.result.message_id;
+    }
+    this.setMoreSession(fromId, session);
+  }
+
+  private static async handleMoreCommand(fromId: string, chatId: string | number): Promise<void> {
+    const existing = this.getActiveMoreSession(fromId);
+    const session: MoreSession = existing
+      ? {
+          ...existing,
+          chatId,
+          view: 'menu',
+          awaiting: undefined,
+          promptMessageId: undefined,
+          createdAt: Date.now()
+        }
+      : {
+          chatId,
+          view: 'menu',
+          repFilter: 'pending',
+          createdAt: Date.now()
+        };
+    await this.renderMoreView(fromId, chatId, 'menu', session, undefined, true);
+  }
+
+  private static async renderMoreView(
+    fromId: string,
+    chatId: string | number,
+    view: string,
+    session: MoreSession,
+    notice?: string,
+    forceNew: boolean = false
+  ): Promise<void> {
+    session.view = view;
+    const noticeBlock = notice ? `\n\n💬 ${notice}` : '';
+    const isMain = this.isMainBotContext();
+    const botId = String((storage as any)?.botId || 'main').trim() || 'main';
+    const settings = await storage.getSettings();
+
+    const rows: any[][] = [];
+    let text = '';
+
+    if (view === 'menu') {
+      const [reports, fraudRules, keyPools, guestAccounts, botUsersCount] = await Promise.all([
+        storage.getReports().catch(() => []),
+        storage.getFraudRules().catch(() => []),
+        storage.getKeyPools().catch(() => []),
+        storage.getGuestAccounts().catch(() => []),
+        storage.getTotalUserCount().catch(() => 0)
+      ]);
+      const pendingReports = reports.filter((r) => r.status === 'pending').length;
+      const activeChannels = (settings.requiredChannels || []).filter((c) => c.enabled !== false).length;
+      const activeGroupModules = [
+        Boolean(settings.linkDeleteEnabled),
+        Boolean(settings.antiForwardEnabled),
+        settings.banEnabled !== false,
+        settings.muteEnabled !== false
+      ].filter(Boolean).length;
+      const activeFraud = fraudRules.filter((r) => r.enabled).length;
+      const emojiRules = sanitizeCustomEmojiRules(settings.customEmojiRules);
+
+      text =
+        `⚙️ <b>More Settings</b>\n` +
+        `🤖 Bot: <code>${this.escapeHtml(botId)}</code>` +
+        noticeBlock;
+
+      if (isMain) {
+        rows.push([{ text: '🤖 Switch Bot & Fleet', callback_data: 'more:v:fleet', style: 'primary' }]);
+      }
+      rows.push([
+        { text: '⚙️ Bot Settings', callback_data: 'more:v:set', style: 'primary' },
+        { text: `📡 Sub Force (${settings.forceSubEnabled ? activeChannels : 'Off'})`, callback_data: 'more:v:sub', style: 'primary' }
+      ]);
+      rows.push([
+        { text: `🛡️ Group Mgmt (${activeGroupModules}/4)`, callback_data: 'more:v:grp', style: 'primary' },
+        { text: `📢 Broadcast (${botUsersCount})`, callback_data: 'more:v:brd', style: 'primary' }
+      ]);
+      rows.push([
+        { text: `🚩 User Reports (${pendingReports})`, callback_data: 'more:v:rep', style: 'primary' },
+        { text: `🚫 Fraud Filter (${activeFraud})`, callback_data: 'more:v:frd', style: 'primary' }
+      ]);
+      rows.push([
+        { text: `🔇 Chat Whitelist (${(settings.allowedChats || []).length})`, callback_data: 'more:v:wht', style: 'primary' },
+        { text: `🔑 Key Generator (${keyPools.length})`, callback_data: 'more:v:key', style: 'primary' }
+      ]);
+      rows.push([
+        { text: `🎨 Emoji Store (${emojiRules.length})`, callback_data: 'more:v:emj', style: 'primary' },
+        { text: `👤 More Guest Account (${guestAccounts.length})`, callback_data: 'more:v:gst', style: 'primary' }
+      ]);
+      rows.push([
+        { text: '💬 Message Templates', callback_data: 'more:v:tpl', style: 'primary' },
+        { text: '👥 Sub-Admins', callback_data: 'more:v:adm', style: 'primary' }
+      ]);
+      rows.push([{ text: '✖️ Close', callback_data: 'more:close', style: 'danger' }]);
+    } else if (view === 'set') {
+      const mem = process.memoryUsage();
+      const rssMb = Math.round((mem.rss / (1024 * 1024)) * 10) / 10;
+      const isRunning = isMain
+        ? (!this.manuallyStopped && (this.pollingActive || Boolean(this.leaderCheckTimer)))
+        : TelegramBotManager.isBotActivelyRunning(botId);
+      const timeoutMin = settings.deliveryTimeoutMinutes || 10;
+
+      text =
+        `⚙️ <b>Bot Settings</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• Status: ${isRunning ? '🟢 <b>Running</b>' : '🔴 <b>Stopped</b>'} (${rssMb} MB)\n` +
+        `• Auto-Delete Delivery: ${settings.autoDeleteDeliveryEnabled ? `<b>ON (${timeoutMin}m)</b>` : '<b>OFF</b>'}\n` +
+        `• Delete Notice: ${settings.autoDeleteNoticeEnabled !== false ? '<b>ON</b>' : '<b>OFF</b>'}\n` +
+        `• Maintenance Mode: ${settings.maintenanceMode ? '<b>ON</b>' : '<b>OFF</b>'}` +
+        (settings.maintenanceNotice ? `\n• Maint. Notice: <i>${this.escapeHtml(settings.maintenanceNotice.slice(0, 120))}</i>` : '') +
+        noticeBlock;
+
+      rows.push([
+        isRunning
+          ? { text: '⏹️ Stop Bot', callback_data: 'more:set:bot:stop', style: 'danger' }
+          : { text: '▶️ Start Bot', callback_data: 'more:set:bot:start', style: 'success' },
+        { text: '🔄 Restart', callback_data: 'more:set:bot:restart', style: 'primary' },
+        { text: '🧹 Clean Mem', callback_data: 'more:set:bot:mem', style: 'primary' }
+      ]);
+      rows.push([
+        {
+          text: `⏱️ Auto-Delete: ${settings.autoDeleteDeliveryEnabled ? 'ON' : 'OFF'}`,
+          callback_data: 'more:set:tog:autoDel',
+          style: settings.autoDeleteDeliveryEnabled ? 'success' : 'secondary'
+        },
+        {
+          text: `🔔 Del Notice: ${settings.autoDeleteNoticeEnabled !== false ? 'ON' : 'OFF'}`,
+          callback_data: 'more:set:tog:delNotice',
+          style: settings.autoDeleteNoticeEnabled !== false ? 'success' : 'secondary'
+        }
+      ]);
+      rows.push([
+        ...[1, 5, 10, 30, 60].map((m) => ({
+          text: timeoutMin === m ? `• ${m}m •` : `${m}m`,
+          callback_data: `more:set:timeout:${m}`,
+          style: timeoutMin === m ? 'primary' : 'secondary'
+        })),
+        { text: '✏️ Custom', callback_data: 'more:set:timeout:custom', style: 'primary' }
+      ]);
+      rows.push([
+        {
+          text: `🛠️ Maintenance: ${settings.maintenanceMode ? 'ON' : 'OFF'}`,
+          callback_data: 'more:set:tog:maint',
+          style: settings.maintenanceMode ? 'danger' : 'secondary'
+        },
+        { text: '✏️ Edit Notice', callback_data: 'more:set:editMaint', style: 'primary' }
+      ]);
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:menu', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'sub') {
+      const channels = Array.isArray(settings.requiredChannels) ? settings.requiredChannels : [];
+      const joinReqs = await storage.getJoinRequests().catch(() => []);
+      const pendingReqs = joinReqs.filter((r) => r.status === 'pending').length;
+      const mode = settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join';
+
+      text =
+        `📡 <b>Sub Force Settings</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• Force Sub: ${settings.forceSubEnabled ? '🟢 <b>ON</b>' : '🔴 <b>OFF</b>'}\n` +
+        `• Mode: <code>${mode === 'request_only' ? 'Request Join' : 'Direct Join'}</code>\n` +
+        `• Auto-Approve: ${settings.autoApproveJoinRequests ? '🟢 <b>ON</b>' : '⚪ <b>OFF</b>'}\n` +
+        `• Channels: <code>${channels.length}</code> · Pending Requests: <code>${pendingReqs}</code>` +
+        noticeBlock;
+
+      rows.push([
+        {
+          text: `Force Sub: ${settings.forceSubEnabled ? 'ON' : 'OFF'}`,
+          callback_data: 'more:sub:tog',
+          style: settings.forceSubEnabled ? 'success' : 'secondary'
+        },
+        {
+          text: `Auto-Approve: ${settings.autoApproveJoinRequests ? 'ON' : 'OFF'}`,
+          callback_data: 'more:sub:autoApprove',
+          style: settings.autoApproveJoinRequests ? 'success' : 'secondary'
+        }
+      ]);
+      rows.push([
+        {
+          text: mode === 'auto_join' ? '• Direct Join •' : 'Direct Join',
+          callback_data: 'more:sub:mode:auto_join',
+          style: mode === 'auto_join' ? 'primary' : 'secondary'
+        },
+        {
+          text: mode === 'request_only' ? '• Request Join •' : 'Request Join',
+          callback_data: 'more:sub:mode:request_only',
+          style: mode === 'request_only' ? 'primary' : 'secondary'
+        }
+      ]);
+      rows.push([
+        { text: '➕ Add Channel', callback_data: 'more:sub:add', style: 'primary' },
+        { text: `📥 Join Requests (${pendingReqs})`, callback_data: 'more:sub:reqs:0', style: 'primary' },
+        { text: '🔄 Sync', callback_data: 'more:sub:sync', style: 'primary' }
+      ]);
+      channels.slice(0, 12).forEach((ch, idx) => {
+        const chOn = ch.enabled !== false;
+        const label = (ch.name || ch.username || ch.chatId).slice(0, 26);
+        rows.push([
+          {
+            text: `${chOn ? '🟢' : '⚪'} ${label}`,
+            callback_data: `more:sub:ch:tog:${idx}`,
+            style: chOn ? 'success' : 'secondary'
+          },
+          { text: '🗑️', callback_data: `more:sub:ch:del:${idx}`, style: 'danger' }
+        ]);
+      });
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:menu', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'sub_reqs') {
+      const joinReqs = await storage.getJoinRequests().catch(() => []);
+      const pending = joinReqs.filter((r) => r.status === 'pending');
+      const pageSize = 6;
+      const totalPages = Math.max(1, Math.ceil(pending.length / pageSize));
+      const page = Math.max(0, Math.min(session.subReqPage || 0, totalPages - 1));
+      session.subReqPage = page;
+      const slice = pending.slice(page * pageSize, (page + 1) * pageSize);
+
+      text =
+        `📥 <b>Pending Join Requests (${pending.length})</b>` +
+        (pending.length === 0 ? '\n\nNo pending join requests.' : `\nPage ${page + 1}/${totalPages}`) +
+        noticeBlock;
+
+      slice.forEach((req, offset) => {
+        const globalIdx = page * pageSize + offset;
+        const name = (req.userName || req.userUsername || req.userId).slice(0, 18);
+        const chTitle = (req.chatTitle || req.chatUsername || req.chatId).slice(0, 14);
+        rows.push([
+          { text: `✅ ${name} (${chTitle})`, callback_data: `more:sub:app:${globalIdx}`, style: 'success' },
+          { text: '❌', callback_data: `more:sub:rej:${globalIdx}`, style: 'danger' }
+        ]);
+      });
+
+      if (totalPages > 1) {
+        const nav: any[] = [];
+        if (page > 0) nav.push({ text: '⬅️ Prev', callback_data: `more:sub:reqs:${page - 1}`, style: 'primary' });
+        if (page + 1 < totalPages) nav.push({ text: 'Next ➡️', callback_data: `more:sub:reqs:${page + 1}`, style: 'primary' });
+        if (nav.length) rows.push(nav);
+      }
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:sub', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'grp') {
+      const durs = Array.isArray(settings.moderationDurations) && settings.moderationDurations.length > 0
+        ? settings.moderationDurations
+        : DEFAULT_MODERATION_DURATIONS;
+      const warnLimit = settings.groupWarningLimit || 3;
+      const welSec = settings.welcomeAutoDeleteSeconds || 60;
+
+      text =
+        `🛡️ <b>Group Management</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• Link Delete: ${settings.linkDeleteEnabled ? '🟢 ON' : '⚪ OFF'}\n` +
+        `• Anti-Forward: ${settings.antiForwardEnabled ? '🟢 ON' : '⚪ OFF'}\n` +
+        `• Ban / Unban: ${settings.banEnabled !== false ? '🟢 ON' : '⚪ OFF'}\n` +
+        `• Mute / Unmute: ${settings.muteEnabled !== false ? '🟢 ON' : '⚪ OFF'}\n` +
+        `• Clean Service: ${settings.cleanServiceEnabled ? '🟢 ON' : '⚪ OFF'}\n` +
+        `• Welcome Msg: ${settings.welcomeMessageEnabled !== false ? '🟢 ON' : '⚪ OFF'}\n` +
+        `• Welcome Auto-Del: ${settings.welcomeAutoDeleteEnabled ? `🟢 ${welSec}s` : '⚪ OFF'}\n` +
+        `• Warning Limit: <code>${warnLimit}</code> · Mod Presets: <code>${durs.length}</code>` +
+        noticeBlock;
+
+      rows.push([
+        { text: `🔗 Link Del: ${settings.linkDeleteEnabled ? 'ON' : 'OFF'}`, callback_data: 'more:grp:tog:link', style: settings.linkDeleteEnabled ? 'success' : 'secondary' },
+        { text: `🚫 Anti-Fwd: ${settings.antiForwardEnabled ? 'ON' : 'OFF'}`, callback_data: 'more:grp:tog:fwd', style: settings.antiForwardEnabled ? 'success' : 'secondary' }
+      ]);
+      rows.push([
+        { text: `🔨 Ban: ${settings.banEnabled !== false ? 'ON' : 'OFF'}`, callback_data: 'more:grp:tog:ban', style: settings.banEnabled !== false ? 'success' : 'secondary' },
+        { text: `🔇 Mute: ${settings.muteEnabled !== false ? 'ON' : 'OFF'}`, callback_data: 'more:grp:tog:mute', style: settings.muteEnabled !== false ? 'success' : 'secondary' }
+      ]);
+      rows.push([
+        { text: `🧹 Clean Svc: ${settings.cleanServiceEnabled ? 'ON' : 'OFF'}`, callback_data: 'more:grp:tog:svc', style: settings.cleanServiceEnabled ? 'success' : 'secondary' },
+        { text: `👋 Welcome: ${settings.welcomeMessageEnabled !== false ? 'ON' : 'OFF'}`, callback_data: 'more:grp:tog:wel', style: settings.welcomeMessageEnabled !== false ? 'success' : 'secondary' }
+      ]);
+      rows.push([
+        { text: `⏱️ Wel Auto-Del: ${settings.welcomeAutoDeleteEnabled ? 'ON' : 'OFF'}`, callback_data: 'more:grp:tog:welDel', style: settings.welcomeAutoDeleteEnabled ? 'success' : 'secondary' },
+        { text: `✏️ Wel Sec (${welSec}s)`, callback_data: 'more:grp:welSec', style: 'primary' }
+      ]);
+      rows.push([
+        { text: '➖', callback_data: 'more:grp:warn:-', style: 'secondary' },
+        { text: `⚠️ Warn Limit: ${warnLimit}`, callback_data: 'more:grp:warn:custom', style: 'primary' },
+        { text: '➕', callback_data: 'more:grp:warn:+', style: 'secondary' }
+      ]);
+      rows.push([{ text: `⏳ Moderation Durations (${durs.length})`, callback_data: 'more:grp:durs', style: 'primary' }]);
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:menu', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'grp_dur') {
+      const durs = Array.isArray(settings.moderationDurations) && settings.moderationDurations.length > 0
+        ? settings.moderationDurations
+        : DEFAULT_MODERATION_DURATIONS;
+
+      text =
+        `⏳ <b>Moderation Duration Presets (${durs.length})</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        durs.map((d, i) => `${i + 1}. <b>${this.escapeHtml(d.label)}</b> (<code>${this.escapeHtml(d.value)}</code>)`).join('\n') +
+        noticeBlock;
+
+      rows.push([{ text: '➕ Add Duration Preset', callback_data: 'more:grp:dur:add', style: 'primary' }]);
+      durs.forEach((d, idx) => {
+        rows.push([
+          { text: `🗑️ Remove ${d.label} (${d.value})`, callback_data: `more:grp:dur:del:${idx}`, style: 'danger' }
+        ]);
+      });
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:grp', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'brd') {
+      const totalUsers = await storage.getTotalUserCount().catch(() => 0);
+      const draft = session.draftBroadcast;
+      const pinEnabled = Boolean(draft?.pin);
+
+      text =
+        `📢 <b>Broadcast System</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• Audience: <code>${totalUsers}</code> users\n` +
+        `• Pin Message: ${pinEnabled ? '🟢 ON' : '⚪ OFF'}\n` +
+        (draft
+          ? `• Draft Type: <code>${draft.mediaType}</code>\n• Preview:\n<blockquote>${this.escapeHtml(stripCustomEmojiTags(draft.message || '(Media Only)').replace(/<[^>]+>/g, '').slice(0, 220))}</blockquote>`
+          : `• Draft: <i>None</i>`) +
+        noticeBlock;
+
+      rows.push([
+        { text: '📝 Compose Broadcast', callback_data: 'more:brd:compose', style: 'primary' },
+        { text: `📌 Pin: ${pinEnabled ? 'ON' : 'OFF'}`, callback_data: 'more:brd:pin', style: pinEnabled ? 'success' : 'secondary' }
+      ]);
+      if (draft) {
+        rows.push([
+          { text: '👁️ Test to Me', callback_data: 'more:brd:test', style: 'primary' },
+          { text: `🚀 Send (${totalUsers})`, callback_data: 'more:brd:send', style: 'success' }
+        ]);
+        rows.push([{ text: '🗑️ Clear Draft', callback_data: 'more:brd:clear', style: 'danger' }]);
+      }
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:menu', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'rep') {
+      const allReports = await storage.getReports().catch(() => []);
+      const filter = session.repFilter || 'pending';
+      const filtered = filter === 'all' ? allReports : allReports.filter((r) => r.status === filter);
+      const pageSize = 6;
+      const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+      const page = Math.max(0, Math.min(session.repPage || 0, totalPages - 1));
+      session.repPage = page;
+      const slice = filtered.slice(page * pageSize, (page + 1) * pageSize);
+
+      text =
+        `🚩 <b>User Reports (${filtered.length})</b>\n` +
+        `Filter: <code>${filter}</code> · Page ${page + 1}/${totalPages}` +
+        (filtered.length === 0 ? '\n\nNo reports in this filter.' : '') +
+        noticeBlock;
+
+      rows.push([
+        { text: filter === 'pending' ? '• Pending •' : 'Pending', callback_data: 'more:rep:f:pending', style: filter === 'pending' ? 'primary' : 'secondary' },
+        { text: filter === 'all' ? '• All •' : 'All', callback_data: 'more:rep:f:all', style: filter === 'all' ? 'primary' : 'secondary' },
+        { text: filter === 'resolved' ? '• Resolved •' : 'Resolved', callback_data: 'more:rep:f:resolved', style: filter === 'resolved' ? 'primary' : 'secondary' },
+        { text: filter === 'dismissed' ? '• Dismissed •' : 'Dismissed', callback_data: 'more:rep:f:dismissed', style: filter === 'dismissed' ? 'primary' : 'secondary' }
+      ]);
+      slice.forEach((rep, offset) => {
+        const globalIdx = page * pageSize + offset;
+        const icon = rep.status === 'pending' ? '🟠' : rep.status === 'resolved' ? '✅' : '❎';
+        const label = `${icon} ${(rep.reportedUserName || rep.reportedUserUsername || rep.reportedUserId).slice(0, 18)} · ${(rep.reason || '').slice(0, 16)}`;
+        rows.push([{ text: label, callback_data: `more:rep:v:${globalIdx}`, style: 'primary' }]);
+      });
+      if (totalPages > 1) {
+        const nav: any[] = [];
+        if (page > 0) nav.push({ text: '⬅️ Prev', callback_data: `more:rep:p:${page - 1}`, style: 'primary' });
+        if (page + 1 < totalPages) nav.push({ text: 'Next ➡️', callback_data: `more:rep:p:${page + 1}`, style: 'primary' });
+        if (nav.length) rows.push(nav);
+      }
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:menu', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view.startsWith('rep_v:')) {
+      const idx = parseInt(view.slice(6), 10);
+      const allReports = await storage.getReports().catch(() => []);
+      const filter = session.repFilter || 'pending';
+      const filtered = filter === 'all' ? allReports : allReports.filter((r) => r.status === filter);
+      const rep = Number.isFinite(idx) ? filtered[idx] : undefined;
+      if (!rep) {
+        return this.renderMoreView(fromId, chatId, 'rep', session, 'Report not found.', forceNew);
+      }
+      text =
+        `🚩 <b>Report Details</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• Status: <code>${this.escapeHtml(rep.status)}</code>\n` +
+        `• Reported: ${this.escapeHtml(rep.reportedUserName || 'User')} (<code>${this.escapeHtml(rep.reportedUserId)}</code>)\n` +
+        `• Reporter: ${this.escapeHtml(rep.reporterName || 'User')} (<code>${this.escapeHtml(rep.reporterId)}</code>)\n` +
+        `• Chat: <code>${this.escapeHtml(rep.chatTitle || rep.chatId)}</code>\n` +
+        `• Reason: <i>${this.escapeHtml(rep.reason || '-')}</i>` +
+        (rep.reportedContent ? `\n<blockquote>${this.escapeHtml(rep.reportedContent.slice(0, 300))}</blockquote>` : '') +
+        noticeBlock;
+
+      rows.push([
+        { text: '🚫 Ban User', callback_data: `more:rep:ban:${idx}`, style: 'danger' },
+        { text: '✅ Resolve', callback_data: `more:rep:res:${idx}`, style: 'success' }
+      ]);
+      rows.push([
+        { text: '❎ Dismiss', callback_data: `more:rep:dis:${idx}`, style: 'secondary' },
+        { text: '🗑️ Delete', callback_data: `more:rep:del:${idx}`, style: 'danger' }
+      ]);
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:rep', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'frd') {
+      const rules = await storage.getFraudRules().catch(() => []);
+      text =
+        `🚫 <b>Fraud &amp; Word Filter (${rules.length})</b>\n` +
+        `Active: <code>${rules.filter((r) => r.enabled).length}</code>` +
+        (rules.length === 0 ? '\n\nNo rules configured.' : '') +
+        noticeBlock;
+
+      rows.push([{ text: '➕ Add Rule', callback_data: 'more:frd:new', style: 'primary' }]);
+      rules.slice(0, 15).forEach((rule, idx) => {
+        rows.push([
+          {
+            text: `${rule.enabled ? '🟢' : '⚪'} ${rule.keyword.slice(0, 18)} (${rule.action})`,
+            callback_data: `more:frd:tog:${idx}`,
+            style: rule.enabled ? 'success' : 'secondary'
+          },
+          { text: '🗑️', callback_data: `more:frd:del:${idx}`, style: 'danger' }
+        ]);
+      });
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:menu', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'frd_new') {
+      const cfg = session.newFraudConfig || { matchType: 'contains' as const, action: 'delete_and_warn' as const };
+      session.newFraudConfig = cfg;
+      text =
+        `➕ <b>New Fraud / Word Filter Rule</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• Match Type: <code>${cfg.matchType}</code>\n` +
+        `• Action: <code>${cfg.action}</code>\n\n` +
+        `Select Match Type &amp; Action, then continue.` +
+        noticeBlock;
+
+      rows.push([
+        { text: cfg.matchType === 'contains' ? '• Contains •' : 'Contains', callback_data: 'more:frd:mt:contains', style: cfg.matchType === 'contains' ? 'primary' : 'secondary' },
+        { text: cfg.matchType === 'exact' ? '• Exact •' : 'Exact', callback_data: 'more:frd:mt:exact', style: cfg.matchType === 'exact' ? 'primary' : 'secondary' },
+        { text: cfg.matchType === 'regex' ? '• Regex •' : 'Regex', callback_data: 'more:frd:mt:regex', style: cfg.matchType === 'regex' ? 'primary' : 'secondary' }
+      ]);
+      rows.push([
+        { text: cfg.action === 'delete_and_warn' ? '• Del+Warn •' : 'Del+Warn', callback_data: 'more:frd:act:delete_and_warn', style: cfg.action === 'delete_and_warn' ? 'primary' : 'secondary' },
+        { text: cfg.action === 'delete' ? '• Delete •' : 'Delete', callback_data: 'more:frd:act:delete', style: cfg.action === 'delete' ? 'primary' : 'secondary' },
+        { text: cfg.action === 'warn' ? '• Warn •' : 'Warn', callback_data: 'more:frd:act:warn', style: cfg.action === 'warn' ? 'primary' : 'secondary' }
+      ]);
+      rows.push([
+        { text: cfg.action === 'mute' ? '• Mute •' : 'Mute', callback_data: 'more:frd:act:mute', style: cfg.action === 'mute' ? 'primary' : 'secondary' },
+        { text: cfg.action === 'ban' ? '• Ban •' : 'Ban', callback_data: 'more:frd:act:ban', style: cfg.action === 'ban' ? 'primary' : 'secondary' },
+        { text: cfg.action === 'reply_only' ? '• Reply •' : 'Reply', callback_data: 'more:frd:act:reply_only', style: cfg.action === 'reply_only' ? 'primary' : 'secondary' }
+      ]);
+      rows.push([{ text: '➡️ Enter Keyword', callback_data: 'more:frd:next', style: 'success' }]);
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:frd', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'wht') {
+      const allowed = Array.isArray(settings.allowedChats) ? settings.allowedChats : [];
+      const allowedSet = new Set(allowed.map((c) => String(c.id).trim()));
+      const unaddedChannels = (settings.requiredChannels || []).filter(
+        (ch) => ch.chatId && !allowedSet.has(String(ch.chatId).trim())
+      );
+
+      text =
+        `🔇 <b>Chat Ignore / Whitelist</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• Strict Whitelist: ${settings.chatWhitelistEnabled ? '🟢 <b>ON</b>' : '⚪ <b>OFF</b>'}\n` +
+        `• Allowed Chats: <code>${allowed.length}</code>` +
+        noticeBlock;
+
+      rows.push([
+        {
+          text: `Whitelist Guard: ${settings.chatWhitelistEnabled ? 'ON' : 'OFF'}`,
+          callback_data: 'more:wht:tog',
+          style: settings.chatWhitelistEnabled ? 'success' : 'secondary'
+        },
+        { text: '➕ Add Chat', callback_data: 'more:wht:add', style: 'primary' }
+      ]);
+      unaddedChannels.slice(0, 4).forEach((ch, idx) => {
+        rows.push([
+          { text: `➕ Allow ${(ch.name || ch.chatId).slice(0, 24)}`, callback_data: `more:wht:qadd:${idx}`, style: 'success' }
+        ]);
+      });
+      allowed.slice(0, 12).forEach((entry, idx) => {
+        rows.push([
+          { text: `🗑️ Remove ${(entry.title || entry.id).slice(0, 26)}`, callback_data: `more:wht:del:${idx}`, style: 'danger' }
+        ]);
+      });
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:menu', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'key') {
+      const pools = await storage.getKeyPools().catch(() => []);
+      const pageSize = 6;
+      const totalPages = Math.max(1, Math.ceil(pools.length / pageSize));
+      const page = Math.max(0, Math.min(session.keyPage || 0, totalPages - 1));
+      session.keyPage = page;
+      const slice = pools.slice(page * pageSize, (page + 1) * pageSize);
+
+      text =
+        `🔑 <b>Key Generator (${pools.length})</b>\n` +
+        `Page ${page + 1}/${totalPages}` +
+        (pools.length === 0 ? '\n\nNo key links created yet.' : '') +
+        noticeBlock;
+
+      rows.push([
+        { text: '➕ Add Key', callback_data: 'more:key:wiz:add', style: 'primary' },
+        { text: '✨ Gen Key', callback_data: 'more:key:wiz:gen', style: 'primary' },
+        { text: '🔗 Text Link', callback_data: 'more:key:wiz:txt', style: 'primary' }
+      ]);
+      slice.forEach((pool, offset) => {
+        const globalIdx = page * pageSize + offset;
+        const icon = pool.status === 'active' ? '🟢' : '🔴';
+        rows.push([
+          { text: `${icon} ${(pool.title || pool.id).slice(0, 28)}`, callback_data: `more:key:v:${globalIdx}`, style: 'primary' }
+        ]);
+      });
+      if (totalPages > 1) {
+        const nav: any[] = [];
+        if (page > 0) nav.push({ text: '⬅️ Prev', callback_data: `more:key:p:${page - 1}`, style: 'primary' });
+        if (page + 1 < totalPages) nav.push({ text: 'Next ➡️', callback_data: `more:key:p:${page + 1}`, style: 'primary' });
+        if (nav.length) rows.push(nav);
+      }
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:menu', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view.startsWith('key_v:')) {
+      const idx = parseInt(view.slice(6), 10);
+      const pools = await storage.getKeyPools().catch(() => []);
+      const pool = Number.isFinite(idx) ? pools[idx] : undefined;
+      if (!pool) {
+        return this.renderMoreView(fromId, chatId, 'key', session, 'Key link not found.', forceNew);
+      }
+      const botName = await this.getBotUsername();
+      const deepLink = botName ? `https://t.me/${botName}?start=k_${pool.id}` : `/start k_${pool.id}`;
+      const remaining = pool.mode === 'pool'
+        ? (pool.keys || []).filter((k) => !k.claimedBy).length
+        : null;
+
+      text =
+        `🔑 <b>${this.escapeHtml(pool.title || pool.id)}</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• Mode: <code>${pool.mode}</code> · Status: <code>${pool.status}</code>\n` +
+        `• Claims: <code>${pool.totalClaims || 0}</code>` +
+        (remaining !== null ? ` · Remaining: <code>${remaining}/${(pool.keys || []).length}</code>` : '') +
+        `\n• Expiry: <code>${pool.expiresAt ? new Date(pool.expiresAt).toLocaleString() : 'Never'}</code>\n` +
+        `• Link: <code>${this.escapeHtml(deepLink)}</code>` +
+        noticeBlock;
+
+      rows.push([
+        {
+          text: pool.status === 'active' ? '🔴 Disable' : '🟢 Enable',
+          callback_data: `more:key:tog:${idx}`,
+          style: pool.status === 'active' ? 'secondary' : 'success'
+        },
+        { text: '🗑️ Delete', callback_data: `more:key:del:${idx}`, style: 'danger' }
+      ]);
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:key', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'emj') {
+      const rules = sanitizeCustomEmojiRules(settings.customEmojiRules);
+      const pageSize = 8;
+      const totalPages = Math.max(1, Math.ceil(rules.length / pageSize));
+      const page = Math.max(0, Math.min(session.emjPage || 0, totalPages - 1));
+      session.emjPage = page;
+      const slice = rules.slice(page * pageSize, (page + 1) * pageSize);
+
+      text =
+        `🎨 <b>Emoji Store (${rules.length})</b>\n` +
+        `Active: <code>${rules.filter((r) => r.enabled).length}</code> · Page ${page + 1}/${totalPages}` +
+        (rules.length === 0 ? '\n\nNo custom emoji rules configured.' : '') +
+        noticeBlock;
+
+      rows.push([{ text: '➕ Add / Update Emoji Rule', callback_data: 'more:emj:add', style: 'primary' }]);
+      slice.forEach((rule, offset) => {
+        const globalIdx = page * pageSize + offset;
+        rows.push([
+          {
+            text: `${rule.enabled ? '🟢' : '⚪'} ${rule.emoji} → ${rule.customEmojiId}`,
+            callback_data: `more:emj:tog:${globalIdx}`,
+            style: rule.enabled ? 'success' : 'secondary'
+          },
+          { text: '🗑️', callback_data: `more:emj:del:${globalIdx}`, style: 'danger' }
+        ]);
+      });
+      if (totalPages > 1) {
+        const nav: any[] = [];
+        if (page > 0) nav.push({ text: '⬅️ Prev', callback_data: `more:emj:p:${page - 1}`, style: 'primary' });
+        if (page + 1 < totalPages) nav.push({ text: 'Next ➡️', callback_data: `more:emj:p:${page + 1}`, style: 'primary' });
+        if (nav.length) rows.push(nav);
+      }
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:menu', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'gst') {
+      const accounts = await storage.getGuestAccounts().catch(() => []);
+      const sysOn = settings.guestLikesEnabled !== false;
+      const pageSize = 6;
+      const totalPages = Math.max(1, Math.ceil(accounts.length / pageSize));
+      const page = Math.max(0, Math.min(session.gstPage || 0, totalPages - 1));
+      session.gstPage = page;
+      const slice = accounts.slice(page * pageSize, (page + 1) * pageSize);
+
+      text =
+        `👤 <b>More Guest Account (${accounts.length})</b>\n` +
+        `System: ${sysOn ? '🟢 <b>ON</b>' : '🔴 <b>OFF</b>'} · Page ${page + 1}/${totalPages}` +
+        (accounts.length === 0 ? '\n\nNo guest accounts saved.' : '') +
+        noticeBlock;
+
+      rows.push([
+        {
+          text: `Guest System: ${sysOn ? 'ON' : 'OFF'}`,
+          callback_data: 'more:gst:sys',
+          style: sysOn ? 'success' : 'secondary'
+        },
+        { text: '🔄 Refresh', callback_data: 'more:gst:ref', style: 'primary' }
+      ]);
+      rows.push([{ text: '➕ Add / Import Guest Account', callback_data: 'more:gst:add', style: 'primary' }]);
+      slice.forEach((acc, offset) => {
+        const globalIdx = page * pageSize + offset;
+        const icon = acc.isBanned ? '🚫' : acc.enabled !== false ? '🟢' : '⚪';
+        const label = `${icon} ${acc.guestUid}${acc.accountName ? ` (${acc.accountName.slice(0, 12)})` : ''}`;
+        rows.push([
+          {
+            text: label.slice(0, 34),
+            callback_data: `more:gst:tog:${globalIdx}`,
+            style: acc.enabled !== false && !acc.isBanned ? 'success' : 'secondary'
+          },
+          { text: '🗑️', callback_data: `more:gst:del:${globalIdx}`, style: 'danger' }
+        ]);
+      });
+      if (totalPages > 1) {
+        const nav: any[] = [];
+        if (page > 0) nav.push({ text: '⬅️ Prev', callback_data: `more:gst:p:${page - 1}`, style: 'primary' });
+        if (page + 1 < totalPages) nav.push({ text: 'Next ➡️', callback_data: `more:gst:p:${page + 1}`, style: 'primary' });
+        if (nav.length) rows.push(nav);
+      }
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:menu', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'tpl') {
+      const templatesMap = await storage.getTemplates().catch(() => ({} as Record<string, MessageTemplate>));
+      const list = Object.values(templatesMap);
+      const pageSize = 8;
+      const totalPages = Math.max(1, Math.ceil(list.length / pageSize));
+      const page = Math.max(0, Math.min(session.tplPage || 0, totalPages - 1));
+      session.tplPage = page;
+      const slice = list.slice(page * pageSize, (page + 1) * pageSize);
+
+      text =
+        `💬 <b>Message Templates (${list.length})</b>\n` +
+        `Page ${page + 1}/${totalPages}` +
+        noticeBlock;
+
+      slice.forEach((tpl, offset) => {
+        const globalIdx = page * pageSize + offset;
+        rows.push([{ text: `📝 ${(tpl.name || tpl.key).slice(0, 34)}`, callback_data: `more:tpl:v:${globalIdx}`, style: 'primary' }]);
+      });
+      if (totalPages > 1) {
+        const nav: any[] = [];
+        if (page > 0) nav.push({ text: '⬅️ Prev', callback_data: `more:tpl:p:${page - 1}`, style: 'primary' });
+        if (page + 1 < totalPages) nav.push({ text: 'Next ➡️', callback_data: `more:tpl:p:${page + 1}`, style: 'primary' });
+        if (nav.length) rows.push(nav);
+      }
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:menu', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view.startsWith('tpl_v:')) {
+      const idx = parseInt(view.slice(6), 10);
+      const templatesMap = await storage.getTemplates().catch(() => ({} as Record<string, MessageTemplate>));
+      const list = Object.values(templatesMap);
+      const tpl = Number.isFinite(idx) ? list[idx] : undefined;
+      if (!tpl) {
+        return this.renderMoreView(fromId, chatId, 'tpl', session, 'Template not found.', forceNew);
+      }
+      const preview = stripCustomEmojiTags(tpl.content || '').replace(/<[^>]+>/g, '').slice(0, 320);
+      text =
+        `💬 <b>${this.escapeHtml(tpl.name || tpl.key)}</b>\n` +
+        `Key: <code>${this.escapeHtml(tpl.key)}</code>\n` +
+        (tpl.variables?.length ? `Vars: ${tpl.variables.map((v) => `<code>{${this.escapeHtml(v)}}</code>`).join(', ')}\n` : '') +
+        (tpl.mediaUrl ? `Media: <code>${this.escapeHtml(tpl.mediaType || 'media')}</code>\n` : '') +
+        `\n<blockquote>${this.escapeHtml(preview || '(Empty)')}</blockquote>` +
+        noticeBlock;
+
+      rows.push([{ text: '✏️ Edit Content', callback_data: `more:tpl:edit:${idx}`, style: 'primary' }]);
+      if (tpl.mediaUrl) {
+        rows.push([{ text: '🗑️ Clear Media', callback_data: `more:tpl:clrmedia:${idx}`, style: 'danger' }]);
+      }
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:tpl', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'adm') {
+      const isOwner = await this.isOwnerAdmin(fromId);
+      const admins = await storage.getAdmins().catch(() => []);
+      text =
+        `👥 <b>Sub-Admins (${admins.length})</b>\n` +
+        (!isOwner ? '<i>Owner access required to modify admins.</i>' : '') +
+        noticeBlock;
+
+      if (isOwner) {
+        rows.push([{ text: '➕ Add Sub-Admin', callback_data: 'more:adm:add', style: 'primary' }]);
+      }
+      admins.slice(0, 12).forEach((adm, idx) => {
+        const icon = adm.role === 'owner' ? '👑' : (adm.enabled !== false ? '🟢' : '⚪');
+        rows.push([
+          {
+            text: `${icon} ${(adm.name || adm.username || adm.telegramId).slice(0, 28)}`,
+            callback_data: `more:adm:v:${idx}`,
+            style: 'primary'
+          }
+        ]);
+      });
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:menu', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view.startsWith('adm_v:')) {
+      const idx = parseInt(view.slice(6), 10);
+      const isOwner = await this.isOwnerAdmin(fromId);
+      const admins = await storage.getAdmins().catch(() => []);
+      const adm = Number.isFinite(idx) ? admins[idx] : undefined;
+      if (!adm) {
+        return this.renderMoreView(fromId, chatId, 'adm', session, 'Admin not found.', forceNew);
+      }
+      const permCount = Object.values(adm.permissions || {}).filter(Boolean).length;
+      text =
+        `👤 <b>${this.escapeHtml(adm.name || adm.telegramId)}</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• ID: <code>${this.escapeHtml(adm.telegramId)}</code>\n` +
+        (adm.username ? `• Username: @${this.escapeHtml(adm.username.replace(/^@/, ''))}\n` : '') +
+        `• Role: <code>${adm.role}</code> · Status: ${adm.enabled !== false ? '🟢 Enabled' : '🔴 Disabled'}\n` +
+        `• Permissions: <code>${permCount}/14</code>` +
+        noticeBlock;
+
+      if (isOwner && adm.role !== 'owner') {
+        rows.push([
+          {
+            text: adm.enabled !== false ? '🔴 Disable' : '🟢 Enable',
+            callback_data: `more:adm:tog:${idx}`,
+            style: adm.enabled !== false ? 'secondary' : 'success'
+          },
+          { text: '🗑️ Remove', callback_data: `more:adm:del:${idx}`, style: 'danger' }
+        ]);
+        rows.push([
+          { text: 'Full', callback_data: `more:adm:pre:${idx}:full`, style: 'primary' },
+          { text: 'Editor', callback_data: `more:adm:pre:${idx}:editor`, style: 'primary' },
+          { text: 'Moderator', callback_data: `more:adm:pre:${idx}:moderator`, style: 'primary' }
+        ]);
+      }
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:adm', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'adm_add') {
+      const preset = session.newAdminPreset || 'editor';
+      session.newAdminPreset = preset;
+      text =
+        `➕ <b>Add Sub-Admin</b>\n` +
+        `Preset: <code>${preset}</code>\n` +
+        `Select preset, then tap Next.` +
+        noticeBlock;
+      rows.push([
+        { text: preset === 'full' ? '• Full •' : 'Full', callback_data: 'more:adm:addpre:full', style: preset === 'full' ? 'primary' : 'secondary' },
+        { text: preset === 'editor' ? '• Editor •' : 'Editor', callback_data: 'more:adm:addpre:editor', style: preset === 'editor' ? 'primary' : 'secondary' },
+        { text: preset === 'moderator' ? '• Mod •' : 'Mod', callback_data: 'more:adm:addpre:moderator', style: preset === 'moderator' ? 'primary' : 'secondary' }
+      ]);
+      rows.push([{ text: '➡️ Enter UID / @username', callback_data: 'more:adm:addgo', style: 'success' }]);
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:adm', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else if (view === 'fleet' && isMain) {
+      const allBots = await TelegramBotManager.getAllBots().catch(() => []);
+      const mainMode = settings.botMode === 'post_bot' ? 'post_bot' : (settings.botMode === 'image_url_bot' ? 'image_url_bot' : 'file_bot');
+      const clones = allBots.filter((b) => !b.isMain);
+
+      text =
+        `🤖 <b>Switch Bot &amp; Fleet</b>\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `• Main Bot Mode: <code>${mainMode}</code>\n` +
+        `• Cloned Bots: <code>${clones.length}</code>` +
+        noticeBlock;
+
+      rows.push([
+        { text: mainMode === 'file_bot' ? '• 📁 File •' : '📁 File', callback_data: 'more:flt:mode:file_bot', style: mainMode === 'file_bot' ? 'primary' : 'secondary' },
+        { text: mainMode === 'post_bot' ? '• 📰 Post •' : '📰 Post', callback_data: 'more:flt:mode:post_bot', style: mainMode === 'post_bot' ? 'primary' : 'secondary' },
+        { text: mainMode === 'image_url_bot' ? '• 🖼️ ImgURL •' : '🖼️ ImgURL', callback_data: 'more:flt:mode:image_url_bot', style: mainMode === 'image_url_bot' ? 'primary' : 'secondary' }
+      ]);
+      rows.push([{ text: '🤖 Clone File Bot', callback_data: 'more:flt:clone', style: 'success' }]);
+      clones.slice(0, 10).forEach((b, idx) => {
+        const running = b.status === 'active';
+        rows.push([
+          {
+            text: `${running ? '🟢' : '🔴'} @${(b.username || b.name || b.id).replace(/^@/, '').slice(0, 18)}`,
+            callback_data: running ? `more:flt:stop:${idx}` : `more:flt:start:${idx}`,
+            style: running ? 'success' : 'secondary'
+          },
+          { text: '🔄', callback_data: `more:flt:rst:${idx}`, style: 'primary' },
+          { text: '🗑️', callback_data: `more:flt:del:${idx}`, style: 'danger' }
+        ]);
+      });
+      rows.push([
+        { text: '⬅️ Back', callback_data: 'more:v:menu', style: 'primary' },
+        { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+      ]);
+    } else {
+      return this.renderMoreView(fromId, chatId, 'menu', session, notice, forceNew);
+    }
+
+    await this.sendOrEditMorePrompt(fromId, chatId, text, { inline_keyboard: rows }, session, forceNew);
+  }
+
+  private static async handleMoreCallback(
+    cb: any,
+    fromId: string,
+    chatId: string | number,
+    data: string
+  ): Promise<void> {
+    const answer = async (msg?: string, alert: boolean = false) => {
+      await this.callTelegramApi('answerCallbackQuery', {
+        callback_query_id: cb.id,
+        ...(msg ? { text: msg.slice(0, 190) } : {}),
+        ...(alert ? { show_alert: true } : {})
+      }).catch(() => {});
+    };
+
+    const existing = this.getActiveMoreSession(fromId);
+    const session: MoreSession = existing
+      ? { ...existing, chatId }
+      : { chatId, view: 'menu', repFilter: 'pending', createdAt: Date.now() };
+    if (cb.message?.message_id) {
+      session.promptMessageId = cb.message.message_id;
+    }
+
+    if (data === 'more:close') {
+      await answer();
+      this.clearMoreSession(fromId);
+      if (cb.message?.message_id) {
+        await this.callTelegramApi('deleteMessage', {
+          chat_id: chatId,
+          message_id: cb.message.message_id
+        }).catch(() => {});
+      }
+      return;
+    }
+
+    if (data.startsWith('more:v:')) {
+      session.awaiting = undefined;
+      const targetView = data.slice(7);
+      await answer();
+      await this.renderMoreView(fromId, chatId, targetView, session);
+      return;
+    }
+
+    const backCloseMarkup = (backTarget: string) => ({
+      inline_keyboard: [
+        [
+          { text: '⬅️ Back', callback_data: `more:v:${backTarget}`, style: 'primary' },
+          { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+        ]
+      ]
+    });
+
+    // --- BOT SETTINGS ---
+    if (data.startsWith('more:set:')) {
+      const sub = data.slice(9);
+      const settings = await storage.getSettings();
+      const botId = String((storage as any)?.botId || 'main').trim() || 'main';
+      if (sub === 'tog:autoDel') {
+        await storage.updateSettings({ autoDeleteDeliveryEnabled: !settings.autoDeleteDeliveryEnabled });
+        await answer(!settings.autoDeleteDeliveryEnabled ? 'Auto-Delete ON' : 'Auto-Delete OFF');
+        return this.renderMoreView(fromId, chatId, 'set', session);
+      }
+      if (sub === 'tog:delNotice') {
+        const nextVal = settings.autoDeleteNoticeEnabled === false;
+        await storage.updateSettings({ autoDeleteNoticeEnabled: nextVal });
+        await answer(nextVal ? 'Delete Notice ON' : 'Delete Notice OFF');
+        return this.renderMoreView(fromId, chatId, 'set', session);
+      }
+      if (sub === 'tog:maint') {
+        await storage.updateSettings({ maintenanceMode: !settings.maintenanceMode });
+        await answer(!settings.maintenanceMode ? 'Maintenance ON' : 'Maintenance OFF');
+        return this.renderMoreView(fromId, chatId, 'set', session);
+      }
+      if (sub === 'editMaint') {
+        session.awaiting = { kind: 'set_maint_notice' };
+        await answer();
+        return this.sendOrEditMorePrompt(
+          fromId,
+          chatId,
+          `✏️ <b>Edit Maintenance Notice</b>\n\nSend the maintenance notice text (or <code>clear</code> to reset).`,
+          backCloseMarkup('set'),
+          session
+        );
+      }
+      if (sub.startsWith('timeout:')) {
+        const val = sub.slice(8);
+        if (val === 'custom') {
+          session.awaiting = { kind: 'set_del_timeout' };
+          await answer();
+          return this.sendOrEditMorePrompt(
+            fromId,
+            chatId,
+            `⏱️ <b>Custom Auto-Delete Timeout</b>\n\nSend minutes (<code>1</code> - <code>1440</code>).`,
+            backCloseMarkup('set'),
+            session
+          );
+        }
+        const mins = Math.max(1, Math.min(1440, parseInt(val, 10) || 10));
+        await storage.updateSettings({ deliveryTimeoutMinutes: mins, autoDeleteDeliveryEnabled: true });
+        await answer(`Timeout set to ${mins}m`);
+        return this.renderMoreView(fromId, chatId, 'set', session);
+      }
+      if (sub === 'bot:start') {
+        const ok = await TelegramBotManager.startBot(botId);
+        await answer(ok ? 'Bot started' : 'Failed to start');
+        return this.renderMoreView(fromId, chatId, 'set', session, ok ? 'Bot started.' : 'Failed to start bot.');
+      }
+      if (sub === 'bot:stop') {
+        await answer('Stopping bot...');
+        await this.renderMoreView(fromId, chatId, 'set', session, 'Bot stopped.');
+        await TelegramBotManager.stopBot(botId);
+        return;
+      }
+      if (sub === 'bot:restart') {
+        await answer('Restarting bot...');
+        const ok = await TelegramBotManager.restartBot(botId);
+        return this.renderMoreView(fromId, chatId, 'set', session, ok ? 'Bot restarted.' : 'Restart failed.');
+      }
+      if (sub === 'bot:mem') {
+        const stats = await TelegramBotManager.cleanMemory(botId);
+        await answer('Memory cleaned');
+        return this.renderMoreView(
+          fromId,
+          chatId,
+          'set',
+          session,
+          `Memory cleaned (${stats.heapUsedMb} MB heap).`
+        );
+      }
+    }
+
+    // --- SUB FORCE ---
+    if (data.startsWith('more:sub:')) {
+      const sub = data.slice(9);
+      const settings = await storage.getSettings();
+      if (sub === 'tog') {
+        await storage.updateSettings({ forceSubEnabled: !settings.forceSubEnabled });
+        this.invalidateForceSubCache();
+        await answer(!settings.forceSubEnabled ? 'Force Sub ON' : 'Force Sub OFF');
+        return this.renderMoreView(fromId, chatId, 'sub', session);
+      }
+      if (sub === 'autoApprove') {
+        await storage.updateSettings({ autoApproveJoinRequests: !settings.autoApproveJoinRequests });
+        this.invalidateForceSubCache();
+        await answer(!settings.autoApproveJoinRequests ? 'Auto-Approve ON' : 'Auto-Approve OFF');
+        return this.renderMoreView(fromId, chatId, 'sub', session);
+      }
+      if (sub.startsWith('mode:')) {
+        const nextMode = sub.slice(5) === 'request_only' ? 'request_only' : 'auto_join';
+        await storage.updateSettings({ forceJoinMode: nextMode });
+        this.invalidateForceSubCache();
+        await answer(`Mode: ${nextMode === 'request_only' ? 'Request Join' : 'Direct Join'}`);
+        return this.renderMoreView(fromId, chatId, 'sub', session);
+      }
+      if (sub === 'add') {
+        session.awaiting = { kind: 'sub_add_channel' };
+        await answer();
+        return this.sendOrEditMorePrompt(
+          fromId,
+          chatId,
+          `📡 <b>Add Force Sub Channel</b>\n\nSend <code>@username</code>, <code>-100...</code> ID (with optional invite link), or forward any message from that channel.`,
+          backCloseMarkup('sub'),
+          session
+        );
+      }
+      if (sub === 'sync') {
+        const channels = Array.isArray(settings.requiredChannels) ? settings.requiredChannels : [];
+        let updated = 0;
+        for (const ch of channels) {
+          if (!ch.chatId) continue;
+          try {
+            const targetChat = /^-?\d+$/.test(ch.chatId) ? Number(ch.chatId) : ch.chatId;
+            const info = await this.callTelegramApi('getChat', { chat_id: targetChat });
+            const title = info?.result?.title || ch.name;
+            const freshLink = await this.generateOrRenewInviteLink(ch.chatId, title);
+            if (freshLink) {
+              await storage.updateChannelInviteLink(ch.chatId, freshLink, false);
+              updated++;
+            }
+          } catch {}
+        }
+        this.invalidateForceSubCache();
+        await answer(`Synced ${updated} channels`);
+        return this.renderMoreView(fromId, chatId, 'sub', session, `Synced ${updated} channel link(s).`);
+      }
+      if (sub.startsWith('reqs:')) {
+        session.subReqPage = Math.max(0, parseInt(sub.slice(5), 10) || 0);
+        await answer();
+        return this.renderMoreView(fromId, chatId, 'sub_reqs', session);
+      }
+      if (sub.startsWith('app:') || sub.startsWith('rej:')) {
+        const approve = sub.startsWith('app:');
+        const idx = parseInt(sub.slice(4), 10);
+        const pending = (await storage.getJoinRequests().catch(() => [])).filter((r) => r.status === 'pending');
+        const req = Number.isFinite(idx) ? pending[idx] : undefined;
+        if (req) {
+          const targetChat = /^-?\d+$/.test(req.chatId) ? Number(req.chatId) : req.chatId;
+          const method = approve ? 'approveChatJoinRequest' : 'declineChatJoinRequest';
+          await this.callTelegramApi(method, {
+            chat_id: targetChat,
+            user_id: Number(req.userId) || req.userId
+          }).catch(() => {});
+          await storage.updateJoinRequestStatus(req.chatId, req.userId, approve ? 'approved' : 'rejected');
+          this.invalidateForceSubCache(req.userId);
+          await answer(approve ? 'Approved' : 'Rejected');
+        } else {
+          await answer('Request not found');
+        }
+        return this.renderMoreView(fromId, chatId, 'sub_reqs', session);
+      }
+      if (sub.startsWith('ch:tog:')) {
+        const idx = parseInt(sub.slice(7), 10);
+        const channels = Array.isArray(settings.requiredChannels) ? settings.requiredChannels : [];
+        const ch = Number.isFinite(idx) ? channels[idx] : undefined;
+        if (ch) {
+          await storage.toggleForceSubChannel(ch.chatId, ch.enabled === false);
+          this.invalidateForceSubCache();
+          await answer(ch.enabled === false ? 'Channel ON' : 'Channel OFF');
+        } else {
+          await answer('Channel not found');
+        }
+        return this.renderMoreView(fromId, chatId, 'sub', session);
+      }
+      if (sub.startsWith('ch:del:')) {
+        const idx = parseInt(sub.slice(7), 10);
+        const channels = Array.isArray(settings.requiredChannels) ? settings.requiredChannels : [];
+        const ch = Number.isFinite(idx) ? channels[idx] : undefined;
+        if (ch) {
+          await storage.removeForceSubChannel(ch.chatId);
+          this.invalidateForceSubCache();
+          await answer('Channel removed');
+        } else {
+          await answer('Channel not found');
+        }
+        return this.renderMoreView(fromId, chatId, 'sub', session);
+      }
+    }
+
+    // --- GROUP MANAGEMENT ---
+    if (data.startsWith('more:grp:')) {
+      const sub = data.slice(9);
+      const settings = await storage.getSettings();
+      if (sub.startsWith('tog:')) {
+        const field = sub.slice(4);
+        if (field === 'link') await storage.updateSettings({ linkDeleteEnabled: !settings.linkDeleteEnabled });
+        else if (field === 'fwd') await storage.updateSettings({ antiForwardEnabled: !settings.antiForwardEnabled });
+        else if (field === 'ban') await storage.updateSettings({ banEnabled: settings.banEnabled === false });
+        else if (field === 'mute') await storage.updateSettings({ muteEnabled: settings.muteEnabled === false });
+        else if (field === 'svc') await storage.updateSettings({ cleanServiceEnabled: !settings.cleanServiceEnabled });
+        else if (field === 'wel') await storage.updateSettings({ welcomeMessageEnabled: settings.welcomeMessageEnabled === false });
+        else if (field === 'welDel') await storage.updateSettings({ welcomeAutoDeleteEnabled: !settings.welcomeAutoDeleteEnabled });
+        await answer('Updated');
+        return this.renderMoreView(fromId, chatId, 'grp', session);
+      }
+      if (sub === 'welSec') {
+        session.awaiting = { kind: 'grp_wel_sec' };
+        await answer();
+        return this.sendOrEditMorePrompt(
+          fromId,
+          chatId,
+          `⏱️ <b>Welcome Auto-Delete Seconds</b>\n\nSend seconds (<code>1</code> - <code>86400</code>).`,
+          backCloseMarkup('grp'),
+          session
+        );
+      }
+      if (sub.startsWith('warn:')) {
+        const op = sub.slice(5);
+        const cur = settings.groupWarningLimit || 3;
+        if (op === 'custom') {
+          session.awaiting = { kind: 'grp_warn_custom' };
+          await answer();
+          return this.sendOrEditMorePrompt(
+            fromId,
+            chatId,
+            `⚠️ <b>Group Warning Limit</b>\n\nSend limit (<code>1</code> - <code>100</code>).`,
+            backCloseMarkup('grp'),
+            session
+          );
+        }
+        const nextWarn = op === '-' ? Math.max(1, cur - 1) : Math.min(100, cur + 1);
+        await storage.updateSettings({ groupWarningLimit: nextWarn });
+        await answer(`Warn limit: ${nextWarn}`);
+        return this.renderMoreView(fromId, chatId, 'grp', session);
+      }
+      if (sub === 'durs') {
+        await answer();
+        return this.renderMoreView(fromId, chatId, 'grp_dur', session);
+      }
+      if (sub === 'dur:add') {
+        session.awaiting = { kind: 'grp_add_dur' };
+        await answer();
+        return this.sendOrEditMorePrompt(
+          fromId,
+          chatId,
+          `➕ <b>Add Moderation Duration</b>\n\nSend duration like <code>15m</code>, <code>6h</code>, <code>7d</code> (or <code>15m Label</code>).`,
+          backCloseMarkup('grp_dur'),
+          session
+        );
+      }
+      if (sub.startsWith('dur:del:')) {
+        const idx = parseInt(sub.slice(8), 10);
+        const durs = Array.isArray(settings.moderationDurations) && settings.moderationDurations.length > 0
+          ? [...settings.moderationDurations]
+          : [...DEFAULT_MODERATION_DURATIONS];
+        if (durs.length <= 1) {
+          await answer('At least 1 preset is required', true);
+          return;
+        }
+        if (Number.isFinite(idx) && idx >= 0 && idx < durs.length) {
+          durs.splice(idx, 1);
+          await storage.updateSettings({ moderationDurations: durs });
+          await answer('Preset removed');
+        }
+        return this.renderMoreView(fromId, chatId, 'grp_dur', session);
+      }
+    }
+
+    // --- BROADCAST ---
+    if (data.startsWith('more:brd:')) {
+      const sub = data.slice(9);
+      if (sub === 'pin') {
+        if (session.draftBroadcast) {
+          session.draftBroadcast.pin = !session.draftBroadcast.pin;
+        } else {
+          session.draftBroadcast = { mediaType: 'text', message: '', pin: true };
+        }
+        await answer(`Pin: ${session.draftBroadcast.pin ? 'ON' : 'OFF'}`);
+        return this.renderMoreView(fromId, chatId, 'brd', session);
+      }
+      if (sub === 'compose') {
+        const pin = Boolean(session.draftBroadcast?.pin);
+        session.awaiting = { kind: 'brd_compose', pin };
+        await answer();
+        return this.sendOrEditMorePrompt(
+          fromId,
+          chatId,
+          `📢 <b>Compose Broadcast</b>\n\nSend text, photo, video, audio, or voice message.`,
+          backCloseMarkup('brd'),
+          session
+        );
+      }
+      if (sub === 'clear') {
+        session.draftBroadcast = undefined;
+        await answer('Draft cleared');
+        return this.renderMoreView(fromId, chatId, 'brd', session);
+      }
+      if (sub === 'test' && session.draftBroadcast) {
+        const res = await this.sendBroadcastMessage({
+          chatId,
+          message: session.draftBroadcast.message,
+          mediaType: session.draftBroadcast.mediaType,
+          mediaUrl: session.draftBroadcast.mediaUrl,
+          pinMessage: false
+        });
+        await answer(res.ok ? 'Test sent' : (res.description || 'Test failed'), !res.ok);
+        return this.renderMoreView(fromId, chatId, 'brd', session, res.ok ? 'Test sent to you.' : `Test failed: ${res.description || 'Error'}`);
+      }
+      if (sub === 'send' && session.draftBroadcast) {
+        const draft = session.draftBroadcast;
+        const users = await storage.getBotUsers().catch(() => []);
+        await answer(`Broadcasting to ${users.length} users...`);
+        await this.renderMoreView(fromId, chatId, 'brd', session, `Sending to ${users.length} users...`);
+        let sent = 0;
+        let failed = 0;
+        for (const u of users) {
+          if (!u?.id) continue;
+          const res = await this.sendBroadcastMessage({
+            chatId: u.id,
+            message: draft.message,
+            mediaType: draft.mediaType,
+            mediaUrl: draft.mediaUrl,
+            pinMessage: draft.pin
+          }).catch(() => ({ ok: false }));
+          if (res?.ok) sent++;
+          else failed++;
+          await new Promise((r) => setTimeout(r, 35));
+        }
+        return this.renderMoreView(
+          fromId,
+          chatId,
+          'brd',
+          session,
+          `Broadcast complete: ${sent} sent, ${failed} failed.`
+        );
+      }
+    }
+
+    // --- USER REPORTS ---
+    if (data.startsWith('more:rep:')) {
+      const sub = data.slice(9);
+      if (sub.startsWith('f:')) {
+        const f = sub.slice(2);
+        session.repFilter = (f === 'all' || f === 'resolved' || f === 'dismissed') ? f : 'pending';
+        session.repPage = 0;
+        await answer();
+        return this.renderMoreView(fromId, chatId, 'rep', session);
+      }
+      if (sub.startsWith('p:')) {
+        session.repPage = Math.max(0, parseInt(sub.slice(2), 10) || 0);
+        await answer();
+        return this.renderMoreView(fromId, chatId, 'rep', session);
+      }
+      if (sub.startsWith('v:')) {
+        const idx = parseInt(sub.slice(2), 10);
+        await answer();
+        return this.renderMoreView(fromId, chatId, `rep_v:${idx}`, session);
+      }
+      const matchAction = sub.match(/^(ban|res|dis|del):(\d+)$/);
+      if (matchAction) {
+        const act = matchAction[1];
+        const idx = parseInt(matchAction[2], 10);
+        const allReports = await storage.getReports().catch(() => []);
+        const filter = session.repFilter || 'pending';
+        const filtered = filter === 'all' ? allReports : allReports.filter((r) => r.status === filter);
+        const rep = filtered[idx];
+        if (!rep) {
+          await answer('Report not found');
+          return this.renderMoreView(fromId, chatId, 'rep', session);
+        }
+        if (act === 'del') {
+          await storage.deleteReport(rep.id);
+          await answer('Report deleted');
+          return this.renderMoreView(fromId, chatId, 'rep', session, 'Report deleted.');
+        }
+        if (act === 'ban') {
+          await storage.setBotUserBanned(rep.reportedUserId, true, {
+            chatId: rep.chatId,
+            reason: rep.reason,
+            name: rep.reportedUserName,
+            username: rep.reportedUserUsername
+          }).catch(() => {});
+          if (rep.chatId) {
+            await this.callTelegramApi('banChatMember', {
+              chat_id: rep.chatId,
+              user_id: Number(rep.reportedUserId) || rep.reportedUserId
+            }).catch(() => {});
+          }
+          const updated = await storage.updateReportStatus(rep.id, 'resolved', fromId, 'banned');
+          await this.syncAdminReportMessages(updated || rep, 'banned');
+          await answer('User banned');
+          return this.renderMoreView(fromId, chatId, 'rep', session, 'User banned & report resolved.');
+        }
+        const status = act === 'res' ? 'resolved' : 'dismissed';
+        const updated = await storage.updateReportStatus(rep.id, status, fromId, status);
+        await this.syncAdminReportMessages(updated || rep, status);
+        await answer(status === 'resolved' ? 'Resolved' : 'Dismissed');
+        return this.renderMoreView(fromId, chatId, 'rep', session, `Report ${status}.`);
+      }
+    }
+
+    // --- FRAUD & WORD FILTER ---
+    if (data.startsWith('more:frd:')) {
+      const sub = data.slice(9);
+      const rules = await storage.getFraudRules().catch(() => []);
+      if (sub === 'new') {
+        await answer();
+        return this.renderMoreView(fromId, chatId, 'frd_new', session);
+      }
+      if (sub.startsWith('mt:')) {
+        const mt = sub.slice(3);
+        session.newFraudConfig = {
+          matchType: mt === 'exact' || mt === 'regex' ? mt : 'contains',
+          action: session.newFraudConfig?.action || 'delete_and_warn'
+        };
+        await answer();
+        return this.renderMoreView(fromId, chatId, 'frd_new', session);
+      }
+      if (sub.startsWith('act:')) {
+        const act = sub.slice(4) as FraudKeywordRule['action'];
+        session.newFraudConfig = {
+          matchType: session.newFraudConfig?.matchType || 'contains',
+          action: ['delete_and_warn', 'delete', 'warn', 'mute', 'ban', 'reply_only'].includes(act)
+            ? act
+            : 'delete_and_warn'
+        };
+        await answer();
+        return this.renderMoreView(fromId, chatId, 'frd_new', session);
+      }
+      if (sub === 'next') {
+        const cfg = session.newFraudConfig || { matchType: 'contains' as const, action: 'delete_and_warn' as const };
+        session.awaiting = { kind: 'frd_add_kw', matchType: cfg.matchType, action: cfg.action };
+        await answer();
+        return this.sendOrEditMorePrompt(
+          fromId,
+          chatId,
+          `🚫 <b>Enter Filter Keyword</b>\n\nMatch: <code>${cfg.matchType}</code> · Action: <code>${cfg.action}</code>\nSend the keyword or phrase.`,
+          backCloseMarkup('frd_new'),
+          session
+        );
+      }
+      if (sub.startsWith('tog:')) {
+        const idx = parseInt(sub.slice(4), 10);
+        const rule = Number.isFinite(idx) ? rules[idx] : undefined;
+        if (rule) {
+          await storage.saveFraudRule({ ...rule, enabled: !rule.enabled });
+          await answer(!rule.enabled ? 'Rule ON' : 'Rule OFF');
+        }
+        return this.renderMoreView(fromId, chatId, 'frd', session);
+      }
+      if (sub.startsWith('del:')) {
+        const idx = parseInt(sub.slice(4), 10);
+        const rule = Number.isFinite(idx) ? rules[idx] : undefined;
+        if (rule) {
+          await storage.deleteFraudRule(rule.id);
+          await answer('Rule deleted');
+        }
+        return this.renderMoreView(fromId, chatId, 'frd', session);
+      }
+    }
+
+    // --- CHAT WHITELIST ---
+    if (data.startsWith('more:wht:')) {
+      const sub = data.slice(9);
+      const settings = await storage.getSettings();
+      if (sub === 'tog') {
+        await storage.updateSettings({ chatWhitelistEnabled: !settings.chatWhitelistEnabled });
+        await answer(!settings.chatWhitelistEnabled ? 'Whitelist Guard ON' : 'Whitelist Guard OFF');
+        return this.renderMoreView(fromId, chatId, 'wht', session);
+      }
+      if (sub === 'add') {
+        session.awaiting = { kind: 'wht_add_chat' };
+        await answer();
+        return this.sendOrEditMorePrompt(
+          fromId,
+          chatId,
+          `🔇 <b>Allow Chat in Whitelist</b>\n\nSend <code>-100...</code> chat ID, <code>@username</code>, or forward a message from the chat.`,
+          backCloseMarkup('wht'),
+          session
+        );
+      }
+      if (sub.startsWith('qadd:')) {
+        const idx = parseInt(sub.slice(5), 10);
+        const allowedSet = new Set((settings.allowedChats || []).map((c) => String(c.id).trim()));
+        const unadded = (settings.requiredChannels || []).filter((ch) => ch.chatId && !allowedSet.has(String(ch.chatId).trim()));
+        const ch = Number.isFinite(idx) ? unadded[idx] : undefined;
+        if (ch) {
+          await storage.addAllowedChat(ch.chatId, ch.name, ch.type || 'channel', fromId, false);
+          await answer('Chat allowed');
+        }
+        return this.renderMoreView(fromId, chatId, 'wht', session);
+      }
+      if (sub.startsWith('del:')) {
+        const idx = parseInt(sub.slice(4), 10);
+        const entry = Number.isFinite(idx) ? (settings.allowedChats || [])[idx] : undefined;
+        if (entry) {
+          await storage.removeAllowedChat(entry.id);
+          await answer('Chat removed');
+        }
+        return this.renderMoreView(fromId, chatId, 'wht', session);
+      }
+    }
+
+    // --- KEY GENERATOR ---
+    if (data.startsWith('more:key:')) {
+      const sub = data.slice(9);
+      const pools = await storage.getKeyPools().catch(() => []);
+      if (sub.startsWith('p:')) {
+        session.keyPage = Math.max(0, parseInt(sub.slice(2), 10) || 0);
+        await answer();
+        return this.renderMoreView(fromId, chatId, 'key', session);
+      }
+      if (sub.startsWith('v:')) {
+        const idx = parseInt(sub.slice(2), 10);
+        await answer();
+        return this.renderMoreView(fromId, chatId, `key_v:${idx}`, session);
+      }
+      if (sub.startsWith('tog:')) {
+        const idx = parseInt(sub.slice(4), 10);
+        const pool = Number.isFinite(idx) ? pools[idx] : undefined;
+        if (pool) {
+          const nextStatus = pool.status === 'active' ? 'disabled' : 'active';
+          await storage.updateKeyPool(pool.id, { status: nextStatus });
+          await answer(`Status: ${nextStatus}`);
+        }
+        return this.renderMoreView(fromId, chatId, `key_v:${idx}`, session);
+      }
+      if (sub.startsWith('del:')) {
+        const idx = parseInt(sub.slice(4), 10);
+        const pool = Number.isFinite(idx) ? pools[idx] : undefined;
+        if (pool) {
+          await storage.deleteKeyPool(pool.id);
+          await answer('Key link deleted');
+        }
+        return this.renderMoreView(fromId, chatId, 'key', session, 'Key link deleted.');
+      }
+      if (sub.startsWith('wiz:')) {
+        const kind = sub.slice(4);
+        await answer();
+        this.clearMoreSession(fromId);
+        if (cb.message?.message_id) {
+          await this.callTelegramApi('deleteMessage', { chat_id: chatId, message_id: cb.message.message_id }).catch(() => {});
+        }
+        const fakeMsg = { from: cb.from || { id: fromId } };
+        if (kind === 'add') return this.handleAddKeyCommand(fromId, chatId, fakeMsg, '/addkey');
+        if (kind === 'gen') return this.handleGenKeyCommand(fromId, chatId, fakeMsg, '/genkey');
+        return this.handleTextLinkCommand(fromId, chatId, fakeMsg, '/textlink');
+      }
+    }
+
+    // --- EMOJI STORE ---
+    if (data.startsWith('more:emj:')) {
+      const sub = data.slice(9);
+      const settings = await storage.getSettings();
+      const rules = sanitizeCustomEmojiRules(settings.customEmojiRules);
+      if (sub.startsWith('p:')) {
+        session.emjPage = Math.max(0, parseInt(sub.slice(2), 10) || 0);
+        await answer();
+        return this.renderMoreView(fromId, chatId, 'emj', session);
+      }
+      if (sub === 'add') {
+        session.awaiting = { kind: 'emj_add_rule' };
+        await answer();
+        return this.sendOrEditMorePrompt(
+          fromId,
+          chatId,
+          `🎨 <b>Add / Update Emoji Rule</b>\n\nSend <code>&lt;emoji&gt; &lt;custom_emoji_id&gt;</code> (example: <code>🔥 5368324170671202286</code>)\nor send <code>&lt;target_emoji&gt;</code> followed by your Telegram custom emoji.`,
+          backCloseMarkup('emj'),
+          session
+        );
+      }
+      if (sub.startsWith('tog:')) {
+        const idx = parseInt(sub.slice(4), 10);
+        if (Number.isFinite(idx) && rules[idx]) {
+          rules[idx] = { ...rules[idx], enabled: !rules[idx].enabled, updatedAt: new Date().toISOString() };
+          await storage.updateSettings({
+            customEmojiRules: rules,
+            customEmojiMap: buildCustomEmojiMapFromRules(rules)
+          });
+          await answer(rules[idx].enabled ? 'Emoji ON' : 'Emoji OFF');
+        }
+        return this.renderMoreView(fromId, chatId, 'emj', session);
+      }
+      if (sub.startsWith('del:')) {
+        const idx = parseInt(sub.slice(4), 10);
+        if (Number.isFinite(idx) && rules[idx]) {
+          rules.splice(idx, 1);
+          await storage.updateSettings({
+            customEmojiRules: rules,
+            customEmojiMap: buildCustomEmojiMapFromRules(rules)
+          });
+          await answer('Emoji removed');
+        }
+        return this.renderMoreView(fromId, chatId, 'emj', session);
+      }
+    }
+
+    // --- MORE GUEST ACCOUNT ---
+    if (data.startsWith('more:gst:')) {
+      const sub = data.slice(9);
+      const settings = await storage.getSettings();
+      const accounts = await storage.getGuestAccounts().catch(() => []);
+      if (sub.startsWith('p:')) {
+        session.gstPage = Math.max(0, parseInt(sub.slice(2), 10) || 0);
+        await answer();
+        return this.renderMoreView(fromId, chatId, 'gst', session);
+      }
+      if (sub === 'sys') {
+        const nextVal = settings.guestLikesEnabled === false;
+        await storage.updateSettings({ guestLikesEnabled: nextVal });
+        await answer(nextVal ? 'Guest Likes ON' : 'Guest Likes OFF');
+        return this.renderMoreView(fromId, chatId, 'gst', session);
+      }
+      if (sub === 'add') {
+        session.awaiting = { kind: 'gst_add_account' };
+        await answer();
+        return this.sendOrEditMorePrompt(
+          fromId,
+          chatId,
+          `👤 <b>Add / Import Guest Account</b>\n\nSend <code>uid password</code> (one or multiple lines) or upload a <code>.dat</code> / <code>.json</code> / <code>.txt</code> guest file.`,
+          backCloseMarkup('gst'),
+          session
+        );
+      }
+      if (sub === 'ref') {
+        await answer('Refreshing accounts...');
+        let okCount = 0;
+        let failCount = 0;
+        for (const acc of accounts) {
+          try {
+            const inspected = await FreeFireGuestService.inspectGuestAccount(acc.guestUid, acc.guestPassword);
+            await storage.updateGuestAccount(acc.id, {
+              accountName: inspected.nameResolved ? inspected.accountName : acc.accountName,
+              inGameUid: inspected.inGameUid || acc.inGameUid,
+              isBanned: inspected.isBanned,
+              banType: inspected.banType,
+              banReason: inspected.banReason,
+              banCheckedAt: new Date().toISOString()
+            });
+            if (inspected.authOk && !inspected.isBanned) okCount++;
+            else failCount++;
+          } catch {
+            failCount++;
+          }
+        }
+        return this.renderMoreView(fromId, chatId, 'gst', session, `Refreshed: ${okCount} active, ${failCount} failed/banned.`);
+      }
+      if (sub.startsWith('tog:')) {
+        const idx = parseInt(sub.slice(4), 10);
+        const acc = Number.isFinite(idx) ? accounts[idx] : undefined;
+        if (acc) {
+          await storage.updateGuestAccount(acc.id, { enabled: acc.enabled === false });
+          await answer(acc.enabled === false ? 'Enabled' : 'Disabled');
+        }
+        return this.renderMoreView(fromId, chatId, 'gst', session);
+      }
+      if (sub.startsWith('del:')) {
+        const idx = parseInt(sub.slice(4), 10);
+        const acc = Number.isFinite(idx) ? accounts[idx] : undefined;
+        if (acc) {
+          await storage.deleteGuestAccount(acc.id);
+          await answer('Account deleted');
+        }
+        return this.renderMoreView(fromId, chatId, 'gst', session);
+      }
+    }
+
+    // --- MESSAGE TEMPLATES ---
+    if (data.startsWith('more:tpl:')) {
+      const sub = data.slice(9);
+      const list = Object.values(await storage.getTemplates().catch(() => ({} as Record<string, MessageTemplate>)));
+      if (sub.startsWith('p:')) {
+        session.tplPage = Math.max(0, parseInt(sub.slice(2), 10) || 0);
+        await answer();
+        return this.renderMoreView(fromId, chatId, 'tpl', session);
+      }
+      if (sub.startsWith('v:')) {
+        const idx = parseInt(sub.slice(2), 10);
+        await answer();
+        return this.renderMoreView(fromId, chatId, `tpl_v:${idx}`, session);
+      }
+      if (sub.startsWith('edit:')) {
+        const idx = parseInt(sub.slice(5), 10);
+        const tpl = Number.isFinite(idx) ? list[idx] : undefined;
+        if (!tpl) {
+          await answer('Template not found');
+          return this.renderMoreView(fromId, chatId, 'tpl', session);
+        }
+        session.awaiting = { kind: 'tpl_edit', templateKey: tpl.key };
+        await answer();
+        return this.sendOrEditMorePrompt(
+          fromId,
+          chatId,
+          `✏️ <b>Edit Template:</b> <code>${this.escapeHtml(tpl.key)}</code>\n\nSend the new text/message now.`,
+          backCloseMarkup(`tpl_v:${idx}`),
+          session
+        );
+      }
+      if (sub.startsWith('clrmedia:')) {
+        const idx = parseInt(sub.slice(9), 10);
+        const tpl = Number.isFinite(idx) ? list[idx] : undefined;
+        if (tpl) {
+          await storage.updateTemplate(tpl.key, tpl.content, { mediaType: 'none', mediaUrl: '' });
+          await answer('Media cleared');
+        }
+        return this.renderMoreView(fromId, chatId, `tpl_v:${idx}`, session);
+      }
+    }
+
+    // --- SUB-ADMINS ---
+    if (data.startsWith('more:adm:')) {
+      const sub = data.slice(9);
+      const isOwner = await this.isOwnerAdmin(fromId, cb.from?.username);
+      const admins = await storage.getAdmins().catch(() => []);
+      if (sub.startsWith('v:')) {
+        const idx = parseInt(sub.slice(2), 10);
+        await answer();
+        return this.renderMoreView(fromId, chatId, `adm_v:${idx}`, session);
+      }
+      if (!isOwner) {
+        await answer('Owner access required', true);
+        return;
+      }
+      if (sub === 'add') {
+        await answer();
+        return this.renderMoreView(fromId, chatId, 'adm_add', session);
+      }
+      if (sub.startsWith('addpre:')) {
+        const pre = sub.slice(7);
+        session.newAdminPreset = (pre === 'full' || pre === 'moderator') ? pre : 'editor';
+        await answer();
+        return this.renderMoreView(fromId, chatId, 'adm_add', session);
+      }
+      if (sub === 'addgo') {
+        const preset = session.newAdminPreset || 'editor';
+        session.awaiting = { kind: 'adm_add', preset };
+        await answer();
+        return this.sendOrEditMorePrompt(
+          fromId,
+          chatId,
+          `👤 <b>Add Sub-Admin (${preset})</b>\n\nSend Telegram UID or <code>@username</code>.`,
+          backCloseMarkup('adm_add'),
+          session
+        );
+      }
+      if (sub.startsWith('tog:')) {
+        const idx = parseInt(sub.slice(4), 10);
+        const adm = Number.isFinite(idx) ? admins[idx] : undefined;
+        if (adm && adm.role !== 'owner') {
+          await storage.saveAdmin({ ...adm, enabled: adm.enabled === false });
+          await answer(adm.enabled === false ? 'Enabled' : 'Disabled');
+        }
+        return this.renderMoreView(fromId, chatId, `adm_v:${idx}`, session);
+      }
+      if (sub.startsWith('del:')) {
+        const idx = parseInt(sub.slice(4), 10);
+        const adm = Number.isFinite(idx) ? admins[idx] : undefined;
+        if (adm && adm.role !== 'owner') {
+          await storage.deleteAdmin(adm.id);
+          await storage.setBotUserAdmin(adm.telegramId, false).catch(() => {});
+          await answer('Sub-admin removed');
+        }
+        return this.renderMoreView(fromId, chatId, 'adm', session, 'Sub-admin removed.');
+      }
+      if (sub.startsWith('pre:')) {
+        const parts = sub.slice(4).split(':');
+        const idx = parseInt(parts[0], 10);
+        const preset = (parts[1] === 'full' || parts[1] === 'moderator') ? parts[1] : 'editor';
+        const adm = Number.isFinite(idx) ? admins[idx] : undefined;
+        if (adm && adm.role !== 'owner') {
+          await storage.saveAdmin({ ...adm, permissions: this.buildSubAdminPresetPerms(preset) });
+          await answer(`Preset: ${preset}`);
+        }
+        return this.renderMoreView(fromId, chatId, `adm_v:${idx}`, session);
+      }
+    }
+
+    // --- FLEET / SWITCH BOT (MAIN BOT ONLY) ---
+    if (data.startsWith('more:flt:') && this.isMainBotContext()) {
+      const sub = data.slice(9);
+      const clones = (await TelegramBotManager.getAllBots().catch(() => [])).filter((b) => !b.isMain);
+      if (sub.startsWith('mode:')) {
+        const mode = sub.slice(5) as BotOperationalMode;
+        await TelegramBotManager.setBotMode('main', mode);
+        await answer(`Mode: ${mode}`);
+        return this.renderMoreView(fromId, chatId, 'fleet', session);
+      }
+      if (sub === 'clone') {
+        await answer();
+        this.clearMoreSession(fromId);
+        const cloneSession: CloneSession = {
+          chatId: String(chatId),
+          createdBy: fromId,
+          createdAt: Date.now(),
+          stage: 'awaiting_token'
+        };
+        const promptRes = await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: `🤖 <b>Clone File Bot — Step 1/2</b>\n\nSend the <b>Bot Token</b> from <code>@BotFather</code>.`,
+          parse_mode: 'HTML',
+          reply_markup: {
+            inline_keyboard: [[{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]]
+          }
+        });
+        if (promptRes?.ok && promptRes.result?.message_id) {
+          cloneSession.promptMessageId = promptRes.result.message_id;
+        }
+        activeCloneSessions.set(fromId, cloneSession);
+        return;
+      }
+      const matchFlt = sub.match(/^(start|stop|rst|del|cdel):(\d+)$/);
+      if (matchFlt) {
+        const act = matchFlt[1];
+        const idx = parseInt(matchFlt[2], 10);
+        const target = clones[idx];
+        if (!target) {
+          await answer('Bot not found');
+          return this.renderMoreView(fromId, chatId, 'fleet', session);
+        }
+        if (act === 'del') {
+          await answer();
+          return this.sendOrEditMorePrompt(
+            fromId,
+            chatId,
+            `⚠️ <b>Delete Cloned Bot?</b>\n\nBot: <code>@${this.escapeHtml(target.username || target.id)}</code>\nThis removes its token and isolated storage.`,
+            {
+              inline_keyboard: [
+                [{ text: '🗑️ Confirm Delete', callback_data: `more:flt:cdel:${idx}`, style: 'danger' }],
+                [
+                  { text: '⬅️ Back', callback_data: 'more:v:fleet', style: 'primary' },
+                  { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+                ]
+              ]
+            },
+            session
+          );
+        }
+        if (act === 'cdel') {
+          await TelegramBotManager.deleteClonedBot(target.id);
+          await answer('Cloned bot deleted');
+          return this.renderMoreView(fromId, chatId, 'fleet', session, `Deleted @${target.username || target.id}.`);
+        }
+        if (act === 'start') {
+          const ok = await TelegramBotManager.startBot(target.id);
+          await answer(ok ? 'Started' : 'Failed');
+        } else if (act === 'stop') {
+          await TelegramBotManager.stopBot(target.id);
+          await answer('Stopped');
+        } else if (act === 'rst') {
+          await TelegramBotManager.restartBot(target.id);
+          await answer('Restarted');
+        }
+        return this.renderMoreView(fromId, chatId, 'fleet', session);
+      }
+    }
+
+    await answer();
+    await this.renderMoreView(fromId, chatId, session.view || 'menu', session);
+  }
+
+  private static async handleActiveMoreSessionInput(
+    message: any,
+    fromId: string,
+    chatId: string | number,
+    text: string,
+    session: MoreSession
+  ): Promise<void> {
+    const awaiting = session.awaiting;
+    if (!awaiting) return;
+
+    await this.deleteUserMessage(chatId, message?.message_id);
+    const trimmed = String(text || '').trim();
+
+    if (awaiting.kind === 'set_del_timeout') {
+      const mins = parseInt(trimmed, 10);
+      if (!Number.isFinite(mins) || mins < 1 || mins > 1440) {
+        return this.renderMoreView(fromId, chatId, 'set', { ...session, awaiting: undefined }, 'Invalid minutes (1-1440).');
+      }
+      session.awaiting = undefined;
+      await storage.updateSettings({ deliveryTimeoutMinutes: mins, autoDeleteDeliveryEnabled: true });
+      return this.renderMoreView(fromId, chatId, 'set', session, `Auto-delete set to ${mins}m.`);
+    }
+
+    if (awaiting.kind === 'set_maint_notice') {
+      session.awaiting = undefined;
+      const val = /^clear$/i.test(trimmed) ? '' : trimmed;
+      await storage.updateSettings({ maintenanceNotice: val });
+      return this.renderMoreView(fromId, chatId, 'set', session, val ? 'Maintenance notice updated.' : 'Maintenance notice cleared.');
+    }
+
+    if (awaiting.kind === 'sub_add_channel') {
+      session.awaiting = undefined;
+      let targetInput = trimmed;
+      const fwdChat = message?.forward_from_chat;
+      if (fwdChat?.id) {
+        targetInput = String(fwdChat.id);
+      }
+      if (!targetInput) {
+        return this.renderMoreView(fromId, chatId, 'sub', session, 'Invalid channel input.');
+      }
+      const parts = targetInput.split(/\s+/).filter(Boolean);
+      let target = parts[0];
+      let inviteLink = parts[1] && /^https?:\/\/|^t\.me\//i.test(parts[1])
+        ? (parts[1].startsWith('http') ? parts[1] : `https://${parts[1]}`)
+        : '';
+      if (target.startsWith('https://t.me/')) {
+        if (target.includes('/+')) inviteLink = inviteLink || target;
+        else target = '@' + target.replace('https://t.me/', '').replace(/\/.*$/, '');
+      } else if (target.startsWith('t.me/')) {
+        if (target.includes('/+')) inviteLink = inviteLink || ('https://' + target);
+        else target = '@' + target.replace('t.me/', '').replace(/\/.*$/, '');
+      } else if (!target.startsWith('@') && !target.startsWith('-') && !/^\d+$/.test(target)) {
+        target = '@' + target;
+      }
+
+      const queryChat = /^-?\d+$/.test(target) ? Number(target) : target;
+      let chatTitle = fwdChat?.title || target;
+      let chatType: 'channel' | 'supergroup' | 'group' = String(target).startsWith('-100') ? 'channel' : 'supergroup';
+      let username = fwdChat?.username ? `@${fwdChat.username}` : (target.startsWith('@') ? target : undefined);
+      let resolvedChatId = String(target);
+
+      const chatRes = await this.callTelegramApi('getChat', { chat_id: queryChat }).catch(() => null);
+      if (chatRes?.ok && chatRes.result) {
+        const c = chatRes.result;
+        chatTitle = c.title || c.username || chatTitle;
+        chatType = c.type || chatType;
+        if (c.username) username = `@${String(c.username).replace(/^@/, '')}`;
+        resolvedChatId = String(c.id);
+        if (!inviteLink && c.invite_link) inviteLink = c.invite_link;
+      }
+      if (!inviteLink) {
+        inviteLink = (await this.generateOrRenewInviteLink(resolvedChatId, chatTitle).catch(() => '')) || '';
+      }
+      if (!inviteLink && username) {
+        inviteLink = `https://t.me/${username.replace(/^@/, '')}`;
+      }
+
+      await storage.registerDetectedChannel({
+        chatId: resolvedChatId,
+        name: chatTitle,
+        inviteLink,
+        username,
+        type: chatType,
+        isAdmin: true,
+        enabled: true
+      });
+      await storage.updateSettings({ forceSubEnabled: true });
+      this.invalidateForceSubCache();
+      return this.renderMoreView(fromId, chatId, 'sub', session, `Added channel: ${chatTitle}`);
+    }
+
+    if (awaiting.kind === 'grp_wel_sec') {
+      session.awaiting = undefined;
+      const secs = parseInt(trimmed, 10);
+      if (!Number.isFinite(secs) || secs < 1 || secs > 86400) {
+        return this.renderMoreView(fromId, chatId, 'grp', session, 'Invalid seconds (1-86400).');
+      }
+      await storage.updateSettings({ welcomeAutoDeleteSeconds: secs, welcomeAutoDeleteEnabled: true });
+      return this.renderMoreView(fromId, chatId, 'grp', session, `Welcome auto-delete: ${secs}s.`);
+    }
+
+    if (awaiting.kind === 'grp_warn_custom') {
+      session.awaiting = undefined;
+      const limit = parseInt(trimmed, 10);
+      if (!Number.isFinite(limit) || limit < 1 || limit > 100) {
+        return this.renderMoreView(fromId, chatId, 'grp', session, 'Invalid limit (1-100).');
+      }
+      await storage.updateSettings({ groupWarningLimit: limit });
+      return this.renderMoreView(fromId, chatId, 'grp', session, `Warning limit: ${limit}.`);
+    }
+
+    if (awaiting.kind === 'grp_add_dur') {
+      session.awaiting = undefined;
+      const parts = trimmed.split(/\s+/);
+      const token = (parts[0] || '').toLowerCase();
+      if (!/^\d+[mhd]$/i.test(token)) {
+        return this.renderMoreView(fromId, chatId, 'grp_dur', session, 'Invalid format (use 15m, 6h, 7d).');
+      }
+      const label = parts.slice(1).join(' ').trim() || token;
+      const settings = await storage.getSettings();
+      const durs = Array.isArray(settings.moderationDurations) && settings.moderationDurations.length > 0
+        ? [...settings.moderationDurations]
+        : [...DEFAULT_MODERATION_DURATIONS];
+      if (!durs.some((d) => d.value === token)) {
+        durs.push({ label, value: token });
+        await storage.updateSettings({ moderationDurations: durs });
+      }
+      return this.renderMoreView(fromId, chatId, 'grp_dur', session, `Added ${label}.`);
+    }
+
+    if (awaiting.kind === 'brd_compose') {
+      session.awaiting = undefined;
+      let mediaType: 'text' | 'photo' | 'video' | 'audio' | 'voice' = 'text';
+      let mediaUrl: string | undefined;
+      if (Array.isArray(message?.photo) && message.photo.length > 0) {
+        mediaType = 'photo';
+        mediaUrl = message.photo[message.photo.length - 1].file_id;
+      } else if (message?.video?.file_id) {
+        mediaType = 'video';
+        mediaUrl = message.video.file_id;
+      } else if (message?.audio?.file_id) {
+        mediaType = 'audio';
+        mediaUrl = message.audio.file_id;
+      } else if (message?.voice?.file_id) {
+        mediaType = 'voice';
+        mediaUrl = message.voice.file_id;
+      }
+      const isTextSrc = typeof message?.text === 'string' && message.text.length > 0;
+      const rawBody = isTextSrc ? String(message.text) : String(message?.caption || text || '');
+      const entities = isTextSrc
+        ? (Array.isArray(message?.entities) ? message.entities : [])
+        : (Array.isArray(message?.caption_entities) ? message.caption_entities : []);
+      const htmlMsg = rawBody ? this.convertTelegramEntitiesToHtml(rawBody, entities, 0) : '';
+      if (!htmlMsg && !mediaUrl) {
+        return this.renderMoreView(fromId, chatId, 'brd', session, 'Empty broadcast ignored.');
+      }
+      session.draftBroadcast = {
+        mediaType,
+        message: htmlMsg,
+        ...(mediaUrl ? { mediaUrl } : {}),
+        pin: awaiting.pin
+      };
+      return this.renderMoreView(fromId, chatId, 'brd', session, 'Draft ready.');
+    }
+
+    if (awaiting.kind === 'frd_add_kw') {
+      session.awaiting = undefined;
+      if (!trimmed) {
+        return this.renderMoreView(fromId, chatId, 'frd', session, 'Keyword cannot be empty.');
+      }
+      const id = `fr_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
+      await storage.saveFraudRule({
+        id,
+        keyword: trimmed,
+        matchType: awaiting.matchType,
+        action: awaiting.action,
+        duration: awaiting.action === 'mute' ? '30m' : undefined,
+        maxWarnings: 3,
+        enabled: true,
+        createdAt: new Date().toISOString()
+      });
+      return this.renderMoreView(fromId, chatId, 'frd', session, `Added rule: ${trimmed}`);
+    }
+
+    if (awaiting.kind === 'wht_add_chat') {
+      session.awaiting = undefined;
+      const fwdChat = message?.forward_from_chat;
+      let targetId = fwdChat?.id ? String(fwdChat.id) : trimmed;
+      let title = fwdChat?.title || '';
+      let type: 'group' | 'supergroup' | 'channel' | 'private' = fwdChat?.type || 'supergroup';
+      if (!targetId) {
+        return this.renderMoreView(fromId, chatId, 'wht', session, 'Invalid chat input.');
+      }
+      const q = /^-?\d+$/.test(targetId) ? Number(targetId) : (targetId.startsWith('@') ? targetId : `@${targetId}`);
+      const info = await this.callTelegramApi('getChat', { chat_id: q }).catch(() => null);
+      if (info?.ok && info.result) {
+        targetId = String(info.result.id);
+        title = info.result.title || info.result.username || title;
+        type = info.result.type || type;
+      }
+      await storage.addAllowedChat(targetId, title || targetId, type, fromId, false);
+      return this.renderMoreView(fromId, chatId, 'wht', session, `Allowed: ${title || targetId}`);
+    }
+
+    if (awaiting.kind === 'emj_add_rule') {
+      session.awaiting = undefined;
+      const settings = await storage.getSettings();
+      const rules = sanitizeCustomEmojiRules(settings.customEmojiRules);
+
+      let targetEmoji = '';
+      let customEmojiId = '';
+
+      const entities = Array.isArray(message?.entities) ? message.entities : [];
+      const customEnt = entities.find((e: any) => e?.type === 'custom_emoji' && isValidCustomEmojiId(e?.custom_emoji_id));
+      if (customEnt) {
+        customEmojiId = String(customEnt.custom_emoji_id).trim();
+        const before = trimmed.slice(0, Number(customEnt.offset) || 0).trim();
+        const inside = trimmed.slice(Number(customEnt.offset) || 0, (Number(customEnt.offset) || 0) + (Number(customEnt.length) || 0)).trim();
+        targetEmoji = before || inside;
+      } else {
+        const parts = trimmed.split(/\s+/).filter(Boolean);
+        if (parts.length >= 2) {
+          targetEmoji = parts[0];
+          customEmojiId = parts[1];
+        }
+      }
+
+      if (!isValidTargetEmoji(targetEmoji) || !isValidCustomEmojiId(customEmojiId)) {
+        return this.renderMoreView(fromId, chatId, 'emj', session, 'Invalid format. Send "<emoji> <custom_emoji_id>".');
+      }
+
+      const norm = stripVariationSelector(targetEmoji);
+      const nextRules = sanitizeCustomEmojiRules([
+        ...rules.filter((r) => stripVariationSelector(r.emoji) !== norm),
+        {
+          id: `em_${Date.now().toString(36)}`,
+          emoji: targetEmoji.trim().normalize('NFC'),
+          customEmojiId: customEmojiId.trim(),
+          enabled: true,
+          updatedAt: new Date().toISOString()
+        }
+      ]);
+      await storage.updateSettings({
+        customEmojiRules: nextRules,
+        customEmojiMap: buildCustomEmojiMapFromRules(nextRules)
+      });
+      return this.renderMoreView(fromId, chatId, 'emj', session, `Saved emoji ${targetEmoji} -> ${customEmojiId}.`);
+    }
+
+    if (awaiting.kind === 'gst_add_account') {
+      session.awaiting = undefined;
+      let entries: Array<{ guestUid: string; guestPassword: string }> = [];
+
+      if (message?.document?.file_id) {
+        const token = await this.getBotToken();
+        const fileRes = token ? await this.callTelegramApi('getFile', { file_id: message.document.file_id }, token).catch(() => null) : null;
+        const filePath = fileRes?.result?.file_path;
+        if (filePath) {
+          const dl = await fetch(`https://api.telegram.org/file/bot${token}/${filePath}`).catch(() => null);
+          if (dl?.ok) {
+            const buf = Buffer.from(await dl.arrayBuffer());
+            entries = parseGuestCredentialsFromBuffer(buf);
+          }
+        }
+      } else if (trimmed) {
+        entries = parseGuestCredentialsFromBuffer(Buffer.from(trimmed, 'utf8'));
+        if (entries.length === 0) {
+          for (const rawLine of trimmed.split(/\r?\n/)) {
+            const m = rawLine.trim().match(/^(\d{5,25})\s+([^\s]+)$/);
+            if (m) entries.push({ guestUid: m[1], guestPassword: m[2] });
+          }
+        }
+      }
+
+      if (entries.length === 0) {
+        return this.renderMoreView(fromId, chatId, 'gst', session, 'No valid guest UID & password entries found.');
+      }
+
+      if (entries.length === 1) {
+        const entry = entries[0];
+        const validation = await FreeFireGuestService.validateAndResolveGuestAccount(entry.guestUid, entry.guestPassword);
+        if (!validation.ok) {
+          return this.renderMoreView(fromId, chatId, 'gst', session, `Validation failed: ${validation.error}`);
+        }
+        await storage.addGuestAccount(entry.guestUid, entry.guestPassword, {
+          accountName: validation.accountName,
+          inGameUid: validation.inGameUid,
+          isBanned: false,
+          banCheckedAt: new Date().toISOString()
+        });
+        return this.renderMoreView(fromId, chatId, 'gst', session, `Added guest account ${entry.guestUid}.`);
+      }
+
+      const validEntries: Array<{
+        guestUid: string;
+        guestPassword: string;
+        accountName?: string;
+        inGameUid?: string;
+        isBanned?: boolean;
+        banCheckedAt?: string;
+      }> = [];
+      let rejected = 0;
+      for (const e of entries) {
+        const v = await FreeFireGuestService.validateAndResolveGuestAccount(e.guestUid, e.guestPassword).catch(() => null);
+        if (v && v.ok) {
+          validEntries.push({
+            guestUid: e.guestUid,
+            guestPassword: e.guestPassword,
+            accountName: v.accountName,
+            inGameUid: v.inGameUid,
+            isBanned: false,
+            banCheckedAt: new Date().toISOString()
+          });
+        } else {
+          rejected++;
+        }
+      }
+      if (validEntries.length === 0) {
+        return this.renderMoreView(fromId, chatId, 'gst', session, `All ${entries.length} accounts failed validation.`);
+      }
+      const saved = await storage.addGuestAccountsBatch(validEntries);
+      return this.renderMoreView(
+        fromId,
+        chatId,
+        'gst',
+        session,
+        `Imported ${saved.addedCount} new, ${saved.updatedCount} updated${rejected ? `, ${rejected} rejected` : ''}.`
+      );
+    }
+
+    if (awaiting.kind === 'tpl_edit') {
+      session.awaiting = undefined;
+      const isTextSrc = typeof message?.text === 'string' && message.text.length > 0;
+      const rawBody = isTextSrc ? String(message.text) : String(message?.caption || text || '');
+      const entities = isTextSrc
+        ? (Array.isArray(message?.entities) ? message.entities : [])
+        : (Array.isArray(message?.caption_entities) ? message.caption_entities : []);
+      const isBtn = awaiting.templateKey === 'GET_FILE_BUTTON' || awaiting.templateKey === 'GET_LINK_BUTTON';
+      const converted = isBtn
+        ? (sanitizeButtonLabel(rawBody) ? this.convertTelegramEntitiesToHtml(rawBody, entities, 0) : sanitizeButtonLabel(rawBody))
+        : this.convertTelegramEntitiesToHtml(rawBody, entities, 0);
+      const sliced = isBtn ? [] : this.sliceTelegramEntities(rawBody, entities, 0);
+      await storage.updateTemplate(awaiting.templateKey, converted, {
+        ...(sliced.length > 0 ? { rawText: rawBody.replace(/\s+$/, ''), entities: sliced } : {})
+      });
+      const list = Object.values(await storage.getTemplates().catch(() => ({} as Record<string, MessageTemplate>)));
+      const idx = list.findIndex((t) => t.key === awaiting.templateKey);
+      return this.renderMoreView(fromId, chatId, idx >= 0 ? `tpl_v:${idx}` : 'tpl', session, `Template ${awaiting.templateKey} updated.`);
+    }
+
+    if (awaiting.kind === 'adm_add') {
+      session.awaiting = undefined;
+      const isOwner = await this.isOwnerAdmin(fromId, message?.from?.username);
+      if (!isOwner) {
+        return this.renderMoreView(fromId, chatId, 'adm', session, 'Owner access required.');
+      }
+      if (!trimmed) {
+        return this.renderMoreView(fromId, chatId, 'adm', session, 'Invalid UID or @username.');
+      }
+      const foundUser = await storage.findUserByIdOrUsername(trimmed).catch(() => null);
+      let targetId = foundUser?.id ? String(foundUser.id) : trimmed.replace(/^@+/, '');
+      let targetUsername = foundUser?.username ? foundUser.username.replace(/^@+/, '') : (trimmed.startsWith('@') ? trimmed.slice(1) : '');
+      let targetName = foundUser
+        ? ([foundUser.firstName, foundUser.lastName].filter(Boolean).join(' ').trim() || targetId)
+        : (targetUsername ? `@${targetUsername}` : `Admin ${targetId}`);
+      const existingAdmin = await storage.getAdmin(targetId);
+      const genPass = existingAdmin?.passwordHash ? undefined : `Dark#${crypto.randomBytes(4).toString('hex')}`;
+      const passwordHash = existingAdmin?.passwordHash || await hashPassword(genPass!);
+      await storage.saveAdmin({
+        id: existingAdmin?.id || targetId,
+        telegramId: targetId,
+        name: targetName,
+        username: targetUsername || existingAdmin?.username,
+        role: existingAdmin?.role === 'owner' ? 'owner' : 'subadmin',
+        passwordHash,
+        permissions: this.buildSubAdminPresetPerms(awaiting.preset),
+        enabled: true,
+        createdAt: existingAdmin?.createdAt || new Date().toISOString(),
+        lastLoginAt: existingAdmin?.lastLoginAt
+      });
+      await storage.setBotUserAdmin(targetId, true).catch(() => {});
+      return this.renderMoreView(
+        fromId,
+        chatId,
+        'adm',
+        session,
+        `Added ${targetName} (${awaiting.preset})${genPass ? ` · Pass: ${genPass}` : ''}.`
+      );
     }
   }
 }
