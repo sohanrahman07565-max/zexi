@@ -3389,6 +3389,108 @@ apiRouter.put('/templates-reset', authenticate, requirePermission('messages_edit
 });
 
 // ============================================================================
+// CENTRALIZED INLINE BUTTON MANAGER
+// ============================================================================
+
+// GET /api/inline-buttons
+apiRouter.get('/inline-buttons', authenticate, async (_req: Request, res: Response) => {
+  const buttons = await storage.getInlineButtons();
+  return res.json(buttons);
+});
+
+// POST /api/inline-buttons (Add new custom inline button)
+apiRouter.post('/inline-buttons', authenticate, requirePermission('messages_edit'), async (req: Request, res: Response) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const created = await storage.addCustomInlineButton({
+      name: body.name,
+      text: body.text,
+      emoji: body.emoji,
+      customEmojiId: body.customEmojiId,
+      actionType: body.actionType,
+      url: body.url,
+      callbackData: body.callbackData,
+      callbackResponse: body.callbackResponse,
+      style: body.style,
+      enabled: body.enabled,
+      placement: body.placement
+    });
+    const all = await storage.getInlineButtons();
+    return res.status(201).json({ success: true, button: created, buttons: all });
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message || 'Failed to create inline button' });
+  }
+});
+
+// PUT /api/inline-buttons/:key (Update inline button config)
+apiRouter.put('/inline-buttons/:key', authenticate, requirePermission('messages_edit'), async (req: Request, res: Response) => {
+  try {
+    const key = String(req.params.key || '').trim();
+    if (!key) return res.status(400).json({ error: 'Button key is required' });
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const updated = await storage.saveInlineButton(key, {
+      name: body.name,
+      text: body.text,
+      emoji: body.emoji,
+      customEmojiId: body.customEmojiId,
+      actionType: body.actionType,
+      url: body.url,
+      callbackData: body.callbackData,
+      callbackResponse: body.callbackResponse,
+      style: body.style,
+      enabled: body.enabled,
+      deleted: body.deleted,
+      placement: body.placement
+    });
+    const all = await storage.getInlineButtons();
+    return res.json({ success: true, button: updated, buttons: all });
+  } catch (err: any) {
+    const msg = err?.message || 'Failed to update inline button';
+    return res.status(msg.includes('not found') ? 404 : 400).json({ error: msg });
+  }
+});
+
+// POST /api/inline-buttons/:key/reset (Reset single built-in button to default)
+apiRouter.post('/inline-buttons/:key/reset', authenticate, requirePermission('messages_edit'), async (req: Request, res: Response) => {
+  const key = String(req.params.key || '').trim();
+  const resetBtn = await storage.resetInlineButton(key);
+  if (!resetBtn) {
+    return res.status(404).json({ error: 'Built-in inline button not found for reset' });
+  }
+  const all = await storage.getInlineButtons();
+  return res.json({ success: true, button: resetBtn, buttons: all });
+});
+
+// POST /api/inline-buttons/:key/restore (Restore a deleted/hidden built-in button)
+apiRouter.post('/inline-buttons/:key/restore', authenticate, requirePermission('messages_edit'), async (req: Request, res: Response) => {
+  const key = String(req.params.key || '').trim();
+  const restored = await storage.restoreInlineButton(key);
+  if (!restored) {
+    return res.status(404).json({ error: 'Inline button not found' });
+  }
+  const all = await storage.getInlineButtons();
+  return res.json({ success: true, button: restored, buttons: all });
+});
+
+// DELETE /api/inline-buttons/:key (Remove custom button or hide built-in button)
+apiRouter.delete('/inline-buttons/:key', authenticate, requirePermission('messages_edit'), async (req: Request, res: Response) => {
+  const key = String(req.params.key || '').trim();
+  const result = await storage.deleteInlineButton(key);
+  if (!result.deleted) {
+    return res.status(404).json({ error: 'Inline button not found' });
+  }
+  const all = await storage.getInlineButtons();
+  return res.json({ success: true, ...result, buttons: all });
+});
+
+// PUT /api/inline-buttons-reset (Reset all inline buttons to defaults)
+apiRouter.put('/inline-buttons-reset', authenticate, requirePermission('messages_edit'), async (_req: Request, res: Response) => {
+  await storage.resetAllInlineButtons();
+  const all = await storage.getInlineButtons();
+  return res.json({ success: true, buttons: all });
+});
+
+// ============================================================================
 // ADMINS MANAGEMENT
 // ============================================================================
 

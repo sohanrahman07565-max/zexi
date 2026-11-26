@@ -102,6 +102,39 @@ export interface MessageTemplate {
   buttons?: TemplateButton[];
 }
 
+export type InlineButtonActionType = 'url' | 'callback';
+export type InlineButtonStyle = 'primary' | 'success' | 'danger' | 'secondary';
+export type InlineButtonPlacement = 'start_welcome' | 'force_sub' | 'both' | 'none';
+
+export interface InlineButtonConfig {
+  key: string;
+  name: string;
+  text: string;
+  emoji?: string;
+  customEmojiId?: string;
+  actionType: InlineButtonActionType;
+  url?: string;
+  callbackData?: string;
+  callbackResponse?: string;
+  actionLocked?: boolean;
+  actionDescription?: string;
+  category: string;
+  style?: InlineButtonStyle;
+  enabled: boolean;
+  isCustom?: boolean;
+  deleted?: boolean;
+  placement?: InlineButtonPlacement;
+  defaultName?: string;
+  defaultText?: string;
+  defaultEmoji?: string;
+  defaultCustomEmojiId?: string;
+  defaultActionType?: InlineButtonActionType;
+  defaultUrl?: string;
+  defaultCallbackData?: string;
+  defaultStyle?: InlineButtonStyle;
+  updatedAt?: string;
+}
+
 export interface DesignConfig {
   primaryColor: string;
   accentColor: string;
@@ -813,6 +846,90 @@ export const api = {
       method: 'PUT'
     });
     return await res.json();
+  },
+
+  // Inline Button Manager
+  async getInlineButtons(): Promise<{ success: boolean; buttons: Record<string, InlineButtonConfig> }> {
+    const res = await authFetch('/api/inline-buttons');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load inline buttons');
+    if (data && typeof data === 'object' && 'buttons' in data && data.buttons && typeof data.buttons === 'object') {
+      return { success: true, buttons: data.buttons as Record<string, InlineButtonConfig> };
+    }
+    return { success: true, buttons: (data || {}) as Record<string, InlineButtonConfig> };
+  },
+
+  async createInlineButton(payload: {
+    name: string;
+    text: string;
+    emoji?: string;
+    customEmojiId?: string;
+    actionType: InlineButtonActionType;
+    url?: string;
+    callbackData?: string;
+    callbackResponse?: string;
+    style?: InlineButtonStyle;
+    placement?: InlineButtonPlacement;
+    enabled?: boolean;
+  }): Promise<{ success: boolean; button: InlineButtonConfig; buttons?: Record<string, InlineButtonConfig> }> {
+    const res = await authFetch('/api/inline-buttons', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to add inline button');
+    return data;
+  },
+
+  async updateInlineButton(
+    key: string,
+    payload: Partial<InlineButtonConfig>
+  ): Promise<{ success: boolean; button: InlineButtonConfig; buttons?: Record<string, InlineButtonConfig> }> {
+    const res = await authFetch(`/api/inline-buttons/${encodeURIComponent(key)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to update inline button');
+    return data;
+  },
+
+  async resetInlineButton(key: string): Promise<{ success: boolean; button: InlineButtonConfig; buttons?: Record<string, InlineButtonConfig> }> {
+    const res = await authFetch(`/api/inline-buttons/${encodeURIComponent(key)}/reset`, {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to reset inline button');
+    return data;
+  },
+
+  async restoreInlineButton(key: string): Promise<{ success: boolean; button: InlineButtonConfig; buttons?: Record<string, InlineButtonConfig> }> {
+    const res = await authFetch(`/api/inline-buttons/${encodeURIComponent(key)}/restore`, {
+      method: 'POST'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to restore inline button');
+    return data;
+  },
+
+  async deleteInlineButton(key: string): Promise<{ success: boolean; deleted?: boolean; mode: 'removed' | 'hidden'; button?: InlineButtonConfig; buttons?: Record<string, InlineButtonConfig> }> {
+    const res = await authFetch(`/api/inline-buttons/${encodeURIComponent(key)}`, {
+      method: 'DELETE'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to delete inline button');
+    return data;
+  },
+
+  async resetAllInlineButtons(): Promise<{ success: boolean; buttons: Record<string, InlineButtonConfig> }> {
+    const res = await authFetch('/api/inline-buttons-reset', {
+      method: 'PUT'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to reset inline buttons');
+    return data;
   },
 
   async getStats(): Promise<{

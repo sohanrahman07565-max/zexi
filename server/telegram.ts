@@ -16,6 +16,7 @@ import {
   getEffectiveCustomEmojiMap,
   stripCustomEmojiTags,
   sanitizeButtonLabel,
+  extractExplicitButtonEmojiFromRaw,
   sanitizeReplyMarkupForTelegram,
   buildInlineKeyboardButton,
   buildReplyKeyboardButton,
@@ -31,6 +32,10 @@ import {
   isValidCustomEmojiId,
   stripVariationSelector
 } from './customEmoji';
+import {
+  composeTelegramInlineButton,
+  InlineButtonStyle
+} from './inlineButtons';
 
 export const botTokenContext = new AsyncLocalStorage<string>();
 export const botIdContext = new AsyncLocalStorage<string>();
@@ -249,7 +254,7 @@ interface PendingForceSubAction {
   botScopeId: string;
   userId: string;
   chatId: string | number;
-  kind: 'private_message' | 'group_message' | 'callback_query';
+  kind: 'private_message' | 'callback_query';
   message?: any;
   text?: string;
   callbackQuery?: any;
@@ -2381,18 +2386,15 @@ export class TelegramService {
 
     const adminLines = sortedAdmins.map((member, index) => {
       const u = member?.user || {};
-      const fullName = [u.first_name, u.last_name].filter(Boolean).join(' ').trim() || (u.username ? `@${u.username}` : 'Admin');
+      const fullName = [u.first_name, u.last_name].filter(Boolean).join(' ').trim() || 'Admin';
       const uid = u.id !== undefined ? String(u.id) : '';
       const uname = u.username ? String(u.username).replace(/^@+/, '').trim() : '';
       const profileLink = uid
         ? this.formatUserProfileLink(fullName, uname, uid)
         : this.escapeHtml(fullName);
-      const unameSuffix = uname && fullName.toLowerCase() !== `@${uname.toLowerCase()}`
-        ? ` (@${this.escapeHtml(uname)})`
-        : '';
       const roleIcon = member?.status === 'creator' ? '👑' : '🛡️';
       const roleTag = member?.status === 'creator' ? ' (Owner)' : (u.is_bot ? ' (Bot)' : '');
-      return `${index + 1}. ${roleIcon} ${profileLink}${unameSuffix}${roleTag}`;
+      return `${index + 1}. ${roleIcon} ${profileLink}${roleTag}`;
     });
 
     const adminsListText = adminLines.length > 0
@@ -2666,13 +2668,15 @@ export class TelegramService {
       }
       inlineKeyboard.push(row);
     }
-    inlineKeyboard.push([
-      { text: '⏱ Temp', callback_data: `modt:${token}`, style: 'primary' },
-      { text: '♾️ Permanent', callback_data: `moda:${token}:perm`, style: 'danger' }
-    ]);
-    inlineKeyboard.push([
-      { text: '❌ Cancel', callback_data: `modc:${token}`, style: 'danger' }
-    ]);
+    const modTempBtn = this.buildManagedButton('mod_temp', { callback_data: `modt:${token}` });
+    const modPermBtn = this.buildManagedButton('mod_perm', { callback_data: `moda:${token}:perm` });
+    const modCancelBtn = this.buildManagedButton('mod_cancel', { callback_data: `modc:${token}` });
+    if (modTempBtn || modPermBtn) {
+      inlineKeyboard.push([modTempBtn, modPermBtn].filter(Boolean) as any[]);
+    }
+    if (modCancelBtn) {
+      inlineKeyboard.push([modCancelBtn]);
+    }
 
     const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
     const header = action === 'ban' ? '🚫 <b>Ban User</b>' : '🔇 <b>Mute User</b>';
@@ -2752,7 +2756,9 @@ export class TelegramService {
       ],
       [
         { text: '✅ Confirm', callback_data: `modk:${token}:ok`, style: 'success' },
-        { text: '❌ Cancel', callback_data: `modc:${token}`, style: 'danger' }
+        ...(this.buildManagedButton('mod_cancel', { callback_data: `modc:${token}` })
+          ? [this.buildManagedButton('mod_cancel', { callback_data: `modc:${token}` })!]
+          : [])
       ]
     ];
 
@@ -2781,10 +2787,11 @@ export class TelegramService {
       `📝 <i>Please type and send the reason in this chat.</i>\n` +
       `<i>(Only messages from the initiating admin will be accepted, or tap Cancel.)</i>`;
 
+    const cancelBtn = this.buildManagedButton('mod_cancel', { callback_data: `modc:${pending.token}` });
     return {
       text,
       reply_markup: {
-        inline_keyboard: [[{ text: '❌ Cancel', callback_data: `modc:${pending.token}`, style: 'danger' }]]
+        inline_keyboard: cancelBtn ? [[cancelBtn]] : []
       }
     };
   }
@@ -2809,15 +2816,13 @@ export class TelegramService {
       `<blockquote>${this.escapeHtml(pending.reason || 'No reason provided')}</blockquote>\n\n` +
       `<i>Tap Confirm Reason to execute, or Cancel to abort.</i>`;
 
+    const confirmBtn = this.buildManagedButton('mod_confirm_reason', { callback_data: `modr:${pending.token}` });
+    const cancelBtn = this.buildManagedButton('mod_cancel', { callback_data: `modc:${pending.token}` });
+    const previewRow = [confirmBtn, cancelBtn].filter(Boolean) as any[];
     return {
       text,
       reply_markup: {
-        inline_keyboard: [
-          [
-            { text: '✅ Confirm Reason', callback_data: `modr:${pending.token}`, style: 'success' },
-            { text: '❌ Cancel', callback_data: `modc:${pending.token}`, style: 'danger' }
-          ]
-        ]
+        inline_keyboard: previewRow.length > 0 ? [previewRow] : []
       }
     };
   }
@@ -3404,17 +3409,20 @@ export class TelegramService {
           }
         }
 
-        // Handle Inline Button Clicks (Callback queries) — Enforce global Sub Force gate BEFORE execution
+        // Handle Inline Button Clicks (Callback queries) — Enforce Sub Force gate ONLY in Private Chat (never in groups)
         if (update.callback_query) {
-          const blockedCb = await this.enforceGlobalSubForceGate({
-            kind: 'callback_query',
-            callbackQuery: update.callback_query,
-            fromId,
-            senderUname,
-            settings
-          });
-          if (blockedCb) return;
-          await this.handleCallbackQuery(update.callback_query);
+          const cbChatType = update.callback_query?.message?.chat?.type;
+          if (cbChatType === 'private') {
+            const blockedCb = await this.enforceGlobalSubForceGate({
+              kind: 'callback_query',
+              callbackQuery: update.callback_query,
+              fromId,
+              senderUname,
+              settings
+            });
+            if (blockedCb) return;
+          }
+          await this.handleCallbackQuery(update.callback_query, { skipForceSubCheck: true });
           return;
         }
 
@@ -3430,7 +3438,7 @@ export class TelegramService {
         if (isGroup) {
           await this.handleGroupMessage(message, text);
         } else if (isPrivate) {
-          // Enforce strict global Sub Force gate BEFORE any command, trigger, or private interaction
+          // Enforce Sub Force gate in Private Chat / Bot Inbox ONLY
           const blockedDm = await this.enforceGlobalSubForceGate({
             kind: 'private_message',
             message,
@@ -3440,7 +3448,7 @@ export class TelegramService {
             settings
           });
           if (blockedDm) return;
-          await this.handlePrivateMessage(message, text);
+          await this.handlePrivateMessage(message, text, { skipForceSubCheck: true });
         }
       });
     } finally {
@@ -4724,6 +4732,49 @@ export class TelegramService {
     return token;
   }
 
+  private static buildManagedButton(
+    key: string,
+    runtime?: {
+      url?: string;
+      callback_data?: string;
+      web_app?: { url: string };
+      copy_text?: { text: string };
+      textOverride?: string;
+      styleOverride?: InlineButtonStyle;
+      dynamicVars?: Record<string, string>;
+      forceInclude?: boolean;
+    }
+  ): Record<string, any> | null {
+    const cfg = storage.getInlineButtonFast(key);
+    if (!cfg) return null;
+    return composeTelegramInlineButton(cfg, runtime);
+  }
+
+  private static compactInlineRows(rows: (Record<string, any> | null | undefined)[][]): any[][] {
+    const result: any[][] = [];
+    for (const row of rows) {
+      if (!Array.isArray(row)) continue;
+      const cleanRow = row.filter((btn): btn is Record<string, any> => Boolean(btn && typeof btn === 'object'));
+      if (cleanRow.length > 0) {
+        result.push(cleanRow);
+      }
+    }
+    return result;
+  }
+
+  private static buildCustomPlacementRows(placement: 'start_welcome' | 'force_sub'): any[][] {
+    const customButtons = storage.getCustomInlineButtonsForPlacement(placement);
+    if (!Array.isArray(customButtons) || customButtons.length === 0) return [];
+    const built = customButtons
+      .map((btn) => composeTelegramInlineButton(btn))
+      .filter((b): b is Record<string, any> => Boolean(b));
+    const rows: any[][] = [];
+    for (let i = 0; i < built.length; i += 2) {
+      rows.push(built.slice(i, i + 2));
+    }
+    return rows;
+  }
+
   private static isCallbackExemptFromForceSub(data: string | undefined): boolean {
     if (!data) return false;
     return data.startsWith('forcesub_verify:');
@@ -4745,15 +4796,16 @@ export class TelegramService {
         senderUname: string;
         settings: any;
       }
-    | {
-        kind: 'group_message';
-        message: any;
-        text: string;
-        fromId: string;
-        senderUname: string;
-        settings: any;
-      }
   ): Promise<boolean> {
+    // Force Subscribe must ONLY run in Private Chat / Bot Inbox — NEVER in Groups
+    const chatType =
+      ctx.kind === 'callback_query'
+        ? ctx.callbackQuery?.message?.chat?.type
+        : ctx.message?.chat?.type;
+    if (chatType !== 'private') {
+      return false;
+    }
+
     const { settings, fromId, senderUname } = ctx;
     if (!settings?.forceSubEnabled || !Array.isArray(settings?.requiredChannels)) {
       return false;
@@ -4773,22 +4825,6 @@ export class TelegramService {
       const data = String(cb?.data || '');
       const chatId = cb?.message?.chat?.id;
       if (this.isCallbackExemptFromForceSub(data)) {
-        return false;
-      }
-      // Allow authorized group moderators / owners to operate moderation panels & controls
-      if (
-        data.startsWith('modp:') ||
-        data.startsWith('moda:') ||
-        data.startsWith('modt:') ||
-        data.startsWith('modk:') ||
-        data.startsWith('modr:') ||
-        data.startsWith('modc:')
-      ) {
-        if (await this.isAuthorizedModerationActor(chatId, fromId, cb?.from?.username)) {
-          return false;
-        }
-      }
-      if (data.startsWith('adm_') && (await this.canOpenGroupDashboard(chatId, fromId, cb?.from?.username))) {
         return false;
       }
 
@@ -4825,46 +4861,6 @@ export class TelegramService {
       return true;
     }
 
-    if (ctx.kind === 'private_message') {
-      const { message, text } = ctx;
-      const chatId = message?.chat?.id;
-      if (!chatId) return false;
-
-      const forceCheck = await this.checkUserForceSub(fromId, senderUname, { forceFresh: true });
-      if (forceCheck.allJoined) {
-        return false;
-      }
-
-      let targetPayload = '';
-      const startMatch = text.match(/^\/start(?:@\w+)?(?:\s+(.+))?$/i);
-      if (startMatch) {
-        const rawPayload = startMatch[1]?.trim() || 'start';
-        if (Buffer.byteLength(`forcesub_verify:${rawPayload}`, 'utf8') <= 64) {
-          targetPayload = rawPayload;
-        }
-      }
-
-      if (!targetPayload) {
-        targetPayload = this.savePendingForceSubAction({
-          kind: 'private_message',
-          userId: fromId,
-          chatId,
-          message,
-          text
-        });
-      }
-
-      await this.sendForceSubPrompt(
-        chatId,
-        forceCheck.unjoinedChannels,
-        targetPayload,
-        undefined,
-        message?.from
-      );
-      return true;
-    }
-
-    // Group message bot-action Sub Force gate
     const { message, text } = ctx;
     const chatId = message?.chat?.id;
     if (!chatId) return false;
@@ -4874,24 +4870,31 @@ export class TelegramService {
       return false;
     }
 
-    const token = this.savePendingForceSubAction({
-      kind: 'group_message',
-      userId: fromId,
-      chatId,
-      message,
-      text
-    });
+    let targetPayload = '';
+    const startMatch = text.match(/^\/start(?:@\w+)?(?:\s+(.+))?$/i);
+    if (startMatch) {
+      const rawPayload = startMatch[1]?.trim() || 'start';
+      if (Buffer.byteLength(`forcesub_verify:${rawPayload}`, 'utf8') <= 64) {
+        targetPayload = rawPayload;
+      }
+    }
+
+    if (!targetPayload) {
+      targetPayload = this.savePendingForceSubAction({
+        kind: 'private_message',
+        userId: fromId,
+        chatId,
+        message,
+        text
+      });
+    }
 
     await this.sendForceSubPrompt(
       chatId,
       forceCheck.unjoinedChannels,
-      token,
+      targetPayload,
       undefined,
-      message?.from,
-      {
-        replyToMessageId: message?.message_id,
-        threadId: message?.message_thread_id
-      }
+      message?.from
     );
     return true;
   }
@@ -4957,7 +4960,7 @@ export class TelegramService {
       // Check EVERY configured & active channel/group in Sub Force via live getChatMember
       const checks = await Promise.all(activeChannels.map(async (channel) => {
         let rawChatId = (channel.chatId || channel.username || '').trim();
-        if (!rawChatId) return null;
+        if (!rawChatId) return channel;
 
         if (rawChatId.startsWith('https://t.me/')) {
           rawChatId = '@' + rawChatId.replace('https://t.me/', '').replace(/\/.*$/, '').replace(/^\+/, '');
@@ -5174,11 +5177,16 @@ export class TelegramService {
         }
       }
       const isGrp = ch.type === 'group' || ch.type === 'supergroup';
-      channelButtons.push({
-        text: `Join ${isGrp ? 'Group' : 'Channel'} ${i + 1}`,
+      const joinBtn = this.buildManagedButton(isGrp ? 'forcesub_join_group' : 'forcesub_join_channel', {
         url: channelUrl,
-        style: 'primary'
+        dynamicVars: {
+          n: String(i + 1),
+          name: ch.name || (isGrp ? 'Group' : 'Channel')
+        }
       });
+      if (joinBtn) {
+        channelButtons.push(joinBtn);
+      }
     }
 
     // Chunk buttons into pairs of 2 per row
@@ -5187,13 +5195,16 @@ export class TelegramService {
     }
 
     // "Verify / Try Again" callback button: Full width prominent button
-    keyboardRows.push([
-      {
-        text: '🔄 Verify / Try Again ✅',
-        callback_data: `forcesub_verify:${targetPayload || 'start'}`,
-        style: 'success'
-      }
-    ]);
+    const verifyBtn = this.buildManagedButton('forcesub_verify', {
+      callback_data: `forcesub_verify:${targetPayload || 'start'}`
+    });
+    if (verifyBtn) {
+      keyboardRows.push([verifyBtn]);
+    }
+
+    for (const customRow of this.buildCustomPlacementRows('force_sub')) {
+      keyboardRows.push(customRow);
+    }
 
     // Dynamic unjoined channels & groups enumeration for {channel_list} placeholder
     const channelNames = unjoinedChannels
@@ -5405,11 +5416,9 @@ export class TelegramService {
   // =========================================================================
   private static async handleGroupMessage(
     message: any,
-    text: string,
-    options?: { skipForceSubCheck?: boolean }
+    text: string
   ): Promise<void> {
     const fromId = message.from?.id !== undefined && message.from?.id !== null ? String(message.from.id).trim() : '';
-    const senderUname = String(message.from?.username || '').replace(/^@+/, '').toLowerCase().trim();
     const groupSettings = await storage.getSettings();
 
     if (message.chat?.id && message.from && !message.from.is_bot && fromId) {
@@ -5624,19 +5633,6 @@ export class TelegramService {
     // 1a-emoji. /emojiid or /emoji id Custom Emoji ID Detector in Group
     const groupEmojiCmd = this.parseEmojiIdCommand(text);
     if (groupEmojiCmd.matched) {
-      if (
-        !options?.skipForceSubCheck &&
-        (await this.enforceGlobalSubForceGate({
-          kind: 'group_message',
-          message,
-          text,
-          fromId,
-          senderUname,
-          settings: groupSettings
-        }))
-      ) {
-        return;
-      }
       await this.handleEmojiIdCommand(message, groupEmojiCmd, true);
       return;
     }
@@ -5657,19 +5653,6 @@ export class TelegramService {
         });
         return;
       } else if (!text.startsWith('/')) {
-        if (
-          !options?.skipForceSubCheck &&
-          (await this.enforceGlobalSubForceGate({
-            kind: 'group_message',
-            message,
-            text,
-            fromId,
-            senderUname,
-            settings: groupSettings
-          }))
-        ) {
-          return;
-        }
         activeEmojiIdSessions.delete(groupEmojiSessionKey);
         await this.handleEmojiIdInspectionMessage(message, true);
         return;
@@ -5921,16 +5904,13 @@ export class TelegramService {
         } catch (err: any) {
           console.warn('[Telegram] Private admin command delivery failed (chat may not be started):', err);
           // If the bot cannot DM the user (never sent /start), send an auto-deleting notice with a direct link
+          const adminDmBtn = this.buildManagedButton('admin_dm_open_bot', { url: `https://t.me/${cleanBot}?start=admin` });
           await this.sendAutoDeletingNotice(
             message.chat.id,
             `⚠️ <b>Admin Privacy Notice</b>\n<i>Please start the bot in private chat to receive admin commands.</i>`,
             6000,
             undefined,
-            {
-              inline_keyboard: [
-                [{ text: 'Open Bot in Private DM', url: `https://t.me/${cleanBot}?start=admin`, style: 'primary' }]
-              ]
-            }
+            adminDmBtn ? { inline_keyboard: [[adminDmBtn]] } : undefined
           );
         }
       };
@@ -6005,17 +5985,14 @@ export class TelegramService {
                 createdAt: Date.now(),
                 stage: 'awaiting_token'
               };
+              const cloneCancelBtn = this.buildManagedButton('clone_cancel', { callback_data: `clone_cancel:${fromId}` });
               const promptRes = await this.callTelegramApi('sendMessage', {
                 chat_id: fromId,
                 text:
                   `🤖 <b>Clone File Bot — Step 1/2</b>\n\n` +
                   `Send the <b>Bot Token</b> from <code>@BotFather</code>.`,
                 parse_mode: 'HTML',
-                reply_markup: {
-                  inline_keyboard: [
-                    [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
-                  ]
-                }
+                ...(cloneCancelBtn ? { reply_markup: { inline_keyboard: [[cloneCancelBtn]] } } : {})
               });
               if (promptRes?.ok && promptRes.result?.message_id) {
                 dmSession.promptMessageId = promptRes.result.message_id;
@@ -6046,6 +6023,10 @@ export class TelegramService {
               stage: 'awaiting_owner'
             };
 
+            const cloneOwnerRows = this.compactInlineRows([
+              [this.buildManagedButton('clone_assign_self', { callback_data: `clone_admin_self:${fromId}` })],
+              [this.buildManagedButton('clone_cancel', { callback_data: `clone_cancel:${fromId}` })]
+            ]);
             const promptRes = await this.callTelegramApi('sendMessage', {
               chat_id: fromId,
               text:
@@ -6054,12 +6035,7 @@ export class TelegramService {
                 `👑 <b>Step 2/2 — Assign Owner</b>\n` +
                 `Send the <b>Owner Telegram ID</b> or <b>@username</b> (e.g. <code>123456789</code> or <code>@username</code>).`,
               parse_mode: 'HTML',
-              reply_markup: {
-                inline_keyboard: [
-                  [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${fromId}`, style: 'primary' }],
-                  [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
-                ]
-              }
+              ...(cloneOwnerRows.length > 0 ? { reply_markup: { inline_keyboard: cloneOwnerRows } } : {})
             });
             if (promptRes?.ok && promptRes.result?.message_id) {
               dmSession.promptMessageId = promptRes.result.message_id;
@@ -6634,19 +6610,6 @@ export class TelegramService {
 
     // 2d. /info Command: Display group chat ID, title, member count, and full admins list
     if (/^\/info(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
-      if (
-        !options?.skipForceSubCheck &&
-        (await this.enforceGlobalSubForceGate({
-          kind: 'group_message',
-          message,
-          text,
-          fromId,
-          senderUname,
-          settings: groupSettings
-        }))
-      ) {
-        return;
-      }
       await this.handleGroupInfoCommand(message);
       return;
     }
@@ -6654,19 +6617,6 @@ export class TelegramService {
     // 3. /report Command: User replies to a message with /report <reason>, or sends /report <@username_or_id> <reason>
     const reportMatch = text.match(/^\/report(?:@\w+)?(?:\s+(.+))?$/i);
     if (reportMatch || text.trim().toLowerCase().startsWith('/report')) {
-      if (
-        !options?.skipForceSubCheck &&
-        (await this.enforceGlobalSubForceGate({
-          kind: 'group_message',
-          message,
-          text,
-          fromId,
-          senderUname,
-          settings: groupSettings
-        }))
-      ) {
-        return;
-      }
       let targetUser: any = null;
       let reason = reportMatch?.[1]?.trim() || '';
       let reportedContent = '';
@@ -6752,14 +6702,13 @@ export class TelegramService {
         `• 📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>\n` +
         `💬 <b>Content Snippet:</b>\n<blockquote>${this.escapeHtml(reportedContent.slice(0, 300))}</blockquote>`;
 
-      const keyboard = {
-        inline_keyboard: [
-          [
-            { text: '🚫 Ban User', callback_data: `admin_ban_user:${targetUserId}:${report.id}`, style: 'danger' },
-            { text: 'Dismiss', callback_data: `admin_dismiss_report:${report.id}`, style: 'primary' }
-          ]
+      const reportRows = this.compactInlineRows([
+        [
+          this.buildManagedButton('report_ban_user', { callback_data: `admin_ban_user:${targetUserId}:${report.id}` }),
+          this.buildManagedButton('report_dismiss', { callback_data: `admin_dismiss_report:${report.id}` })
         ]
-      };
+      ]);
+      const keyboard = reportRows.length > 0 ? { inline_keyboard: reportRows } : undefined;
 
       const sentAdminMessages: AdminReportMessageRef[] = [];
       for (const adminId of adminTargetIds) {
@@ -7013,7 +6962,7 @@ export class TelegramService {
       }
     }
 
-    // Check all public bot features & trigger commands in groups under strict global Sub Force gate
+    // Check all public bot features & trigger commands in groups
     const isTranslationTrigger = Boolean(this.parseTranslationTrigger(text));
     const groupFfCmd = this.parseFreeFireUidCommand(text);
     const groupBanInfoCmd = this.parseBanInfoCommand(text);
@@ -7025,30 +6974,6 @@ export class TelegramService {
       cleanGroupBot && new RegExp(`^\\/start@${cleanGroupBot.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`, 'i').test(text)
     );
     const matchedItem = text ? await storage.findItemByTrigger(text) : null;
-
-    if (
-      isTranslationTrigger ||
-      groupFfCmd.matched ||
-      groupBanInfoCmd.matched ||
-      groupLikeCmd.matched ||
-      isFilters ||
-      isStartInGroup ||
-      matchedItem
-    ) {
-      if (
-        !options?.skipForceSubCheck &&
-        (await this.enforceGlobalSubForceGate({
-          kind: 'group_message',
-          message,
-          text,
-          fromId,
-          senderUname,
-          settings: groupSettings
-        }))
-      ) {
-        return;
-      }
-    }
 
     // Multi-Language Translation Trigger in Groups (Method A: `tran bd|ind|eng` | Method B: `/translate bd|ind|eng`, `/bd`, `/ind`, `/eng`)
     if (isTranslationTrigger && (await this.handleTranslationCommand(message, text, true))) {
@@ -7138,9 +7063,10 @@ export class TelegramService {
       const payload = getItemPayload(matchedItem);
       const deepLink = `https://t.me/${cleanBotUsername}?start=${payload}`;
 
-      const rawBtnText = buttonTemplate.content || '';
-      const buttonText = sanitizeButtonLabel(rawBtnText) ? rawBtnText : (isTextOnly ? '💬 View Message Privately' : '📁 Get File Privately');
-      const keyboard = [[{ text: buttonText, url: deepLink, style: 'primary' }]];
+      const managedGroupBtn = this.buildManagedButton(isTextOnly ? 'group_get_text' : 'group_get_file', {
+        url: deepLink
+      });
+      const keyboard = managedGroupBtn ? [[managedGroupBtn]] : [];
 
       const res = await this.sendGroupTriggerReply(
         message.chat.id,
@@ -7155,7 +7081,6 @@ export class TelegramService {
       }
     } else if (matchedItem.type === 'link') {
       const template = templates.GROUP_LINK_REPLY || { content: "🔗 <b>Link Ready for Delivery</b>\n<i>Tap the button below to open your link in private DM.</i>" };
-      const buttonTemplate = templates.GET_LINK_BUTTON || { content: '🔗 Open Privately' };
 
       const replyText = template.content
         .replace('{user_name}', this.escapeHtml(userName))
@@ -7167,9 +7092,8 @@ export class TelegramService {
       const payload = getItemPayload(matchedItem);
       const deepLink = `https://t.me/${cleanBotUsername}?start=${payload}`;
 
-      const rawBtnText = buttonTemplate.content || '';
-      const buttonText = sanitizeButtonLabel(rawBtnText) ? rawBtnText : '🔗 Open Privately';
-      const keyboard = [[{ text: buttonText, url: deepLink, style: 'primary' }]];
+      const managedLinkBtn = this.buildManagedButton('group_get_link', { url: deepLink });
+      const keyboard = managedLinkBtn ? [[managedLinkBtn]] : [];
 
       const res = await this.sendGroupTriggerReply(
         message.chat.id,
@@ -7197,7 +7121,7 @@ export class TelegramService {
       chat_id: chatId,
       text,
       parse_mode: 'HTML',
-      reply_markup: { inline_keyboard: inlineKeyboard }
+      ...(inlineKeyboard.length > 0 ? { reply_markup: { inline_keyboard: inlineKeyboard } } : {})
     };
     if (replyToMessageId) params.reply_to_message_id = replyToMessageId;
     if (threadId) params.message_thread_id = threadId;
@@ -7295,7 +7219,8 @@ export class TelegramService {
 
     const mediaType = startTemplate?.mediaType || 'none';
     const mediaUrl = startTemplate?.mediaUrl?.trim();
-    const replyMarkup = undefined;
+    const customStartRows = this.buildCustomPlacementRows('start_welcome');
+    const replyMarkup = customStartRows.length > 0 ? { inline_keyboard: customStartRows } : undefined;
 
     let sent = false;
 
@@ -7315,7 +7240,7 @@ export class TelegramService {
             fileName: up.fileName || (mediaType === 'video' ? 'welcome.mp4' : 'welcome.jpg'),
             mimeType: up.mimeType || (mediaType === 'video' ? 'video/mp4' : 'image/jpeg'),
             fileType: mediaType === 'video' ? 'video' : 'photo'
-          }, startMsg, undefined, { parseMode: 'HTML' });
+          }, startMsg, replyMarkup, { parseMode: 'HTML' });
           if (res && res.ok) {
             sent = true;
             const realFileId = (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
@@ -7553,7 +7478,8 @@ export class TelegramService {
         const retryPrompt =
           `⚠️ <b>Invalid Token</b>\n\n` +
           `Send the <b>Bot Token</b> from <code>@BotFather</code>.`;
-        const cancelKeyboard = [[{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]];
+        const cBtn = this.buildManagedButton('clone_cancel', { callback_data: `clone_cancel:${fromId}` });
+        const cancelKeyboard = cBtn ? [[cBtn]] : [];
         activeCloneSessions.set(fromId, session);
         if (!isGroup && session.promptMessageId) {
           const msgId = await this.sendOrEditKeyWizardPrompt(chatId, retryPrompt, cancelKeyboard, session.promptMessageId);
@@ -7563,7 +7489,7 @@ export class TelegramService {
             chat_id: chatId,
             text: retryPrompt,
             parse_mode: 'HTML',
-            reply_markup: { inline_keyboard: cancelKeyboard }
+            ...(cancelKeyboard.length > 0 ? { reply_markup: { inline_keyboard: cancelKeyboard } } : {})
           });
           if (sent?.result?.message_id) session.promptMessageId = sent.result.message_id;
         }
@@ -7575,7 +7501,8 @@ export class TelegramService {
         const errorText = check.error === 'Already this bot is already running.'
           ? '❌ <b>Already Running:</b> <i>This bot instance is already active. Send another Bot Token or tap Cancel.</i>'
           : `❌ <b>Invalid Bot Token</b>\n<code>${this.escapeHtml(check.error || 'Failed to verify token with Telegram.')}</code>\n\nSend a valid <b>Bot Token</b> or tap Cancel.`;
-        const cancelKeyboard = [[{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]];
+        const cBtn = this.buildManagedButton('clone_cancel', { callback_data: `clone_cancel:${fromId}` });
+        const cancelKeyboard = cBtn ? [[cBtn]] : [];
         activeCloneSessions.set(fromId, session);
         if (!isGroup && session.promptMessageId) {
           const msgId = await this.sendOrEditKeyWizardPrompt(chatId, errorText, cancelKeyboard, session.promptMessageId);
@@ -7585,7 +7512,7 @@ export class TelegramService {
             chat_id: chatId,
             text: errorText,
             parse_mode: 'HTML',
-            reply_markup: { inline_keyboard: cancelKeyboard }
+            ...(cancelKeyboard.length > 0 ? { reply_markup: { inline_keyboard: cancelKeyboard } } : {})
           });
           if (sent?.result?.message_id) session.promptMessageId = sent.result.message_id;
         }
@@ -7602,10 +7529,10 @@ export class TelegramService {
         `⚙️ <b>Mode:</b> <code>📁 File Bot</code>\n\n` +
         `👑 <b>Step 2/2 — Assign Owner</b>\n` +
         `Send the <b>Owner Telegram ID</b> or <b>@username</b> (e.g. <code>123456789</code> or <code>@username</code>).`;
-      const ownerKeyboard = [
-        [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${fromId}`, style: 'primary' }],
-        [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
-      ];
+      const ownerKeyboard = this.compactInlineRows([
+        [this.buildManagedButton('clone_assign_self', { callback_data: `clone_admin_self:${fromId}` })],
+        [this.buildManagedButton('clone_cancel', { callback_data: `clone_cancel:${fromId}` })]
+      ]);
       if (!isGroup && session.promptMessageId) {
         const msgId = await this.sendOrEditKeyWizardPrompt(chatId, ownerPrompt, ownerKeyboard, session.promptMessageId);
         if (msgId) session.promptMessageId = msgId;
@@ -7657,10 +7584,10 @@ export class TelegramService {
         `⚠️ <b>Invalid Owner Format</b>\n\n` +
         `👑 <b>Assign Clone Bot Owner</b>\n` +
         `Send a valid <b>Telegram User ID</b> or <b>@username</b> (e.g. <code>123456789</code> or <code>@username</code>).`;
-      const ownerKeyboard = [
-        [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${fromId}`, style: 'primary' }],
-        [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
-      ];
+      const ownerKeyboard = this.compactInlineRows([
+        [this.buildManagedButton('clone_assign_self', { callback_data: `clone_admin_self:${fromId}` })],
+        [this.buildManagedButton('clone_cancel', { callback_data: `clone_cancel:${fromId}` })]
+      ]);
       if (isGroup) {
         await this.sendAutoDeletingNotice(chatId, invalidMsg, 8000, message?.message_id);
       } else if (session.promptMessageId) {
@@ -7810,17 +7737,14 @@ export class TelegramService {
           createdAt: Date.now(),
           stage: 'awaiting_token'
         };
+        const cBtn = this.buildManagedButton('clone_cancel', { callback_data: `clone_cancel:${fromId}` });
         const promptRes = await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
           text:
             `🤖 <b>Clone File Bot — Step 1/2</b>\n\n` +
             `Send the <b>Bot Token</b> from <code>@BotFather</code>.`,
           parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
-            ]
-          }
+          ...(cBtn ? { reply_markup: { inline_keyboard: [[cBtn]] } } : {})
         });
         if (promptRes?.ok && promptRes.result?.message_id) {
           session.promptMessageId = promptRes.result.message_id;
@@ -7851,6 +7775,10 @@ export class TelegramService {
         stage: 'awaiting_owner'
       };
 
+      const cloneOwnerRows = this.compactInlineRows([
+        [this.buildManagedButton('clone_assign_self', { callback_data: `clone_admin_self:${fromId}` })],
+        [this.buildManagedButton('clone_cancel', { callback_data: `clone_cancel:${fromId}` })]
+      ]);
       const promptRes = await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
         text:
@@ -7859,12 +7787,7 @@ export class TelegramService {
           `👑 <b>Step 2/2 — Assign Owner</b>\n` +
           `Send the <b>Owner Telegram ID</b> or <b>@username</b> (e.g. <code>123456789</code> or <code>@username</code>).`,
         parse_mode: 'HTML',
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: '👤 Assign Myself', callback_data: `clone_admin_self:${fromId}`, style: 'primary' }],
-            [{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]
-          ]
-        }
+        ...(cloneOwnerRows.length > 0 ? { reply_markup: { inline_keyboard: cloneOwnerRows } } : {})
       });
       if (promptRes?.ok && promptRes.result?.message_id) {
         session.promptMessageId = promptRes.result.message_id;
@@ -8050,14 +7973,13 @@ export class TelegramService {
         `• 💬 <b>Source:</b> <code>Direct Message</code>\n` +
         `• 📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>`;
 
-      const keyboard = {
-        inline_keyboard: [
-          [
-            { text: '🚫 Ban User', callback_data: `admin_ban_user:${targetUserId}:${report.id}` },
-            { text: 'Dismiss', callback_data: `admin_dismiss_report:${report.id}` }
-          ]
+      const dmReportRows = this.compactInlineRows([
+        [
+          this.buildManagedButton('report_ban_user', { callback_data: `admin_ban_user:${targetUserId}:${report.id}` }),
+          this.buildManagedButton('report_dismiss', { callback_data: `admin_dismiss_report:${report.id}` })
         ]
-      };
+      ]);
+      const keyboard = dmReportRows.length > 0 ? { inline_keyboard: dmReportRows } : undefined;
 
       const sentAdminMessages: AdminReportMessageRef[] = [];
       for (const adminId of adminTargetIds) {
@@ -8563,23 +8485,27 @@ export class TelegramService {
       if (matchedItem) {
         const payload = getItemPayload(matchedItem);
 
-        // Live Force Sub Check
-        const forceCheck = await this.checkUserForceSub(fromId, message?.from?.username, { forceFresh: true });
-        if (!forceCheck.allJoined) {
-          await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, payload, undefined, message?.from);
-          return;
+        // Live Force Sub Check (when not already cleared by top-level global middleware)
+        if (!options?.skipForceSubCheck) {
+          const forceCheck = await this.checkUserForceSub(fromId, message?.from?.username, { forceFresh: true });
+          if (!forceCheck.allJoined) {
+            await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, payload, undefined, message?.from);
+            return;
+          }
         }
 
-        await this.handleDeepLinkDelivery(chatId, payload, { skipForceSubCheck: true });
+        await this.handleDeepLinkDelivery(chatId, payload, { skipForceSubCheck: true, username: message?.from?.username });
         return;
       }
     }
 
     // Live Force Sub check on any other direct user interactions in private chat
-    const generalForceCheck = await this.checkUserForceSub(fromId, message?.from?.username, { forceFresh: true });
-    if (!generalForceCheck.allJoined) {
-      await this.sendForceSubPrompt(chatId, generalForceCheck.unjoinedChannels, 'start', undefined, message?.from);
-      return;
+    if (!options?.skipForceSubCheck) {
+      const generalForceCheck = await this.checkUserForceSub(fromId, message?.from?.username, { forceFresh: true });
+      if (!generalForceCheck.allJoined) {
+        await this.sendForceSubPrompt(chatId, generalForceCheck.unjoinedChannels, 'start', undefined, message?.from);
+        return;
+      }
     }
   }
 
@@ -9246,8 +9172,8 @@ export class TelegramService {
       return;
     }
 
-    // Mandatory Channel Join (Force Sub) live check (skipped when just verified by /start or forcesub_verify caller)
-    if (!options?.skipForceSubCheck) {
+    // Mandatory Channel Join (Force Sub) live check (Private Inbox ONLY — never in groups)
+    if (!options?.skipForceSubCheck && !strChatId.startsWith('-')) {
       const forceCheck = await this.checkUserForceSub(chatId, options?.username, { forceFresh: true });
       if (!forceCheck.allJoined) {
         await this.sendForceSubPrompt(chatId, forceCheck.unjoinedChannels, rawPayload);
@@ -9313,11 +9239,10 @@ export class TelegramService {
       return;
     }
 
-    const backKeyboard = (options?.includeBackButton && isSetupVideoActive) ? {
-      inline_keyboard: [
-        [{ text: '⬅️ Back', callback_data: `sv_menu_${item.id}`, style: 'primary' }]
-      ]
-    } : undefined;
+    const svBackBtn = (options?.includeBackButton && isSetupVideoActive)
+      ? this.buildManagedButton('sv_back_button', { callback_data: `sv_menu_${item.id}` })
+      : null;
+    const backKeyboard = svBackBtn ? { inline_keyboard: [[svBackBtn]] } : undefined;
 
     const isTextOnlyItem = Boolean(item.isTextOnly || (item.type === 'file' && item.fileEnabled === false));
 
@@ -9716,23 +9641,31 @@ export class TelegramService {
         }
       } else if (item.type === 'link') {
         const messageText = item.replyMessage || `🔗 <b>${this.escapeHtml(item.name)}</b>`;
-        const rawLinkBtnText = item.buttonText || '';
-        const buttonText = sanitizeButtonLabel(rawLinkBtnText) ? rawLinkBtnText : (item.openMode === 'webapp' ? '📱 Launch App' : '🌐 Open Link');
+        const rawLinkBtnText = (item.buttonText || '').trim();
+        const isDefaultLinkBtn =
+          !rawLinkBtnText ||
+          /^(?:🌐\s*)?Open Link$/i.test(rawLinkBtnText) ||
+          /^(?:📱\s*)?Launch App$/i.test(rawLinkBtnText);
 
         const isHttps = /^https:\/\//i.test(item.url || '');
         const canUseWebApp = item.openMode === 'webapp' && isHttps;
+        const managedKey = canUseWebApp ? 'delivery_launch_webapp' : 'delivery_open_link';
+        const textOverride = !isDefaultLinkBtn && (sanitizeButtonLabel(rawLinkBtnText) || extractExplicitButtonEmojiFromRaw(rawLinkBtnText))
+          ? rawLinkBtnText
+          : undefined;
 
-        const inlineButton: any = { text: buttonText, style: 'primary' };
-        if (canUseWebApp) {
-          inlineButton.web_app = { url: item.url };
-        } else {
-          inlineButton.url = item.url;
-        }
+        const inlineButton = this.buildManagedButton(managedKey, {
+          ...(canUseWebApp ? { web_app: { url: item.url! } } : { url: item.url! }),
+          ...(textOverride ? { textOverride } : {})
+        });
 
-        const linkKeyboardRows: any[][] = [[inlineButton]];
-        if (options?.includeBackButton && isSetupVideoActive) {
-          linkKeyboardRows.push([{ text: '⬅️ Back', callback_data: `sv_menu_${item.id}`, style: 'primary' }]);
-        }
+        const linkBackBtn = (options?.includeBackButton && isSetupVideoActive)
+          ? this.buildManagedButton('sv_back_button', { callback_data: `sv_menu_${item.id}` })
+          : null;
+        const linkKeyboardRows = this.compactInlineRows([
+          [inlineButton],
+          [linkBackBtn]
+        ]);
 
         let res: any = null;
         if (options?.messageIdToEdit) {
@@ -9741,9 +9674,7 @@ export class TelegramService {
               chat_id: chatId,
               message_id: options.messageIdToEdit,
               text: messageText,
-              reply_markup: {
-                inline_keyboard: linkKeyboardRows
-              }
+              ...(linkKeyboardRows.length > 0 ? { reply_markup: { inline_keyboard: linkKeyboardRows } } : {})
             });
           } catch {}
         }
@@ -9752,28 +9683,28 @@ export class TelegramService {
           res = await this.callTelegramApi('sendMessage', {
             chat_id: chatId,
             text: messageText,
-            reply_markup: {
-              inline_keyboard: linkKeyboardRows
-            }
+            ...(linkKeyboardRows.length > 0 ? { reply_markup: { inline_keyboard: linkKeyboardRows } } : {})
           });
         }
 
         // If Telegram rejected web_app button, fallback immediately to regular url button
         if ((!res || !res.ok) && canUseWebApp) {
           console.warn('[Telegram] web_app button delivery rejected, falling back to regular url:', res?.description);
-          const fallbackRows: any[][] = [[{ text: buttonText, url: item.url, style: 'primary' }]];
-          if (options?.includeBackButton && isSetupVideoActive) {
-            fallbackRows.push([{ text: '⬅️ Back', callback_data: `sv_menu_${item.id}`, style: 'primary' }]);
-          }
+          const fallbackBtn = this.buildManagedButton(managedKey, {
+            url: item.url!,
+            ...(textOverride ? { textOverride } : {})
+          });
+          const fallbackRows = this.compactInlineRows([
+            [fallbackBtn],
+            [linkBackBtn]
+          ]);
           if (options?.messageIdToEdit) {
             try {
               res = await this.callTelegramApi('editMessageText', {
                 chat_id: chatId,
                 message_id: options.messageIdToEdit,
                 text: messageText,
-                reply_markup: {
-                  inline_keyboard: fallbackRows
-                }
+                ...(fallbackRows.length > 0 ? { reply_markup: { inline_keyboard: fallbackRows } } : {})
               });
             } catch {}
           }
@@ -9781,9 +9712,7 @@ export class TelegramService {
             res = await this.callTelegramApi('sendMessage', {
               chat_id: chatId,
               text: messageText,
-              reply_markup: {
-                inline_keyboard: fallbackRows
-              }
+              ...(fallbackRows.length > 0 ? { reply_markup: { inline_keyboard: fallbackRows } } : {})
             });
           }
         }
@@ -9834,16 +9763,24 @@ export class TelegramService {
   ): Promise<void> {
     const defaultText = `🎬 <b>Setup Video &amp; Resource Menu</b>\n\n• 📦 <b>Item:</b> <code>${this.escapeHtml(item.name)}</code>\n\n<i>Choose an option below to watch the setup tutorial or access your ${item.type === 'file' ? 'file' : 'link'}:</i>`;
     const text = item.setupVideoMessage?.trim() || defaultText;
-    const rawSvVidBtn = item.setupVideoButtonText || '';
-    const rawSvResBtn = item.setupResourceButtonText || '';
-    const keyboard = {
-      inline_keyboard: [
-        [
-          { text: sanitizeButtonLabel(rawSvVidBtn) ? rawSvVidBtn : '🎬 Setup Video', callback_data: `sv_vid_${item.id}`, style: 'primary' },
-          { text: sanitizeButtonLabel(rawSvResBtn) ? rawSvResBtn : (item.type === 'file' ? '📁 Get File' : '🔗 Open Link'), callback_data: `sv_item_${item.id}`, style: 'primary' }
-        ]
-      ]
-    };
+    const rawSvVidBtn = (item.setupVideoButtonText || '').trim();
+    const rawSvResBtn = (item.setupResourceButtonText || '').trim();
+    const isDefaultVidBtn = !rawSvVidBtn || /^(?:🎬\s*)?Setup Video$/i.test(rawSvVidBtn);
+    const isDefaultResBtn =
+      !rawSvResBtn ||
+      /^(?:📁\s*)?Get File$/i.test(rawSvResBtn) ||
+      /^(?:🔗\s*)?Open Link$/i.test(rawSvResBtn) ||
+      /^(?:💬\s*)?View Message$/i.test(rawSvResBtn);
+    const svWatchBtn = this.buildManagedButton('sv_watch_button', {
+      callback_data: `sv_vid_${item.id}`,
+      ...(!isDefaultVidBtn && (sanitizeButtonLabel(rawSvVidBtn) || extractExplicitButtonEmojiFromRaw(rawSvVidBtn)) ? { textOverride: rawSvVidBtn } : {})
+    });
+    const svResBtn = this.buildManagedButton(item.type === 'file' ? 'sv_get_file_button' : 'sv_open_link_button', {
+      callback_data: `sv_item_${item.id}`,
+      ...(!isDefaultResBtn && (sanitizeButtonLabel(rawSvResBtn) || extractExplicitButtonEmojiFromRaw(rawSvResBtn)) ? { textOverride: rawSvResBtn } : {})
+    });
+    const svRows = this.compactInlineRows([[svWatchBtn, svResBtn]]);
+    const keyboard = svRows.length > 0 ? { inline_keyboard: svRows } : undefined;
 
     if (messageIdToEdit) {
       try {
@@ -9852,7 +9789,7 @@ export class TelegramService {
           message_id: messageIdToEdit,
           text,
           parse_mode: 'HTML',
-          reply_markup: keyboard
+          ...(keyboard ? { reply_markup: keyboard } : {})
         });
         if (editRes && editRes.ok) return;
         // If edit failed (for example, previous message was media), delete it before sending fresh message
@@ -9867,7 +9804,7 @@ export class TelegramService {
       chat_id: chatId,
       text,
       parse_mode: 'HTML',
-      reply_markup: keyboard
+      ...(keyboard ? { reply_markup: keyboard } : {})
     });
   }
 
@@ -9876,11 +9813,8 @@ export class TelegramService {
     item: ItemRecord,
     messageIdToEdit?: number
   ): Promise<void> {
-    const backKeyboard = {
-      inline_keyboard: [
-        [{ text: '⬅️ Back', callback_data: `sv_menu_${item.id}`, style: 'primary' }]
-      ]
-    };
+    const svBackBtn = this.buildManagedButton('sv_back_button', { callback_data: `sv_menu_${item.id}` });
+    const backKeyboard = svBackBtn ? { inline_keyboard: [[svBackBtn]] } : undefined;
 
     if (!item.setupVideoUrl) {
       const noVidText = `⚠️ <b>No Setup Video</b>\n<i>No setup video configured for <code>${this.escapeHtml(item.name)}</code>.</i>`;
@@ -10005,12 +9939,14 @@ export class TelegramService {
     // 3. If external web link (e.g. YouTube, tutorial URL): edit existing message in place seamlessly!
     const videoButtonRow: any[] = [];
     if (isExternalUrl) {
-      videoButtonRow.push({ text: '▶️ Watch Setup Video', url: item.setupVideoUrl, style: 'primary' });
+      const watchExtBtn = this.buildManagedButton('sv_watch_external', { url: item.setupVideoUrl });
+      if (watchExtBtn) videoButtonRow.push(watchExtBtn);
     }
-    const inlineKeyboard = [
-      ...(videoButtonRow.length > 0 ? [videoButtonRow] : []),
-      [{ text: '⬅️ Back', callback_data: `sv_menu_${item.id}`, style: 'primary' }]
-    ];
+    const backExtBtn = this.buildManagedButton('sv_back_button', { callback_data: `sv_menu_${item.id}` });
+    const inlineKeyboard = this.compactInlineRows([
+      videoButtonRow,
+      [backExtBtn]
+    ]);
     const textMsg = `🎬 <b>Setup Video Tutorial</b>\n\n• 📦 <b>Item:</b> <code>${this.escapeHtml(item.name)}</code>\n• 🔗 <b>URL:</b> <code>${this.escapeHtml(item.setupVideoUrl)}</code>`;
 
     if (messageIdToEdit) {
@@ -10020,9 +9956,7 @@ export class TelegramService {
           message_id: messageIdToEdit,
           text: textMsg,
           parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: inlineKeyboard
-          }
+          ...(inlineKeyboard.length > 0 ? { reply_markup: { inline_keyboard: inlineKeyboard } } : {})
         });
         if (editRes && editRes.ok) return;
       } catch {}
@@ -10032,9 +9966,7 @@ export class TelegramService {
       chat_id: chatId,
       text: textMsg,
       parse_mode: 'HTML',
-      reply_markup: {
-        inline_keyboard: inlineKeyboard
-      }
+      ...(inlineKeyboard.length > 0 ? { reply_markup: { inline_keyboard: inlineKeyboard } } : {})
     });
   }
 
@@ -10387,12 +10319,10 @@ export class TelegramService {
   }
 
   public static buildPlayerProfileReplyMarkup(uid: string) {
+    const guildBtn = this.buildManagedButton('ff_guild_info', { callback_data: `guild_${uid}` });
+    if (!guildBtn) return undefined;
     return {
-      inline_keyboard: [
-        // Temporarily hidden until a dedicated banner API is integrated:
-        // [{ text: '🖼 Banner', callback_data: `banner_${uid}`, style: 'primary' }],
-        [{ text: '🛡 Guild Info', callback_data: `guild_${uid}`, style: 'primary' }]
-      ]
+      inline_keyboard: [[guildBtn]]
     };
   }
 
@@ -12388,14 +12318,15 @@ export class TelegramService {
     const pageItems = activeItems.slice(startIdx, startIdx + pageSize);
 
     if (totalItems === 0) {
+      const emptyRows = this.compactInlineRows([
+        [
+          this.buildManagedButton('fl_refresh', { callback_data: 'fl_p:1' }),
+          this.buildManagedButton('fl_close')
+        ]
+      ]);
       return {
         text: '📁 <b>No files found in the database.</b>',
-        inlineKeyboard: [
-          [
-            { text: '🔄 Refresh', callback_data: 'fl_p:1', style: 'primary' },
-            { text: '✖️ Close', callback_data: 'fl_close', style: 'danger' }
-          ]
-        ],
+        inlineKeyboard: emptyRows,
         totalItems: 0,
         page: 1,
         totalPages: 1
@@ -12455,19 +12386,22 @@ export class TelegramService {
     if (totalPages > 1) {
       const navRow: any[] = [];
       if (page > 1) {
-        navRow.push({ text: '⬅️ Prev', callback_data: `fl_p:${page - 1}`, style: 'primary' });
+        const prevBtn = this.buildManagedButton('fl_prev', { callback_data: `fl_p:${page - 1}` });
+        if (prevBtn) navRow.push(prevBtn);
       }
       navRow.push({ text: `📄 ${page} / ${totalPages}`, callback_data: 'fl_noop', style: 'primary' });
       if (page < totalPages) {
-        navRow.push({ text: 'Next ➡️', callback_data: `fl_p:${page + 1}`, style: 'primary' });
+        const nextBtn = this.buildManagedButton('fl_next', { callback_data: `fl_p:${page + 1}` });
+        if (nextBtn) navRow.push(nextBtn);
       }
-      rows.push(navRow);
+      if (navRow.length > 0) rows.push(navRow);
     }
 
-    rows.push([
-      { text: '🔄 Refresh', callback_data: `fl_p:${page}`, style: 'primary' },
-      { text: '✖️ Close', callback_data: 'fl_close', style: 'danger' }
-    ]);
+    const bottomRow = [
+      this.buildManagedButton('fl_refresh', { callback_data: `fl_p:${page}` }),
+      this.buildManagedButton('fl_close')
+    ].filter(Boolean) as any[];
+    if (bottomRow.length > 0) rows.push(bottomRow);
 
     return { text, inlineKeyboard: rows, totalItems, page, totalPages };
   }
@@ -12517,34 +12451,37 @@ export class TelegramService {
       `🔗 <b>Direct Start Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
       `👇 <i>Tap <b>🔗 Copy Link</b> below to copy and share:</i>`;
 
-    const copyBtnPrimary: any = cleanBotUsername
-      ? { text: '🔗 Copy Link', copy_text: { text: deepLink }, style: 'success' }
-      : { text: '🔗 Copy Link', callback_data: `fl_copy:${item.id}`, style: 'success' };
+    const copyBtnPrimary = cleanBotUsername
+      ? this.buildManagedButton('fl_copy_link', { copy_text: { text: deepLink } })
+      : this.buildManagedButton('fl_copy_link', { callback_data: `fl_copy:${item.id}` });
 
-    const actionRowFallback: any[] = [
-      { text: '🔗 Copy Link', callback_data: `fl_copy:${item.id}`, style: 'success' },
-      ...(cleanBotUsername ? [{ text: '↗️ Open Link', url: deepLink, style: 'success' }] : [])
-    ];
+    const openLinkBtn = cleanBotUsername
+      ? this.buildManagedButton('fl_open_link', { url: deepLink })
+      : null;
 
-    const primaryKeyboard: any[][] = [
+    const actionRowFallback = [
+      this.buildManagedButton('fl_copy_link', { callback_data: `fl_copy:${item.id}` }),
+      openLinkBtn
+    ].filter(Boolean) as any[];
+
+    const navBackRow = [
+      this.buildManagedButton('fl_back_list', { callback_data: `fl_p:${returnPage}` }),
+      this.buildManagedButton('fl_close')
+    ].filter(Boolean) as any[];
+
+    const primaryKeyboard = this.compactInlineRows([
       [copyBtnPrimary],
       [
         { text: '📋 Send Copyable Link', callback_data: `fl_copy:${item.id}`, style: 'success' },
-        ...(cleanBotUsername ? [{ text: '↗️ Open Link', url: deepLink, style: 'success' }] : [])
+        openLinkBtn
       ],
-      [
-        { text: '⬅️ Back to File List', callback_data: `fl_p:${returnPage}`, style: 'primary' },
-        { text: '✖️ Close', callback_data: 'fl_close', style: 'danger' }
-      ]
-    ];
+      navBackRow
+    ]);
 
-    const fallbackKeyboard: any[][] = [
+    const fallbackKeyboard = this.compactInlineRows([
       actionRowFallback,
-      [
-        { text: '⬅️ Back to File List', callback_data: `fl_p:${returnPage}`, style: 'primary' },
-        { text: '✖️ Close', callback_data: 'fl_close', style: 'danger' }
-      ]
-    ];
+      navBackRow
+    ]);
 
     return { text, deepLink, primaryKeyboard, fallbackKeyboard };
   }
@@ -13544,10 +13481,10 @@ export class TelegramService {
   }
 
   private static buildAddCancelBackRows(): any[][] {
-    return [
-      [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }],
-      [{ text: '⬅️ Back', callback_data: 'add_back', style: 'primary' }]
-    ];
+    return this.compactInlineRows([
+      [this.buildManagedButton('add_cancel')],
+      [this.buildManagedButton('add_back')]
+    ]);
   }
 
   private static normalizeAddStage(stage?: AddStage): AddStage {
@@ -13642,14 +13579,14 @@ export class TelegramService {
           errorNotice ||
           `📥 <b>What would you like to add?</b>\n\nChoose an option below or send your content directly:\n• <b>File(s):</b> Send 1 or multiple Documents, Photos, Videos, Audio, APKs, ZIPs\n• <b>Link:</b> Website URL (https://...)\n• <b>Text Response:</b> Custom text / message`;
         replyMarkup = {
-          inline_keyboard: [
+          inline_keyboard: this.compactInlineRows([
             [
-              { text: '📁 Add File(s)', callback_data: 'add_choose_file', style: 'primary' },
-              { text: '🔗 Add Link', callback_data: 'add_choose_link', style: 'primary' },
-              { text: '💬 Add Text', callback_data: 'add_choose_text', style: 'primary' }
+              this.buildManagedButton('add_file_choice'),
+              this.buildManagedButton('add_link_choice'),
+              this.buildManagedButton('add_text_choice')
             ],
             ...this.buildAddCancelBackRows()
-          ]
+          ])
         };
         break;
       }
@@ -13991,24 +13928,28 @@ export class TelegramService {
       let res: any = null;
 
       if (keyValue.length >= 1 && keyValue.length <= 256) {
+        const copyPrimary = this.buildManagedButton('key_copy_button', {
+          copy_text: { text: keyValue },
+          styleOverride: buttonStyle
+        });
         res = await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
           text: msgText,
           parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [[{ text: '📋 Copy Key', copy_text: { text: keyValue }, style: buttonStyle }]]
-          }
+          ...(copyPrimary ? { reply_markup: { inline_keyboard: [[copyPrimary]] } } : {})
         });
       }
 
       if (!res?.ok) {
+        const copyFallback = this.buildManagedButton('key_copy_button', {
+          callback_data: `copy_key:${targetPoolId}`,
+          styleOverride: buttonStyle
+        });
         const fallbackRes = await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
           text: msgText,
           parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [[{ text: '📋 Copy Key', callback_data: `copy_key:${targetPoolId}`, style: buttonStyle }]]
-          }
+          ...(copyFallback ? { reply_markup: { inline_keyboard: [[copyFallback]] } } : {})
         });
         if (!fallbackRes?.ok) {
           await this.callTelegramApi('sendMessage', {
@@ -15343,7 +15284,18 @@ export class TelegramService {
 
     // Stage 6 (Link Mandatory Step 2): Awaiting Open Button Text
     if (session.stage === 'awaiting_link_button_text') {
-      const customBtn = rawInput.trim();
+      let customBtn = rawInput.trim();
+      const customEmojiEnt = Array.isArray(message?.entities)
+        ? message.entities.find((e: any) => e?.type === 'custom_emoji' && isValidCustomEmojiId(e?.custom_emoji_id ?? e?.customEmojiId))
+        : null;
+      if (customEmojiEnt && typeof text === 'string' && !/<tg-emoji\b/i.test(customBtn)) {
+        const entId = String(customEmojiEnt.custom_emoji_id ?? customEmojiEnt.customEmojiId).trim();
+        const entOffset = Math.max(0, Number(customEmojiEnt.offset) || 0);
+        const entLen = Math.max(0, Number(customEmojiEnt.length) || 0);
+        const entSlice = text.slice(entOffset, entOffset + entLen);
+        const labelWithoutEnt = `${text.slice(0, entOffset)}${text.slice(entOffset + entLen)}`.trim();
+        customBtn = `<tg-emoji emoji-id="${entId}">${entSlice}</tg-emoji>${labelWithoutEnt ? ` ${labelWithoutEnt}` : ''}`.trim();
+      }
       session.buttonText = customBtn ? customBtn.trim() : 'Open Link';
       if (session.linkData) session.linkData.buttonText = session.buttonText;
       this.pushAddHistory(session, 'awaiting_link_button_text');
@@ -15750,17 +15702,12 @@ export class TelegramService {
       `🔗 <b>Direct Link:</b>\n<code>${this.escapeHtml(deepLink)}</code>\n\n` +
       `💡 <i>Type <code>${this.escapeHtml(primaryTrigger)}</code> in any group or here to test delivery!</i>`;
 
-    const successMarkup = {
-      inline_keyboard: [
-        [
-          {
-            text: 'Test Delivery',
-            callback_data: `test_delivery_${primarySaved.id}`,
-            style: 'primary'
-          }
-        ]
-      ]
-    };
+    const testDeliveryBtn = this.buildManagedButton('add_test_delivery', {
+      callback_data: `test_delivery_${primarySaved.id}`
+    });
+    const successMarkup = testDeliveryBtn
+      ? { inline_keyboard: [[testDeliveryBtn]] }
+      : undefined;
 
     // Update in-place inside the single dynamic message bubble
     if (session.lastPromptMessageId && chatId) {
@@ -15857,16 +15804,13 @@ export class TelegramService {
         this.freeFireGuildCache.set(guildKey, { guild, sourceUid: targetUid, playerData });
 
         if (chatId && cb.message?.message_id) {
+          const leaderBtn = this.buildManagedButton('ff_leader_info', { callback_data: `leader_${guildKey}` });
           await this.callTelegramApi('editMessageText', {
             chat_id: chatId,
             message_id: cb.message.message_id,
             text: this.formatGuildInfoMessage(guild, targetUid, playerData),
             parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '👑 Leader Info', callback_data: `leader_${guildKey}`, style: 'primary' }]
-              ]
-            }
+            ...(leaderBtn ? { reply_markup: { inline_keyboard: [[leaderBtn]] } } : {})
           }).catch(() => {});
         }
       } catch (err: any) {
@@ -15916,16 +15860,13 @@ export class TelegramService {
                 '👑 <b>GUILD LEADER PROFILE</b>'
               )
             : '👑 <b>GUILD LEADER PROFILE</b>\n\nℹ️ <i>Leader details unavailable.</i>';
+          const playerBtn = this.buildManagedButton('ff_player_info', { callback_data: `player_${sourceUid}` });
           await this.callTelegramApi('editMessageText', {
             chat_id: chatId,
             message_id: cb.message.message_id,
             text: leaderProfileHtml,
             parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '👤 Player Info', callback_data: `player_${sourceUid}`, style: 'primary' }]
-              ]
-            }
+            ...(playerBtn ? { reply_markup: { inline_keyboard: [[playerBtn]] } } : {})
           }).catch(() => {});
         }
       } catch (err: any) {
@@ -15966,6 +15907,9 @@ export class TelegramService {
             parse_mode: 'HTML'
           }).catch(() => {});
 
+          const playerBtnForTarget = this.buildManagedButton('ff_player_info', { callback_data: `player_${targetUid}` });
+          const playerMarkupForTarget = playerBtnForTarget ? { inline_keyboard: [[playerBtnForTarget]] } : undefined;
+
           const playerData = await playerPromise;
           if (!playerData) {
             await this.callTelegramApi('editMessageText', {
@@ -15973,11 +15917,7 @@ export class TelegramService {
               message_id: msgId,
               text: '❌ <b>Player not found or API service is busy.</b> Please try again later.',
               parse_mode: 'HTML',
-              reply_markup: {
-                inline_keyboard: [
-                  [{ text: '👤 Player Info', callback_data: `player_${targetUid}`, style: 'primary' }]
-                ]
-              }
+              ...(playerMarkupForTarget ? { reply_markup: playerMarkupForTarget } : {})
             }).catch(() => {});
             return;
           }
@@ -15989,11 +15929,7 @@ export class TelegramService {
               message_id: msgId,
               text: 'ℹ️ <b>Real banner image is unavailable for this player right now.</b>',
               parse_mode: 'HTML',
-              reply_markup: {
-                inline_keyboard: [
-                  [{ text: '👤 Player Info', callback_data: `player_${targetUid}`, style: 'primary' }]
-                ]
-              }
+              ...(playerMarkupForTarget ? { reply_markup: playerMarkupForTarget } : {})
             }).catch(() => {});
             return;
           }
@@ -16014,11 +15950,7 @@ export class TelegramService {
             caption: this.formatBannerCaptionHtml(playerData, targetUid),
             replyToMessageId: isGroup ? replyToMsgId : undefined,
             threadId,
-            replyMarkup: {
-              inline_keyboard: [
-                [{ text: '👤 Player Info', callback_data: `player_${targetUid}`, style: 'primary' }]
-              ]
-            }
+            replyMarkup: playerMarkupForTarget
           });
 
           if (sentPhoto?.ok) {
@@ -16035,27 +15967,20 @@ export class TelegramService {
               message_id: msgId,
               text: '❌ <b>Failed to send banner image.</b> Please try again later.',
               parse_mode: 'HTML',
-              reply_markup: {
-                inline_keyboard: [
-                  [{ text: '👤 Player Info', callback_data: `player_${targetUid}`, style: 'primary' }]
-                ]
-              }
+              ...(playerMarkupForTarget ? { reply_markup: playerMarkupForTarget } : {})
             }).catch(() => {});
           }
         }
       } catch (err: any) {
         console.warn('[FreeFireUID] Banner callback error:', err?.message || err);
         if (chatId && msgId) {
+          const playerBtnCatch = this.buildManagedButton('ff_player_info', { callback_data: `player_${targetUid}` });
           await this.callTelegramApi('editMessageText', {
             chat_id: chatId,
             message_id: msgId,
             text: '❌ <b>Banner asset is not available right now.</b> Please try again later.',
             parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: '👤 Player Info', callback_data: `player_${targetUid}`, style: 'primary' }]
-              ]
-            }
+            ...(playerBtnCatch ? { reply_markup: { inline_keyboard: [[playerBtnCatch]] } } : {})
           }).catch(() => {});
         }
       }
@@ -16243,8 +16168,8 @@ export class TelegramService {
       if (pending && String(pending.userId) !== String(fromId)) {
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
-          text: '✅ Membership verified!',
-          show_alert: false
+          text: 'This verification button belongs to another user.',
+          show_alert: true
         });
         return;
       }
@@ -16272,8 +16197,6 @@ export class TelegramService {
         pendingForceSubActions.delete(targetPayload);
         if (pending.kind === 'private_message' && pending.message) {
           await this.handlePrivateMessage(pending.message, pending.text || '', { skipForceSubCheck: true });
-        } else if (pending.kind === 'group_message' && pending.message) {
-          await this.handleGroupMessage(pending.message, pending.text || '', { skipForceSubCheck: true });
         } else if (pending.kind === 'callback_query' && pending.callbackQuery) {
           await this.handleCallbackQuery(pending.callbackQuery, { skipForceSubCheck: true, replayedAfterVerify: true });
         }
@@ -17497,7 +17420,9 @@ export class TelegramService {
       }
     }
 
-    await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id });
+    if (!options?.replayedAfterVerify) {
+      await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+    }
 
     // SETUP VIDEO NAVIGATION:
     // [ 🎬 Setup Video ] button tap
@@ -17980,9 +17905,26 @@ export class TelegramService {
           parse_mode: 'HTML'
         });
         const payload = getItemPayload(item);
-        await this.handleDeepLinkDelivery(chatId, payload);
+        await this.handleDeepLinkDelivery(chatId, payload, {
+          skipForceSubCheck: true,
+          username: cb.from?.username
+        });
       }
       return;
+    }
+
+    // Handle Admin-Created Custom Inline Buttons with Callback Data
+    if (data) {
+      const customBtn = storage.findCustomInlineButtonByCallback(data);
+      if (customBtn) {
+        const alertText = (customBtn.callbackResponse || customBtn.text || 'Done!').slice(0, 195);
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: alertText,
+          show_alert: Boolean(customBtn.callbackResponse && customBtn.callbackResponse.length > 60)
+        }).catch(() => {});
+        return;
+      }
     }
   }
 
@@ -20699,7 +20641,21 @@ export class TelegramService {
       return this.renderMoreView(fromId, chatId, 'menu', session, notice, forceNew);
     }
 
-    await this.sendOrEditMorePrompt(fromId, chatId, text, { inline_keyboard: rows }, session, forceNew);
+    const managedRows = this.compactInlineRows(
+      rows.map((row) =>
+        row.map((btn: any) => {
+          if (btn?.callback_data === 'more:close') {
+            return this.buildManagedButton('more_close');
+          }
+          if (typeof btn?.callback_data === 'string' && btn.callback_data.startsWith('more:v:') && btn.text === '⬅️ Back') {
+            return this.buildManagedButton('more_back', { callback_data: btn.callback_data });
+          }
+          return btn;
+        })
+      )
+    );
+
+    await this.sendOrEditMorePrompt(fromId, chatId, text, { inline_keyboard: managedRows }, session, forceNew);
   }
 
   private static async handleMoreCallback(
@@ -20744,14 +20700,15 @@ export class TelegramService {
       return;
     }
 
-    const backCloseMarkup = (backTarget: string) => ({
-      inline_keyboard: [
-        [
-          { text: '⬅️ Back', callback_data: `more:v:${backTarget}`, style: 'primary' },
-          { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
-        ]
-      ]
-    });
+    const backCloseMarkup = (backTarget: string) => {
+      const row = [
+        this.buildManagedButton('more_back', { callback_data: `more:v:${backTarget}` }),
+        this.buildManagedButton('more_close')
+      ].filter(Boolean) as any[];
+      return {
+        inline_keyboard: row.length > 0 ? [row] : []
+      };
+    };
 
     // --- BOT SETTINGS ---
     if (data.startsWith('more:set:')) {
@@ -21546,13 +21503,12 @@ export class TelegramService {
           createdAt: Date.now(),
           stage: 'awaiting_token'
         };
+        const fleetCancelBtn = this.buildManagedButton('clone_cancel', { callback_data: `clone_cancel:${fromId}` });
         const promptRes = await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
           text: `🤖 <b>Clone File Bot — Step 1/2</b>\n\nSend the <b>Bot Token</b> from <code>@BotFather</code>.`,
           parse_mode: 'HTML',
-          reply_markup: {
-            inline_keyboard: [[{ text: '❌ Cancel', callback_data: `clone_cancel:${fromId}`, style: 'danger' }]]
-          }
+          ...(fleetCancelBtn ? { reply_markup: { inline_keyboard: [[fleetCancelBtn]] } } : {})
         });
         if (promptRes?.ok && promptRes.result?.message_id) {
           cloneSession.promptMessageId = promptRes.result.message_id;
@@ -21576,13 +21532,13 @@ export class TelegramService {
             chatId,
             `⚠️ <b>Delete Cloned Bot?</b>\n\nBot: <code>@${this.escapeHtml(target.username || target.id)}</code>\nThis removes its token and isolated storage.`,
             {
-              inline_keyboard: [
+              inline_keyboard: this.compactInlineRows([
                 [{ text: '🗑️ Confirm Delete', callback_data: `more:flt:cdel:${idx}`, style: 'danger' }],
                 [
-                  { text: '⬅️ Back', callback_data: 'more:v:fleet', style: 'primary' },
-                  { text: '✖️ Close', callback_data: 'more:close', style: 'danger' }
+                  this.buildManagedButton('more_back', { callback_data: 'more:v:fleet' }),
+                  this.buildManagedButton('more_close')
                 ]
-              ]
+              ])
             },
             session
           );

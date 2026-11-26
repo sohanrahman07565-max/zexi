@@ -89,6 +89,33 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
   const [copiedTag, setCopiedTag] = useState<string | null>(null);
   const [togglingItemState, setTogglingItemState] = useState<Record<string, boolean>>({});
 
+  const parseButtonPreviewMarkup = (raw: string | undefined, fallback: string) => {
+    const str = String(raw || '').trim();
+    if (!str) return { customEmojiId: '', label: fallback };
+    const pairMatch = str.match(
+      /<tg-emoji\b[^>]*\bemoji-id\s*=\s*(?:["']|&quot;|&#39;)?(\d{5,30})(?:["']|&quot;|&#39;)?[^>]*>([\s\S]*?)<\/tg-emoji>/i
+    );
+    const singleMatch = pairMatch
+      ? null
+      : str.match(
+          /<tg-emoji\b[^>]*\bemoji-id\s*=\s*(?:["']|&quot;|&#39;)?(\d{5,30})(?:["']|&quot;|&#39;)?[^>]*>/i
+        );
+    const match = pairMatch || singleMatch;
+    if (!match?.[1]) return { customEmojiId: '', label: str };
+    const stripAll = (input: string) =>
+      input
+        .replace(/<tg-emoji\b[^>]*>([\s\S]*?)<\/tg-emoji>/gi, '$1')
+        .replace(/<\/?tg-emoji\b[^>]*>/gi, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+    const withoutMatched = stripAll(str.replace(match[0], ''));
+    const innerFallback = stripAll(str);
+    return {
+      customEmojiId: match[1].trim(),
+      label: withoutMatched || innerFallback || fallback
+    };
+  };
+
   const handleToggleItemStatus = async (item: ItemRecord) => {
     const key = `${item.id}:status`;
     if (togglingItemState[key]) return;
@@ -993,8 +1020,21 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                             <span className="text-indigo-400 font-medium">
                               {item.openMode === 'webapp' ? '📱 Telegram Mini App' : '🌐 Normal Browser'}
                             </span>
-                            <span className="text-zinc-400 min-w-0 break-words">
-                              Button: <strong className="text-white">{item.buttonText || 'Open Link'}</strong>
+                            <span className="text-zinc-400 min-w-0 break-words inline-flex items-center gap-1 flex-wrap">
+                              Button:{' '}
+                              {(() => {
+                                const parsed = parseButtonPreviewMarkup(item.buttonText, 'Open Link');
+                                return (
+                                  <strong className="text-white inline-flex items-center gap-1">
+                                    {parsed.customEmojiId && (
+                                      <span className="px-1 py-0.5 rounded bg-amber-500/20 border border-amber-400/40 text-amber-200 font-mono text-[9px]">
+                                        ✨ ID:{parsed.customEmojiId.slice(-4)}
+                                      </span>
+                                    )}
+                                    <span>{parsed.label}</span>
+                                  </strong>
+                                );
+                              })()}
                             </span>
                           </div>
                         </div>
@@ -1555,6 +1595,17 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                           placeholder="Enter inline button text"
                           className="w-full bg-zinc-900 border border-zinc-700 rounded-xl py-2 px-3 text-xs text-white focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500/40"
                         />
+                        {/<tg-emoji\b/i.test(buttonText) && (() => {
+                          const parsed = parseButtonPreviewMarkup(buttonText, openMode === 'webapp' ? 'Launch App' : 'Open Link');
+                          return parsed.customEmojiId ? (
+                            <div className="mt-1.5 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-500/15 border border-sky-400/35 text-[11px] font-semibold text-sky-100">
+                              <span className="px-1.5 py-0.5 rounded bg-amber-500/25 border border-amber-400/40 text-amber-200 font-mono text-[10px]">
+                                ✨ ID:{parsed.customEmojiId.slice(-4)}
+                              </span>
+                              <span>{parsed.label}</span>
+                            </div>
+                          ) : null;
+                        })()}
                       </div>
 
                       {/* Auto-generated File / Link / Text ID */}
@@ -1978,23 +2029,37 @@ const FilesTabComponent: React.FC<FilesTabProps> = ({
                                 {setupVideoMessage.trim() || '🎬 Click below to watch the video instructions or get your item!'}
                               </div>
                               <div className="space-y-1.5 pt-1">
-                                <div className="w-full py-1.5 px-3 rounded-lg bg-purple-600/30 border border-purple-500/50 text-purple-200 text-xs font-semibold flex items-center justify-center gap-2 shadow-xs">
-                                  <Video className="w-3.5 h-3.5 text-purple-300" />
-                                  <span>{setupVideoButtonText.trim() || '🎬 Setup Video'}</span>
-                                </div>
-                                <div className="w-full py-1.5 px-3 rounded-lg bg-blue-600/30 border border-blue-500/50 text-blue-200 text-xs font-semibold flex items-center justify-center gap-2 shadow-xs">
-                                  {itemType === 'file' ? (
+                                {(() => {
+                                  const vidPreview = parseButtonPreviewMarkup(setupVideoButtonText, '🎬 Setup Video');
+                                  const resFallback = itemType === 'file' ? '📁 Get File' : '🔗 Open Link';
+                                  const resPreview = parseButtonPreviewMarkup(setupResourceButtonText, resFallback);
+                                  return (
                                     <>
-                                      <FileText className="w-3.5 h-3.5 text-blue-300" />
-                                      <span>{setupResourceButtonText.trim() || '📁 Get File'}</span>
+                                      <div className="w-full py-1.5 px-3 rounded-lg bg-purple-600/30 border border-purple-500/50 text-purple-200 text-xs font-semibold flex items-center justify-center gap-2 shadow-xs">
+                                        {vidPreview.customEmojiId ? (
+                                          <span className="px-1.5 py-0.5 rounded bg-amber-500/25 border border-amber-400/40 text-amber-200 font-mono text-[10px]">
+                                            ✨ ID:{vidPreview.customEmojiId.slice(-4)}
+                                          </span>
+                                        ) : (
+                                          <Video className="w-3.5 h-3.5 text-purple-300" />
+                                        )}
+                                        <span>{vidPreview.label}</span>
+                                      </div>
+                                      <div className="w-full py-1.5 px-3 rounded-lg bg-blue-600/30 border border-blue-500/50 text-blue-200 text-xs font-semibold flex items-center justify-center gap-2 shadow-xs">
+                                        {resPreview.customEmojiId ? (
+                                          <span className="px-1.5 py-0.5 rounded bg-amber-500/25 border border-amber-400/40 text-amber-200 font-mono text-[10px]">
+                                            ✨ ID:{resPreview.customEmojiId.slice(-4)}
+                                          </span>
+                                        ) : itemType === 'file' ? (
+                                          <FileText className="w-3.5 h-3.5 text-blue-300" />
+                                        ) : (
+                                          <Link2 className="w-3.5 h-3.5 text-blue-300" />
+                                        )}
+                                        <span>{resPreview.label}</span>
+                                      </div>
                                     </>
-                                  ) : (
-                                    <>
-                                      <Link2 className="w-3.5 h-3.5 text-blue-300" />
-                                      <span>{setupResourceButtonText.trim() || '🔗 Open Link'}</span>
-                                    </>
-                                  )}
-                                </div>
+                                  );
+                                })()}
                               </div>
                             </div>
                           </div>

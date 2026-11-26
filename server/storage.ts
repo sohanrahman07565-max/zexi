@@ -5,6 +5,18 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import dotenv from 'dotenv';
 import { hashPassword, verifyPassword } from './auth';
 import type { CustomEmojiRule } from './customEmoji';
+import {
+  InlineButtonConfig,
+  DEFAULT_INLINE_BUTTONS,
+  cloneDefaultInlineButtons,
+  sanitizeInlineButtonRecord,
+  extractCustomEmojiId,
+  hasLeadingOrTrailingEmoji,
+  isValidInlineButtonUrl,
+  sanitizeInlineButtonStyle,
+  sanitizeInlineButtonPlacement
+} from './inlineButtons';
+export type { InlineButtonConfig };
 
 try {
   dotenv.config({ override: true });
@@ -509,6 +521,7 @@ export interface PendingModerationActionRecord {
 export interface AppDatabase {
   items: ItemRecord[];
   templates: Record<string, MessageTemplate>;
+  inlineButtons?: Record<string, InlineButtonConfig>;
   admins: AdminUser[];
   sessions: SessionRecord[];
   trackedMessages: Record<string, TrackedMessage[]>;
@@ -861,6 +874,7 @@ export class SharedStorageService {
     this.db = {
       items: [],
       templates: { ...DEFAULT_TEMPLATES },
+      inlineButtons: cloneDefaultInlineButtons(),
       admins: [],
       sessions: [],
       trackedMessages: {},
@@ -1299,9 +1313,36 @@ export class SharedStorageService {
       };
     }
 
+    const mergedInlineButtons: Record<string, InlineButtonConfig> = cloneDefaultInlineButtons();
+    if (loadedData.inlineButtons && typeof loadedData.inlineButtons === 'object') {
+      for (const [k, rawBtn] of Object.entries(loadedData.inlineButtons)) {
+        const cleanBtn = sanitizeInlineButtonRecord(rawBtn, k);
+        if (cleanBtn) {
+          mergedInlineButtons[cleanBtn.key] = cleanBtn;
+        }
+      }
+    } else {
+      // Backwards-compatibility: carry over customized GET_FILE_BUTTON / GET_LINK_BUTTON template text if no inlineButtons saved yet
+      const customGetFile = cleanedLoadedTemplates.GET_FILE_BUTTON?.content?.trim();
+      if (customGetFile && customGetFile !== DEFAULT_TEMPLATES.GET_FILE_BUTTON.content) {
+        mergedInlineButtons.group_get_file.text = customGetFile;
+        if (hasLeadingOrTrailingEmoji(customGetFile)) {
+          mergedInlineButtons.group_get_file.emoji = '';
+        }
+      }
+      const customGetLink = cleanedLoadedTemplates.GET_LINK_BUTTON?.content?.trim();
+      if (customGetLink && customGetLink !== DEFAULT_TEMPLATES.GET_LINK_BUTTON.content) {
+        mergedInlineButtons.group_get_link.text = customGetLink;
+        if (hasLeadingOrTrailingEmoji(customGetLink)) {
+          mergedInlineButtons.group_get_link.emoji = '';
+        }
+      }
+    }
+
     this.db = {
       items: Array.isArray(loadedData.items) ? loadedData.items : [],
       templates: { ...DEFAULT_TEMPLATES, ...cleanedLoadedTemplates },
+      inlineButtons: mergedInlineButtons,
       admins: Array.isArray(loadedData.admins) ? loadedData.admins : [],
       sessions: Array.from(mergedSessionsMap.values()),
       clonedBots: loadedClonedBots,
@@ -2097,12 +2138,344 @@ export class SharedStorageService {
         this.db.templates[key].buttons = extraFields.buttons;
       }
     }
+    if (key === 'GET_FILE_BUTTON' || key === 'GET_LINK_BUTTON') {
+      if (!this.db.inlineButtons) this.db.inlineButtons = cloneDefaultInlineButtons();
+      const targetBtnKey = key === 'GET_FILE_BUTTON' ? 'group_get_file' : 'group_get_link';
+      const existingBtn = this.db.inlineButtons[targetBtnKey] || { ...DEFAULT_INLINE_BUTTONS[targetBtnKey] };
+      const nextTxt = content || existingBtn.defaultText || existingBtn.text;
+      this.db.inlineButtons[targetBtnKey] = {
+        ...existingBtn,
+        text: nextTxt,
+        ...(hasLeadingOrTrailingEmoji(nextTxt) ? { emoji: '' } : {}),
+        updatedAt: new Date().toISOString()
+      };
+    }
     return await this.persist();
   }
 
   public async resetTemplates(): Promise<boolean> {
     await this.loadLatest(true);
     this.db.templates = { ...DEFAULT_TEMPLATES };
+    return await this.persist();
+  }
+
+  // --- Centralized Inline Buttons ---
+  private ensureInlineButtonsMap(): Record<string, InlineButtonConfig> {
+    const base = cloneDefaultInlineButtons();
+    const current = this.db.inlineButtons || {};
+    for (const [k, raw] of Object.entries(current)) {
+      const clean = sanitizeInlineButtonRecord(raw, k);
+      if (clean) {
+        base[clean.key] = clean;
+      }
+    }
+    this.db.inlineButtons = base;
+    return base;
+  }
+
+  public getInlineButtonsSync(): Record<string, InlineButtonConfig> {
+    return this.ensureInlineButtonsMap();
+  }
+
+  public getInlineButtonFast(key: string): InlineButtonConfig | null {
+    const map = this.ensureInlineButtonsMap();
+    return map[key] || null;
+  }
+
+  public getCustomInlineButtonsForPlacement(placement: 'start_welcome' | 'force_sub'): InlineButtonConfig[] {
+    const map = this.ensureInlineButtonsMap();
+    return Object.values(map).filter(
+      (b) =>
+        b &&
+        b.isCustom === true &&
+        !b.deleted &&
+        b.enabled !== false &&
+        (b.placement === placement || b.placement === 'both')
+    );
+  }
+
+  public findCustomInlineButtonByCallback(callbackData: string): InlineButtonConfig | null {
+    const cleanData = String(callbackData || '').trim();
+    if (!cleanData) return null;
+    const map = this.ensureInlineButtonsMap();
+    for (const btn of Object.values(map)) {
+      if (
+        btn &&
+        btn.isCustom === true &&
+        !btn.deleted &&
+        btn.enabled !== false &&
+        btn.actionType === 'callback' &&
+        btn.callbackData === cleanData
+      ) {
+        return btn;
+      }
+    }
+    return null;
+  }
+
+  public async getInlineButtons(): Promise<Record<string, InlineButtonConfig>> {
+    await this.loadLatest(false);
+    const map = this.ensureInlineButtonsMap();
+    const out: Record<string, InlineButtonConfig> = {};
+    for (const [k, v] of Object.entries(map)) {
+      out[k] = { ...v };
+    }
+    return out;
+  }
+
+  public async getInlineButton(key: string): Promise<InlineButtonConfig | null> {
+    await this.loadLatest(false);
+    const map = this.ensureInlineButtonsMap();
+    return map[key] ? { ...map[key] } : null;
+  }
+
+  public async saveInlineButton(
+    key: string,
+    patch: Partial<InlineButtonConfig>
+  ): Promise<InlineButtonConfig> {
+    await this.loadLatest(true);
+    const map = this.ensureInlineButtonsMap();
+    const def = DEFAULT_INLINE_BUTTONS[key];
+    const existing = map[key];
+    if (!existing && !def) {
+      throw new Error('Inline button not found');
+    }
+    const base = existing || { ...def };
+    const isBuiltIn = Boolean(def);
+
+    const nextName = patch.name !== undefined ? String(patch.name).trim().slice(0, 80) : base.name;
+    const nextText = patch.text !== undefined ? String(patch.text).trim().slice(0, 100) : base.text;
+    let nextEmoji = patch.emoji !== undefined ? String(patch.emoji).trim().slice(0, 16) : (base.emoji || '');
+    if (
+      patch.text !== undefined &&
+      hasLeadingOrTrailingEmoji(nextText) &&
+      (patch.emoji === undefined || nextEmoji === base.emoji)
+    ) {
+      // Avoid keeping a stale default emoji stacked in front when the admin placed/edited an emoji directly in Button Text
+      if (!nextText.startsWith(nextEmoji) && !nextText.endsWith(nextEmoji)) {
+        nextEmoji = '';
+      }
+    }
+    const nextCustomEmojiId = patch.customEmojiId !== undefined
+      ? extractCustomEmojiId(patch.customEmojiId)
+      : (base.customEmojiId || '');
+
+    if (patch.customEmojiId !== undefined && String(patch.customEmojiId).trim() !== '' && !nextCustomEmojiId) {
+      throw new Error('Custom Emoji ID must be a valid Telegram numeric ID (5-30 digits)');
+    }
+
+    const nextActionType = isBuiltIn
+      ? def.actionType
+      : (patch.actionType === 'callback' ? 'callback' : (patch.actionType === 'url' ? 'url' : base.actionType));
+
+    let nextUrl = base.url || '';
+    let nextCallbackData = base.callbackData || '';
+    if (!isBuiltIn) {
+      if (nextActionType === 'url') {
+        const candidateUrl = patch.url !== undefined ? String(patch.url).trim() : (base.url || '');
+        if (!isValidInlineButtonUrl(candidateUrl)) {
+          throw new Error('Button URL must start with https://, http://, or tg://');
+        }
+        nextUrl = candidateUrl.slice(0, 500);
+        nextCallbackData = '';
+      } else {
+        const candidateCb = patch.callbackData !== undefined ? String(patch.callbackData).trim() : (base.callbackData || '');
+        if (!candidateCb || Buffer.byteLength(candidateCb, 'utf8') > 64) {
+          throw new Error('Callback Data is required and must be at most 64 bytes');
+        }
+        nextCallbackData = candidateCb;
+        nextUrl = '';
+      }
+    }
+
+    const nextDeleted = isBuiltIn
+      ? (patch.deleted !== undefined ? Boolean(patch.deleted) : Boolean(base.deleted))
+      : false;
+    const nextEnabled = nextDeleted
+      ? false
+      : (patch.enabled !== undefined ? Boolean(patch.enabled) : base.enabled !== false);
+
+    const updatedRaw = {
+      ...base,
+      key,
+      name: nextName || base.name,
+      text: nextText || base.text,
+      emoji: nextEmoji,
+      customEmojiId: nextCustomEmojiId,
+      actionType: nextActionType,
+      url: nextUrl,
+      callbackData: nextCallbackData,
+      ...( !isBuiltIn && patch.callbackResponse !== undefined
+        ? { callbackResponse: String(patch.callbackResponse).trim().slice(0, 190) }
+        : (!isBuiltIn && base.callbackResponse !== undefined ? { callbackResponse: base.callbackResponse } : {})),
+      style: sanitizeInlineButtonStyle(patch.style !== undefined ? patch.style : base.style, def?.style || 'primary'),
+      enabled: nextEnabled,
+      deleted: nextDeleted,
+      ...(!isBuiltIn
+        ? {
+            placement: sanitizeInlineButtonPlacement(
+              patch.placement !== undefined ? patch.placement : base.placement,
+              'start_welcome'
+            )
+          }
+        : {}),
+      updatedAt: new Date().toISOString()
+    };
+
+    const sanitized = sanitizeInlineButtonRecord(updatedRaw, key);
+    if (!sanitized) {
+      throw new Error('Invalid inline button configuration');
+    }
+    map[key] = sanitized;
+    this.db.inlineButtons = map;
+
+    // Keep legacy GET_FILE_BUTTON / GET_LINK_BUTTON templates in sync for backwards compatibility
+    if (key === 'group_get_file' && this.db.templates?.GET_FILE_BUTTON) {
+      this.db.templates.GET_FILE_BUTTON.content = sanitized.text;
+    } else if (key === 'group_get_link' && this.db.templates?.GET_LINK_BUTTON) {
+      this.db.templates.GET_LINK_BUTTON.content = sanitized.text;
+    }
+
+    await this.persist();
+    return { ...sanitized };
+  }
+
+  public async addCustomInlineButton(input: Partial<InlineButtonConfig>): Promise<InlineButtonConfig> {
+    await this.loadLatest(true);
+    const map = this.ensureInlineButtonsMap();
+
+    const name = String(input.name || '').trim().slice(0, 80);
+    const text = String(input.text || '').trim().slice(0, 100);
+    if (!name || !text) {
+      throw new Error('Button Name and Button Text are required');
+    }
+
+    const emoji = String(input.emoji || '').trim().slice(0, 16);
+    const rawCustomId = String(input.customEmojiId || '').trim();
+    const customEmojiId = extractCustomEmojiId(rawCustomId);
+    if (rawCustomId && !customEmojiId) {
+      throw new Error('Custom Emoji ID must be a valid Telegram numeric ID (5-30 digits)');
+    }
+
+    const actionType = input.actionType === 'callback' ? 'callback' : 'url';
+    let url = '';
+    let callbackData = '';
+    if (actionType === 'url') {
+      url = String(input.url || '').trim();
+      if (!isValidInlineButtonUrl(url)) {
+        throw new Error('Button URL must start with https://, http://, or tg://');
+      }
+      url = url.slice(0, 500);
+    } else {
+      callbackData = String(input.callbackData || '').trim();
+      if (!callbackData) {
+        callbackData = `cbtn_${crypto.randomBytes(4).toString('hex')}`;
+      }
+      if (Buffer.byteLength(callbackData, 'utf8') > 64) {
+        throw new Error('Callback Data must be at most 64 bytes');
+      }
+    }
+
+    const key = `custom_${Date.now().toString(36)}_${crypto.randomBytes(3).toString('hex')}`;
+    const created: InlineButtonConfig = {
+      key,
+      name,
+      text,
+      emoji,
+      customEmojiId,
+      actionType,
+      url,
+      callbackData,
+      ...(actionType === 'callback'
+        ? { callbackResponse: String(input.callbackResponse || '').trim().slice(0, 190) }
+        : {}),
+      actionLocked: false,
+      actionDescription: actionType === 'url'
+        ? `Opens custom URL (${url.slice(0, 60)})`
+        : `Triggers custom callback (${callbackData})`,
+      category: 'Custom Buttons',
+      style: sanitizeInlineButtonStyle(input.style, 'primary'),
+      enabled: input.enabled !== undefined ? Boolean(input.enabled) : true,
+      isCustom: true,
+      deleted: false,
+      placement: sanitizeInlineButtonPlacement(input.placement, 'start_welcome'),
+      updatedAt: new Date().toISOString()
+    };
+
+    const sanitized = sanitizeInlineButtonRecord(created, key);
+    if (!sanitized) {
+      throw new Error('Invalid custom inline button');
+    }
+    map[key] = sanitized;
+    this.db.inlineButtons = map;
+    await this.persist();
+    return { ...sanitized };
+  }
+
+  public async deleteInlineButton(
+    key: string
+  ): Promise<{ deleted: boolean; mode: 'removed' | 'hidden'; button?: InlineButtonConfig }> {
+    await this.loadLatest(true);
+    const map = this.ensureInlineButtonsMap();
+    const existing = map[key];
+    if (!existing) {
+      return { deleted: false, mode: 'removed' };
+    }
+    if (existing.isCustom) {
+      delete map[key];
+      this.db.inlineButtons = map;
+      await this.persist();
+      return { deleted: true, mode: 'removed' };
+    }
+    // Built-in button: soft-delete (hide/disable) so it can be Restored anytime without losing routing
+    map[key] = {
+      ...existing,
+      enabled: false,
+      deleted: true,
+      updatedAt: new Date().toISOString()
+    };
+    this.db.inlineButtons = map;
+    await this.persist();
+    return { deleted: true, mode: 'hidden', button: { ...map[key] } };
+  }
+
+  public async restoreInlineButton(key: string): Promise<InlineButtonConfig | null> {
+    await this.loadLatest(true);
+    const map = this.ensureInlineButtonsMap();
+    const existing = map[key];
+    if (!existing) return null;
+    map[key] = {
+      ...existing,
+      deleted: false,
+      enabled: true,
+      updatedAt: new Date().toISOString()
+    };
+    this.db.inlineButtons = map;
+    await this.persist();
+    return { ...map[key] };
+  }
+
+  public async resetInlineButton(key: string): Promise<InlineButtonConfig | null> {
+    await this.loadLatest(true);
+    const def = DEFAULT_INLINE_BUTTONS[key];
+    if (!def) return null;
+    const map = this.ensureInlineButtonsMap();
+    map[key] = { ...def, updatedAt: new Date().toISOString() };
+    this.db.inlineButtons = map;
+
+    if (key === 'group_get_file' && this.db.templates?.GET_FILE_BUTTON) {
+      this.db.templates.GET_FILE_BUTTON.content = DEFAULT_TEMPLATES.GET_FILE_BUTTON.content;
+    } else if (key === 'group_get_link' && this.db.templates?.GET_LINK_BUTTON) {
+      this.db.templates.GET_LINK_BUTTON.content = DEFAULT_TEMPLATES.GET_LINK_BUTTON.content;
+    }
+
+    await this.persist();
+    return { ...map[key] };
+  }
+
+  public async resetAllInlineButtons(): Promise<boolean> {
+    await this.loadLatest(true);
+    this.db.inlineButtons = cloneDefaultInlineButtons();
     return await this.persist();
   }
 

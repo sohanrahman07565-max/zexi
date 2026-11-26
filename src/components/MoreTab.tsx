@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { 
-  AdminUser, MessageTemplate, BotSettings, ModerationDurationPreset, UserReportRecord, FraudKeywordRule, JoinRequestRecord, AllowedChatEntry, KeyPoolRecord, KeyPoolMode, KeyGeneratorCharType, GuestAccountRecord, api 
+  AdminUser, MessageTemplate, BotSettings, ModerationDurationPreset, UserReportRecord, FraudKeywordRule, JoinRequestRecord, AllowedChatEntry, KeyPoolRecord, KeyPoolMode, KeyGeneratorCharType, GuestAccountRecord, InlineButtonConfig, InlineButtonActionType, InlineButtonStyle, InlineButtonPlacement, api 
 } from '../lib/api';
 import { toast } from '../lib/toast';
 import { 
@@ -9,7 +9,8 @@ import {
   ChevronRight, Edit2, Check, RefreshCw, Plus, Minus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi,
   Megaphone, Image as ImageIcon, Video as VideoIcon, Music, Mic, Pin, Paperclip, Loader2, Radio,
   Flag, Ban, CheckCircle, ShieldAlert, ExternalLink, ShieldCheck,
-  Copy, Upload, Bot, VolumeX, Play, Square, RotateCcw, Key, Link2, UserPlus
+  Copy, Upload, Bot, VolumeX, Play, Square, RotateCcw, Key, Link2, UserPlus,
+  MousePointerClick, Lock, Search
 } from 'lucide-react';
 import { EmojiStore } from './EmojiStore';
 
@@ -40,7 +41,7 @@ interface MoreTabProps {
   onOpenBotSwitcher?: () => void;
 }
 
-type MoreSubView = 'menu' | 'templates' | 'admins' | 'settings' | 'sub_force' | 'group_management' | 'webhook' | 'broadcast' | 'emoji' | 'reports' | 'fraud' | 'whitelist' | 'key_generator' | 'guest_accounts';
+type MoreSubView = 'menu' | 'templates' | 'inline_buttons' | 'admins' | 'settings' | 'sub_force' | 'group_management' | 'webhook' | 'broadcast' | 'emoji' | 'reports' | 'fraud' | 'whitelist' | 'key_generator' | 'guest_accounts';
 
 export const MoreTab: React.FC<MoreTabProps> = ({
   currentUser,
@@ -268,6 +269,29 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [templateMediaType, setTemplateMediaType] = useState<'none' | 'photo' | 'video'>('none');
   const [templateMediaUrl, setTemplateMediaUrl] = useState('');
   const [templateSaving, setTemplateSaving] = useState(false);
+
+  // Inline Button Manager state
+  const [inlineButtonsMap, setInlineButtonsMap] = useState<Record<string, InlineButtonConfig>>({});
+  const [inlineButtonsLoading, setInlineButtonsLoading] = useState(false);
+  const [inlineButtonSearch, setInlineButtonSearch] = useState('');
+  const [inlineButtonCategory, setInlineButtonCategory] = useState<string>('all');
+  const [inlineButtonStatusFilter, setInlineButtonStatusFilter] = useState<'all' | 'enabled' | 'disabled' | 'deleted' | 'custom'>('all');
+  const [inlineModalOpen, setInlineModalOpen] = useState(false);
+  const [editingInlineButton, setEditingInlineButton] = useState<InlineButtonConfig | null>(null);
+  const [btnName, setBtnName] = useState('');
+  const [btnText, setBtnText] = useState('');
+  const [btnEmoji, setBtnEmoji] = useState('');
+  const [btnCustomEmojiId, setBtnCustomEmojiId] = useState('');
+  const [btnActionType, setBtnActionType] = useState<InlineButtonActionType>('url');
+  const [btnUrl, setBtnUrl] = useState('');
+  const [btnCallbackData, setBtnCallbackData] = useState('');
+  const [btnCallbackResponse, setBtnCallbackResponse] = useState('');
+  const [btnStyle, setBtnStyle] = useState<InlineButtonStyle>('primary');
+  const [btnPlacement, setBtnPlacement] = useState<InlineButtonPlacement>('start_welcome');
+  const [btnEnabled, setBtnEnabled] = useState(true);
+  const [btnSaving, setBtnSaving] = useState(false);
+  const [btnActionBusyKey, setBtnActionBusyKey] = useState<string | null>(null);
+  const [resettingAllButtons, setResettingAllButtons] = useState(false);
 
   // Auto-focus, scroll to top, and cursor-position tracking refs for seamless editing
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -631,6 +655,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       loadKeyPools();
     } else if (subView === 'guest_accounts') {
       loadGuestAccounts();
+    } else if (subView === 'inline_buttons') {
+      loadInlineButtons();
     }
     // Refresh user count for broadcast
     api.getUsers().then(users => {
@@ -781,12 +807,13 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     );
   };
 
-  // Initial load for reports, fraud rules, key pools, and guest accounts
+  // Initial load for reports, fraud rules, key pools, guest accounts, and inline buttons
   useEffect(() => {
     loadReports();
     loadFraudRules();
     loadKeyPools();
     loadGuestAccounts();
+    loadInlineButtons(true);
   }, []);
 
   useEffect(() => {
@@ -798,6 +825,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       loadKeyPools();
     } else if (subView === 'guest_accounts') {
       loadGuestAccounts(true);
+    } else if (subView === 'inline_buttons') {
+      loadInlineButtons(true);
     }
   }, [subView]);
 
@@ -1226,6 +1255,726 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     } finally {
       setTemplateSaving(false);
     }
+  };
+
+  // Inline Button Manager helpers & handlers
+  const normalizeCustomEmojiInput = (raw: string): string => {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed) return '';
+    const tagMatch = trimmed.match(/emoji-id=["']?(\d{5,30})["']?/i);
+    if (tagMatch?.[1]) return tagMatch[1];
+    return trimmed;
+  };
+
+  const extractTgEmojiFromButtonText = (
+    raw: string
+  ): { customEmojiId: string; strippedText: string } | null => {
+    const str = String(raw || '');
+    if (!str) return null;
+    const pairMatch = str.match(
+      /<tg-emoji\b[^>]*\bemoji-id\s*=\s*(?:["']|&quot;|&#39;)?(\d{5,30})(?:["']|&quot;|&#39;)?[^>]*>([\s\S]*?)<\/tg-emoji>/i
+    );
+    const singleMatch = pairMatch
+      ? null
+      : str.match(
+          /<tg-emoji\b[^>]*\bemoji-id\s*=\s*(?:["']|&quot;|&#39;)?(\d{5,30})(?:["']|&quot;|&#39;)?[^>]*>/i
+        );
+    const match = pairMatch || singleMatch;
+    if (!match?.[1]) return null;
+
+    const stripAllTags = (input: string) =>
+      input
+        .replace(/<tg-emoji\b[^>]*>([\s\S]*?)<\/tg-emoji>/gi, '$1')
+        .replace(/<\/?tg-emoji\b[^>]*>/gi, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+
+    const withoutMatched = stripAllTags(str.replace(match[0], ''));
+    const fallback = stripAllTags(str);
+    return {
+      customEmojiId: match[1].trim(),
+      strippedText: withoutMatched || fallback
+    };
+  };
+
+  const hasLeadingOrTrailingEmoji = (raw: string): boolean => {
+    const trimmed = String(raw || '').trim();
+    if (!trimmed) return false;
+    const leadingRe =
+      /^(?:[\u2600-\u27BF]|\p{Extended_Pictographic})(?:\uFE0F|\uFE0E|\u200D(?:[\u2600-\u27BF]|\p{Extended_Pictographic}))*/u;
+    const trailingRe =
+      /(?:[\u2600-\u27BF]|\p{Extended_Pictographic})(?:\uFE0F|\uFE0E|\u200D(?:[\u2600-\u27BF]|\p{Extended_Pictographic}))*$/u;
+    return leadingRe.test(trimmed) || trailingRe.test(trimmed);
+  };
+
+  const loadInlineButtons = async (silent = false) => {
+    if (!silent) setInlineButtonsLoading(true);
+    try {
+      const res = await api.getInlineButtons();
+      setInlineButtonsMap(res?.buttons && typeof res.buttons === 'object' ? res.buttons : {});
+    } catch (err: any) {
+      if (!silent) toast.error(err?.message || 'Failed to load inline buttons');
+    } finally {
+      if (!silent) setInlineButtonsLoading(false);
+    }
+  };
+
+  const openEditInlineButtonModal = (btn: InlineButtonConfig) => {
+    setEditingInlineButton(btn);
+    setBtnName(btn.name || '');
+    setBtnText(btn.text || '');
+    setBtnEmoji(btn.emoji || '');
+    setBtnCustomEmojiId(btn.customEmojiId || '');
+    setBtnActionType(btn.actionType === 'callback' ? 'callback' : 'url');
+    setBtnUrl(btn.url || '');
+    setBtnCallbackData(btn.callbackData || '');
+    setBtnCallbackResponse(btn.callbackResponse || '');
+    setBtnStyle((btn.style as InlineButtonStyle) || 'primary');
+    setBtnPlacement((btn.placement as InlineButtonPlacement) || 'start_welcome');
+    setBtnEnabled(btn.enabled !== false && !btn.deleted);
+    setInlineModalOpen(true);
+  };
+
+  const openAddInlineButtonModal = () => {
+    setEditingInlineButton(null);
+    setBtnName('');
+    setBtnText('');
+    setBtnEmoji('✨');
+    setBtnCustomEmojiId('');
+    setBtnActionType('url');
+    setBtnUrl('https://');
+    setBtnCallbackData('');
+    setBtnCallbackResponse('');
+    setBtnStyle('primary');
+    setBtnPlacement('start_welcome');
+    setBtnEnabled(true);
+    setInlineModalOpen(true);
+  };
+
+  const handleSaveInlineButton = async () => {
+    const cleanName = btnName.trim();
+    const rawCleanText = btnText.trim();
+    if (!cleanName) {
+      toast.error('Button Name is required');
+      return;
+    }
+    if (!rawCleanText) {
+      toast.error('Button Text is required');
+      return;
+    }
+
+    const explicitFromText = extractTgEmojiFromButtonText(rawCleanText);
+    const cleanText = explicitFromText ? explicitFromText.strippedText : rawCleanText;
+    if (!cleanText) {
+      toast.error('Button Text needs visible text alongside the custom emoji');
+      return;
+    }
+
+    const cleanCustomEmojiId = explicitFromText
+      ? explicitFromText.customEmojiId
+      : normalizeCustomEmojiInput(btnCustomEmojiId);
+    if (cleanCustomEmojiId && !/^\d{5,30}$/.test(cleanCustomEmojiId)) {
+      toast.error('Custom Emoji ID must be a 5–30 digit Telegram Custom Emoji ID (or paste <tg-emoji emoji-id="...">)');
+      return;
+    }
+
+    const isActionEditable = !editingInlineButton || !editingInlineButton.actionLocked;
+    if (isActionEditable) {
+      if (btnActionType === 'url') {
+        const cleanUrl = btnUrl.trim();
+        if (!/^https?:\/\/[^\s/$.?#].[^\s]*$/i.test(cleanUrl) && !/^tg:\/\/[^\s]+$/i.test(cleanUrl)) {
+          toast.error('Please enter a valid URL starting with https://, http://, or tg://');
+          return;
+        }
+      } else {
+        const cleanCb = btnCallbackData.trim();
+        if (!cleanCb) {
+          toast.error('Callback Data is required for callback buttons');
+          return;
+        }
+        if (new TextEncoder().encode(cleanCb).length > 64) {
+          toast.error('Callback Data cannot exceed 64 bytes');
+          return;
+        }
+      }
+    }
+
+    setBtnSaving(true);
+    try {
+      if (editingInlineButton) {
+        let finalEmoji = explicitFromText ? '' : btnEmoji.trim();
+        if (
+          finalEmoji &&
+          hasLeadingOrTrailingEmoji(cleanText) &&
+          !cleanText.startsWith(finalEmoji) &&
+          !cleanText.endsWith(finalEmoji)
+        ) {
+          finalEmoji = '';
+        }
+        const payload: Partial<InlineButtonConfig> = {
+          name: cleanName,
+          text: cleanText,
+          emoji: finalEmoji,
+          customEmojiId: cleanCustomEmojiId,
+          style: btnStyle,
+          enabled: btnEnabled
+        };
+        if (!editingInlineButton.actionLocked) {
+          payload.actionType = btnActionType;
+          payload.url = btnActionType === 'url' ? btnUrl.trim() : '';
+          payload.callbackData = btnActionType === 'callback' ? btnCallbackData.trim() : '';
+          payload.callbackResponse = btnActionType === 'callback' ? btnCallbackResponse.trim() : '';
+          payload.placement = btnPlacement;
+        }
+        const res = await api.updateInlineButton(editingInlineButton.key, payload);
+        if (res.buttons) {
+          setInlineButtonsMap(res.buttons);
+        } else if (res.button) {
+          setInlineButtonsMap((prev) => ({ ...prev, [res.button.key]: res.button }));
+        }
+        if (editingInlineButton.key === 'group_get_file' || editingInlineButton.key === 'group_get_link') {
+          onRefreshTemplates();
+        }
+        toast.success('Inline button saved!');
+      } else {
+        const res = await api.createInlineButton({
+          name: cleanName,
+          text: cleanText,
+          emoji: explicitFromText ? '' : btnEmoji.trim(),
+          customEmojiId: cleanCustomEmojiId,
+          actionType: btnActionType,
+          url: btnActionType === 'url' ? btnUrl.trim() : '',
+          callbackData: btnActionType === 'callback' ? btnCallbackData.trim() : '',
+          callbackResponse: btnActionType === 'callback' ? btnCallbackResponse.trim() : '',
+          style: btnStyle,
+          placement: btnPlacement,
+          enabled: btnEnabled
+        });
+        if (res.buttons) {
+          setInlineButtonsMap(res.buttons);
+        } else if (res.button) {
+          setInlineButtonsMap((prev) => ({ ...prev, [res.button.key]: res.button }));
+        }
+        toast.success('New inline button added!');
+      }
+      setInlineModalOpen(false);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to save inline button');
+    } finally {
+      setBtnSaving(false);
+    }
+  };
+
+  const handleToggleInlineButtonEnabled = async (btn: InlineButtonConfig) => {
+    const nextEnabled = !(btn.enabled !== false && !btn.deleted);
+    setBtnActionBusyKey(btn.key);
+    try {
+      const res = await api.updateInlineButton(btn.key, {
+        enabled: nextEnabled,
+        ...(btn.deleted && nextEnabled ? { deleted: false } : {})
+      });
+      if (res.buttons) {
+        setInlineButtonsMap(res.buttons);
+      } else if (res.button) {
+        setInlineButtonsMap((prev) => ({ ...prev, [res.button.key]: res.button }));
+      }
+      if (btn.key === 'group_get_file' || btn.key === 'group_get_link') {
+        onRefreshTemplates();
+      }
+      toast.success(nextEnabled ? `"${btn.name}" enabled` : `"${btn.name}" disabled`);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to toggle button status');
+    } finally {
+      setBtnActionBusyKey(null);
+    }
+  };
+
+  const handleDeleteInlineButton = async (btn: InlineButtonConfig) => {
+    setBtnActionBusyKey(btn.key);
+    try {
+      const res = await api.deleteInlineButton(btn.key);
+      if (res.buttons) {
+        setInlineButtonsMap(res.buttons);
+      }
+      if (btn.key === 'group_get_file' || btn.key === 'group_get_link') {
+        onRefreshTemplates();
+      }
+      toast.success(btn.isCustom ? `Deleted "${btn.name}"` : `Hidden "${btn.name}" (you can restore it anytime)`);
+      if (editingInlineButton?.key === btn.key) {
+        setInlineModalOpen(false);
+      }
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to delete button');
+    } finally {
+      setBtnActionBusyKey(null);
+    }
+  };
+
+  const handleRestoreInlineButton = async (btn: InlineButtonConfig) => {
+    setBtnActionBusyKey(btn.key);
+    try {
+      const res = await api.restoreInlineButton(btn.key);
+      if (res.buttons) {
+        setInlineButtonsMap(res.buttons);
+      } else if (res.button) {
+        setInlineButtonsMap((prev) => ({ ...prev, [res.button.key]: res.button }));
+      }
+      if (btn.key === 'group_get_file' || btn.key === 'group_get_link') {
+        onRefreshTemplates();
+      }
+      toast.success(`Restored "${btn.name}"`);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to restore button');
+    } finally {
+      setBtnActionBusyKey(null);
+    }
+  };
+
+  const handleResetInlineButton = async (btn: InlineButtonConfig, syncModal = false) => {
+    setBtnActionBusyKey(btn.key);
+    try {
+      const res = await api.resetInlineButton(btn.key);
+      if (res.buttons) {
+        setInlineButtonsMap(res.buttons);
+      } else if (res.button) {
+        setInlineButtonsMap((prev) => ({ ...prev, [res.button.key]: res.button }));
+      }
+      if (syncModal && res.button) {
+        setEditingInlineButton(res.button);
+        setBtnName(res.button.name || '');
+        setBtnText(res.button.text || '');
+        setBtnEmoji(res.button.emoji || '');
+        setBtnCustomEmojiId(res.button.customEmojiId || '');
+        setBtnStyle((res.button.style as InlineButtonStyle) || 'primary');
+        setBtnEnabled(res.button.enabled !== false);
+      }
+      if (btn.key === 'group_get_file' || btn.key === 'group_get_link') {
+        onRefreshTemplates();
+      }
+      toast.success(`Reset "${btn.defaultName || btn.name}" to default`);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to reset button');
+    } finally {
+      setBtnActionBusyKey(null);
+    }
+  };
+
+  const handleResetAllInlineButtons = async () => {
+    setResettingAllButtons(true);
+    try {
+      const res = await api.resetAllInlineButtons();
+      if (res.buttons) {
+        setInlineButtonsMap(res.buttons);
+      }
+      onRefreshTemplates();
+      toast.success('All built-in inline buttons restored to defaults!');
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to reset inline buttons');
+    } finally {
+      setResettingAllButtons(false);
+    }
+  };
+
+  const renderInlineButtonPreviewPill = (
+    text: string,
+    emoji?: string,
+    customEmojiId?: string,
+    style: InlineButtonStyle = 'primary'
+  ) => {
+    const styleClasses: Record<InlineButtonStyle, string> = {
+      primary: 'bg-sky-500/20 border-sky-400/45 text-sky-100',
+      success: 'bg-emerald-500/20 border-emerald-400/45 text-emerald-100',
+      danger: 'bg-rose-500/20 border-rose-400/45 text-rose-100',
+      secondary: 'bg-zinc-800/90 border-zinc-600/60 text-zinc-100'
+    };
+    const explicitFromText = extractTgEmojiFromButtonText(text);
+    const cleanId = explicitFromText?.customEmojiId || normalizeCustomEmojiInput(customEmojiId || '');
+    const trimmedText = (explicitFromText ? explicitFromText.strippedText : text || '').trim();
+    const trimmedEmoji = (emoji || '').trim();
+    const shouldPrependEmoji =
+      !cleanId &&
+      Boolean(trimmedEmoji) &&
+      !trimmedText.startsWith(trimmedEmoji) &&
+      !trimmedText.endsWith(trimmedEmoji) &&
+      !hasLeadingOrTrailingEmoji(trimmedText);
+
+    return (
+      <div
+        className={`inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl border text-xs font-semibold shadow-sm max-w-full ${styleClasses[style] || styleClasses.primary}`}
+      >
+        {cleanId ? (
+          <span
+            title={`Custom Emoji ID: ${cleanId}`}
+            className="px-1.5 py-0.5 rounded-md bg-amber-500/25 border border-amber-400/40 text-amber-200 font-mono text-[10px] shrink-0"
+          >
+            ✨ ID:{cleanId.slice(-4)}
+          </span>
+        ) : shouldPrependEmoji ? (
+          <span className="shrink-0 leading-none">{trimmedEmoji}</span>
+        ) : null}
+        <span className="truncate">{trimmedText || 'Button Text'}</span>
+      </div>
+    );
+  };
+
+  const renderInlineButtonModal = () => {
+    if (!inlineModalOpen) return null;
+    const isEditing = Boolean(editingInlineButton);
+    const isActionLocked = Boolean(editingInlineButton?.actionLocked);
+    const cleanCustomId = normalizeCustomEmojiInput(btnCustomEmojiId);
+    const quickEmojis = ['📁', '🔗', '💬', '🎬', '🔄', '❌', '⬅️', '➡️', '🌐', '📱', '✅', '📢', '👥', '🛡️', '👑', '📋', '💎', '⚡'];
+
+    return createPortal(
+      <div
+        onClick={() => !btnSaving && setInlineModalOpen(false)}
+        className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-5 pb-[max(0.75rem,env(safe-area-inset-bottom))] bg-black/85 backdrop-blur-md overflow-y-auto overscroll-contain animate-in fade-in duration-200"
+      >
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="glass-panel w-full max-w-lg md:max-w-2xl max-h-[90dvh] overflow-y-auto overscroll-contain rounded-3xl p-4 sm:p-5 border border-sky-500/35 shadow-[0_0_50px_-10px_rgba(56,189,248,0.28),0_25px_50px_-12px_rgba(0,0,0,0.95)] space-y-4 my-auto relative animate-in zoom-in-95 duration-200"
+        >
+          <div className="flex items-center justify-between gap-2 pb-2 border-b border-zinc-800">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <div className="w-9 h-9 rounded-xl bg-sky-500/20 text-sky-300 border border-sky-500/30 flex items-center justify-center shrink-0">
+                <MousePointerClick className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <h4 className="font-bold text-white text-sm truncate">
+                  {isEditing ? `Edit Button: ${editingInlineButton?.name}` : 'Add New Inline Button'}
+                </h4>
+                <p className="text-[11px] text-zinc-400 truncate">
+                  {isEditing
+                    ? editingInlineButton?.actionDescription || 'Customize button name, label, and emoji'
+                    : 'Create a custom Telegram inline button for bot menus'}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => !btnSaving && setInlineModalOpen(false)}
+              className="w-8 h-8 rounded-xl bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Live Telegram Button Preview */}
+          <div className="p-3 rounded-2xl bg-[#0e1118] border border-zinc-800 flex flex-col items-center gap-2">
+            <span className="text-[10px] uppercase tracking-wider font-bold text-zinc-500">Live Telegram Button Preview</span>
+            {renderInlineButtonPreviewPill(btnText, btnEmoji, cleanCustomId, btnStyle)}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-semibold text-zinc-300 block mb-1.5">Button Name (Admin Label)</label>
+              <input
+                type="text"
+                value={btnName}
+                onChange={(e) => setBtnName(e.target.value)}
+                placeholder="e.g. Support Channel"
+                className="w-full bg-[#101018] border border-zinc-700/80 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-sky-500"
+              />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-zinc-300 block mb-1.5">Button Text (Shown on Telegram)</label>
+              <input
+                type="text"
+                value={btnText}
+                onChange={(e) => {
+                  const nextVal = e.target.value;
+                  setBtnText(nextVal);
+                  if (
+                    btnEmoji &&
+                    hasLeadingOrTrailingEmoji(nextVal) &&
+                    !nextVal.trim().startsWith(btnEmoji.trim()) &&
+                    !nextVal.trim().endsWith(btnEmoji.trim())
+                  ) {
+                    setBtnEmoji('');
+                  }
+                }}
+                placeholder="e.g. Join Official Channel"
+                className="w-full bg-[#101018] border border-zinc-700/80 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-sky-500"
+              />
+              {editingInlineButton?.defaultText && /\{[^}]+\}/.test(editingInlineButton.defaultText) && (
+                <p className="text-[10px] text-amber-300/90 mt-1 font-mono">
+                  Supports placeholder: {editingInlineButton.defaultText.match(/\{[^}]+\}/g)?.join(', ')}
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* Unicode Emoji & Telegram Premium Custom Emoji ID */}
+          <div className="p-3.5 rounded-2xl bg-[#0f0f18] border border-zinc-800 space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-semibold text-zinc-300">Normal Unicode Emoji</label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={btnEmoji}
+                    onChange={(e) => setBtnEmoji(e.target.value)}
+                    placeholder="Empty (no emoji)"
+                    className="flex-1 min-w-0 bg-zinc-950 border border-zinc-700/80 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-sky-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setBtnEmoji('')}
+                    disabled={!btnEmoji}
+                    title="Remove Normal Unicode Emoji"
+                    className="px-2.5 py-2 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 disabled:opacity-40 disabled:hover:bg-rose-500/15 text-rose-200 border border-rose-500/30 text-[11px] font-semibold flex items-center gap-1 cursor-pointer disabled:cursor-default shrink-0 transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    <span>Clear</span>
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-semibold text-amber-300 flex items-center gap-1">
+                    <Sparkles className="w-3 h-3" />
+                    <span>Premium Custom Emoji ID</span>
+                  </label>
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={btnCustomEmojiId}
+                    onChange={(e) => setBtnCustomEmojiId(normalizeCustomEmojiInput(e.target.value))}
+                    placeholder="5432109876543210987 or <tg-emoji...>"
+                    className="flex-1 min-w-0 bg-zinc-950 border border-zinc-700/80 rounded-xl px-3 py-2 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-amber-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setBtnCustomEmojiId('')}
+                    disabled={!btnCustomEmojiId}
+                    title="Clear Premium Custom Emoji ID"
+                    className="px-2.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-40 text-zinc-200 border border-zinc-700 text-[11px] font-semibold flex items-center gap-1 cursor-pointer disabled:cursor-default shrink-0 transition-colors"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                    <span>Clear</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <span className="text-[10px] text-zinc-400 block">Quick Unicode Emoji Picker (tap to select or remove):</span>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setBtnEmoji('')}
+                  className={`h-7 px-2 rounded-lg text-[10px] font-semibold flex items-center justify-center border transition-all cursor-pointer ${
+                    !btnEmoji
+                      ? 'bg-rose-500/20 border-rose-400/60 text-rose-200'
+                      : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-600'
+                  }`}
+                >
+                  🚫 None
+                </button>
+                {quickEmojis.map((em) => (
+                  <button
+                    key={em}
+                    type="button"
+                    onClick={() => setBtnEmoji(em)}
+                    className={`w-7 h-7 rounded-lg text-sm flex items-center justify-center border transition-all cursor-pointer ${
+                      btnEmoji === em
+                        ? 'bg-sky-500/25 border-sky-400 text-white scale-105'
+                        : 'bg-zinc-900 border-zinc-800 hover:border-zinc-600'
+                    }`}
+                  >
+                    {em}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <p className="text-[10px] text-zinc-400 leading-relaxed">
+              When a valid Telegram Premium Custom Emoji ID is set, the bot attaches it via Telegram Bot API <code className="text-amber-300">icon_custom_emoji_id</code>. Use <code className="text-sky-300">/emojiid</code> in the bot to inspect any custom emoji ID.
+            </p>
+          </div>
+
+          {/* Button Action (URL or Callback Data) */}
+          <div className="p-3.5 rounded-2xl bg-[#0f0f18] border border-zinc-800 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-semibold text-white flex items-center gap-1.5">
+                {isActionLocked && <Lock className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                <span>Button Action ({btnActionType === 'url' ? 'URL' : 'Callback Data'})</span>
+              </label>
+              {isActionLocked && (
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-semibold">
+                  Functionality Preserved
+                </span>
+              )}
+            </div>
+
+            {isActionLocked ? (
+              <div className="space-y-2">
+                <div className="p-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-zinc-300 break-all">
+                  {editingInlineButton?.actionType === 'url'
+                    ? `URL → ${editingInlineButton?.url || editingInlineButton?.defaultUrl}`
+                    : `Callback → ${editingInlineButton?.callbackData || editingInlineButton?.defaultCallbackData}`}
+                </div>
+                <p className="text-[11px] text-zinc-400">
+                  Built-in button actions are protected so changing the Name, Text, or Emoji updates the appearance everywhere without altering what the button does.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setBtnActionType('url')}
+                    className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                      btnActionType === 'url'
+                        ? 'bg-sky-500/20 text-sky-200 border-sky-400/60'
+                        : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-white'
+                    }`}
+                  >
+                    🌐 Open URL Link
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBtnActionType('callback')}
+                    className={`py-2 px-3 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                      btnActionType === 'callback'
+                        ? 'bg-sky-500/20 text-sky-200 border-sky-400/60'
+                        : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-white'
+                    }`}
+                  >
+                    ⚡ Callback Action
+                  </button>
+                </div>
+
+                {btnActionType === 'url' ? (
+                  <div>
+                    <label className="text-[11px] font-semibold text-zinc-300 block mb-1">Target URL</label>
+                    <input
+                      type="text"
+                      value={btnUrl}
+                      onChange={(e) => setBtnUrl(e.target.value)}
+                      placeholder="https://t.me/yourchannel"
+                      className="w-full bg-zinc-950 border border-zinc-700/80 rounded-xl px-3 py-2 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-sky-500"
+                    />
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    <div>
+                      <label className="text-[11px] font-semibold text-zinc-300 block mb-1">Callback Data (max 64 bytes)</label>
+                      <input
+                        type="text"
+                        value={btnCallbackData}
+                        onChange={(e) => setBtnCallbackData(e.target.value)}
+                        placeholder="e.g. custom_help_info"
+                        className="w-full bg-zinc-950 border border-zinc-700/80 rounded-xl px-3 py-2 text-xs text-white font-mono placeholder:text-zinc-600 focus:outline-none focus:border-sky-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] font-semibold text-zinc-300 block mb-1">Popup Response Message (Optional)</label>
+                      <input
+                        type="text"
+                        value={btnCallbackResponse}
+                        onChange={(e) => setBtnCallbackResponse(e.target.value)}
+                        placeholder="Text shown when user taps this button"
+                        className="w-full bg-zinc-950 border border-zinc-700/80 rounded-xl px-3 py-2 text-xs text-white placeholder:text-zinc-600 focus:outline-none focus:border-sky-500"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <label className="text-[11px] font-semibold text-zinc-300 block mb-1">Display Placement in Bot</label>
+                  <select
+                    value={btnPlacement}
+                    onChange={(e) => setBtnPlacement(e.target.value as InlineButtonPlacement)}
+                    className="w-full bg-zinc-950 border border-zinc-700/80 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-sky-500"
+                  >
+                    <option value="start_welcome">/start Welcome Menu</option>
+                    <option value="force_sub">Force Subscribe Prompt</option>
+                    <option value="both">Both (/start &amp; Force Sub)</option>
+                    <option value="none">Saved Only (Do not auto-attach)</option>
+                  </select>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Style & Enable/Disable */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+            <div>
+              <label className="text-xs font-semibold text-zinc-300 block mb-1.5">Button Color Style</label>
+              <div className="grid grid-cols-4 gap-1.5">
+                {(['primary', 'success', 'danger', 'secondary'] as const).map((st) => (
+                  <button
+                    key={st}
+                    type="button"
+                    onClick={() => setBtnStyle(st)}
+                    className={`py-1.5 px-1 rounded-xl text-[11px] font-semibold capitalize border transition-all cursor-pointer ${
+                      btnStyle === st
+                        ? 'bg-sky-500/20 text-sky-200 border-sky-400'
+                        : 'bg-zinc-950 text-zinc-400 border-zinc-800 hover:text-white'
+                    }`}
+                  >
+                    {st}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between p-3 rounded-2xl bg-[#0f0f18] border border-zinc-800">
+              <div>
+                <div className="text-xs font-bold text-white">Button Status</div>
+                <div className="text-[10px] text-zinc-400">{btnEnabled ? 'Active in bot menus' : 'Disabled / hidden'}</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBtnEnabled(!btnEnabled)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                  btnEnabled
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                }`}
+              >
+                {btnEnabled ? 'Enabled' : 'Disabled'}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2 pt-2">
+            <button
+              type="button"
+              onClick={() => setInlineModalOpen(false)}
+              disabled={btnSaving}
+              className="py-2.5 px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold cursor-pointer transition-all"
+            >
+              Cancel
+            </button>
+            {isEditing && !editingInlineButton?.isCustom && (
+              <button
+                type="button"
+                onClick={() => editingInlineButton && handleResetInlineButton(editingInlineButton, true)}
+                disabled={btnSaving || btnActionBusyKey === editingInlineButton?.key}
+                className="py-2.5 px-4 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/35 text-amber-200 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-all"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Reset to Default</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={handleSaveInlineButton}
+              disabled={btnSaving}
+              className="flex-1 py-2.5 px-4 rounded-xl bg-sky-500 hover:bg-sky-400 text-white text-xs font-semibold cursor-pointer shadow-md shadow-sky-500/25 disabled:opacity-50 transition-all"
+            >
+              {btnSaving ? 'Saving...' : isEditing ? 'Save Changes' : 'Create Button'}
+            </button>
+          </div>
+        </div>
+      </div>,
+      document.body
+    );
   };
 
   const renderTemplateEditModal = () => {
@@ -2026,6 +2775,29 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
           </button>
 
+          {/* Inline Button Manager */}
+          <button
+            onClick={() => setSubView('inline_buttons')}
+            className="more-menu-item tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #38bdf8 22%, rgba(255,255,255,.06))' }}>
+                <MousePointerClick className="w-4 h-4 text-sky-300" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>🔘 Inline Button Manager</span>
+                  {Object.keys(inlineButtonsMap).length > 0 && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-sky-500/20 text-sky-200 font-mono font-semibold tabular-nums border border-sky-400/25">
+                      {Object.values(inlineButtonsMap).filter((b) => b.enabled !== false && !b.deleted).length}/{Object.values(inlineButtonsMap).filter((b) => !b.deleted).length} Active
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
+          </button>
+
           {/* Admins */}
           <button
             onClick={() => setSubView('admins')}
@@ -2533,6 +3305,277 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         </div>
 
         {renderTemplateEditModal()}
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------
+  // SUB-VIEW: INLINE BUTTON MANAGER
+  // -------------------------------------------------------------
+  if (subView === 'inline_buttons') {
+    const allButtons = Object.values(inlineButtonsMap);
+    const categories = ['all', ...Array.from(new Set(allButtons.map((b) => b.category || 'Custom')))];
+    const query = inlineButtonSearch.trim().toLowerCase();
+    const filteredButtons = allButtons.filter((btn) => {
+      if (inlineButtonCategory !== 'all' && (btn.category || 'Custom') !== inlineButtonCategory) {
+        return false;
+      }
+      if (inlineButtonStatusFilter === 'enabled' && (btn.enabled === false || btn.deleted)) return false;
+      if (inlineButtonStatusFilter === 'disabled' && (btn.enabled !== false || btn.deleted)) return false;
+      if (inlineButtonStatusFilter === 'deleted' && !btn.deleted) return false;
+      if (inlineButtonStatusFilter === 'custom' && !btn.isCustom) return false;
+      if (inlineButtonStatusFilter !== 'deleted' && btn.deleted) return false;
+
+      if (query) {
+        const hay = `${btn.name} ${btn.text} ${btn.key} ${btn.category} ${btn.url || ''} ${btn.callbackData || ''} ${btn.customEmojiId || ''}`.toLowerCase();
+        if (!hay.includes(query)) return false;
+      }
+      return true;
+    });
+
+    const activeCount = allButtons.filter((b) => b.enabled !== false && !b.deleted).length;
+    const deletedCount = allButtons.filter((b) => Boolean(b.deleted)).length;
+    const customCount = allButtons.filter((b) => Boolean(b.isCustom) && !b.deleted).length;
+
+    return (
+      <div className="space-y-4 pb-28 md:pb-8">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            {renderSubViewBackButton('menu', 'Back to More')}
+            <h2 className="text-base font-bold text-white truncate">🔘 Inline Button Manager</h2>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={openAddInlineButtonModal}
+              className="py-1.5 px-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors shadow-sm"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add Inline Button</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => loadInlineButtons()}
+              disabled={inlineButtonsLoading}
+              className="p-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700/70 cursor-pointer transition-colors"
+              title="Refresh buttons"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${inlineButtonsLoading ? 'animate-spin' : ''}`} />
+            </button>
+            <button
+              type="button"
+              onClick={handleResetAllInlineButtons}
+              disabled={resettingAllButtons}
+              className="py-1.5 px-3 rounded-xl bg-amber-500/15 hover:bg-amber-500/25 text-amber-200 border border-amber-500/35 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+            >
+              <RotateCcw className={`w-3.5 h-3.5 ${resettingAllButtons ? 'animate-spin' : ''}`} />
+              <span>Reset All Defaults</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Info Banner */}
+        <div className="p-3.5 rounded-2xl bg-zinc-900/80 border border-zinc-800 text-xs text-zinc-300 flex items-start gap-2.5">
+          <MousePointerClick className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+          <div className="text-[11px] leading-relaxed text-zinc-400">
+            <span className="font-semibold text-zinc-200">Centralized Inline Buttons:</span> Customize any button&apos;s Name, Label Text, Unicode Emoji, or Telegram Premium Custom Emoji ID across the entire bot. Built-in button functionality remains intact automatically.
+          </div>
+        </div>
+
+        {/* Search + Status Filters */}
+        <div className="space-y-2.5">
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={inlineButtonSearch}
+              onChange={(e) => setInlineButtonSearch(e.target.value)}
+              placeholder="Search buttons by name, label text, category, URL, or callback..."
+              className="w-full bg-zinc-950/90 border border-zinc-800 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:border-sky-500"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            {([
+              { id: 'all', label: `All (${allButtons.filter((b) => !b.deleted).length})` },
+              { id: 'enabled', label: `Enabled (${activeCount})` },
+              { id: 'disabled', label: `Disabled (${allButtons.filter((b) => b.enabled === false && !b.deleted).length})` },
+              { id: 'custom', label: `Custom (${customCount})` },
+              { id: 'deleted', label: `Hidden / Deleted (${deletedCount})` }
+            ] as const).map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setInlineButtonStatusFilter(tab.id)}
+                className={`px-2.5 py-1 rounded-xl text-[11px] font-semibold border transition-colors cursor-pointer ${
+                  inlineButtonStatusFilter === tab.id
+                    ? 'bg-sky-500/20 text-sky-200 border-sky-400/50'
+                    : 'bg-zinc-900/80 text-zinc-400 border-zinc-800 hover:text-white'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            {categories.map((cat) => (
+              <button
+                key={cat}
+                type="button"
+                onClick={() => setInlineButtonCategory(cat)}
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold border transition-colors cursor-pointer ${
+                  inlineButtonCategory === cat
+                    ? 'bg-white/15 text-white border-white/30'
+                    : 'bg-zinc-950/70 text-zinc-400 border-zinc-800 hover:text-zinc-200'
+                }`}
+              >
+                {cat === 'all' ? 'All Categories' : cat}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {inlineButtonsLoading && allButtons.length === 0 ? (
+          <div className="p-10 text-center text-xs text-zinc-500 flex flex-col items-center justify-center gap-2">
+            <Loader2 className="w-5 h-5 animate-spin text-sky-400" />
+            <span>Loading inline buttons...</span>
+          </div>
+        ) : filteredButtons.length === 0 ? (
+          <div className="p-8 rounded-2xl bg-zinc-900/60 border border-zinc-800 text-center text-xs text-zinc-400">
+            No inline buttons match the current filter.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 items-start">
+            {filteredButtons.map((btn) => {
+              const isEnabled = btn.enabled !== false && !btn.deleted;
+              const isBusy = btnActionBusyKey === btn.key;
+              return (
+                <div
+                  key={btn.key}
+                  className={`glass-panel rounded-2xl p-4 border transition-all space-y-3 ${
+                    btn.deleted
+                      ? 'border-rose-900/40 bg-rose-950/10 opacity-75'
+                      : isEnabled
+                      ? 'border-zinc-800/90 hover:border-zinc-700/80'
+                      : 'border-zinc-800/60 opacity-70'
+                  }`}
+                >
+                  {/* Top Header */}
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-zinc-800 text-zinc-300 border border-zinc-700/70 font-medium">
+                          {btn.category}
+                        </span>
+                        {btn.isCustom ? (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-purple-500/20 text-purple-200 border border-purple-400/30 font-semibold">
+                            Custom
+                          </span>
+                        ) : (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 font-semibold flex items-center gap-1">
+                            <Lock className="w-2.5 h-2.5" />
+                            <span>Action Locked</span>
+                          </span>
+                        )}
+                        {btn.deleted && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-rose-500/20 text-rose-200 border border-rose-500/30 font-semibold">
+                            Hidden
+                          </span>
+                        )}
+                      </div>
+                      <h4 className="text-xs font-bold text-white break-words">{btn.name}</h4>
+                    </div>
+
+                    {!btn.deleted && (
+                      <button
+                        type="button"
+                        onClick={() => handleToggleInlineButtonEnabled(btn)}
+                        disabled={isBusy}
+                        title={isEnabled ? 'Disable button' : 'Enable button'}
+                        className={`px-2 py-1 rounded-lg text-[10px] font-bold border transition-colors cursor-pointer shrink-0 ${
+                          isEnabled
+                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/25'
+                            : 'bg-zinc-800 text-zinc-400 border-zinc-700 hover:text-white'
+                        }`}
+                      >
+                        {isEnabled ? 'Enabled' : 'Disabled'}
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Live Pill Preview */}
+                  <div className="p-2.5 rounded-xl bg-zinc-950/90 border border-zinc-800/90 flex items-center justify-center">
+                    {renderInlineButtonPreviewPill(btn.text, btn.emoji, btn.customEmojiId, (btn.style as InlineButtonStyle) || 'primary')}
+                  </div>
+
+                  {/* Action Metadata */}
+                  <div className="text-[10px] font-mono text-zinc-400 bg-zinc-900/80 border border-zinc-800 rounded-xl px-2.5 py-1.5 break-all">
+                    {btn.actionType === 'url'
+                      ? `URL: ${btn.url || btn.defaultUrl || '—'}`
+                      : `Callback: ${btn.callbackData || btn.defaultCallbackData || '—'}`}
+                  </div>
+
+                  {btn.customEmojiId && (
+                    <div className="text-[10px] text-amber-300 font-mono truncate">
+                      Custom Emoji ID: {btn.customEmojiId}
+                    </div>
+                  )}
+
+                  {/* Controls */}
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    {btn.deleted ? (
+                      <button
+                        type="button"
+                        onClick={() => handleRestoreInlineButton(btn)}
+                        disabled={isBusy}
+                        className="flex-1 py-1.5 px-2.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-200 border border-emerald-500/35 text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        <span>Restore Button</span>
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => openEditInlineButtonModal(btn)}
+                          disabled={isBusy}
+                          className="flex-1 py-1.5 px-2.5 rounded-xl bg-sky-500/20 hover:bg-sky-500/30 text-sky-200 border border-sky-500/30 text-[11px] font-semibold flex items-center justify-center gap-1 cursor-pointer"
+                        >
+                          <Edit2 className="w-3 h-3" />
+                          <span>Edit</span>
+                        </button>
+                        {!btn.isCustom && (
+                          <button
+                            type="button"
+                            onClick={() => handleResetInlineButton(btn)}
+                            disabled={isBusy}
+                            title="Reset to Default"
+                            className="py-1.5 px-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-amber-300 border border-zinc-700 text-[11px] font-semibold flex items-center gap-1 cursor-pointer"
+                          >
+                            <RotateCcw className="w-3 h-3" />
+                            <span>Reset</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteInlineButton(btn)}
+                          disabled={isBusy}
+                          title={btn.isCustom ? 'Delete button' : 'Hide / delete button'}
+                          className="p-1.5 rounded-xl bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/30 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {renderInlineButtonModal()}
       </div>
     );
   }

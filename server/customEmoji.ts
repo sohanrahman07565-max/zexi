@@ -561,7 +561,9 @@ export function applyCustomEmojisToEntities<T extends Record<string, any>>(
 
 export function stripCustomEmojiTags(html: string): string {
   if (!html || typeof html !== 'string') return html;
-  return html.replace(/<tg-emoji\b[^>]*>([\s\S]*?)<\/tg-emoji>/gi, '$1');
+  return html
+    .replace(/<tg-emoji\b[^>]*>([\s\S]*?)<\/tg-emoji>/gi, '$1')
+    .replace(/&lt;tg-emoji\b[\s\S]*?&gt;([\s\S]*?)&lt;\/tg-emoji&gt;/gi, '$1');
 }
 
 /**
@@ -573,7 +575,6 @@ export function sanitizeButtonLabel(label: string): string {
   if (typeof label !== 'string') return '';
   let out = stripCustomEmojiTags(label);
   out = out.replace(/<\/?tg-emoji\b[^>]*>/gi, '');
-  out = out.replace(/&lt;tg-emoji\b[\s\S]*?&gt;([\s\S]*?)&lt;\/tg-emoji&gt;/gi, '$1');
   out = out.replace(/&lt;\/?tg-emoji\b[\s\S]*?&gt;/gi, '');
   out = out.replace(/\{emoji:([a-z0-9_]+)(?:\|([^}]*))?\}/gi, (_match, rawKey, rawFallback) => {
     if (typeof rawFallback === 'string' && rawFallback.trim()) {
@@ -634,23 +635,34 @@ function extractButtonEmojiMatch(
   };
 }
 
-function extractExplicitButtonEmojiFromRaw(
+export function extractExplicitButtonEmojiFromRaw(
   rawText: string,
   customMap?: Record<string, string> | null
 ): { customEmojiId: string; strippedText: string } | null {
-  if (!rawText) return null;
+  if (!rawText || typeof rawText !== 'string') return null;
 
-  const tgEmojiMatch = rawText.match(/<tg-emoji\b[^>]*emoji-id=["'](\d{5,30})["'][^>]*>([\s\S]*?)<\/tg-emoji>/i);
+  const rawTgPair = rawText.match(
+    /<tg-emoji\b[^>]*\bemoji-id\s*=\s*(?:["']|&quot;|&#39;)?(\d{5,30})(?:["']|&quot;|&#39;)?[^>]*>([\s\S]*?)<\/tg-emoji>/i
+  );
+  const escapedTgPair = rawTgPair
+    ? null
+    : rawText.match(
+        /&lt;tg-emoji\b[\s\S]*?\bemoji-id\s*=\s*(?:["']|&quot;|&#39;)?(\d{5,30})(?:["']|&quot;|&#39;)?[\s\S]*?&gt;([\s\S]*?)&lt;\/tg-emoji&gt;/i
+      );
+  const singleTgTag = rawTgPair || escapedTgPair
+    ? null
+    : rawText.match(
+        /(?:<|&lt;)tg-emoji\b[^>]*\bemoji-id\s*=\s*(?:["']|&quot;|&#39;)?(\d{5,30})(?:["']|&quot;|&#39;)?[^>]*(?:>|&gt;)/i
+      );
+
+  const tgEmojiMatch = rawTgPair || escapedTgPair || singleTgTag;
   if (tgEmojiMatch) {
     const explicitId = tgEmojiMatch[1].trim();
-    const innerText = tgEmojiMatch[2] || '';
-    const mappedOverride = innerText ? lookupCustomEmojiId(innerText, customMap) : undefined;
-    const customEmojiId = mappedOverride || explicitId;
-    if (isValidCustomEmojiId(customEmojiId)) {
+    if (isValidCustomEmojiId(explicitId)) {
       const cleanWithoutTag = sanitizeButtonLabel(rawText.replace(tgEmojiMatch[0], '')).normalize('NFC');
       const fallback = sanitizeButtonLabel(rawText).normalize('NFC');
       return {
-        customEmojiId,
+        customEmojiId: explicitId,
         strippedText: cleanWithoutTag || fallback
       };
     }
@@ -675,9 +687,9 @@ function extractExplicitButtonEmojiFromRaw(
 }
 
 /**
- * Builds an InlineKeyboardButton object, sanitizing `<tg-emoji>` tags and automatically
- * attaching `icon_custom_emoji_id` when the button label contains any mapped emoji in
- * Emoji Store (at start, middle, or end), removing that matched Unicode emoji from `text`.
+ * Builds an InlineKeyboardButton object, prioritizing explicit `<tg-emoji emoji-id="...">`
+ * tags inside `text`, then explicit `icon_custom_emoji_id`, then Emoji Store rules,
+ * while stripping all `<tg-emoji>` markup from the visible button label.
  */
 export function buildInlineKeyboardButton<T extends Record<string, any>>(
   btn: T,
@@ -687,6 +699,18 @@ export function buildInlineKeyboardButton<T extends Record<string, any>>(
   if (typeof btn.text !== 'string') return btn;
 
   const cleanText = sanitizeButtonLabel(btn.text).normalize('NFC');
+
+  // Priority 1: Explicit <tg-emoji emoji-id="..."> or {emoji:...} in raw button text
+  const explicit = extractExplicitButtonEmojiFromRaw(btn.text, customMap);
+  if (explicit) {
+    return {
+      ...btn,
+      text: explicit.strippedText || cleanText || '✨',
+      icon_custom_emoji_id: explicit.customEmojiId
+    };
+  }
+
+  // Priority 2: Explicitly attached icon_custom_emoji_id
   const existingIconId = typeof btn.icon_custom_emoji_id === 'string' ? btn.icon_custom_emoji_id.trim() : '';
   if (isValidCustomEmojiId(existingIconId)) {
     return {
@@ -696,21 +720,13 @@ export function buildInlineKeyboardButton<T extends Record<string, any>>(
     };
   }
 
+  // Priority 3: Emoji Store mapping for any emoji inside the button label
   const matched = extractButtonEmojiMatch(cleanText, customMap);
   if (matched) {
     return {
       ...btn,
       text: matched.strippedText,
       icon_custom_emoji_id: matched.customEmojiId
-    };
-  }
-
-  const explicit = extractExplicitButtonEmojiFromRaw(btn.text, customMap);
-  if (explicit) {
-    return {
-      ...btn,
-      text: explicit.strippedText,
-      icon_custom_emoji_id: explicit.customEmojiId
     };
   }
 
@@ -724,7 +740,7 @@ export function buildInlineKeyboardButton<T extends Record<string, any>>(
 
 /**
  * Builds a KeyboardButton (string or object), sanitizing `<tg-emoji>` tags and automatically
- * upgrading to a KeyboardButton object with `icon_custom_emoji_id` when mapped in Emoji Store.
+ * upgrading to a KeyboardButton object with `icon_custom_emoji_id` when configured.
  */
 export function buildReplyKeyboardButton<T extends string | Record<string, any>>(
   btn: T,
@@ -732,18 +748,18 @@ export function buildReplyKeyboardButton<T extends string | Record<string, any>>
 ): T extends string ? string | TelegramButtonLike : T {
   if (typeof btn === 'string') {
     const cleanText = sanitizeButtonLabel(btn).normalize('NFC');
+    const explicit = extractExplicitButtonEmojiFromRaw(btn, customMap);
+    if (explicit) {
+      return {
+        text: explicit.strippedText || cleanText || '✨',
+        icon_custom_emoji_id: explicit.customEmojiId
+      } as any;
+    }
     const matched = extractButtonEmojiMatch(cleanText, customMap);
     if (matched) {
       return {
         text: matched.strippedText,
         icon_custom_emoji_id: matched.customEmojiId
-      } as any;
-    }
-    const explicit = extractExplicitButtonEmojiFromRaw(btn, customMap);
-    if (explicit) {
-      return {
-        text: explicit.strippedText,
-        icon_custom_emoji_id: explicit.customEmojiId
       } as any;
     }
     return cleanText as any;
