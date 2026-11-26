@@ -296,56 +296,83 @@
     "botStopped": false,
     "customEmojiRules": [
       {
-        "id": "r_fire",
-        "emoji": "🔥",
-        "customEmojiId": "510000000000000001",
+        "id": "r1",
+        "emoji": "🛡️",
+        "customEmojiId": "5312345678901234561",
         "enabled": true,
-        "label": "Fire",
-        "slotKey": "fire",
-        "updatedAt": "2026-11-26T10:01:54.557Z"
-      },
-      {
-        "id": "r_shield",
-        "emoji": "🛡",
-        "customEmojiId": "510000000000000002",
-        "enabled": true,
-        "label": "Shield",
+        "label": "Shield / Bancheck",
         "slotKey": "shield",
-        "updatedAt": "2026-11-26T10:01:54.558Z"
+        "updatedAt": "2026-11-26T14:58:40.675Z"
       },
       {
-        "id": "r_bolt",
-        "emoji": "⚡",
-        "customEmojiId": "510000000000000003",
-        "enabled": false,
-        "label": "Bolt Paused",
-        "slotKey": "bolt",
-        "updatedAt": "2026-11-26T10:01:54.558Z"
-      },
-      {
-        "id": "r_one",
-        "emoji": "1️⃣",
-        "customEmojiId": "510000000000000004",
+        "id": "r2",
+        "emoji": "⭐️",
+        "customEmojiId": "5312345678901234562",
         "enabled": true,
-        "label": "One",
-        "updatedAt": "2026-11-26T10:01:54.558Z"
+        "label": "Level / Star",
+        "slotKey": "star",
+        "updatedAt": "2026-11-26T14:58:40.676Z"
       },
       {
-        "id": "r_fox",
-        "emoji": "🦊",
-        "customEmojiId": "510000000000000005",
+        "id": "r3",
+        "emoji": "➡️",
+        "customEmojiId": "5312345678901234564",
         "enabled": true,
-        "label": "Fox",
-        "updatedAt": "2026-11-26T10:01:54.558Z"
+        "updatedAt": "2026-11-26T14:58:40.676Z"
+      },
+      {
+        "id": "r4",
+        "emoji": "🔥",
+        "customEmojiId": "5312345678901234565",
+        "enabled": true,
+        "label": "Fire Header",
+        "slotKey": "fire",
+        "updatedAt": "2026-11-26T14:58:40.676Z"
+      },
+      {
+        "id": "r5",
+        "emoji": "📄",
+        "customEmojiId": "5312345678901234566",
+        "enabled": true,
+        "updatedAt": "2026-11-26T14:58:40.676Z"
+      },
+      {
+        "id": "r6",
+        "emoji": "🌐",
+        "customEmojiId": "5312345678901234567",
+        "enabled": true,
+        "updatedAt": "2026-11-26T14:58:40.676Z"
+      },
+      {
+        "id": "r7",
+        "emoji": "❤️",
+        "customEmojiId": "5312345678901234568",
+        "enabled": true,
+        "updatedAt": "2026-11-26T14:58:40.676Z"
+      },
+      {
+        "id": "r8",
+        "emoji": "👍",
+        "customEmojiId": "5312345678901234569",
+        "enabled": true,
+        "label": "Likes / Thumbs Up",
+        "slotKey": "like",
+        "updatedAt": "2026-11-26T14:58:40.676Z"
       }
     ],
     "customEmojiMap": {
-      "🔥": "510000000000000001",
-      "fire": "510000000000000001",
-      "🛡": "510000000000000002",
-      "shield": "510000000000000002",
-      "1️⃣": "510000000000000004",
-      "🦊": "510000000000000005"
+      "🛡": "5312345678901234561",
+      "shield": "5312345678901234561",
+      "⭐": "5312345678901234562",
+      "star": "5312345678901234562",
+      "➡": "5312345678901234564",
+      "🔥": "5312345678901234565",
+      "fire": "5312345678901234565",
+      "📄": "5312345678901234566",
+      "🌐": "5312345678901234567",
+      "❤": "5312345678901234568",
+      "👍": "5312345678901234569",
+      "like": "5312345678901234569"
     }
   },
   "backupServer": {

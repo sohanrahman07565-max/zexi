@@ -12,10 +12,16 @@ import { FreeFireGuestService } from './ffGuestApi';
 import {
   formatCustomEmoji,
   applyCustomEmojisToHtml,
+  applyCustomEmojisToEntities,
   getEffectiveCustomEmojiMap,
   stripCustomEmojiTags,
   sanitizeButtonLabel,
-  sanitizeReplyMarkupForTelegram
+  sanitizeReplyMarkupForTelegram,
+  buildInlineKeyboardButton,
+  buildReplyKeyboardButton,
+  buildTelegramButton,
+  replyMarkupHasIconCustomEmoji,
+  stripIconCustomEmojiFromReplyMarkup
 } from './customEmoji';
 
 export const botTokenContext = new AsyncLocalStorage<string>();
@@ -43,25 +49,28 @@ interface AddFileEntry {
   caption?: string;
 }
 
+type AddStage =
+  | 'awaiting_content'
+  | 'awaiting_file_content'
+  | 'awaiting_link_url'
+  | 'awaiting_text_content'
+  | 'awaiting_trigger_type'
+  | 'awaiting_trigger_name'
+  | 'awaiting_keyword_type'
+  | 'awaiting_hashtag'
+  | 'awaiting_filter_choice'
+  | 'awaiting_delivery_type'
+  | 'awaiting_link_reply_message'
+  | 'awaiting_link_button_text'
+  | 'awaiting_retention_choice'
+  | 'awaiting_retention_days'
+  | 'awaiting_setup_video_choice'
+  | 'awaiting_setup_video'
+  | 'awaiting_caption';
+
 interface AddSession {
-  stage: 
-    | 'awaiting_content'
-    | 'awaiting_file_content'
-    | 'awaiting_link_url'
-    | 'awaiting_text_content'
-    | 'awaiting_trigger_type'
-    | 'awaiting_trigger_name'
-    | 'awaiting_keyword_type'
-    | 'awaiting_hashtag'
-    | 'awaiting_filter_choice'
-    | 'awaiting_delivery_type'
-    | 'awaiting_link_reply_message'
-    | 'awaiting_link_button_text'
-    | 'awaiting_retention_choice'
-    | 'awaiting_retention_days'
-    | 'awaiting_setup_video_choice'
-    | 'awaiting_setup_video'
-    | 'awaiting_caption';
+  stage: AddStage;
+  stepHistory?: AddStage[];
   type?: 'file' | 'link';
   isTextOnly?: boolean;
   textResponse?: string;
@@ -841,85 +850,181 @@ export class TelegramService {
       sanitizedPayload.parse_mode = 'HTML';
     }
 
-    const needsEmojiApplyForSingle =
+    const isSingleHtml =
       sanitizedPayload.parse_mode === 'HTML' &&
       (typeof sanitizedPayload.text === 'string' || typeof sanitizedPayload.caption === 'string');
-    const needsEmojiApplyForMediaGroup =
+    const isSingleEntitiesMode =
+      !sanitizedPayload.parse_mode &&
+      (typeof sanitizedPayload.text === 'string' || typeof sanitizedPayload.caption === 'string');
+    const isMediaGroup =
       method === 'sendMediaGroup' &&
       Array.isArray(sanitizedPayload.media) &&
-      sanitizedPayload.media.some(
-        (item: any) =>
-          item &&
-          typeof item === 'object' &&
-          item.parse_mode === 'HTML' &&
-          typeof item.caption === 'string' &&
-          !(Array.isArray(item.caption_entities) && item.caption_entities.length > 0)
-      );
-    const needsEmojiApplyForInlineQuery =
-      method === 'answerInlineQuery' &&
-      Array.isArray(sanitizedPayload.results) &&
-      sanitizedPayload.results.some(
-        (resItem: any) =>
-          resItem &&
-          typeof resItem === 'object' &&
-          ((resItem.parse_mode === 'HTML' && typeof resItem.caption === 'string') ||
-            (resItem.input_message_content?.parse_mode === 'HTML' &&
-              typeof resItem.input_message_content?.message_text === 'string'))
-      );
+      sanitizedPayload.media.some((item: any) => item && typeof item === 'object' && typeof item.caption === 'string');
+    const isEditMedia =
+      method === 'editMessageMedia' &&
+      sanitizedPayload.media &&
+      typeof sanitizedPayload.media === 'object' &&
+      !Array.isArray(sanitizedPayload.media) &&
+      typeof sanitizedPayload.media.caption === 'string';
+    const isPoll =
+      method === 'sendPoll' &&
+      (typeof sanitizedPayload.question === 'string' || typeof sanitizedPayload.explanation === 'string');
+    const isInlineQuery =
+      method === 'answerInlineQuery' && Array.isArray(sanitizedPayload.results) && sanitizedPayload.results.length > 0;
+    const hasReplyMarkup = Boolean(sanitizedPayload.reply_markup);
 
-    if (needsEmojiApplyForSingle || needsEmojiApplyForMediaGroup || needsEmojiApplyForInlineQuery) {
+    let effectiveEmojiMap: Record<string, string> | undefined;
+    let fallbackEntities: any[] | undefined;
+    let hasAutoTextCustomEntities = false;
+    let fallbackCaptionEntities: any[] | undefined;
+    let hasAutoCaptionCustomEntities = false;
+    let fallbackEditMediaCaptionEntities: any[] | undefined;
+    let hasAutoEditMediaCustomEntities = false;
+
+    if (
+      isSingleHtml ||
+      isSingleEntitiesMode ||
+      isMediaGroup ||
+      isEditMedia ||
+      isPoll ||
+      isInlineQuery ||
+      hasReplyMarkup
+    ) {
       const settingsForEmoji = await storage.getSettings().catch(() => null);
-      const effectiveEmojiMap = getEffectiveCustomEmojiMap(
+      effectiveEmojiMap = getEffectiveCustomEmojiMap(
         settingsForEmoji?.customEmojiMap,
         settingsForEmoji?.customEmojiRules
       );
-      if (needsEmojiApplyForSingle) {
+
+      if (isSingleHtml) {
         if (typeof sanitizedPayload.text === 'string') {
           sanitizedPayload.text = applyCustomEmojisToHtml(sanitizedPayload.text, effectiveEmojiMap);
         }
         if (typeof sanitizedPayload.caption === 'string') {
           sanitizedPayload.caption = applyCustomEmojisToHtml(sanitizedPayload.caption, effectiveEmojiMap);
         }
+      } else if (isSingleEntitiesMode) {
+        if (typeof sanitizedPayload.text === 'string') {
+          const origEntities = Array.isArray(sanitizedPayload.entities) ? sanitizedPayload.entities : undefined;
+          const res = applyCustomEmojisToEntities(sanitizedPayload.text, origEntities, effectiveEmojiMap);
+          if (res.addedCount > 0) {
+            fallbackEntities = origEntities ? origEntities.map((e: any) => ({ ...e })) : [];
+            sanitizedPayload.entities = res.entities;
+            hasAutoTextCustomEntities = true;
+          }
+        }
+        if (typeof sanitizedPayload.caption === 'string') {
+          const origCapEntities = Array.isArray(sanitizedPayload.caption_entities)
+            ? sanitizedPayload.caption_entities
+            : undefined;
+          const res = applyCustomEmojisToEntities(sanitizedPayload.caption, origCapEntities, effectiveEmojiMap);
+          if (res.addedCount > 0) {
+            fallbackCaptionEntities = origCapEntities ? origCapEntities.map((e: any) => ({ ...e })) : [];
+            sanitizedPayload.caption_entities = res.entities;
+            hasAutoCaptionCustomEntities = true;
+          }
+        }
       }
-      if (needsEmojiApplyForMediaGroup) {
+
+      if (isEditMedia) {
+        const mediaObj = { ...sanitizedPayload.media };
+        const hasMediaCapEntities = Array.isArray(mediaObj.caption_entities) && mediaObj.caption_entities.length > 0;
+        if (mediaObj.parse_mode === 'HTML' && !hasMediaCapEntities) {
+          mediaObj.caption = applyCustomEmojisToHtml(mediaObj.caption, effectiveEmojiMap);
+        } else if (!mediaObj.parse_mode || hasMediaCapEntities) {
+          if (hasMediaCapEntities) delete mediaObj.parse_mode;
+          const origMediaEntities = Array.isArray(mediaObj.caption_entities) ? mediaObj.caption_entities : undefined;
+          const res = applyCustomEmojisToEntities(mediaObj.caption, origMediaEntities, effectiveEmojiMap);
+          if (res.addedCount > 0) {
+            fallbackEditMediaCaptionEntities = origMediaEntities ? origMediaEntities.map((e: any) => ({ ...e })) : [];
+            mediaObj.caption_entities = res.entities;
+            hasAutoEditMediaCustomEntities = true;
+          }
+        }
+        sanitizedPayload.media = mediaObj;
+      }
+
+      if (isMediaGroup) {
         sanitizedPayload.media = sanitizedPayload.media.map((item: any) => {
-          if (
-            item &&
-            typeof item === 'object' &&
-            item.parse_mode === 'HTML' &&
-            typeof item.caption === 'string' &&
-            !(Array.isArray(item.caption_entities) && item.caption_entities.length > 0)
-          ) {
+          if (!item || typeof item !== 'object' || typeof item.caption !== 'string') return item;
+          const hasItemCapEntities = Array.isArray(item.caption_entities) && item.caption_entities.length > 0;
+          if (item.parse_mode === 'HTML' && !hasItemCapEntities) {
             return { ...item, caption: applyCustomEmojisToHtml(item.caption, effectiveEmojiMap) };
+          }
+          if (!item.parse_mode || hasItemCapEntities) {
+            const res = applyCustomEmojisToEntities(item.caption, item.caption_entities, effectiveEmojiMap);
+            if (res.addedCount > 0) {
+              return { ...item, caption_entities: res.entities };
+            }
           }
           return item;
         });
       }
-      if (needsEmojiApplyForInlineQuery) {
+
+      if (isPoll) {
+        if (sanitizedPayload.question_parse_mode === 'HTML' && typeof sanitizedPayload.question === 'string') {
+          sanitizedPayload.question = applyCustomEmojisToHtml(sanitizedPayload.question, effectiveEmojiMap);
+        }
+        if (sanitizedPayload.explanation_parse_mode === 'HTML' && typeof sanitizedPayload.explanation === 'string') {
+          sanitizedPayload.explanation = applyCustomEmojisToHtml(sanitizedPayload.explanation, effectiveEmojiMap);
+        }
+      }
+
+      if (isInlineQuery) {
         sanitizedPayload.results = sanitizedPayload.results.map((resItem: any) => {
           if (!resItem || typeof resItem !== 'object') return resItem;
           const nextRes = { ...resItem };
           if (nextRes.parse_mode === 'HTML' && typeof nextRes.caption === 'string') {
             nextRes.caption = applyCustomEmojisToHtml(nextRes.caption, effectiveEmojiMap);
+          } else if (typeof nextRes.caption === 'string' && !nextRes.parse_mode) {
+            const capRes = applyCustomEmojisToEntities(nextRes.caption, nextRes.caption_entities, effectiveEmojiMap);
+            if (capRes.addedCount > 0) nextRes.caption_entities = capRes.entities;
           }
           if (
             nextRes.input_message_content &&
             typeof nextRes.input_message_content === 'object' &&
-            nextRes.input_message_content.parse_mode === 'HTML' &&
             typeof nextRes.input_message_content.message_text === 'string'
           ) {
-            nextRes.input_message_content = {
-              ...nextRes.input_message_content,
-              message_text: applyCustomEmojisToHtml(nextRes.input_message_content.message_text, effectiveEmojiMap)
-            };
+            const imc = { ...nextRes.input_message_content };
+            if (imc.parse_mode === 'HTML') {
+              imc.message_text = applyCustomEmojisToHtml(imc.message_text, effectiveEmojiMap);
+            } else if (!imc.parse_mode) {
+              const txtRes = applyCustomEmojisToEntities(imc.message_text, imc.entities, effectiveEmojiMap);
+              if (txtRes.addedCount > 0) imc.entities = txtRes.entities;
+            }
+            nextRes.input_message_content = imc;
           }
           return nextRes;
         });
       }
     }
 
+    let fallbackReplyMarkup: any = undefined;
     if (sanitizedPayload.reply_markup) {
-      sanitizedPayload.reply_markup = sanitizeReplyMarkupForTelegram(sanitizedPayload.reply_markup);
+      fallbackReplyMarkup = sanitizeReplyMarkupForTelegram(sanitizedPayload.reply_markup);
+      sanitizedPayload.reply_markup = sanitizeReplyMarkupForTelegram(
+        sanitizedPayload.reply_markup,
+        effectiveEmojiMap
+      );
+    }
+
+    const hasInlineQueryReplyMarkup =
+      method === 'answerInlineQuery' &&
+      Array.isArray(sanitizedPayload.results) &&
+      sanitizedPayload.results.some((resItem: any) => Boolean(resItem?.reply_markup));
+
+    let fallbackInlineQueryResults: any[] | undefined = undefined;
+    if (hasInlineQueryReplyMarkup && Array.isArray(sanitizedPayload.results)) {
+      fallbackInlineQueryResults = sanitizedPayload.results.map((resItem: any) =>
+        resItem && typeof resItem === 'object' && resItem.reply_markup
+          ? { ...resItem, reply_markup: sanitizeReplyMarkupForTelegram(resItem.reply_markup) }
+          : resItem
+      );
+      sanitizedPayload.results = sanitizedPayload.results.map((resItem: any) =>
+        resItem && typeof resItem === 'object' && resItem.reply_markup
+          ? { ...resItem, reply_markup: sanitizeReplyMarkupForTelegram(resItem.reply_markup, effectiveEmojiMap) }
+          : resItem
+      );
     }
 
     // Adaptive timeout: for long-polling (getUpdates), allow payload.timeout + 15s. Standard calls allow 15s.
@@ -958,8 +1063,8 @@ export class TelegramService {
       let currentPayload: Record<string, any> = { ...sanitizedPayload };
       let data = await executeRequest(currentPayload);
 
-      // Chained error-resilient fallback retries (handles custom emoji rejection, parse_mode, reply_to_message_id, thread_id, and inline style rejections)
-      for (let retryPass = 0; retryPass < 4 && data && !data.ok; retryPass++) {
+      // Chained error-resilient fallback retries (handles custom emoji rejection, auto custom_emoji entities, button icon_custom_emoji_id rejection, parse_mode, reply_to_message_id, thread_id, and inline style rejections)
+      for (let retryPass = 0; retryPass < 6 && data && !data.ok; retryPass++) {
         const desc = typeof data.description === 'string' ? data.description.toLowerCase() : '';
         let modified = false;
 
@@ -978,6 +1083,10 @@ export class TelegramService {
         const hasTgEmojiInPayload =
           (typeof currentPayload.text === 'string' && /<tg-emoji\b/i.test(currentPayload.text)) ||
           (typeof currentPayload.caption === 'string' && /<tg-emoji\b/i.test(currentPayload.caption)) ||
+          (currentPayload.media &&
+            !Array.isArray(currentPayload.media) &&
+            typeof currentPayload.media.caption === 'string' &&
+            /<tg-emoji\b/i.test(currentPayload.media.caption)) ||
           (Array.isArray(currentPayload.media) &&
             currentPayload.media.some((item: any) => typeof item?.caption === 'string' && /<tg-emoji\b/i.test(item.caption))) ||
           (Array.isArray(currentPayload.results) &&
@@ -988,7 +1097,91 @@ export class TelegramService {
                   /<tg-emoji\b/i.test(resItem.input_message_content.message_text))
             ));
 
+        const hasAutoEntitiesPendingFallback =
+          hasAutoTextCustomEntities || hasAutoCaptionCustomEntities || hasAutoEditMediaCustomEntities;
+
+        const hasButtonCustomEmoji =
+          replyMarkupHasIconCustomEmoji(currentPayload.reply_markup) ||
+          (Array.isArray(currentPayload.results) &&
+            currentPayload.results.some((resItem: any) => replyMarkupHasIconCustomEmoji(resItem?.reply_markup)));
+
+        const isExplicitButtonEmojiError =
+          desc.includes('icon_custom_emoji_id') ||
+          desc.includes('button_custom_emoji') ||
+          desc.includes('not enough rights') ||
+          desc.includes('premium') ||
+          ((desc.includes('button') || desc.includes('reply_markup') || desc.includes('keyboard')) &&
+            (desc.includes('custom') || desc.includes('emoji')));
+
         if (
+          hasButtonCustomEmoji &&
+          (isExplicitButtonEmojiError ||
+            (!hasTgEmojiInPayload &&
+              !hasAutoEntitiesPendingFallback &&
+              (desc.includes('custom') ||
+                desc.includes('emoji') ||
+                desc.includes('button') ||
+                desc.includes('reply_markup') ||
+                desc.includes('keyboard'))))
+        ) {
+          console.warn(`[Telegram] ${method} rejected button icon_custom_emoji_id (${data.description}). Retrying with Unicode fallback button labels...`);
+          const nextPayload = { ...currentPayload };
+          if (nextPayload.reply_markup && replyMarkupHasIconCustomEmoji(nextPayload.reply_markup)) {
+            nextPayload.reply_markup = stripIconCustomEmojiFromReplyMarkup(
+              nextPayload.reply_markup,
+              fallbackReplyMarkup
+            );
+          }
+          if (Array.isArray(nextPayload.results)) {
+            nextPayload.results = nextPayload.results.map((resItem: any, idx: number) =>
+              resItem && typeof resItem === 'object' && replyMarkupHasIconCustomEmoji(resItem.reply_markup)
+                ? {
+                    ...resItem,
+                    reply_markup: stripIconCustomEmojiFromReplyMarkup(
+                      resItem.reply_markup,
+                      fallbackInlineQueryResults?.[idx]?.reply_markup
+                    )
+                  }
+                : resItem
+            );
+          }
+          currentPayload = nextPayload;
+          modified = true;
+        } else if (
+          hasAutoEntitiesPendingFallback &&
+          (desc.includes('custom') || desc.includes('emoji') || desc.includes('entit'))
+        ) {
+          console.warn(`[Telegram] ${method} rejected injected custom_emoji entities (${data.description}). Retrying with original entities...`);
+          const nextPayload = { ...currentPayload };
+          if (hasAutoTextCustomEntities) {
+            if (fallbackEntities && fallbackEntities.length > 0) {
+              nextPayload.entities = fallbackEntities;
+            } else {
+              delete nextPayload.entities;
+            }
+            hasAutoTextCustomEntities = false;
+          }
+          if (hasAutoCaptionCustomEntities) {
+            if (fallbackCaptionEntities && fallbackCaptionEntities.length > 0) {
+              nextPayload.caption_entities = fallbackCaptionEntities;
+            } else {
+              delete nextPayload.caption_entities;
+            }
+            hasAutoCaptionCustomEntities = false;
+          }
+          if (hasAutoEditMediaCustomEntities && nextPayload.media && !Array.isArray(nextPayload.media)) {
+            const nextMedia = { ...nextPayload.media };
+            if (fallbackEditMediaCaptionEntities && fallbackEditMediaCaptionEntities.length > 0) {
+              nextMedia.caption_entities = fallbackEditMediaCaptionEntities;
+            } else {
+              delete nextMedia.caption_entities;
+            }
+            nextPayload.media = nextMedia;
+            hasAutoEditMediaCustomEntities = false;
+          }
+          currentPayload = nextPayload;
+          modified = true;
+        } else if (
           hasTgEmojiInPayload &&
           (desc.includes('custom') || desc.includes('emoji') || desc.includes('parse entities') || desc.includes("can't parse"))
         ) {
@@ -999,6 +1192,9 @@ export class TelegramService {
           }
           if (typeof nextPayload.caption === 'string') {
             nextPayload.caption = stripCustomEmojiTags(nextPayload.caption);
+          }
+          if (nextPayload.media && !Array.isArray(nextPayload.media) && typeof nextPayload.media.caption === 'string') {
+            nextPayload.media = { ...nextPayload.media, caption: stripCustomEmojiTags(nextPayload.media.caption) };
           }
           if (Array.isArray(nextPayload.media)) {
             nextPayload.media = nextPayload.media.map((item: any) =>
@@ -1044,14 +1240,12 @@ export class TelegramService {
           currentPayload = nextPayload;
           modified = true;
         } else if (
-          Array.isArray(currentPayload?.reply_markup?.inline_keyboard) &&
+          (Array.isArray(currentPayload?.reply_markup?.inline_keyboard) ||
+            Array.isArray(currentPayload?.reply_markup?.keyboard)) &&
           (desc.includes('style') || desc.includes('reply_markup') || desc.includes('button') || desc.includes('keyboard'))
         ) {
-          const hasStyle = currentPayload.reply_markup.inline_keyboard.some((row: any[]) =>
-            Array.isArray(row) && row.some((btn: any) => btn && typeof btn === 'object' && 'style' in btn)
-          );
-          if (hasStyle) {
-            const strippedKeyboard = currentPayload.reply_markup.inline_keyboard.map((row: any[]) =>
+          const stripRowStyle = (rows: any[]) =>
+            rows.map((row: any[]) =>
               Array.isArray(row)
                 ? row.map((btn: any) => {
                     if (!btn || typeof btn !== 'object') return btn;
@@ -1060,9 +1254,24 @@ export class TelegramService {
                   })
                 : row
             );
+          const hasInlineStyle =
+            Array.isArray(currentPayload.reply_markup.inline_keyboard) &&
+            currentPayload.reply_markup.inline_keyboard.some((row: any[]) =>
+              Array.isArray(row) && row.some((btn: any) => btn && typeof btn === 'object' && 'style' in btn)
+            );
+          const hasReplyStyle =
+            Array.isArray(currentPayload.reply_markup.keyboard) &&
+            currentPayload.reply_markup.keyboard.some((row: any[]) =>
+              Array.isArray(row) && row.some((btn: any) => btn && typeof btn === 'object' && 'style' in btn)
+            );
+          if (hasInlineStyle || hasReplyStyle) {
             currentPayload = {
               ...currentPayload,
-              reply_markup: { ...currentPayload.reply_markup, inline_keyboard: strippedKeyboard }
+              reply_markup: {
+                ...currentPayload.reply_markup,
+                ...(hasInlineStyle ? { inline_keyboard: stripRowStyle(currentPayload.reply_markup.inline_keyboard) } : {}),
+                ...(hasReplyStyle ? { keyboard: stripRowStyle(currentPayload.reply_markup.keyboard) } : {})
+              }
             };
             modified = true;
           }
@@ -1305,6 +1514,34 @@ export class TelegramService {
     customMap?: Record<string, string> | null
   ): string {
     return applyCustomEmojisToHtml(html, customMap);
+  }
+
+  public static buildInlineButton<T extends Record<string, any>>(
+    btn: T,
+    customMap?: Record<string, string> | null
+  ): T {
+    return buildInlineKeyboardButton(btn, customMap);
+  }
+
+  public static buildKeyboardButton<T extends string | Record<string, any>>(
+    btn: T,
+    customMap?: Record<string, string> | null
+  ) {
+    return buildReplyKeyboardButton(btn, customMap);
+  }
+
+  public static buildButton<T extends string | Record<string, any>>(
+    btnOrText: T,
+    customMap?: Record<string, string> | null
+  ) {
+    return buildTelegramButton(btnOrText, customMap);
+  }
+
+  public static buildReplyMarkupWithCustomEmojis<T>(
+    replyMarkup: T,
+    customMap?: Record<string, string> | null
+  ): T {
+    return sanitizeReplyMarkupForTelegram(replyMarkup, customMap);
   }
 
   public static formatHeader(title: string, icon?: string): string {
@@ -9747,13 +9984,19 @@ export class TelegramService {
       return { ok: false, description: 'Bot token not configured' };
     }
 
-    const settingsForEmoji = params.caption ? await storage.getSettings().catch(() => null) : null;
-    let formattedCaption = params.caption
-      ? applyCustomEmojisToHtml(params.caption, getEffectiveCustomEmojiMap(settingsForEmoji?.customEmojiMap, settingsForEmoji?.customEmojiRules))
+    const settingsForEmoji = (params.caption || params.replyMarkup) ? await storage.getSettings().catch(() => null) : null;
+    const effectiveEmojiMap = settingsForEmoji
+      ? getEffectiveCustomEmojiMap(settingsForEmoji.customEmojiMap, settingsForEmoji.customEmojiRules)
       : undefined;
-    const safeReplyMarkup = params.replyMarkup ? sanitizeReplyMarkupForTelegram(params.replyMarkup) : undefined;
+    let formattedCaption = params.caption
+      ? applyCustomEmojisToHtml(params.caption, effectiveEmojiMap)
+      : undefined;
+    const fallbackReplyMarkup = params.replyMarkup ? sanitizeReplyMarkupForTelegram(params.replyMarkup) : undefined;
+    let safeReplyMarkup = params.replyMarkup
+      ? sanitizeReplyMarkupForTelegram(params.replyMarkup, effectiveEmojiMap)
+      : undefined;
 
-    const sendMultipart = async (useReply: boolean, cap?: string) => {
+    const sendMultipart = async (useReply: boolean, cap?: string, markup?: any) => {
       const formData = new FormData();
       formData.append('chat_id', String(params.chatId));
       if (cap) {
@@ -9766,8 +10009,8 @@ export class TelegramService {
       if (params.threadId) {
         formData.append('message_thread_id', String(params.threadId));
       }
-      if (safeReplyMarkup) {
-        formData.append('reply_markup', typeof safeReplyMarkup === 'string' ? safeReplyMarkup : JSON.stringify(safeReplyMarkup));
+      if (markup) {
+        formData.append('reply_markup', typeof markup === 'string' ? markup : JSON.stringify(markup));
       }
 
       const blob = new Blob([new Uint8Array(params.photoBuffer)] as any, {
@@ -9783,7 +10026,17 @@ export class TelegramService {
     };
 
     try {
-      let data = await sendMultipart(true, formattedCaption);
+      let data = await sendMultipart(true, formattedCaption, safeReplyMarkup);
+      if (
+        !data?.ok &&
+        safeReplyMarkup &&
+        replyMarkupHasIconCustomEmoji(safeReplyMarkup) &&
+        typeof data?.description === 'string' &&
+        /icon_custom_emoji_id|custom|emoji|premium|not enough rights|button|reply_markup|keyboard/i.test(data.description)
+      ) {
+        safeReplyMarkup = stripIconCustomEmojiFromReplyMarkup(safeReplyMarkup, fallbackReplyMarkup);
+        data = await sendMultipart(true, formattedCaption, safeReplyMarkup);
+      }
       if (
         !data?.ok &&
         formattedCaption &&
@@ -9792,10 +10045,10 @@ export class TelegramService {
         /custom|emoji|parse entities|can't parse/i.test(data.description)
       ) {
         formattedCaption = stripCustomEmojiTags(formattedCaption);
-        data = await sendMultipart(true, formattedCaption);
+        data = await sendMultipart(true, formattedCaption, safeReplyMarkup);
       }
       if (!data?.ok && params.replyToMessageId) {
-        data = await sendMultipart(false, formattedCaption);
+        data = await sendMultipart(false, formattedCaption, safeReplyMarkup);
       }
       return data;
     } catch (err: any) {
@@ -12777,7 +13030,49 @@ export class TelegramService {
     session.fileData = session.filesData[0];
     session.type = 'file';
     session.isTextOnly = false;
+    delete session.textResponse;
+    if (session.fileName?.startsWith('Text:')) {
+      delete session.fileName;
+    }
     return !alreadyExists;
+  }
+
+  private static buildAddCancelBackRows(): any[][] {
+    return [
+      [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }],
+      [{ text: '⬅️ Back', callback_data: 'add_back', style: 'primary' }]
+    ];
+  }
+
+  private static normalizeAddStage(stage?: AddStage): AddStage {
+    if (stage === 'awaiting_keyword_type') return 'awaiting_trigger_type';
+    if (stage === 'awaiting_hashtag') return 'awaiting_trigger_name';
+    if (stage === 'awaiting_caption' || !stage) return 'awaiting_content';
+    return stage;
+  }
+
+  private static pushAddHistory(session: AddSession, fromStage?: AddStage): void {
+    const normalized = this.normalizeAddStage(fromStage || session.stage);
+    if (!Array.isArray(session.stepHistory)) {
+      session.stepHistory = [];
+    }
+    const last = session.stepHistory[session.stepHistory.length - 1];
+    if (last !== normalized) {
+      session.stepHistory.push(normalized);
+    }
+  }
+
+  private static popAddPreviousStage(session: AddSession): AddStage {
+    const curNorm = this.normalizeAddStage(session.stage);
+    if (Array.isArray(session.stepHistory) && session.stepHistory.length > 0) {
+      while (session.stepHistory.length > 0) {
+        const prev = this.normalizeAddStage(session.stepHistory.pop());
+        if (prev && prev !== curNorm) {
+          return prev;
+        }
+      }
+    }
+    return 'awaiting_content';
   }
 
   private static buildMultiFileCollectorPrompt(session: AddSession): { text: string; replyMarkup: any } {
@@ -12789,9 +13084,7 @@ export class TelegramService {
       return {
         text: `📤 <b>Send File(s) — Multi-File Mode</b>\n\nPlease send one or more files (Document, Photo, Video, Audio, APK, or ZIP).\n<i>You can send multiple files one-by-one or as an album, then tap Done when finished.</i>`,
         replyMarkup: {
-          inline_keyboard: [
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
+          inline_keyboard: this.buildAddCancelBackRows()
         }
       };
     }
@@ -12816,19 +13109,276 @@ export class TelegramService {
       replyMarkup: {
         inline_keyboard: [
           [{ text: `✅ Done — Continue (${files.length} ${files.length === 1 ? 'File' : 'Files'})`, callback_data: 'add_files_done', style: 'success' }],
-          [
-            { text: '🗑️ Remove Last', callback_data: 'add_files_pop', style: 'primary' },
-            { text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }
-          ]
+          [{ text: '🗑️ Remove Last', callback_data: 'add_files_pop', style: 'primary' }],
+          ...this.buildAddCancelBackRows()
         ]
       }
     };
   }
 
+  private static async renderAddStage(
+    fromId: string,
+    chatId: string | number,
+    session: AddSession,
+    errorNotice?: string
+  ): Promise<void> {
+    const stage = this.normalizeAddStage(session.stage);
+    session.stage = stage;
+
+    let promptText = '';
+    let replyMarkup: any = { inline_keyboard: this.buildAddCancelBackRows() };
+    const isFile = session.type === 'file';
+    const stepPrefix = (fileStep: string, linkStep: string) => (isFile ? fileStep : linkStep);
+
+    switch (stage) {
+      case 'awaiting_content': {
+        promptText =
+          errorNotice ||
+          `📥 <b>What would you like to add?</b>\n\nChoose an option below or send your content directly:\n• <b>File(s):</b> Send 1 or multiple Documents, Photos, Videos, Audio, APKs, ZIPs\n• <b>Link:</b> Website URL (https://...)\n• <b>Text Response:</b> Custom text / message`;
+        replyMarkup = {
+          inline_keyboard: [
+            [
+              { text: '📁 Add File(s)', callback_data: 'add_choose_file', style: 'primary' },
+              { text: '🔗 Add Link', callback_data: 'add_choose_link', style: 'primary' },
+              { text: '💬 Add Text', callback_data: 'add_choose_text', style: 'primary' }
+            ],
+            ...this.buildAddCancelBackRows()
+          ]
+        };
+        break;
+      }
+
+      case 'awaiting_file_content': {
+        if (errorNotice) {
+          promptText = errorNotice;
+          replyMarkup = { inline_keyboard: this.buildAddCancelBackRows() };
+        } else {
+          const collector = this.buildMultiFileCollectorPrompt(session);
+          promptText = collector.text;
+          replyMarkup = collector.replyMarkup;
+        }
+        break;
+      }
+
+      case 'awaiting_link_url': {
+        const currentUrlNote = session.linkData?.url
+          ? `\n<i>Current: <code>${this.escapeHtml(session.linkData.url)}</code></i>`
+          : '';
+        promptText =
+          errorNotice ||
+          `🔗 Please enter or paste the <b>Web Link (URL)</b> you want to add (e.g., https://example.com):${currentUrlNote}\n\n<i>Or send /cancel to abort.</i>`;
+        replyMarkup = {
+          inline_keyboard: [
+            ...(session.linkData?.url
+              ? [[{ text: '➡️ Keep Current URL', callback_data: 'add_keep_link_url', style: 'success' }]]
+              : []),
+            ...this.buildAddCancelBackRows()
+          ]
+        };
+        break;
+      }
+
+      case 'awaiting_text_content': {
+        const currentTxtNote = session.textResponse
+          ? `\n<i>Current: <code>${this.escapeHtml(session.textResponse.slice(0, 80))}${session.textResponse.length > 80 ? '...' : ''}</code></i>`
+          : '';
+        promptText =
+          errorNotice ||
+          `💬 Please enter the <b>Text Message</b> you want the bot to deliver when triggered:${currentTxtNote}\n\n<i>You can use bold, italic, links, and HTML tags. Or send /cancel to abort.</i>`;
+        replyMarkup = {
+          inline_keyboard: [
+            ...(session.textResponse
+              ? [[{ text: '➡️ Keep Current Text', callback_data: 'add_keep_text_content', style: 'success' }]]
+              : []),
+            ...this.buildAddCancelBackRows()
+          ]
+        };
+        break;
+      }
+
+      case 'awaiting_trigger_type': {
+        await this.promptTriggerTypeStep(fromId, chatId, session, errorNotice);
+        return;
+      }
+
+      case 'awaiting_trigger_name': {
+        const triggerType = session.triggerType || 'hashtag';
+        const promptHint = triggerType === 'hashtag'
+          ? 'starting with #'
+          : triggerType === 'slash'
+          ? 'starting with /'
+          : 'plain text keyword';
+        const stepHeader = stepPrefix('Step 2/4', 'Step 2/7');
+        const currentKwNote = session.rawKeyword
+          ? `\n<i>Current: <code>${this.escapeHtml(session.rawKeyword)}</code></i>`
+          : '';
+        promptText =
+          errorNotice ||
+          `<b>${stepHeader}: Trigger Name</b>\nPlease enter the trigger keyword for this ${isFile ? 'file' : 'link'} (${promptHint}):${currentKwNote}`;
+        replyMarkup = {
+          inline_keyboard: [
+            ...(session.rawKeyword
+              ? [[{ text: '➡️ Keep Current', callback_data: 'add_keep_trigger_name', style: 'success' }]]
+              : []),
+            ...this.buildAddCancelBackRows()
+          ]
+        };
+        break;
+      }
+
+      case 'awaiting_filter_choice': {
+        const stepHeader = stepPrefix('Step 3/4', 'Step 3/7');
+        const formattedTrigger = session.trigger || session.rawKeyword || 'item';
+        promptText =
+          errorNotice ||
+          `<b>${stepHeader}: Filter List Visibility</b>\nDo you want to add <code>${this.escapeHtml(formattedTrigger)}</code> to the public /filters list?`;
+        replyMarkup = {
+          inline_keyboard: [
+            [
+              { text: '1. Yes, Add to Filters', callback_data: 'add_filter_yes', style: 'success' },
+              { text: '2. No, Keep Hidden', callback_data: 'add_filter_no', style: 'danger' }
+            ],
+            ...this.buildAddCancelBackRows()
+          ]
+        };
+        break;
+      }
+
+      case 'awaiting_delivery_type': {
+        promptText =
+          errorNotice ||
+          `<b>Step 4/7: Delivery Type</b>\nChoose delivery type when triggered:\n• <b>Telegram Mini App</b> — opens embedded inside Telegram\n• <b>Web Browser / Direct</b> — opens in standard browser or direct Telegram chat`;
+        replyMarkup = {
+          inline_keyboard: [
+            [
+              { text: 'Telegram Mini App', callback_data: 'add_delivery_webapp', style: 'primary' },
+              { text: 'Web Browser / Direct', callback_data: 'add_delivery_browser', style: 'primary' }
+            ],
+            ...this.buildAddCancelBackRows()
+          ]
+        };
+        break;
+      }
+
+      case 'awaiting_link_reply_message': {
+        const defaultReplyMsg = `🔗 Here is your requested link: ${session.linkData?.url || ''}`;
+        const hasCustomReply = Boolean(session.replyMessage && session.replyMessage !== defaultReplyMsg);
+        const currentReplyNote = hasCustomReply
+          ? `\n<i>Current: <code>${this.escapeHtml((session.replyMessage || '').slice(0, 80))}${(session.replyMessage || '').length > 80 ? '...' : ''}</code></i>`
+          : '';
+        promptText =
+          errorNotice ||
+          `<b>Step 5/7: Private Delivery Message</b>\nEnter the message text to send privately along with this link, or tap <b>Use Default</b> below:\n\nDefault: <code>${this.escapeHtml(defaultReplyMsg)}</code>${currentReplyNote}`;
+        replyMarkup = {
+          inline_keyboard: [
+            ...(hasCustomReply
+              ? [[{ text: '➡️ Keep Current Message', callback_data: 'add_keep_link_reply', style: 'success' }]]
+              : []),
+            [{ text: 'Use Default Message', callback_data: 'add_link_default_msg', style: 'primary' }],
+            ...this.buildAddCancelBackRows()
+          ]
+        };
+        break;
+      }
+
+      case 'awaiting_link_button_text': {
+        const hasCustomBtn = Boolean(session.buttonText && session.buttonText !== 'Open Link');
+        const currentBtnNote = hasCustomBtn
+          ? `\n<i>Current: <code>${this.escapeHtml(session.buttonText || '')}</code></i>`
+          : '';
+        promptText =
+          errorNotice ||
+          `<b>Step 6/7: Open Button Text</b>\nEnter the inline button text to open the link, or tap <b>Use Default</b> below:\n\nDefault: <code>Open Link</code>${currentBtnNote}`;
+        replyMarkup = {
+          inline_keyboard: [
+            ...(hasCustomBtn
+              ? [[{ text: '➡️ Keep Current Text', callback_data: 'add_keep_link_button', style: 'success' }]]
+              : []),
+            [{ text: 'Use Default', callback_data: 'add_link_default_btn', style: 'primary' }],
+            ...this.buildAddCancelBackRows()
+          ]
+        };
+        break;
+      }
+
+      case 'awaiting_retention_choice': {
+        const stepHeader = stepPrefix('Step 4/4', 'Step 7/7');
+        const targetLabel = isFile ? 'file' : 'link';
+        promptText =
+          errorNotice ||
+          `<b>${stepHeader}: Storage Duration</b>\nChoose storage duration for this ${targetLabel}:\n• <b>Permanent</b> — ${targetLabel} and its filters remain indefinitely\n• <b>Temporary</b> — auto-deleted with its filters after the chosen days`;
+        replyMarkup = {
+          inline_keyboard: [
+            [
+              { text: 'Permanent', callback_data: 'add_ret_perm', style: 'primary' },
+              { text: 'Temporary', callback_data: 'add_ret_temp', style: 'primary' }
+            ],
+            ...this.buildAddCancelBackRows()
+          ]
+        };
+        break;
+      }
+
+      case 'awaiting_retention_days': {
+        const currentDaysNote = session.retentionDays
+          ? `\n<i>Current: <code>${session.retentionDays} Days</code></i>`
+          : '';
+        promptText =
+          errorNotice ||
+          `⏳ <b>Auto-Deletion Duration:</b>\nPlease select or enter how many days to keep this ${isFile ? 'file' : 'link'}:${currentDaysNote}`;
+        replyMarkup = {
+          inline_keyboard: [
+            [
+              { text: '1 Day', callback_data: 'add_days_1', style: 'primary' },
+              { text: '7 Days', callback_data: 'add_days_7', style: 'primary' },
+              { text: '30 Days', callback_data: 'add_days_30', style: 'primary' }
+            ],
+            ...this.buildAddCancelBackRows()
+          ]
+        };
+        break;
+      }
+
+      case 'awaiting_setup_video_choice': {
+        await this.promptSetupVideoChoice(fromId, chatId, session);
+        return;
+      }
+
+      case 'awaiting_setup_video': {
+        promptText =
+          errorNotice ||
+          `🎬 <b>Send Setup Video</b>\n\nPlease provide your setup video tutorial. You can:\n• Send/upload a video directly from your phone/gallery\n• Forward a video from any chat or channel\n• Send a video URL link (e.g. YouTube or direct MP4 link)\n\n<i>Or send /skip to finish without a video, or /cancel to abort.</i>`;
+        replyMarkup = {
+          inline_keyboard: [
+            [{ text: 'Skip Video', callback_data: 'add_sv_no', style: 'primary' }],
+            ...this.buildAddCancelBackRows()
+          ]
+        };
+        break;
+      }
+    }
+
+    activeAddSessions.set(fromId, session);
+    await storage.saveAddSession(fromId, session);
+
+    const promptId = await TelegramService.sendOrEditSetupPrompt(
+      chatId,
+      promptText,
+      replyMarkup,
+      session
+    );
+    if (promptId && promptId !== session.lastPromptMessageId) {
+      session.lastPromptMessageId = promptId;
+      activeAddSessions.set(fromId, session);
+      await storage.saveAddSession(fromId, session);
+    }
+  }
+
   private static async promptTriggerTypeStep(
     fromId: string,
     chatId: string | number,
-    session: AddSession
+    session: AddSession,
+    customHeaderText?: string
   ): Promise<void> {
     const filesCount = session.type === 'file' && !session.isTextOnly
       ? (session.filesData?.length || (session.fileData ? 1 : 0))
@@ -12843,10 +13393,17 @@ export class TelegramService {
       ? `📦 <b>Batch Ready:</b> <code>${filesCount} Files</code>`
       : `✅ <b>File Received:</b> <code>${this.escapeHtml(session.filesData?.[0]?.fileName || session.fileData?.fileName || 'File')}</code>`;
 
+    const promptBody = customHeaderText
+      ? customHeaderText
+      : `${headerLine}\n\n<b>${stepHeader}: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`;
+
     session.stage = 'awaiting_trigger_type';
+    activeAddSessions.set(fromId, session);
+    await storage.saveAddSession(fromId, session);
+
     const promptId = await TelegramService.sendOrEditSetupPrompt(
       chatId,
-      `${headerLine}\n\n<b>${stepHeader}: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
+      promptBody,
       {
         inline_keyboard: [
           [
@@ -12854,14 +13411,16 @@ export class TelegramService {
             { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
             { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
           ],
-          [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+          ...this.buildAddCancelBackRows()
         ]
       },
       session
     );
-    if (promptId) session.lastPromptMessageId = promptId;
-    activeAddSessions.set(fromId, session);
-    await storage.saveAddSession(fromId, session);
+    if (promptId && promptId !== session.lastPromptMessageId) {
+      session.lastPromptMessageId = promptId;
+      activeAddSessions.set(fromId, session);
+      await storage.saveAddSession(fromId, session);
+    }
   }
 
   private static async handleKeyPoolClaim(
@@ -13973,6 +14532,7 @@ export class TelegramService {
         const entry: AddFileEntry = { ...media, caption: cleanCaption };
         const sessionData: AddSession = {
           stage: 'awaiting_file_content',
+          stepHistory: [],
           type: 'file',
           isTextOnly: false,
           fileData: entry,
@@ -13980,22 +14540,14 @@ export class TelegramService {
           caption: cleanCaption
         };
 
-        const collector = this.buildMultiFileCollectorPrompt(sessionData);
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
-          chatId,
-          collector.text,
-          collector.replyMarkup,
-          sessionData
-        );
-        if (promptId) sessionData.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, sessionData);
-        await storage.saveAddSession(fromId, sessionData);
+        await this.renderAddStage(fromId, chatId, sessionData);
         return;
       }
 
       if (urlMatch && !/^\/add(?:@\w+)?$/i.test(text?.trim() || '')) {
         const sessionData: AddSession = {
           stage: 'awaiting_trigger_type',
+          stepHistory: [],
           type: 'link',
           linkData: {
             url: urlMatch[0]
@@ -14007,25 +14559,8 @@ export class TelegramService {
       }
 
       // Command Entry: When an admin types /add, the bot asks what they want to add
-      const sessionData: AddSession = { stage: 'awaiting_content', filesData: [] };
-      const promptId = await TelegramService.sendOrEditSetupPrompt(
-        chatId,
-        `📥 <b>What would you like to add?</b>\n\nChoose an option below or send your content directly:\n• <b>File(s):</b> Send 1 or multiple Documents, Photos, Videos, Audio, APKs, ZIPs\n• <b>Link:</b> Website URL (https://...)\n• <b>Text Response:</b> Custom text / message`,
-        {
-          inline_keyboard: [
-            [
-              { text: '📁 Add File(s)', callback_data: 'add_choose_file', style: 'primary' },
-              { text: '🔗 Add Link', callback_data: 'add_choose_link', style: 'primary' },
-              { text: '💬 Add Text', callback_data: 'add_choose_text', style: 'primary' }
-            ],
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
-        },
-        sessionData
-      );
-      if (promptId) sessionData.lastPromptMessageId = promptId;
-      activeAddSessions.set(fromId, sessionData);
-      await storage.saveAddSession(fromId, sessionData);
+      const sessionData: AddSession = { stage: 'awaiting_content', filesData: [], stepHistory: [] };
+      await this.renderAddStage(fromId, chatId, sessionData);
     });
   }
 
@@ -14057,81 +14592,49 @@ export class TelegramService {
         if (media) {
           const fileCaption = message.caption && !/^(?:\/|#)?(?:add)/i.test(message.caption) ? message.caption : undefined;
           const entry: AddFileEntry = { ...media, caption: fileCaption };
+          this.pushAddHistory(session, 'awaiting_content');
           this.appendFileToSession(session, entry);
           if (fileCaption && !session.caption) {
             session.caption = fileCaption;
           }
           session.stage = 'awaiting_file_content';
-
-          const collector = this.buildMultiFileCollectorPrompt(session);
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
-            chatId,
-            collector.text,
-            collector.replyMarkup,
-            session
-          );
-          if (promptId) session.lastPromptMessageId = promptId;
-          activeAddSessions.set(fromId, session);
-          await storage.saveAddSession(fromId, session);
+          await this.renderAddStage(fromId, chatId, session);
           return;
         }
 
         const urlMatch = rawInput.match(/https?:\/\/[^\s]+/i);
         if (urlMatch) {
+          this.pushAddHistory(session, 'awaiting_content');
           session.type = 'link';
-          session.linkData = { url: urlMatch[0] };
+          session.isTextOnly = false;
+          session.linkData = { ...(session.linkData || {}), url: urlMatch[0] };
           await this.promptTriggerTypeStep(fromId, chatId, session);
           return;
         }
 
         // If user typed normal text (no file and no URL), automatically treat it as a Text Response!
         if (rawInput) {
+          this.pushAddHistory(session, 'awaiting_content');
           session.type = 'file';
           session.isTextOnly = true;
           session.caption = rawInput;
           session.textResponse = rawInput;
           session.fileName = 'Text: ' + (rawInput.slice(0, 25).replace(/\n/g, ' '));
-          session.stage = 'awaiting_trigger_type';
-
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
+          await this.promptTriggerTypeStep(
+            fromId,
             chatId,
-            `✅ <b>Text Response Received:</b>\n<blockquote>${this.escapeHtml(rawInput.slice(0, 100))}${rawInput.length > 100 ? '...' : ''}</blockquote>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
-            {
-              inline_keyboard: [
-                [
-                  { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
-                  { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
-                  { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
-                ],
-                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-              ]
-            },
-            session
+            session,
+            `✅ <b>Text Response Received:</b>\n<blockquote>${this.escapeHtml(rawInput.slice(0, 100))}${rawInput.length > 100 ? '...' : ''}</blockquote>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`
           );
-          if (promptId) session.lastPromptMessageId = promptId;
-          activeAddSessions.set(fromId, session);
-          await storage.saveAddSession(fromId, session);
           return;
         }
 
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
+        await this.renderAddStage(
+          fromId,
           chatId,
-          '📥 Please send one or more <b>Files</b>, a <b>Web Link (URL)</b>, or enter a <b>Text Message</b> to deliver (or type /cancel to abort):',
-          {
-            inline_keyboard: [
-              [
-                { text: '📁 Add File(s)', callback_data: 'add_choose_file', style: 'primary' },
-                { text: '🔗 Add Link', callback_data: 'add_choose_link', style: 'primary' },
-                { text: '💬 Add Text', callback_data: 'add_choose_text', style: 'primary' }
-              ],
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
+          session,
+          '📥 Please send one or more <b>Files</b>, a <b>Web Link (URL)</b>, or enter a <b>Text Message</b> to deliver (or type /cancel to abort):'
         );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
         return;
       }
 
@@ -14145,17 +14648,7 @@ export class TelegramService {
           if (fileCaption && !session.caption) {
             session.caption = fileCaption;
           }
-
-          const collector = this.buildMultiFileCollectorPrompt(session);
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
-            chatId,
-            collector.text,
-            collector.replyMarkup,
-            session
-          );
-          if (promptId) session.lastPromptMessageId = promptId;
-          activeAddSessions.set(fromId, session);
-          await storage.saveAddSession(fromId, session);
+          await this.renderAddStage(fromId, chatId, session);
           return;
         }
 
@@ -14165,6 +14658,7 @@ export class TelegramService {
 
         const lowerCmd = rawInput.toLowerCase();
         if (existingCount > 0 && (lowerCmd === '/done' || lowerCmd === 'done' || lowerCmd === 'next' || lowerCmd === 'finish')) {
+          this.pushAddHistory(session, 'awaiting_file_content');
           await this.promptTriggerTypeStep(fromId, chatId, session);
           return;
         }
@@ -14183,19 +14677,12 @@ export class TelegramService {
           return;
         }
 
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
+        await this.renderAddStage(
+          fromId,
           chatId,
-          '❌ <b>No File Detected</b>\n<i>Please send one or more Documents, Photos, Videos, or Audio files, or send <code>/cancel</code> to abort.</i>',
-          {
-            inline_keyboard: [
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
+          session,
+          '❌ <b>No File Detected</b>\n<i>Please send one or more Documents, Photos, Videos, or Audio files, or send <code>/cancel</code> to abort.</i>'
         );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
         return;
       }
 
@@ -14203,115 +14690,59 @@ export class TelegramService {
     if (session.stage === 'awaiting_link_url') {
       const urlMatch = rawInput.match(/https?:\/\/[^\s]+/i);
       if (urlMatch) {
+        this.pushAddHistory(session, 'awaiting_link_url');
         session.type = 'link';
-        session.linkData = { url: urlMatch[0] };
-        session.stage = 'awaiting_trigger_type';
-
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
-          chatId,
-          `✅ <b>Link Received:</b> <code>${this.escapeHtml(urlMatch[0])}</code>\n\n<b>Step 1/7: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
-          {
-            inline_keyboard: [
-              [
-                { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
-                { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
-                { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
-              ],
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
-        );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
+        session.isTextOnly = false;
+        session.linkData = { ...(session.linkData || {}), url: urlMatch[0] };
+        await this.promptTriggerTypeStep(fromId, chatId, session);
         return;
       }
 
-      const promptId = await TelegramService.sendOrEditSetupPrompt(
+      await this.renderAddStage(
+        fromId,
         chatId,
-        '❌ <b>Invalid URL</b>\n<i>Please send a valid web link starting with <code>https://</code> or <code>http://</code> (or send <code>/cancel</code>).</i>',
-        {
-          inline_keyboard: [
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
-        },
-        session
+        session,
+        '❌ <b>Invalid URL</b>\n<i>Please send a valid web link starting with <code>https://</code> or <code>http://</code> (or send <code>/cancel</code>).</i>'
       );
-      if (promptId) session.lastPromptMessageId = promptId;
-      activeAddSessions.set(fromId, session);
-      await storage.saveAddSession(fromId, session);
       return;
     }
 
     // Stage 1c: Explicitly awaiting text content (PATH C)
     if (session.stage === 'awaiting_text_content') {
       if (rawInput) {
+        this.pushAddHistory(session, 'awaiting_text_content');
         session.type = 'file';
         session.isTextOnly = true;
         session.caption = rawInput;
         session.textResponse = rawInput;
         session.fileName = 'Text: ' + (rawInput.slice(0, 25).replace(/\n/g, ' '));
-        session.stage = 'awaiting_trigger_type';
-
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
+        await this.promptTriggerTypeStep(
+          fromId,
           chatId,
-          `✅ <b>Text Response Received:</b>\n<blockquote>${this.escapeHtml(rawInput.slice(0, 100))}${rawInput.length > 100 ? '...' : ''}</blockquote>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`,
-          {
-            inline_keyboard: [
-              [
-                { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
-                { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
-                { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
-              ],
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
+          session,
+          `✅ <b>Text Response Received:</b>\n<blockquote>${this.escapeHtml(rawInput.slice(0, 100))}${rawInput.length > 100 ? '...' : ''}</blockquote>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`
         );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
         return;
       }
 
-      const promptId = await TelegramService.sendOrEditSetupPrompt(
+      await this.renderAddStage(
+        fromId,
         chatId,
-        '❌ Please send a valid text message (or type /cancel to abort):',
-        {
-          inline_keyboard: [
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
-        },
-        session
+        session,
+        '❌ Please send a valid text message (or type /cancel to abort):'
       );
-      if (promptId) session.lastPromptMessageId = promptId;
-      activeAddSessions.set(fromId, session);
-      await storage.saveAddSession(fromId, session);
       return;
     }
 
     // Stage: Awaiting trigger type button selection
     if (session.stage === 'awaiting_trigger_type' || session.stage === 'awaiting_keyword_type') {
       const stepHeader = session.type === 'file' ? 'Step 1/4' : 'Step 1/7';
-      const promptId = await TelegramService.sendOrEditSetupPrompt(
+      await this.promptTriggerTypeStep(
+        fromId,
         chatId,
-        `<b>${stepHeader}:</b> Please choose a trigger type using the buttons below:`,
-        {
-          inline_keyboard: [
-            [
-              { text: 'Hashtag (#)', callback_data: 'add_kw_hashtag', style: 'primary' },
-              { text: 'Slash Command (/)', callback_data: 'add_kw_slash', style: 'primary' },
-              { text: 'Normal Text', callback_data: 'add_kw_normal', style: 'primary' }
-            ],
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
-        },
-        session
+        session,
+        `<b>${stepHeader}:</b> Please choose a trigger type using the buttons below:`
       );
-      if (promptId) session.lastPromptMessageId = promptId;
-      activeAddSessions.set(fromId, session);
-      await storage.saveAddSession(fromId, session);
       return;
     }
 
@@ -14320,19 +14751,12 @@ export class TelegramService {
       const cleanInput = rawInput.trim();
       const rawKeyword = cleanInput.replace(/^[#/]+/, '').trim();
       if (!rawKeyword) {
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
+        await this.renderAddStage(
+          fromId,
           chatId,
-          '❌ Please enter a valid trigger keyword name (or send /cancel to abort):',
-          {
-            inline_keyboard: [
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
+          session,
+          '❌ Please enter a valid trigger keyword name (or send /cancel to abort):'
         );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
         return;
       }
 
@@ -14343,30 +14767,12 @@ export class TelegramService {
         ? `/${rawKeyword}`
         : rawKeyword;
 
+      this.pushAddHistory(session, 'awaiting_trigger_name');
       session.rawKeyword = rawKeyword;
       session.trigger = formattedTrigger;
       session.hashtag = formattedTrigger;
       session.stage = 'awaiting_filter_choice';
-
-      // Step 3: Filter List Visibility
-      const stepHeader = session.type === 'file' ? 'Step 3/4' : 'Step 3/7';
-      const promptId = await TelegramService.sendOrEditSetupPrompt(
-        chatId,
-        `<b>${stepHeader}: Filter List Visibility</b>\nDo you want to add <code>${formattedTrigger}</code> to the public /filters list?`,
-        {
-          inline_keyboard: [
-            [
-              { text: '1. Yes, Add to Filters', callback_data: 'add_filter_yes', style: 'success' },
-              { text: '2. No, Keep Hidden', callback_data: 'add_filter_no', style: 'danger' }
-            ],
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
-        },
-        session
-      );
-      if (promptId) session.lastPromptMessageId = promptId;
-      activeAddSessions.set(fromId, session);
-      await storage.saveAddSession(fromId, session);
+      await this.renderAddStage(fromId, chatId, session);
       return;
     }
 
@@ -14379,73 +14785,28 @@ export class TelegramService {
         session.inFiltersList = false;
       } else {
         const stepHeader = session.type === 'file' ? 'Step 3/4' : 'Step 3/7';
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
+        await this.renderAddStage(
+          fromId,
           chatId,
-          `<b>${stepHeader}:</b> Do you want to add <code>${session.trigger || session.rawKeyword}</code> to the public /filters list?`,
-          {
-            inline_keyboard: [
-              [
-                { text: '1. Yes, Add to Filters', callback_data: 'add_filter_yes', style: 'success' },
-                { text: '2. No, Keep Hidden', callback_data: 'add_filter_no', style: 'danger' }
-              ],
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
+          session,
+          `<b>${stepHeader}:</b> Do you want to add <code>${this.escapeHtml(session.trigger || session.rawKeyword || 'item')}</code> to the public /filters list?`
         );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
         return;
       }
+
+      this.pushAddHistory(session, 'awaiting_filter_choice');
 
       // FILE ADD FLOW: Completely skip Delivery Mode! Files are direct Telegram Document/Media files.
       if (session.type === 'file') {
         session.openMode = 'browser';
         session.stage = 'awaiting_retention_choice';
-
-        // Step 4/4: Storage Duration for Files
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
-          chatId,
-          `<b>Step 4/4: Storage Duration</b>\nChoose storage duration for this file:\n• <b>Permanent</b> — file and its filters remain indefinitely\n• <b>Temporary</b> — auto-deleted with its filters after the chosen days`,
-          {
-            inline_keyboard: [
-              [
-                { text: 'Permanent', callback_data: 'add_ret_perm', style: 'primary' },
-                { text: 'Temporary', callback_data: 'add_ret_temp', style: 'primary' }
-              ],
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
-        );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
+        await this.renderAddStage(fromId, chatId, session);
         return;
       }
 
       // LINK ADD FLOW: Proceed to Step 4/7 Delivery Type
       session.stage = 'awaiting_delivery_type';
-
-      // Step 4/7: Delivery Type (Only for Links)
-      const promptId = await TelegramService.sendOrEditSetupPrompt(
-        chatId,
-        `<b>Step 4/7: Delivery Type</b>\nChoose delivery type when triggered:\n• <b>Telegram Mini App</b> — opens embedded inside Telegram\n• <b>Web Browser / Direct</b> — opens in standard browser or direct Telegram chat`,
-        {
-          inline_keyboard: [
-            [
-              { text: 'Telegram Mini App', callback_data: 'add_delivery_webapp', style: 'primary' },
-              { text: 'Web Browser / Direct', callback_data: 'add_delivery_browser', style: 'primary' }
-            ],
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
-        },
-        session
-      );
-      if (promptId) session.lastPromptMessageId = promptId;
-      activeAddSessions.set(fromId, session);
-      await storage.saveAddSession(fromId, session);
+      await this.renderAddStage(fromId, chatId, session);
       return;
     }
 
@@ -14458,24 +14819,9 @@ export class TelegramService {
         session.openMode = 'browser';
       }
 
-      // Mandatory Customization for Links: Private Delivery Message Text & Open Button Text
+      this.pushAddHistory(session, 'awaiting_delivery_type');
       session.stage = 'awaiting_link_reply_message';
-
-      const defaultReplyMsg = `🔗 Here is your requested link: ${session.linkData?.url || ''}`;
-      const promptId = await TelegramService.sendOrEditSetupPrompt(
-        chatId,
-        `<b>Step 5/7: Private Delivery Message</b>\nEnter the message text to send privately along with this link, or tap <b>Use Default</b> below:\n\nDefault: <code>${defaultReplyMsg}</code>`,
-        {
-          inline_keyboard: [
-            [{ text: 'Use Default Message', callback_data: 'add_link_default_msg', style: 'primary' }],
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
-        },
-        session
-      );
-      if (promptId) session.lastPromptMessageId = promptId;
-      activeAddSessions.set(fromId, session);
-      await storage.saveAddSession(fromId, session);
+      await this.renderAddStage(fromId, chatId, session);
       return;
     }
 
@@ -14485,23 +14831,9 @@ export class TelegramService {
       const defaultReplyMsg = `🔗 Here is your requested link: ${session.linkData?.url || ''}`;
       session.replyMessage = customReply || defaultReplyMsg;
       if (session.linkData) session.linkData.replyMessage = session.replyMessage;
+      this.pushAddHistory(session, 'awaiting_link_reply_message');
       session.stage = 'awaiting_link_button_text';
-
-      // Step 6: Open Button Text
-      const promptId = await TelegramService.sendOrEditSetupPrompt(
-        chatId,
-        `<b>Step 6/7: Open Button Text</b>\nEnter the inline button text to open the link, or tap <b>Use Default</b> below:\n\nDefault: <code>Open Link</code>`,
-        {
-          inline_keyboard: [
-            [{ text: 'Use Default', callback_data: 'add_link_default_btn', style: 'primary' }],
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
-        },
-        session
-      );
-      if (promptId) session.lastPromptMessageId = promptId;
-      activeAddSessions.set(fromId, session);
-      await storage.saveAddSession(fromId, session);
+      await this.renderAddStage(fromId, chatId, session);
       return;
     }
 
@@ -14510,26 +14842,9 @@ export class TelegramService {
       const customBtn = rawInput.trim();
       session.buttonText = customBtn ? customBtn.trim() : 'Open Link';
       if (session.linkData) session.linkData.buttonText = session.buttonText;
+      this.pushAddHistory(session, 'awaiting_link_button_text');
       session.stage = 'awaiting_retention_choice';
-
-      // Step 7: Storage Duration for Link
-      const promptId = await TelegramService.sendOrEditSetupPrompt(
-        chatId,
-        `<b>Step 7/7: Storage Duration</b>\nChoose storage duration for this link:\n• <b>Permanent</b> — link and its filters remain indefinitely\n• <b>Temporary</b> — auto-deleted with its filters after the chosen days`,
-        {
-          inline_keyboard: [
-            [
-              { text: 'Permanent', callback_data: 'add_ret_perm', style: 'primary' },
-              { text: 'Temporary', callback_data: 'add_ret_temp', style: 'primary' }
-            ],
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
-        },
-        session
-      );
-      if (promptId) session.lastPromptMessageId = promptId;
-      activeAddSessions.set(fromId, session);
-      await storage.saveAddSession(fromId, session);
+      await this.renderAddStage(fromId, chatId, session);
       return;
     }
 
@@ -14537,52 +14852,25 @@ export class TelegramService {
     if (session.stage === 'awaiting_retention_choice') {
       const lower = rawInput.toLowerCase();
       if (lower === 'permanent' || lower === 'p' || lower.includes('perm')) {
+        this.pushAddHistory(session, 'awaiting_retention_choice');
         session.retentionType = 'permanent';
         session.retentionDays = undefined;
         await this.promptSetupVideoChoice(fromId, chatId, session);
         return;
       } else if (lower === 'temporary' || lower === 't' || lower.includes('temp')) {
+        this.pushAddHistory(session, 'awaiting_retention_choice');
         session.retentionType = 'temporary';
         session.stage = 'awaiting_retention_days';
-
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
-          chatId,
-          `⏳ <b>Auto-Deletion Duration:</b>\nPlease select or enter how many days to keep this ${session.type === 'file' ? 'file' : 'link'}:`,
-          {
-            inline_keyboard: [
-              [
-                { text: '1 Day', callback_data: 'add_days_1', style: 'primary' },
-                { text: '7 Days', callback_data: 'add_days_7', style: 'primary' },
-                { text: '30 Days', callback_data: 'add_days_30', style: 'primary' }
-              ],
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
-        );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
+        await this.renderAddStage(fromId, chatId, session);
         return;
       } else {
         const stepHeader = session.type === 'file' ? 'Step 4/4' : 'Step 7/7';
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
+        await this.renderAddStage(
+          fromId,
           chatId,
-          `<b>${stepHeader}: Storage Duration</b>\nDo you want this ${session.type === 'file' ? 'file' : 'link'} to be Permanent or Temporary?`,
-          {
-            inline_keyboard: [
-              [
-                { text: 'Permanent', callback_data: 'add_ret_perm', style: 'primary' },
-                { text: 'Temporary', callback_data: 'add_ret_temp', style: 'primary' }
-              ],
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
+          session,
+          `<b>${stepHeader}: Storage Duration</b>\nDo you want this ${session.type === 'file' ? 'file' : 'link'} to be Permanent or Temporary?`
         );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
         return;
       }
     }
@@ -14591,27 +14879,16 @@ export class TelegramService {
     if (session.stage === 'awaiting_retention_days') {
       const days = parseInt(rawInput, 10);
       if (isNaN(days) || days < 1) {
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
+        await this.renderAddStage(
+          fromId,
           chatId,
-          '❌ Please enter a valid number of days (e.g., 7 or 30):',
-          {
-            inline_keyboard: [
-              [
-                { text: '1 Day', callback_data: 'add_days_1', style: 'primary' },
-                { text: '7 Days', callback_data: 'add_days_7', style: 'primary' },
-                { text: '30 Days', callback_data: 'add_days_30', style: 'primary' }
-              ],
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
+          session,
+          '❌ Please enter a valid number of days (e.g., 7 or 30):'
         );
-        if (promptId) session.lastPromptMessageId = promptId;
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
         return;
       }
 
+      this.pushAddHistory(session, 'awaiting_retention_days');
       session.retentionType = 'temporary';
       session.retentionDays = days;
       await this.promptSetupVideoChoice(fromId, chatId, session);
@@ -14622,26 +14899,10 @@ export class TelegramService {
     if (session.stage === 'awaiting_setup_video_choice') {
       const lower = rawInput.toLowerCase();
       if (lower === '1' || lower === 'yes' || lower === 'y' || lower.includes('add')) {
+        this.pushAddHistory(session, 'awaiting_setup_video_choice');
         session.hasSetupVideo = true;
         session.stage = 'awaiting_setup_video';
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-
-        const promptId = await TelegramService.sendOrEditSetupPrompt(
-          chatId,
-          `🎬 <b>Send Setup Video</b>\n\nPlease provide your setup video tutorial. You can:\n• Send/upload a video directly from your phone/gallery\n• Forward a video from any chat or channel\n• Send a video URL link (e.g. YouTube or direct MP4 link)\n\n<i>Or send /skip to finish without a video, or /cancel to abort.</i>`,
-          {
-            inline_keyboard: [
-              [{ text: 'Skip Video', callback_data: 'add_sv_no', style: 'primary' }],
-              [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-            ]
-          },
-          session
-        );
-        if (promptId) {
-          session.lastPromptMessageId = promptId;
-          await storage.saveAddSession(fromId, session);
-        }
+        await this.renderAddStage(fromId, chatId, session);
         return;
       } else {
         session.hasSetupVideo = false;
@@ -14689,20 +14950,12 @@ export class TelegramService {
         return;
       }
 
-      const promptId = await TelegramService.sendOrEditSetupPrompt(
+      await this.renderAddStage(
+        fromId,
         chatId,
-        '❌ Invalid input. Please send/forward a video file, or send a valid URL starting with http:// or https:// (or tap Skip Video below):',
-        {
-          inline_keyboard: [
-            [{ text: 'Skip Video', callback_data: 'add_sv_no', style: 'primary' }],
-            [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-          ]
-        },
-        session
+        session,
+        '❌ Invalid input. Please send/forward a video file, or send a valid URL starting with http:// or https:// (or tap Skip Video below):'
       );
-      if (promptId) session.lastPromptMessageId = promptId;
-      activeAddSessions.set(fromId, session);
-      await storage.saveAddSession(fromId, session);
       return;
     }
     });
@@ -14727,13 +14980,14 @@ export class TelegramService {
             { text: '1. Yes, Add Setup Video', callback_data: 'add_sv_yes', style: 'success' },
             { text: '2. No, Skip (Direct Delivery)', callback_data: 'add_sv_no', style: 'primary' }
           ],
-          [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
+          ...this.buildAddCancelBackRows()
         ]
       },
       session
     );
-    if (promptId) {
+    if (promptId && promptId !== session.lastPromptMessageId) {
       session.lastPromptMessageId = promptId;
+      activeAddSessions.set(fromId, session);
       await storage.saveAddSession(fromId, session);
     }
   }
@@ -16755,6 +17009,29 @@ export class TelegramService {
       return;
     }
 
+    // Back Button throughout /add wizard
+    if (data === 'add_back') {
+      await withAddSessionLock(fromId, async () => {
+        let curSession = activeAddSessions.get(fromId);
+        if (!curSession) {
+          curSession = await storage.getAddSession(fromId);
+          if (curSession) activeAddSessions.set(fromId, curSession);
+        }
+        if (!curSession) return;
+        if (cb.message?.message_id) {
+          curSession.lastPromptMessageId = cb.message.message_id;
+        }
+        const prevStage = this.popAddPreviousStage(curSession);
+        curSession.stage = prevStage;
+        activeAddSessions.set(fromId, curSession);
+        await storage.saveAddSession(fromId, curSession);
+        if (chatId) {
+          await this.renderAddStage(fromId, chatId, curSession);
+        }
+      });
+      return;
+    }
+
     let session = activeAddSessions.get(fromId);
     if (!session) {
       session = await storage.getAddSession(fromId);
@@ -16766,30 +17043,25 @@ export class TelegramService {
       session.lastPromptMessageId = msgId;
     }
 
-    // PATH Selection Callbacks: Add File or Add Link
+    // PATH Selection Callbacks: Add File, Add Link, Add Text
     if (data === 'add_choose_file') {
       await withAddSessionLock(fromId, async () => {
         const curSession = activeAddSessions.get(fromId) || session;
         if (!curSession) return;
+        this.pushAddHistory(curSession, 'awaiting_content');
         curSession.type = 'file';
         curSession.isTextOnly = false;
+        delete curSession.textResponse;
+        if (curSession.fileName?.startsWith('Text:')) {
+          delete curSession.fileName;
+        }
         curSession.filesData = curSession.filesData || [];
         curSession.stage = 'awaiting_file_content';
-        activeAddSessions.set(fromId, curSession);
-        await storage.saveAddSession(fromId, curSession);
-
         if (chatId) {
-          const collector = this.buildMultiFileCollectorPrompt(curSession);
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
-            chatId,
-            collector.text,
-            collector.replyMarkup,
-            curSession
-          );
-          if (promptId) {
-            curSession.lastPromptMessageId = promptId;
-            await storage.saveAddSession(fromId, curSession);
-          }
+          await this.renderAddStage(fromId, chatId, curSession);
+        } else {
+          activeAddSessions.set(fromId, curSession);
+          await storage.saveAddSession(fromId, curSession);
         }
       });
       return;
@@ -16804,16 +17076,11 @@ export class TelegramService {
           : (curSession.fileData ? [curSession.fileData] : []);
         if (files.length === 0) {
           if (chatId) {
-            const collector = this.buildMultiFileCollectorPrompt(curSession);
-            await TelegramService.sendOrEditSetupPrompt(
-              chatId,
-              collector.text,
-              collector.replyMarkup,
-              curSession
-            );
+            await this.renderAddStage(fromId, chatId, curSession);
           }
           return;
         }
+        this.pushAddHistory(curSession, 'awaiting_file_content');
         if (chatId) {
           await this.promptTriggerTypeStep(fromId, chatId, curSession);
         }
@@ -16829,367 +17096,288 @@ export class TelegramService {
           curSession.filesData.pop();
         }
         curSession.fileData = curSession.filesData?.[0];
-        activeAddSessions.set(fromId, curSession);
-        await storage.saveAddSession(fromId, curSession);
-
         if (chatId) {
-          const collector = this.buildMultiFileCollectorPrompt(curSession);
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
-            chatId,
-            collector.text,
-            collector.replyMarkup,
-            curSession
-          );
-          if (promptId) {
-            curSession.lastPromptMessageId = promptId;
-            await storage.saveAddSession(fromId, curSession);
-          }
+          await this.renderAddStage(fromId, chatId, curSession);
+        } else {
+          activeAddSessions.set(fromId, curSession);
+          await storage.saveAddSession(fromId, curSession);
         }
       });
       return;
     }
 
     if (data === 'add_choose_link') {
-      if (session) {
-        session.type = 'link';
-        session.stage = 'awaiting_link_url';
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        this.pushAddHistory(curSession, 'awaiting_content');
+        curSession.type = 'link';
+        curSession.isTextOnly = false;
+        curSession.stage = 'awaiting_link_url';
         if (chatId) {
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
-            chatId,
-            '🔗 Please enter or paste the <b>Web Link (URL)</b> you want to add (e.g., https://example.com):\n\n<i>Or send /cancel to abort.</i>',
-            {
-              inline_keyboard: [
-                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-              ]
-            },
-            session
-          );
-          if (promptId) {
-            session.lastPromptMessageId = promptId;
-            await storage.saveAddSession(fromId, session);
-          }
+          await this.renderAddStage(fromId, chatId, curSession);
+        } else {
+          activeAddSessions.set(fromId, curSession);
+          await storage.saveAddSession(fromId, curSession);
         }
-      }
+      });
+      return;
+    }
+
+    if (data === 'add_keep_link_url') {
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession || !curSession.linkData?.url) return;
+        this.pushAddHistory(curSession, 'awaiting_link_url');
+        curSession.type = 'link';
+        curSession.isTextOnly = false;
+        if (chatId) {
+          await this.promptTriggerTypeStep(fromId, chatId, curSession);
+        }
+      });
       return;
     }
 
     if (data === 'add_choose_text') {
-      if (session) {
-        session.type = 'file';
-        session.isTextOnly = true;
-        session.stage = 'awaiting_text_content';
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        this.pushAddHistory(curSession, 'awaiting_content');
+        curSession.type = 'file';
+        curSession.isTextOnly = true;
+        curSession.stage = 'awaiting_text_content';
         if (chatId) {
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
-            chatId,
-            '💬 Please enter the <b>Text Message</b> you want the bot to deliver when triggered:\n\n<i>You can use bold, italic, links, and HTML tags. Or send /cancel to abort.</i>',
-            {
-              inline_keyboard: [
-                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-              ]
-            },
-            session
-          );
-          if (promptId) {
-            session.lastPromptMessageId = promptId;
-            await storage.saveAddSession(fromId, session);
-          }
+          await this.renderAddStage(fromId, chatId, curSession);
+        } else {
+          activeAddSessions.set(fromId, curSession);
+          await storage.saveAddSession(fromId, curSession);
         }
-      }
+      });
+      return;
+    }
+
+    if (data === 'add_keep_text_content') {
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession || !curSession.textResponse) return;
+        this.pushAddHistory(curSession, 'awaiting_text_content');
+        curSession.type = 'file';
+        curSession.isTextOnly = true;
+        if (chatId) {
+          await this.promptTriggerTypeStep(
+            fromId,
+            chatId,
+            curSession,
+            `✅ <b>Text Response Received:</b>\n<blockquote>${this.escapeHtml(curSession.textResponse.slice(0, 100))}${curSession.textResponse.length > 100 ? '...' : ''}</blockquote>\n\n<b>Step 1/4: Trigger Type Selection</b>\n<i>Choose whether the trigger will be a Hashtag (<code>#</code>), Slash Command (<code>/</code>), or Normal Text:</i>`
+          );
+        }
+      });
       return;
     }
 
     // Step 1: Trigger Type Selection (#, /, or normal)
     if (data === 'add_kw_hashtag' || data === 'add_kw_slash' || data === 'add_kw_normal') {
-      if (session) {
-        session.triggerType = data === 'add_kw_hashtag' ? 'hashtag' : data === 'add_kw_slash' ? 'slash' : 'normal';
-        session.stage = 'awaiting_trigger_name';
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-
-        const promptHint = session.triggerType === 'hashtag'
-          ? 'starting with #'
-          : session.triggerType === 'slash'
-          ? 'starting with /'
-          : 'plain text keyword';
-
-        const stepHeader = session.type === 'file' ? 'Step 2/4' : 'Step 2/7';
-
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        this.pushAddHistory(curSession, 'awaiting_trigger_type');
+        curSession.triggerType = data === 'add_kw_hashtag' ? 'hashtag' : data === 'add_kw_slash' ? 'slash' : 'normal';
+        curSession.stage = 'awaiting_trigger_name';
         if (chatId) {
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
-            chatId,
-            `<b>${stepHeader}: Trigger Name</b>\nPlease enter the trigger keyword for this ${session.type === 'file' ? 'file' : 'link'} (${promptHint}):`,
-            {
-              inline_keyboard: [
-                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-              ]
-            },
-            session
-          );
-          if (promptId) {
-            session.lastPromptMessageId = promptId;
-            await storage.saveAddSession(fromId, session);
-          }
+          await this.renderAddStage(fromId, chatId, curSession);
+        } else {
+          activeAddSessions.set(fromId, curSession);
+          await storage.saveAddSession(fromId, curSession);
         }
-      }
+      });
+      return;
+    }
+
+    if (data === 'add_keep_trigger_name') {
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession || !curSession.rawKeyword) return;
+        const triggerType = curSession.triggerType || 'hashtag';
+        const formattedTrigger = triggerType === 'hashtag'
+          ? `#${curSession.rawKeyword}`
+          : triggerType === 'slash'
+          ? `/${curSession.rawKeyword}`
+          : curSession.rawKeyword;
+        curSession.trigger = formattedTrigger;
+        curSession.hashtag = formattedTrigger;
+        this.pushAddHistory(curSession, 'awaiting_trigger_name');
+        curSession.stage = 'awaiting_filter_choice';
+        if (chatId) {
+          await this.renderAddStage(fromId, chatId, curSession);
+        } else {
+          activeAddSessions.set(fromId, curSession);
+          await storage.saveAddSession(fromId, curSession);
+        }
+      });
       return;
     }
 
     // Step 3: Filter List Visibility Selection (Yes/No)
     if (data === 'add_filter_yes' || data === 'add_filter_no') {
-      if (session) {
-        session.inFiltersList = (data === 'add_filter_yes');
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        this.pushAddHistory(curSession, 'awaiting_filter_choice');
+        curSession.inFiltersList = (data === 'add_filter_yes');
 
-        // FILE ADD FLOW: Completely skip Delivery Mode! Files are direct Telegram Document/Media files.
-        if (session.type === 'file') {
-          session.openMode = 'browser';
-          session.stage = 'awaiting_retention_choice';
-          activeAddSessions.set(fromId, session);
-          await storage.saveAddSession(fromId, session);
-
-          if (chatId) {
-            const promptId = await TelegramService.sendOrEditSetupPrompt(
-              chatId,
-              `<b>Step 4/4: Storage Duration</b>\nChoose storage duration for this file:\n• <b>Permanent</b> — file and its filters remain indefinitely\n• <b>Temporary</b> — auto-deleted with its filters after chosen days`,
-              {
-                inline_keyboard: [
-                  [
-                    { text: 'Permanent', callback_data: 'add_ret_perm', style: 'primary' },
-                    { text: 'Temporary', callback_data: 'add_ret_temp', style: 'primary' }
-                  ],
-                  [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-                ]
-              },
-              session
-            );
-            if (promptId) {
-              session.lastPromptMessageId = promptId;
-              await storage.saveAddSession(fromId, session);
-            }
-          }
-          return;
+        if (curSession.type === 'file') {
+          curSession.openMode = 'browser';
+          curSession.stage = 'awaiting_retention_choice';
+        } else {
+          curSession.stage = 'awaiting_delivery_type';
         }
 
-        // LINK ADD FLOW: Proceed to Step 4/7 Delivery Type
-        session.stage = 'awaiting_delivery_type';
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-
-        // Step 4 Prompt: Delivery Type (Only for Links)
         if (chatId) {
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
-            chatId,
-            `<b>Step 4/7: Delivery Type</b>\nChoose delivery type when triggered:\n• <b>Telegram Mini App</b> — opens embedded inside Telegram\n• <b>Web Browser / Direct</b> — opens in standard browser or direct Telegram chat`,
-            {
-              inline_keyboard: [
-                [
-                  { text: 'Telegram Mini App', callback_data: 'add_delivery_webapp', style: 'primary' },
-                  { text: 'Web Browser / Direct', callback_data: 'add_delivery_browser', style: 'primary' }
-                ],
-                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-              ]
-            },
-            session
-          );
-          if (promptId) {
-            session.lastPromptMessageId = promptId;
-            await storage.saveAddSession(fromId, session);
-          }
+          await this.renderAddStage(fromId, chatId, curSession);
+        } else {
+          activeAddSessions.set(fromId, curSession);
+          await storage.saveAddSession(fromId, curSession);
         }
-      }
+      });
       return;
     }
 
     // Step 4: Delivery Type Selection (Mini App vs Browser/Direct) - ONLY FOR LINKS
     if (data === 'add_delivery_webapp' || data === 'add_delivery_browser') {
-      if (session) {
-        session.openMode = (data === 'add_delivery_webapp' ? 'webapp' : 'browser');
-
-        // Mandatory Customization for Links
-        session.stage = 'awaiting_link_reply_message';
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-
-        const defaultReplyMsg = `🔗 Here is your requested link: ${session.linkData?.url || ''}`;
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        this.pushAddHistory(curSession, 'awaiting_delivery_type');
+        curSession.openMode = (data === 'add_delivery_webapp' ? 'webapp' : 'browser');
+        curSession.stage = 'awaiting_link_reply_message';
         if (chatId) {
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
-            chatId,
-            `<b>Step 5/7: Private Delivery Message</b>\nEnter the message text to send privately along with this link, or tap <b>Use Default</b> below:\n\nDefault: <code>${defaultReplyMsg}</code>`,
-            {
-              inline_keyboard: [
-                [{ text: 'Use Default Message', callback_data: 'add_link_default_msg', style: 'primary' }],
-                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-              ]
-            },
-            session
-          );
-          if (promptId) {
-            session.lastPromptMessageId = promptId;
-            await storage.saveAddSession(fromId, session);
-          }
+          await this.renderAddStage(fromId, chatId, curSession);
+        } else {
+          activeAddSessions.set(fromId, curSession);
+          await storage.saveAddSession(fromId, curSession);
         }
-      }
+      });
       return;
     }
 
-    // Step 5 (Link Mandatory Step 1): Default Private Delivery Message selection
-    if (data === 'add_link_default_msg') {
-      if (session) {
-        session.replyMessage = `🔗 Here is your requested link: ${session.linkData?.url || ''}`;
-        session.caption = session.replyMessage;
-        if (session.linkData) session.linkData.replyMessage = session.replyMessage;
-        session.stage = 'awaiting_link_button_text';
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-
-        // Step 6 Prompt: Open Button Text
-        if (chatId) {
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
-            chatId,
-            `<b>Step 6/7: Open Button Text</b>\nEnter the inline button text to open the link, or tap <b>Use Default</b> below:\n\nDefault: <code>Open Link</code>`,
-            {
-              inline_keyboard: [
-                [{ text: 'Use Default', callback_data: 'add_link_default_btn', style: 'primary' }],
-                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-              ]
-            },
-            session
-          );
-          if (promptId) {
-            session.lastPromptMessageId = promptId;
-            await storage.saveAddSession(fromId, session);
-          }
+    // Step 5 (Link Mandatory Step 1): Default or Keep Private Delivery Message
+    if (data === 'add_link_default_msg' || data === 'add_keep_link_reply') {
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        if (data === 'add_link_default_msg' || !curSession.replyMessage) {
+          curSession.replyMessage = `🔗 Here is your requested link: ${curSession.linkData?.url || ''}`;
         }
-      }
+        curSession.caption = curSession.replyMessage;
+        if (curSession.linkData) curSession.linkData.replyMessage = curSession.replyMessage;
+        this.pushAddHistory(curSession, 'awaiting_link_reply_message');
+        curSession.stage = 'awaiting_link_button_text';
+        if (chatId) {
+          await this.renderAddStage(fromId, chatId, curSession);
+        } else {
+          activeAddSessions.set(fromId, curSession);
+          await storage.saveAddSession(fromId, curSession);
+        }
+      });
       return;
     }
 
-    // Step 6 (Link Mandatory Step 2): Default Open Button Text selection
-    if (data === 'add_link_default_btn') {
-      if (session) {
-        session.buttonText = 'Open Link';
-        if (session.linkData) session.linkData.buttonText = session.buttonText;
-        session.stage = 'awaiting_retention_choice';
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-
-        // Step 7 Prompt: Storage Duration
-        if (chatId) {
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
-            chatId,
-            `<b>Step 7/7: Storage Duration</b>\nChoose storage duration for this link:\n• <b>Permanent</b> — link and its filters remain indefinitely\n• <b>Temporary</b> — auto-deleted with its filters after chosen days`,
-            {
-              inline_keyboard: [
-                [
-                  { text: 'Permanent', callback_data: 'add_ret_perm', style: 'primary' },
-                  { text: 'Temporary', callback_data: 'add_ret_temp', style: 'primary' }
-                ],
-                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-              ]
-            },
-            session
-          );
-          if (promptId) {
-            session.lastPromptMessageId = promptId;
-            await storage.saveAddSession(fromId, session);
-          }
+    // Step 6 (Link Mandatory Step 2): Default or Keep Open Button Text
+    if (data === 'add_link_default_btn' || data === 'add_keep_link_button') {
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        if (data === 'add_link_default_btn' || !curSession.buttonText) {
+          curSession.buttonText = 'Open Link';
         }
-      }
+        if (curSession.linkData) curSession.linkData.buttonText = curSession.buttonText;
+        this.pushAddHistory(curSession, 'awaiting_link_button_text');
+        curSession.stage = 'awaiting_retention_choice';
+        if (chatId) {
+          await this.renderAddStage(fromId, chatId, curSession);
+        } else {
+          activeAddSessions.set(fromId, curSession);
+          await storage.saveAddSession(fromId, curSession);
+        }
+      });
       return;
     }
 
     // Step 5: Storage Duration Selection (Permanent vs Temporary)
     if (data === 'add_ret_perm') {
-      if (session) {
-        session.retentionType = 'permanent';
-        session.retentionDays = undefined;
-        await this.promptSetupVideoChoice(fromId, chatId, session);
-      }
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        this.pushAddHistory(curSession, 'awaiting_retention_choice');
+        curSession.retentionType = 'permanent';
+        curSession.retentionDays = undefined;
+        if (chatId) {
+          await this.promptSetupVideoChoice(fromId, chatId, curSession);
+        }
+      });
       return;
     }
 
     if (data === 'add_ret_temp') {
-      if (session) {
-        session.retentionType = 'temporary';
-        session.stage = 'awaiting_retention_days';
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        this.pushAddHistory(curSession, 'awaiting_retention_choice');
+        curSession.retentionType = 'temporary';
+        curSession.stage = 'awaiting_retention_days';
         if (chatId) {
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
-            chatId,
-            `⏳ <b>Auto-Deletion Duration:</b>\nPlease select or enter how many days to keep this ${session.type === 'file' ? 'file' : 'link'}:`,
-            {
-              inline_keyboard: [
-                [
-                  { text: '1 Day', callback_data: 'add_days_1', style: 'primary' },
-                  { text: '7 Days', callback_data: 'add_days_7', style: 'primary' },
-                  { text: '30 Days', callback_data: 'add_days_30', style: 'primary' }
-                ],
-                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-              ]
-            },
-            session
-          );
-          if (promptId) {
-            session.lastPromptMessageId = promptId;
-            await storage.saveAddSession(fromId, session);
-          }
+          await this.renderAddStage(fromId, chatId, curSession);
+        } else {
+          activeAddSessions.set(fromId, curSession);
+          await storage.saveAddSession(fromId, curSession);
         }
-      }
+      });
       return;
     }
 
     // Step 5b: Quick days selection
     if (data.startsWith('add_days_')) {
-      if (session) {
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
         const days = parseInt(data.replace('add_days_', ''), 10) || 7;
-        session.retentionType = 'temporary';
-        session.retentionDays = days;
-        await this.promptSetupVideoChoice(fromId, chatId, session);
-      }
+        this.pushAddHistory(curSession, 'awaiting_retention_days');
+        curSession.retentionType = 'temporary';
+        curSession.retentionDays = days;
+        if (chatId) {
+          await this.promptSetupVideoChoice(fromId, chatId, curSession);
+        }
+      });
       return;
     }
 
     // Setup Video Selection Callbacks
     if (data === 'add_sv_yes') {
-      if (session) {
-        session.hasSetupVideo = true;
-        session.stage = 'awaiting_setup_video';
-        activeAddSessions.set(fromId, session);
-        await storage.saveAddSession(fromId, session);
-
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        this.pushAddHistory(curSession, 'awaiting_setup_video_choice');
+        curSession.hasSetupVideo = true;
+        curSession.stage = 'awaiting_setup_video';
         if (chatId) {
-          const promptId = await TelegramService.sendOrEditSetupPrompt(
-            chatId,
-            `🎬 <b>Send Setup Video</b>\n\nPlease provide your setup video tutorial. You can:\n• Send/upload a video directly from your phone/gallery\n• Forward a video from any chat or channel\n• Send a video URL link (e.g. YouTube or direct MP4 link)\n\n<i>Or send /skip to finish without a video, or /cancel to abort.</i>`,
-            {
-              inline_keyboard: [
-                [{ text: 'Skip Video', callback_data: 'add_sv_no', style: 'primary' }],
-                [{ text: 'Cancel', callback_data: 'cancel_add', style: 'danger' }]
-              ]
-            },
-            session
-          );
-          if (promptId) {
-            session.lastPromptMessageId = promptId;
-            await storage.saveAddSession(fromId, session);
-          }
+          await this.renderAddStage(fromId, chatId, curSession);
+        } else {
+          activeAddSessions.set(fromId, curSession);
+          await storage.saveAddSession(fromId, curSession);
         }
-      }
+      });
       return;
     }
 
     if (data === 'add_sv_no') {
-      if (session) {
-        session.hasSetupVideo = false;
-        await this.finalizeAndSaveItem(fromId, chatId, session);
-      }
+      await withAddSessionLock(fromId, async () => {
+        const curSession = activeAddSessions.get(fromId) || session;
+        if (!curSession) return;
+        curSession.hasSetupVideo = false;
+        if (chatId) {
+          await this.finalizeAndSaveItem(fromId, chatId, curSession);
+        }
+      });
       return;
     }
 
@@ -17947,14 +18135,21 @@ export class TelegramService {
     }
 
     let formattedCaption = caption;
+    const settingsForEmoji = ((caption && options?.parseMode === 'HTML') || replyMarkup)
+      ? await storage.getSettings().catch(() => null)
+      : null;
+    const effectiveEmojiMap = settingsForEmoji
+      ? getEffectiveCustomEmojiMap(settingsForEmoji.customEmojiMap, settingsForEmoji.customEmojiRules)
+      : undefined;
+
     if (caption && options?.parseMode === 'HTML') {
-      const settingsForEmoji = await storage.getSettings().catch(() => null);
-      formattedCaption = applyCustomEmojisToHtml(caption, getEffectiveCustomEmojiMap(settingsForEmoji?.customEmojiMap, settingsForEmoji?.customEmojiRules));
+      formattedCaption = applyCustomEmojisToHtml(caption, effectiveEmojiMap);
     }
 
-    const safeReplyMarkup = replyMarkup ? sanitizeReplyMarkupForTelegram(replyMarkup) : undefined;
+    const fallbackReplyMarkup = replyMarkup ? sanitizeReplyMarkupForTelegram(replyMarkup) : undefined;
+    let safeReplyMarkup = replyMarkup ? sanitizeReplyMarkupForTelegram(replyMarkup, effectiveEmojiMap) : undefined;
 
-    const buildForm = (cap?: string, docOnly = false) => {
+    const buildForm = (cap?: string, docOnly = false, markup = safeReplyMarkup) => {
       const fd = new FormData();
       fd.append('chat_id', String(chatId));
       if (cap) {
@@ -17962,8 +18157,8 @@ export class TelegramService {
         if (options?.parseMode) fd.append('parse_mode', options.parseMode);
       }
       if (options?.threadId) fd.append('message_thread_id', String(options.threadId));
-      if (safeReplyMarkup) {
-        fd.append('reply_markup', typeof safeReplyMarkup === 'string' ? safeReplyMarkup : JSON.stringify(safeReplyMarkup));
+      if (markup) {
+        fd.append('reply_markup', typeof markup === 'string' ? markup : JSON.stringify(markup));
       }
       const blob = new Blob([new Uint8Array(buf)] as any, { type: uploadedFile.mimeType || 'application/octet-stream' });
       fd.append(docOnly ? 'document' : fieldName, blob, uploadedFile.fileName || 'file');
@@ -17973,9 +18168,24 @@ export class TelegramService {
     try {
       const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
         method: 'POST',
-        body: buildForm(formattedCaption, false)
+        body: buildForm(formattedCaption, false, safeReplyMarkup)
       });
       let data = await res.json();
+
+      if (
+        !data.ok &&
+        safeReplyMarkup &&
+        replyMarkupHasIconCustomEmoji(safeReplyMarkup) &&
+        typeof data.description === 'string' &&
+        /icon_custom_emoji_id|custom|emoji|premium|not enough rights|button|reply_markup|keyboard/i.test(data.description)
+      ) {
+        safeReplyMarkup = stripIconCustomEmojiFromReplyMarkup(safeReplyMarkup, fallbackReplyMarkup);
+        const retryBtnRes = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+          method: 'POST',
+          body: buildForm(formattedCaption, false, safeReplyMarkup)
+        });
+        data = await retryBtnRes.json();
+      }
 
       if (
         !data.ok &&
@@ -17987,7 +18197,7 @@ export class TelegramService {
         formattedCaption = stripCustomEmojiTags(formattedCaption);
         const retryRes = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
           method: 'POST',
-          body: buildForm(formattedCaption, false)
+          body: buildForm(formattedCaption, false, safeReplyMarkup)
         });
         data = await retryRes.json();
       }
@@ -17997,7 +18207,7 @@ export class TelegramService {
         console.warn(`[Telegram] ${method} returned error (${data.description}), falling back to sendDocument...`);
         const docRes = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {
           method: 'POST',
-          body: buildForm(formattedCaption, true)
+          body: buildForm(formattedCaption, true, safeReplyMarkup)
         });
         data = await docRes.json();
       }

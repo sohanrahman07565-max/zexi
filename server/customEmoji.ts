@@ -62,7 +62,7 @@ const SLOT_BY_KEY = new Map<string, CustomEmojiSlotDef>();
 const SLOT_BY_EMOJI = new Map<string, CustomEmojiSlotDef>();
 
 export function stripVariationSelector(s: string): string {
-  return String(s || '').replace(/\uFE0F/g, '');
+  return String(s || '').replace(/[\uFE0E\uFE0F]/g, '');
 }
 
 for (const slot of CUSTOM_EMOJI_SLOTS) {
@@ -99,7 +99,9 @@ export function sanitizeCustomEmojiMap(raw: unknown): Record<string, string> {
     const id = String(v ?? '').trim();
     if (!key || !isValidCustomEmojiId(id)) continue;
     if (key.length > 64 || /[<>{}\r\n]/.test(key)) continue;
-    cleaned[key] = id;
+    const normKey = /^[a-z0-9_]+$/i.test(key) ? key.toLowerCase() : stripVariationSelector(key);
+    if (!normKey) continue;
+    cleaned[normKey] = id;
   }
   return cleaned;
 }
@@ -192,10 +194,13 @@ export function buildCustomEmojiMapFromRules(rules: CustomEmojiRule[]): Record<s
   const map: Record<string, string> = {};
   for (const rule of sanitizeCustomEmojiRules(rules)) {
     if (!rule.enabled) continue;
-    map[rule.emoji] = rule.customEmojiId;
+    const norm = stripVariationSelector(rule.emoji);
+    if (norm) {
+      map[norm] = rule.customEmojiId;
+    }
     const slot = rule.slotKey
       ? SLOT_BY_KEY.get(rule.slotKey.toLowerCase())
-      : (SLOT_BY_EMOJI.get(rule.emoji) || SLOT_BY_EMOJI.get(stripVariationSelector(rule.emoji)));
+      : (SLOT_BY_EMOJI.get(rule.emoji) || SLOT_BY_EMOJI.get(norm));
     if (slot?.key) {
       map[slot.key] = rule.customEmojiId;
     }
@@ -348,13 +353,53 @@ function buildEmojiMatchPattern(normEmoji: string): string {
   return codepoints
     .map((cp) => {
       const esc = escapeRegExp(cp);
-      // Allow optional U+FE0F variation selector after base codepoints (not ZWJ/keycap/skin-tone modifiers)
+      // Consume optional U+FE0E/U+FE0F atomically (cannot backtrack to split ZWJ/modifier sequences)
       if (cp === '\u200D' || cp === '\u20E3' || /^[\u{1F3FB}-\u{1F3FF}]$/u.test(cp)) {
         return esc;
       }
-      return `${esc}\\uFE0F?`;
+      return `${esc}(?:[\\uFE0E\\uFE0F]|(?![\\uFE0E\\uFE0F]))`;
     })
     .join('');
+}
+
+function buildNormalizedEmojiMap(customMap?: Record<string, string> | null): Map<string, string> {
+  // Keyed by variation-selector-stripped emoji -> custom_emoji_id
+  const normalizedReplacements = new Map<string, string>();
+  if (!customMap) return normalizedReplacements;
+
+  for (const [rawKey, rawId] of Object.entries(customMap)) {
+    if (!isValidCustomEmojiId(rawId)) continue;
+    const cleanId = rawId.trim();
+    const slot = SLOT_BY_KEY.get(rawKey.toLowerCase());
+    if (slot) {
+      const norm = stripVariationSelector(slot.fallback);
+      if (norm) normalizedReplacements.set(norm, cleanId);
+    } else if (!/^[a-z0-9_]+$/i.test(rawKey) && isValidTargetEmoji(rawKey)) {
+      const norm = stripVariationSelector(rawKey.trim());
+      if (norm) normalizedReplacements.set(norm, cleanId);
+    }
+  }
+  return normalizedReplacements;
+}
+
+function buildEmojiRegex(
+  customMap?: Record<string, string> | null,
+  globalFlag: boolean = true
+): { regex: RegExp; normalizedReplacements: Map<string, string> } | null {
+  const normalizedReplacements = buildNormalizedEmojiMap(customMap);
+  if (normalizedReplacements.size === 0) return null;
+
+  const sortedNormEmojis = Array.from(normalizedReplacements.keys()).sort(
+    (a, b) => Array.from(b).length - Array.from(a).length || b.length - a.length
+  );
+  if (sortedNormEmojis.length === 0) return null;
+
+  const alternation = sortedNormEmojis.map((e) => buildEmojiMatchPattern(e)).join('|');
+  const pattern = `(?<!\\u200D)(?:${alternation})(?![\\u200D\\u20E3\\u{1F3FB}-\\u{1F3FF}])`;
+  return {
+    regex: new RegExp(pattern, globalFlag ? 'gu' : 'u'),
+    normalizedReplacements
+  };
 }
 
 /**
@@ -369,35 +414,13 @@ export function applyCustomEmojisToHtml(
   if (!html || typeof html !== 'string') return html;
 
   const hasEmojiPlaceholders = /\{emoji:[a-z0-9_]+(?:\|[^}]*)?\}/i.test(html);
-  // Keyed by variation-selector-stripped emoji -> custom_emoji_id
-  const normalizedReplacements = new Map<string, string>();
-
-  if (customMap) {
-    for (const [rawKey, rawId] of Object.entries(customMap)) {
-      if (!isValidCustomEmojiId(rawId)) continue;
-      const cleanId = rawId.trim();
-      const slot = SLOT_BY_KEY.get(rawKey.toLowerCase());
-      if (slot) {
-        const norm = stripVariationSelector(slot.fallback);
-        if (norm) normalizedReplacements.set(norm, cleanId);
-      } else if (!/^[a-z0-9_]+$/i.test(rawKey) && isValidTargetEmoji(rawKey)) {
-        const norm = stripVariationSelector(rawKey.trim());
-        if (norm) normalizedReplacements.set(norm, cleanId);
-      }
-    }
-  }
+  const compiled = buildEmojiRegex(customMap, true);
+  const emojiRegex = compiled?.regex || null;
+  const normalizedReplacements = compiled?.normalizedReplacements || new Map<string, string>();
 
   if (!hasEmojiPlaceholders && normalizedReplacements.size === 0) {
     return html;
   }
-
-  const sortedNormEmojis = Array.from(normalizedReplacements.keys()).sort(
-    (a, b) => Array.from(b).length - Array.from(a).length || b.length - a.length
-  );
-  const emojiRegex =
-    sortedNormEmojis.length > 0
-      ? new RegExp(sortedNormEmojis.map((e) => buildEmojiMatchPattern(e)).join('|'), 'g')
-      : null;
 
   const tokenRegex = /\{emoji:([a-z0-9_]+)(?:\|([^}]*))?\}/gi;
 
@@ -440,6 +463,7 @@ export function applyCustomEmojisToHtml(
 
       const replacePlainEmojis = (segment: string): string => {
         if (!emojiRegex || !segment) return segment;
+        emojiRegex.lastIndex = 0;
         return segment.replace(emojiRegex, (matchedEmoji) => {
           const customId = normalizedReplacements.get(stripVariationSelector(matchedEmoji));
           if (!customId) return matchedEmoji;
@@ -471,6 +495,59 @@ export function applyCustomEmojisToHtml(
     .join('');
 }
 
+/**
+ * Attaches Telegram `custom_emoji` entities for non-HTML / entity-formatted messages
+ * without mutating `text` or shifting any existing entity UTF-16 offsets.
+ */
+export function applyCustomEmojisToEntities<T extends Record<string, any>>(
+  text: string,
+  existingEntities?: T[] | null,
+  customMap?: Record<string, string> | null
+): { entities: T[]; addedCount: number } {
+  const baseEntities = Array.isArray(existingEntities) ? existingEntities.map((e) => ({ ...e })) : [];
+  if (!text || typeof text !== 'string') {
+    return { entities: baseEntities, addedCount: 0 };
+  }
+
+  const compiled = buildEmojiRegex(customMap, true);
+  if (!compiled) {
+    return { entities: baseEntities, addedCount: 0 };
+  }
+
+  const protectedTypes = new Set(['custom_emoji', 'code', 'pre', 'url', 'text_link']);
+  const protectedRanges = baseEntities
+    .filter((e) => e && typeof e.type === 'string' && protectedTypes.has(e.type) && Number.isFinite(e.offset) && Number(e.length) > 0)
+    .map((e) => ({ start: Number(e.offset), end: Number(e.offset) + Number(e.length) }));
+
+  const added: any[] = [];
+  compiled.regex.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = compiled.regex.exec(text)) !== null) {
+    const start = match.index;
+    const length = match[0].length;
+    const end = start + length;
+    const customEmojiId = compiled.normalizedReplacements.get(stripVariationSelector(match[0]));
+    if (!customEmojiId || length <= 0) continue;
+
+    const overlapsProtected = protectedRanges.some((r) => r.start < end && r.end > start);
+    if (overlapsProtected) continue;
+
+    added.push({
+      type: 'custom_emoji',
+      offset: start,
+      length,
+      custom_emoji_id: customEmojiId
+    });
+  }
+
+  if (added.length === 0) {
+    return { entities: baseEntities, addedCount: 0 };
+  }
+
+  const combined = [...baseEntities, ...added].sort((a: any, b: any) => (a.offset ?? 0) - (b.offset ?? 0));
+  return { entities: combined as T[], addedCount: added.length };
+}
+
 export function stripCustomEmojiTags(html: string): string {
   if (!html || typeof html !== 'string') return html;
   return html.replace(/<tg-emoji\b[^>]*>([\s\S]*?)<\/tg-emoji>/gi, '$1');
@@ -497,11 +574,134 @@ export function sanitizeButtonLabel(label: string): string {
   return out.replace(/\s{2,}/g, ' ').trim();
 }
 
+export interface TelegramButtonLike {
+  text: string;
+  icon_custom_emoji_id?: string;
+  style?: string;
+  [key: string]: any;
+}
+
+function extractButtonEmojiMatch(
+  cleanText: string,
+  customMap?: Record<string, string> | null
+): { customEmojiId: string; strippedText: string; matchedEmoji: string } | null {
+  if (!cleanText || !customMap) return null;
+  const compiled = buildEmojiRegex(customMap, false);
+  if (!compiled) return null;
+
+  const match = compiled.regex.exec(cleanText);
+  if (!match || typeof match.index !== 'number') return null;
+
+  const matchedEmoji = match[0];
+  const customEmojiId = compiled.normalizedReplacements.get(stripVariationSelector(matchedEmoji));
+  if (!customEmojiId) return null;
+
+  const before = cleanText.slice(0, match.index);
+  const after = cleanText.slice(match.index + matchedEmoji.length);
+  const needsSpace =
+    before.length > 0 &&
+    after.length > 0 &&
+    !/\s$/.test(before) &&
+    !/^\s/.test(after) &&
+    !/[([{"'“‘]$/.test(before) &&
+    !/^[)\]}"'.,!?:;”’]/.test(after);
+  const remainder = `${before}${needsSpace ? ' ' : ''}${after}`.replace(/\s{2,}/g, ' ').trim();
+
+  return {
+    customEmojiId,
+    matchedEmoji,
+    strippedText: remainder || matchedEmoji
+  };
+}
+
+/**
+ * Builds an InlineKeyboardButton object, sanitizing `<tg-emoji>` tags and automatically
+ * attaching `icon_custom_emoji_id` when the button label contains any mapped emoji in
+ * Emoji Store (at start, middle, or end), removing that matched Unicode emoji from `text`.
+ */
+export function buildInlineKeyboardButton<T extends Record<string, any>>(
+  btn: T,
+  customMap?: Record<string, string> | null
+): T {
+  if (!btn || typeof btn !== 'object') return btn;
+  if (typeof btn.text !== 'string') return btn;
+
+  const cleanText = sanitizeButtonLabel(btn.text);
+  const existingIconId = typeof btn.icon_custom_emoji_id === 'string' ? btn.icon_custom_emoji_id.trim() : '';
+  if (isValidCustomEmojiId(existingIconId)) {
+    return {
+      ...btn,
+      text: cleanText,
+      icon_custom_emoji_id: existingIconId
+    };
+  }
+
+  const matched = extractButtonEmojiMatch(cleanText, customMap);
+  if (matched) {
+    return {
+      ...btn,
+      text: matched.strippedText,
+      icon_custom_emoji_id: matched.customEmojiId
+    };
+  }
+
+  if ('icon_custom_emoji_id' in btn) {
+    const { icon_custom_emoji_id: _unused, ...rest } = btn as any;
+    return { ...rest, text: cleanText } as T;
+  }
+
+  return { ...btn, text: cleanText };
+}
+
+/**
+ * Builds a KeyboardButton (string or object), sanitizing `<tg-emoji>` tags and automatically
+ * upgrading to a KeyboardButton object with `icon_custom_emoji_id` when mapped in Emoji Store.
+ */
+export function buildReplyKeyboardButton<T extends string | Record<string, any>>(
+  btn: T,
+  customMap?: Record<string, string> | null
+): T extends string ? string | TelegramButtonLike : T {
+  if (typeof btn === 'string') {
+    const cleanText = sanitizeButtonLabel(btn);
+    const matched = extractButtonEmojiMatch(cleanText, customMap);
+    if (matched) {
+      return {
+        text: matched.strippedText,
+        icon_custom_emoji_id: matched.customEmojiId
+      } as any;
+    }
+    return cleanText as any;
+  }
+
+  if (!btn || typeof btn !== 'object' || typeof btn.text !== 'string') {
+    return btn as any;
+  }
+
+  return buildInlineKeyboardButton(btn, customMap) as any;
+}
+
+/**
+ * Convenience button builder for both InlineKeyboardButton and KeyboardButton inputs.
+ */
+export function buildTelegramButton<T extends string | Record<string, any>>(
+  btnOrText: T,
+  customMap?: Record<string, string> | null
+): T extends string ? string | TelegramButtonLike : T {
+  if (typeof btnOrText === 'string') {
+    return buildReplyKeyboardButton(btnOrText, customMap);
+  }
+  return buildInlineKeyboardButton(btnOrText, customMap) as any;
+}
+
 /**
  * Sanitizes all `text` fields inside `reply_markup.inline_keyboard` and `reply_markup.keyboard`
- * so raw `<tg-emoji>` tags are never sent in Telegram button labels.
+ * so raw `<tg-emoji>` tags are never sent in Telegram button labels, preserves any existing
+ * `icon_custom_emoji_id`, and optionally attaches `icon_custom_emoji_id` from `customMap`.
  */
-export function sanitizeReplyMarkupForTelegram<T>(replyMarkup: T): T {
+export function sanitizeReplyMarkupForTelegram<T>(
+  replyMarkup: T,
+  customMap?: Record<string, string> | null
+): T {
   if (!replyMarkup) return replyMarkup;
 
   const isString = typeof replyMarkup === 'string';
@@ -520,26 +720,97 @@ export function sanitizeReplyMarkupForTelegram<T>(replyMarkup: T): T {
   if (Array.isArray(parsed.inline_keyboard)) {
     next.inline_keyboard = parsed.inline_keyboard.map((row: any) =>
       Array.isArray(row)
-        ? row.map((btn: any) => {
-            if (!btn || typeof btn !== 'object') return btn;
-            if (typeof btn.text !== 'string') return btn;
-            return { ...btn, text: sanitizeButtonLabel(btn.text) };
-          })
+        ? row.map((btn: any) => buildInlineKeyboardButton(btn, customMap))
         : row
     );
   }
   if (Array.isArray(parsed.keyboard)) {
     next.keyboard = parsed.keyboard.map((row: any) =>
       Array.isArray(row)
-        ? row.map((btn: any) => {
-            if (typeof btn === 'string') return sanitizeButtonLabel(btn);
-            if (btn && typeof btn === 'object' && typeof btn.text === 'string') {
-              return { ...btn, text: sanitizeButtonLabel(btn.text) };
+        ? row.map((btn: any) => buildReplyKeyboardButton(btn, customMap))
+        : row
+    );
+  }
+
+  return isString ? (JSON.stringify(next) as unknown as T) : next;
+}
+
+export const applyCustomEmojisToReplyMarkup = sanitizeReplyMarkupForTelegram;
+
+export function replyMarkupHasIconCustomEmoji(replyMarkup: any): boolean {
+  if (!replyMarkup) return false;
+  let parsed: any = replyMarkup;
+  if (typeof replyMarkup === 'string') {
+    try {
+      parsed = JSON.parse(replyMarkup);
+    } catch {
+      return false;
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') return false;
+
+  const checkRows = (rows: any): boolean =>
+    Array.isArray(rows) &&
+    rows.some(
+      (row: any) =>
+        Array.isArray(row) &&
+        row.some((btn: any) => btn && typeof btn === 'object' && typeof btn.icon_custom_emoji_id === 'string' && btn.icon_custom_emoji_id.length > 0)
+    );
+
+  return checkRows(parsed.inline_keyboard) || checkRows(parsed.keyboard);
+}
+
+export function stripIconCustomEmojiFromReplyMarkup<T>(
+  replyMarkup: T,
+  fallbackReplyMarkup?: any
+): T {
+  const source = fallbackReplyMarkup || replyMarkup;
+  if (!source) return source as T;
+
+  const isString = typeof source === 'string';
+  let parsed: any = source;
+  if (isString) {
+    try {
+      parsed = JSON.parse(source as unknown as string);
+    } catch {
+      return source as T;
+    }
+  }
+  if (!parsed || typeof parsed !== 'object') return source as T;
+
+  let currentParsed: any = replyMarkup;
+  if (typeof replyMarkup === 'string') {
+    try {
+      currentParsed = JSON.parse(replyMarkup);
+    } catch {
+      currentParsed = null;
+    }
+  }
+
+  const preserveStyleFromCurrent = (rowsKey: 'inline_keyboard' | 'keyboard', rows: any[]): any[] =>
+    rows.map((row: any, rIdx: number) =>
+      Array.isArray(row)
+        ? row.map((btn: any, bIdx: number) => {
+            if (!btn || typeof btn !== 'object') return btn;
+            const { icon_custom_emoji_id: _removed, ...rest } = btn;
+            if (currentParsed && Array.isArray(currentParsed[rowsKey]?.[rIdx])) {
+              const currBtn = currentParsed[rowsKey][rIdx][bIdx];
+              if (currBtn && typeof currBtn === 'object' && !('style' in currBtn) && 'style' in rest) {
+                const { style: _strippedStyle, ...withoutStyle } = rest;
+                return withoutStyle;
+              }
             }
-            return btn;
+            return rest;
           })
         : row
     );
+
+  const next: any = { ...parsed };
+  if (Array.isArray(parsed.inline_keyboard)) {
+    next.inline_keyboard = preserveStyleFromCurrent('inline_keyboard', parsed.inline_keyboard);
+  }
+  if (Array.isArray(parsed.keyboard)) {
+    next.keyboard = preserveStyleFromCurrent('keyboard', parsed.keyboard);
   }
 
   return isString ? (JSON.stringify(next) as unknown as T) : next;
