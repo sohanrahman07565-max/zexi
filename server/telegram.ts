@@ -7,6 +7,8 @@ import { storage, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ScheduledDel
 import { hashPassword, signSessionToken } from './auth';
 import { PostBotEngine } from './postBot';
 import { ImageUrlBotEngine } from './imageUrlBot';
+import { resolveRealBannerImage } from './ffBannerGenerator';
+import { FreeFireGuestService } from './ffGuestApi';
 
 export const botTokenContext = new AsyncLocalStorage<string>();
 export const botIdContext = new AsyncLocalStorage<string>();
@@ -141,6 +143,12 @@ interface PendingModerationAction {
   targetUsername: string;
   reason?: string;
   adminId: string;
+  stage: 'select_duration' | 'custom_keypad' | 'awaiting_reason' | 'confirm_reason';
+  keypadDigits: string;
+  keypadUnit: 'm' | 'h' | 'd';
+  durationToken?: string;
+  durationLabel?: string;
+  isPermanent?: boolean;
   replyToMessageId?: number;
   promptMessageId?: number;
   createdAt: number;
@@ -1406,14 +1414,18 @@ export class TelegramService {
     };
   }
 
-  private static async isGroupModerator(message: any, fromId: string): Promise<boolean> {
+  private static async isGroupModerator(message: any, fromId: string | number): Promise<boolean> {
+    const cleanFromId = fromId !== undefined && fromId !== null ? String(fromId).trim() : '';
     if (message?.sender_chat?.id && message?.chat?.id && String(message.sender_chat.id) === String(message.chat.id)) {
       return true;
     }
-    if (fromId && (await this.isAuthorizedAdmin(fromId, message?.from?.username))) {
+    if (cleanFromId && (await this.isOwnerAdmin(cleanFromId, message?.from?.username))) {
       return true;
     }
-    if (fromId && message?.chat?.id && (await this.isGroupAdminOrCreator(message.chat.id, fromId))) {
+    if (cleanFromId && (await this.isAuthorizedAdmin(cleanFromId, message?.from?.username))) {
+      return true;
+    }
+    if (cleanFromId && message?.chat?.id && (await this.isGroupAdminOrCreator(message.chat.id, cleanFromId))) {
       return true;
     }
     return false;
@@ -2152,10 +2164,14 @@ export class TelegramService {
       targetUsername: target.username,
       reason: reason || undefined,
       adminId,
+      stage: 'select_duration',
+      keypadDigits: '',
+      keypadUnit: 'h',
       replyToMessageId,
       createdAt: now
     };
     pendingGroupModerationMap.set(token, pending);
+    await storage.savePendingModeration(pending).catch(() => {});
 
     const inlineKeyboard: any[][] = [];
     for (let i = 0; i < presets.length; i += 2) {
@@ -2169,6 +2185,9 @@ export class TelegramService {
     inlineKeyboard.push([
       { text: '⏱ Temp', callback_data: `modt:${token}`, style: 'primary' },
       { text: '♾️ Permanent', callback_data: `moda:${token}:perm`, style: 'danger' }
+    ]);
+    inlineKeyboard.push([
+      { text: '❌ Cancel', callback_data: `modc:${token}`, style: 'danger' }
     ]);
 
     const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
@@ -2188,7 +2207,312 @@ export class TelegramService {
     });
     if (sent?.ok && sent.result?.message_id) {
       pending.promptMessageId = sent.result.message_id;
+      await storage.savePendingModeration(pending).catch(() => {});
     }
+  }
+
+  private static buildModerationKeypadPayload(pending: PendingModerationAction): {
+    text: string;
+    reply_markup: { inline_keyboard: any[][] };
+  } {
+    const numVal = pending.keypadDigits ? parseInt(pending.keypadDigits, 10) : 0;
+    const unitWord = pending.keypadUnit === 'm'
+      ? (numVal === 1 ? 'Minute' : 'Minutes')
+      : pending.keypadUnit === 'd'
+        ? (numVal === 1 ? 'Day' : 'Days')
+        : (numVal === 1 ? 'Hour' : 'Hours');
+
+    const userLink = this.formatUserProfileLink(pending.targetName, pending.targetUsername, pending.targetId);
+    const header = pending.action === 'ban'
+      ? '⏱ <b>Temporary Ban — Custom Duration</b>'
+      : '⏱ <b>Temporary Mute — Custom Duration</b>';
+
+    const text =
+      `${header}\n\n` +
+      `👤 <b>User:</b> ${userLink}\n` +
+      `🕒 <b>Selected Duration:</b> <code>${numVal} ${unitWord}</code>\n\n` +
+      `<i>Tap the keypad below to set a duration, then tap Confirm.</i>`;
+
+    const token = pending.token;
+    const unitButton = (unit: 'm' | 'h' | 'd', label: string) => ({
+      text: pending.keypadUnit === unit ? `[ ${label} ]` : label,
+      callback_data: `modk:${token}:u:${unit}`,
+      ...(pending.keypadUnit === unit ? { style: 'primary' } : {})
+    });
+
+    const inline_keyboard: any[][] = [
+      [
+        { text: '1', callback_data: `modk:${token}:d:1` },
+        { text: '2', callback_data: `modk:${token}:d:2` },
+        { text: '3', callback_data: `modk:${token}:d:3` }
+      ],
+      [
+        { text: '4', callback_data: `modk:${token}:d:4` },
+        { text: '5', callback_data: `modk:${token}:d:5` },
+        { text: '6', callback_data: `modk:${token}:d:6` }
+      ],
+      [
+        { text: '7', callback_data: `modk:${token}:d:7` },
+        { text: '8', callback_data: `modk:${token}:d:8` },
+        { text: '9', callback_data: `modk:${token}:d:9` }
+      ],
+      [
+        { text: 'Clear', callback_data: `modk:${token}:clr` },
+        { text: '0', callback_data: `modk:${token}:d:0` },
+        { text: '⌫', callback_data: `modk:${token}:bk` }
+      ],
+      [
+        unitButton('m', 'Minutes'),
+        unitButton('h', 'Hours'),
+        unitButton('d', 'Days')
+      ],
+      [
+        { text: '✅ Confirm', callback_data: `modk:${token}:ok`, style: 'success' },
+        { text: '❌ Cancel', callback_data: `modc:${token}`, style: 'danger' }
+      ]
+    ];
+
+    return {
+      text,
+      reply_markup: { inline_keyboard }
+    };
+  }
+
+  private static buildModerationReasonPromptPayload(pending: PendingModerationAction): {
+    text: string;
+    reply_markup: { inline_keyboard: any[][] };
+  } {
+    const userLink = this.formatUserProfileLink(pending.targetName, pending.targetUsername, pending.targetId);
+    const durDisplay = pending.isPermanent
+      ? 'Permanent'
+      : (pending.durationLabel || pending.durationToken || 'Temporary');
+    const header = pending.action === 'ban'
+      ? '🚫 <b>Ban User — Enter Reason</b>'
+      : '🔇 <b>Mute User — Enter Reason</b>';
+
+    const text =
+      `${header}\n\n` +
+      `👤 <b>User:</b> ${userLink}\n` +
+      `⏱ <b>Duration:</b> <code>${this.escapeHtml(durDisplay)}</code>\n\n` +
+      `📝 <i>Please type and send the reason in this chat.</i>\n` +
+      `<i>(Only messages from the initiating admin will be accepted, or tap Cancel.)</i>`;
+
+    return {
+      text,
+      reply_markup: {
+        inline_keyboard: [[{ text: '❌ Cancel', callback_data: `modc:${pending.token}`, style: 'danger' }]]
+      }
+    };
+  }
+
+  private static buildModerationReasonPreviewPayload(pending: PendingModerationAction): {
+    text: string;
+    reply_markup: { inline_keyboard: any[][] };
+  } {
+    const userLink = this.formatUserProfileLink(pending.targetName, pending.targetUsername, pending.targetId);
+    const durDisplay = pending.isPermanent
+      ? 'Permanent'
+      : (pending.durationLabel || pending.durationToken || 'Temporary');
+    const header = pending.action === 'ban'
+      ? '🚫 <b>Confirm Ban Action</b>'
+      : '🔇 <b>Confirm Mute Action</b>';
+
+    const text =
+      `${header}\n\n` +
+      `👤 <b>User:</b> ${userLink}\n` +
+      `⏱ <b>Duration:</b> <code>${this.escapeHtml(durDisplay)}</code>\n` +
+      `📝 <b>Reason:</b>\n` +
+      `<blockquote>${this.escapeHtml(pending.reason || 'No reason provided')}</blockquote>\n\n` +
+      `<i>Tap Confirm Reason to execute, or Cancel to abort.</i>`;
+
+    return {
+      text,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '✅ Confirm Reason', callback_data: `modr:${pending.token}`, style: 'success' },
+            { text: '❌ Cancel', callback_data: `modc:${pending.token}`, style: 'danger' }
+          ]
+        ]
+      }
+    };
+  }
+
+  public static async recoverPendingModerationFromCallback(
+    cb: any,
+    token: string,
+    actorId: string
+  ): Promise<PendingModerationAction | null> {
+    const msg = cb?.message;
+    const chatId = msg?.chat?.id;
+    if (!chatId || !token) return null;
+
+    const rawText = String(msg?.text || msg?.caption || '');
+    const firstLine = rawText.split(/\r?\n/)[0] || '';
+    const action: 'ban' | 'mute' = /\bmute\b/i.test(firstLine) ? 'mute' : 'ban';
+
+    const entities: any[] = Array.isArray(msg?.entities)
+      ? msg.entities
+      : Array.isArray(msg?.caption_entities)
+        ? msg.caption_entities
+        : [];
+
+    let targetId = '';
+    let targetName = '';
+    let targetUsername = '';
+
+    for (const ent of entities) {
+      const entText =
+        typeof ent?.offset === 'number' && typeof ent?.length === 'number'
+          ? rawText.slice(ent.offset, ent.offset + ent.length).trim()
+          : '';
+      if (ent?.type === 'text_link' && typeof ent.url === 'string') {
+        const tgUidMatch = ent.url.match(/^tg:\/\/user\?id=(\d+)$/i);
+        if (tgUidMatch) {
+          targetId = tgUidMatch[1];
+          if (entText) targetName = entText;
+          break;
+        }
+        const tmeMatch = ent.url.match(/^https?:\/\/t\.me\/([A-Za-z0-9_]+)$/i);
+        if (tmeMatch && !targetUsername) {
+          targetUsername = tmeMatch[1];
+          if (entText) targetName = entText;
+        }
+      } else if (ent?.type === 'text_mention' && ent.user?.id !== undefined) {
+        targetId = String(ent.user.id).trim();
+        targetName =
+          [ent.user.first_name, ent.user.last_name].filter(Boolean).join(' ').trim() ||
+          entText ||
+          targetId;
+        targetUsername = String(ent.user.username || '').replace(/^@+/, '').trim();
+        break;
+      } else if (ent?.type === 'mention' && entText.startsWith('@') && !targetUsername) {
+        targetUsername = entText.slice(1).trim();
+        targetName = entText;
+      }
+    }
+
+    if (!targetId) {
+      const userLineMatch = rawText.match(/👤\s*User:\s*([^\n]+)/i);
+      const userLine = userLineMatch ? userLineMatch[1].trim() : '';
+      if (userLine) {
+        const numericMatch = userLine.match(/^(\d{5,20})$/);
+        if (numericMatch) {
+          targetId = numericMatch[1];
+          targetName = targetName || numericMatch[1];
+        } else {
+          const query = targetUsername ? `@${targetUsername}` : userLine;
+          const resolved = await this.resolveModerationTarget(chatId, null, query).catch(() => null);
+          if (resolved?.id) {
+            targetId = String(resolved.id).trim();
+            targetName = resolved.name || targetName || userLine;
+            targetUsername = resolved.username || targetUsername;
+          }
+        }
+      }
+    }
+
+    if (!targetId) {
+      const nestedReplyUser = msg?.reply_to_message?.reply_to_message?.from;
+      const directReplyMsg = msg?.reply_to_message;
+      const directReplyText = String(directReplyMsg?.text || '').trim();
+      const candidateUser =
+        nestedReplyUser?.id && !nestedReplyUser.is_bot
+          ? nestedReplyUser
+          : directReplyMsg?.from?.id &&
+              !directReplyMsg.from.is_bot &&
+              !/^\/(?:ban|mute)(?:@\w+)?\b/i.test(directReplyText)
+            ? directReplyMsg.from
+            : null;
+      if (candidateUser?.id) {
+        targetId = String(candidateUser.id).trim();
+        targetName =
+          [candidateUser.first_name, candidateUser.last_name].filter(Boolean).join(' ').trim() ||
+          candidateUser.username ||
+          targetId;
+        targetUsername = String(candidateUser.username || '').replace(/^@+/, '').trim();
+      }
+    }
+
+    if (!targetId) return null;
+
+    let stage: PendingModerationAction['stage'] = 'select_duration';
+    let keypadDigits = '';
+    let keypadUnit: 'm' | 'h' | 'd' = 'h';
+    let durationToken: string | undefined;
+    let durationLabel: string | undefined;
+    let isPermanent = false;
+    let reason: string | undefined;
+
+    const keypadMatch = rawText.match(/Selected Duration:\s*(\d+)\s*(Minute|Minutes|Hour|Hours|Day|Days)/i);
+    if (keypadMatch) {
+      stage = 'custom_keypad';
+      const valNum = parseInt(keypadMatch[1], 10);
+      keypadDigits = Number.isFinite(valNum) && valNum > 0 ? String(valNum) : '';
+      const unitWord = keypadMatch[2].toLowerCase();
+      keypadUnit = unitWord.startsWith('m') ? 'm' : unitWord.startsWith('d') ? 'd' : 'h';
+    }
+
+    const durationLineMatch = rawText.match(/⏱\s*Duration:\s*([^\n]+)/i);
+    if (durationLineMatch) {
+      const durText = durationLineMatch[1].trim();
+      if (/^permanent$/i.test(durText)) {
+        isPermanent = true;
+        durationLabel = 'Permanent';
+      } else {
+        durationLabel = durText;
+        const unitMatch = durText.match(/^(\d+(?:\.\d+)?)\s*([a-z]+)/i);
+        if (unitMatch) {
+          const parsed = this.parseModerationDuration(`${unitMatch[1]}${unitMatch[2]}`);
+          if (parsed.valid) {
+            durationToken = `${unitMatch[1]}${unitMatch[2][0].toLowerCase()}`;
+          }
+        }
+      }
+    }
+
+    const reasonBlockMatch = rawText.match(/📝\s*Reason:\s*\n([\s\S]+?)(?:\n\nTap Confirm Reason|\s*$)/i);
+    if (reasonBlockMatch) {
+      const extractedReason = reasonBlockMatch[1].trim();
+      if (extractedReason && extractedReason !== 'No reason provided') {
+        reason = extractedReason;
+      }
+      stage = 'confirm_reason';
+    } else {
+      const inlineReasonMatch = rawText.match(/📝\s*Reason:\s*([^\n]+)/i);
+      if (inlineReasonMatch) {
+        const extractedInline = inlineReasonMatch[1].trim();
+        if (extractedInline) reason = extractedInline;
+      }
+    }
+
+    if (/Please type and send the reason/i.test(rawText)) {
+      stage = 'awaiting_reason';
+    }
+
+    const recovered: PendingModerationAction = {
+      token,
+      chatId,
+      action,
+      targetId,
+      targetName: targetName || targetId,
+      targetUsername,
+      ...(reason ? { reason } : {}),
+      adminId: String(actorId || '').trim(),
+      stage,
+      keypadDigits,
+      keypadUnit,
+      ...(durationToken ? { durationToken } : {}),
+      ...(durationLabel ? { durationLabel } : {}),
+      isPermanent,
+      replyToMessageId: msg?.reply_to_message?.message_id,
+      promptMessageId: msg?.message_id,
+      createdAt: Date.now()
+    };
+
+    pendingGroupModerationMap.set(token, recovered);
+    await storage.savePendingModeration(recovered).catch(() => {});
+    return recovered;
   }
 
   public static async sendGroupWelcomeMessage(
@@ -2224,6 +2548,11 @@ export class TelegramService {
       lastName: lastName || undefined
     }).catch(() => {});
 
+    const settings = await storage.getSettings();
+    if (settings.welcomeMessageEnabled === false) {
+      return;
+    }
+
     const welcomeTpl = await storage.getTemplate('GROUP_WELCOME_MESSAGE');
     const rawContent = String(welcomeTpl?.content || '').trim();
     const mediaType = welcomeTpl?.mediaType || 'none';
@@ -2244,14 +2573,15 @@ export class TelegramService {
 
     let welcomeText = rawContent
       .replace(/@?\{@?username\}/gi, safeUsername)
-      .replace(/\{first_name\}|\{firstname\}/gi, safeFirstName)
-      .replace(/\{last_name\}|\{lastname\}/gi, safeLastName)
+      .replace(/\{first_name\}|\{firstname\}|\{first\}/gi, safeFirstName)
+      .replace(/\{last_name\}|\{lastname\}|\{last\}/gi, safeLastName)
       .replace(/\{user_id\}|\{userid\}|\{id\}/gi, safeUserId)
       .replace(/\{user_name\}|\{name\}|\{fullname\}/gi, safeFullName)
       .replace(/@?\{@?bot_name\}|@?\{@?bot_username\}/gi, safeBotName)
       .replace(/@@([a-zA-Z0-9_]+)/g, '@$1');
 
     let sent = false;
+    let sentMessageId: number | undefined;
     const isLocalUpload = Boolean(mediaUrl && (
       mediaUrl.startsWith('upload_') ||
       mediaUrl.startsWith('local_') ||
@@ -2267,9 +2597,10 @@ export class TelegramService {
             fileName: up.fileName || (mediaType === 'video' ? 'welcome.mp4' : 'welcome.jpg'),
             mimeType: up.mimeType || (mediaType === 'video' ? 'video/mp4' : 'image/jpeg'),
             fileType: mediaType === 'video' ? 'video' : 'photo'
-          }, welcomeText || undefined);
+          }, welcomeText || undefined, undefined, { parseMode: 'HTML', threadId });
           if (res && res.ok) {
             sent = true;
+            sentMessageId = res.result?.message_id;
             const realFileId =
               (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
               res.result?.video?.file_id ||
@@ -2294,24 +2625,57 @@ export class TelegramService {
         ...(welcomeText ? { caption: welcomeText, parse_mode: 'HTML' } : {}),
         ...(threadId ? { message_thread_id: threadId } : {})
       });
-      if (res?.ok) sent = true;
+      if (res?.ok) {
+        sent = true;
+        sentMessageId = res.result?.message_id;
+      }
     } else if (!sent && mediaUrl && (mediaType === 'video' || (mediaType !== 'photo' && mediaType !== 'none' && /\.(mp4|mov|webm|m4v)$/i.test(mediaUrl)))) {
-      const res = await this.callTelegramApi('sendVideo', {
+      let res = await this.callTelegramApi('sendVideo', {
         chat_id: chatId,
         video: mediaUrl,
         ...(welcomeText ? { caption: welcomeText, parse_mode: 'HTML' } : {}),
         ...(threadId ? { message_thread_id: threadId } : {})
       });
-      if (res?.ok) sent = true;
+      if (!res?.ok) {
+        res = await this.callTelegramApi('sendAnimation', {
+          chat_id: chatId,
+          animation: mediaUrl,
+          ...(welcomeText ? { caption: welcomeText, parse_mode: 'HTML' } : {}),
+          ...(threadId ? { message_thread_id: threadId } : {})
+        });
+      }
+      if (res?.ok) {
+        sent = true;
+        sentMessageId = res.result?.message_id;
+      }
     }
 
     if (!sent && welcomeText) {
-      await this.callTelegramApi('sendMessage', {
+      const res = await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
         text: welcomeText,
         parse_mode: 'HTML',
         ...(threadId ? { message_thread_id: threadId } : {})
       });
+      if (res?.ok) {
+        sent = true;
+        sentMessageId = res.result?.message_id;
+      }
+    }
+
+    if (sent && sentMessageId && settings.welcomeAutoDeleteEnabled) {
+      const deleteAfterSeconds = Math.max(1, Math.min(86400, Math.round(Number(settings.welcomeAutoDeleteSeconds) || 60)));
+      try {
+        const sched = await storage.scheduleMessageDeletion({
+          chatId,
+          messageId: sentMessageId,
+          timeoutSeconds: deleteAfterSeconds,
+          itemTitle: 'Welcome Message'
+        });
+        this.armScheduledDeletionTimer(sched);
+      } catch (err) {
+        console.warn('[Telegram] Failed to schedule welcome message auto-delete:', err);
+      }
     }
   }
 
@@ -2594,10 +2958,31 @@ export class TelegramService {
     return this.isTelegramGroupAdmin(cleanChatId, cleanUserId);
   }
 
+  public static async isAuthorizedModerationActor(
+    chatId: string | number | undefined,
+    userId: string | number,
+    username?: string
+  ): Promise<boolean> {
+    const cleanUserId = userId !== undefined && userId !== null ? String(userId).trim() : '';
+    if (!cleanUserId) return false;
+    if (await this.isOwnerAdmin(cleanUserId, username)) {
+      return true;
+    }
+    if (await this.isAuthorizedAdmin(cleanUserId, username)) {
+      return true;
+    }
+    const cleanChatId = chatId !== undefined && chatId !== null ? String(chatId).trim() : '';
+    if (cleanChatId && (await this.isTelegramGroupAdmin(cleanChatId, cleanUserId))) {
+      return true;
+    }
+    return false;
+  }
+
   public static async isTelegramGroupAdmin(chatId: string | number, userId: string | number): Promise<boolean> {
     if (!chatId || !userId) return false;
     const cleanChatId = String(chatId).trim();
     const cleanUserId = String(userId).trim();
+    if (!cleanChatId || !cleanUserId) return false;
 
     // Check local in-memory cache scoped per bot
     const botScope = String((storage as any)?.botId || 'main').trim() || 'main';
@@ -2609,7 +2994,7 @@ export class TelegramService {
     }
 
     const numericChatId = /^-?\d+$/.test(cleanChatId) ? Number(cleanChatId) : cleanChatId;
-    const numericUserId = Number(cleanUserId) || cleanUserId;
+    const numericUserId = /^\d+$/.test(cleanUserId) ? Number(cleanUserId) : cleanUserId;
 
     // 3. Query Telegram getChatMember
     try {
@@ -2639,13 +3024,17 @@ export class TelegramService {
       if (adminsRes && adminsRes.ok && Array.isArray(adminsRes.result)) {
         let matched = false;
         for (const member of adminsRes.result) {
-          const memberId = String(member?.user?.id || '').trim();
+          const memberId = String(member?.user?.id ?? '').trim();
           if (memberId) {
             this.groupAdminCache.set(`${botScope}:${cleanChatId}:${memberId}`, {
               isAdmin: true,
               expiresAt: now + 60000
             });
-            if (memberId === cleanUserId) {
+            const sameNumericId =
+              /^\d+$/.test(memberId) &&
+              /^\d+$/.test(cleanUserId) &&
+              Number(memberId) === Number(cleanUserId);
+            if (memberId === cleanUserId || sameNumericId) {
               matched = true;
             }
           }
@@ -2815,6 +3204,7 @@ export class TelegramService {
       `• <code>/setstartmsg &lt;text&gt;</code> — Update <code>/start</code> welcome message`,
       `• <code>/setstartmedia &lt;url|file_id&gt;</code> — Attach photo/video to <code>/start</code>`,
       `• <code>/clearstartmedia</code> — Remove media from <code>/start</code> message`,
+      `• <code>/setwelcome &lt;text&gt;</code> — Set group welcome message (supports photo/video &amp; reply)`,
       `• <code>/setpassword &lt;password&gt;</code> — Set/change Web Panel password`,
       `• <code>/broadcast</code> · <code>/settings</code> — Panel broadcast &amp; filter guide`,
       ...(isMainBot ? [`• <code>/clone &lt;bot_token&gt;</code> — Clone an isolated bot instance`] : []),
@@ -2828,6 +3218,8 @@ export class TelegramService {
       ``,
       `👥 <b>PUBLIC GROUP COMMANDS (ALL USERS)</b>`,
       `• <code>/u &lt;uid&gt;</code> or <code>/uid &lt;uid&gt;</code> — Free Fire profile &amp; Guild checker`,
+      `• <code>/like &lt;uid&gt;</code> — Send Free Fire profile likes`,
+      `• <code>/baninfo &lt;uid&gt;</code> — Free Fire account ban status checker`,
       `• <code>/filters</code> — List public <code>#hashtag</code> keywords`,
       `• <code>/translate &lt;bd|ind|eng&gt;</code> — Translate text or replied messages`,
       `• <code>/report &lt;@user_or_id&gt; &lt;reason&gt;</code> — Report a user to admins`,
@@ -4292,7 +4684,7 @@ export class TelegramService {
   // GROUP MESSAGE HANDLING (EXACT TRIGGER MATCHING & STRICT GROUP PRIVACY)
   // =========================================================================
   private static async handleGroupMessage(message: any, text: string): Promise<void> {
-    const fromId = String(message.from?.id || '');
+    const fromId = message.from?.id !== undefined && message.from?.id !== null ? String(message.from.id).trim() : '';
     const groupSettings = await storage.getSettings();
 
     if (message.chat?.id && message.from && !message.from.is_bot && fromId) {
@@ -4504,70 +4896,110 @@ export class TelegramService {
       return;
     }
 
-    // 1b. Check if admin is replying with a custom Temp Ban/Mute duration in this group
+    // 1b. Check if the initiating or authorized moderator is typing a Ban/Mute Reason in this group
     let tempModSessionKey = `${String(message.chat.id)}:${fromId}`;
     let pendingTempMod = activeGroupTempModSessions.get(tempModSessionKey);
-    if (!pendingTempMod && message?.sender_chat?.id && String(message.sender_chat.id) === String(message.chat.id)) {
+    if (!pendingTempMod) {
+      const replyMsgId = message?.reply_to_message?.message_id;
       for (const [k, v] of activeGroupTempModSessions.entries()) {
-        if (String(v.chatId) === String(message.chat.id)) {
+        if (String(v.chatId) !== String(message.chat.id) || v.stage !== 'awaiting_reason') continue;
+        if (
+          String(v.adminId) === String(fromId) ||
+          (Boolean(message?.sender_chat?.id) &&
+            String(message.sender_chat.id) === String(message.chat.id) &&
+            v.adminId === '1087968824') ||
+          (replyMsgId && v.promptMessageId && Number(replyMsgId) === Number(v.promptMessageId))
+        ) {
           tempModSessionKey = k;
           pendingTempMod = v;
           break;
         }
       }
     }
-    if (pendingTempMod && text) {
-      if (/^\/cancel(?:@\w+)?(?:\s|$)/i.test(text.trim())) {
-        activeGroupTempModSessions.delete(tempModSessionKey);
-        pendingGroupModerationMap.delete(pendingTempMod.token);
-        if (pendingTempMod.promptMessageId) {
-          await this.callTelegramApi('editMessageText', {
-            chat_id: message.chat.id,
-            message_id: pendingTempMod.promptMessageId,
-            text: '❌ <b>Moderation Action Cancelled</b>',
-            parse_mode: 'HTML',
-            reply_markup: { inline_keyboard: [] }
-          }).catch(() => {});
-        }
-        if (!isOfficial && message.message_id) {
-          await this.deleteUserMessage(message.chat.id, message.message_id);
-        }
-        return;
+    if (!pendingTempMod) {
+      const restored = await storage
+        .getAwaitingReasonModeration(message.chat.id, fromId, message?.reply_to_message?.message_id)
+        .catch(() => null);
+      if (restored) {
+        pendingTempMod = restored;
+        pendingGroupModerationMap.set(restored.token, restored);
+        tempModSessionKey = `${String(restored.chatId)}:${restored.adminId}`;
+        activeGroupTempModSessions.set(tempModSessionKey, restored);
       }
+    }
+    if (pendingTempMod && pendingTempMod.stage === 'awaiting_reason' && text) {
+      const matchesInitiator =
+        String(pendingTempMod.adminId) === String(fromId) ||
+        (Boolean(message?.sender_chat?.id) &&
+          String(message.sender_chat.id) === String(message.chat.id) &&
+          pendingTempMod.adminId === '1087968824');
+      const matchesReplyByAuthorizedMod =
+        Boolean(message?.reply_to_message?.message_id) &&
+        Boolean(pendingTempMod.promptMessageId) &&
+        Number(message.reply_to_message.message_id) === Number(pendingTempMod.promptMessageId) &&
+        (await this.isAuthorizedModerationActor(message.chat.id, fromId, message.from?.username));
 
-      if (!text.trim().startsWith('/')) {
-        const parts = text.trim().split(/\s+/);
-        const parsedDur = this.parseModerationDuration(parts[0]);
-        if (!parsedDur.valid || parsedDur.isPermanent) {
-          await this.callTelegramApi('sendMessage', {
-            chat_id: message.chat.id,
-            text: `⚠️ <b>Invalid Duration</b>\n<i>Send a valid duration like <code>30m</code>, <code>2h</code>, <code>3d</code>, or <code>1w</code> (or send <code>/cancel</code>).</i>`,
-            parse_mode: 'HTML',
-            reply_to_message_id: message.message_id
-          });
+      if (matchesInitiator || matchesReplyByAuthorizedMod) {
+        if (/^\/cancel(?:@\w+)?(?:\s|$)/i.test(text.trim())) {
+          activeGroupTempModSessions.delete(tempModSessionKey);
+          activeGroupTempModSessions.delete(`${String(pendingTempMod.chatId)}:${fromId}`);
+          pendingGroupModerationMap.delete(pendingTempMod.token);
+          await storage.deletePendingModeration(pendingTempMod.token).catch(() => {});
+          if (pendingTempMod.promptMessageId) {
+            await this.callTelegramApi('editMessageText', {
+              chat_id: message.chat.id,
+              message_id: pendingTempMod.promptMessageId,
+              text: '❌ <b>Moderation Action Cancelled</b>',
+              parse_mode: 'HTML',
+              reply_markup: { inline_keyboard: [] }
+            }).catch(() => {});
+          }
+          if (!isOfficial && message.message_id) {
+            await this.deleteUserMessage(message.chat.id, message.message_id);
+          }
           return;
         }
-        const customReason = parts.slice(1).join(' ').trim() || pendingTempMod.reason;
-        activeGroupTempModSessions.delete(tempModSessionKey);
-        pendingGroupModerationMap.delete(pendingTempMod.token);
-        if (message.message_id) {
-          this.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
+
+        if (!text.trim().startsWith('/')) {
+          const reasonText = text.trim().slice(0, 500);
+          pendingTempMod.reason = reasonText;
+          pendingTempMod.stage = 'confirm_reason';
+          pendingTempMod.adminId = fromId || pendingTempMod.adminId;
+          activeGroupTempModSessions.delete(tempModSessionKey);
+          activeGroupTempModSessions.delete(`${String(pendingTempMod.chatId)}:${fromId}`);
+          await storage.savePendingModeration(pendingTempMod).catch(() => {});
+
+          if (message.message_id) {
+            this.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
+          }
+
+          const previewPayload = this.buildModerationReasonPreviewPayload(pendingTempMod);
+          let edited = false;
+          if (pendingTempMod.promptMessageId) {
+            const editRes = await this.callTelegramApi('editMessageText', {
+              chat_id: message.chat.id,
+              message_id: pendingTempMod.promptMessageId,
+              text: previewPayload.text,
+              parse_mode: 'HTML',
+              reply_markup: previewPayload.reply_markup
+            }).catch(() => null);
+            edited = Boolean(editRes?.ok);
+          }
+          if (!edited) {
+            const sentPreview = await this.callTelegramApi('sendMessage', {
+              chat_id: message.chat.id,
+              text: previewPayload.text,
+              parse_mode: 'HTML',
+              reply_markup: previewPayload.reply_markup,
+              ...(pendingTempMod.replyToMessageId ? { reply_to_message_id: pendingTempMod.replyToMessageId } : {})
+            }).catch(() => null);
+            if (sentPreview?.ok && sentPreview.result?.message_id) {
+              pendingTempMod.promptMessageId = sentPreview.result.message_id;
+              await storage.savePendingModeration(pendingTempMod).catch(() => {});
+            }
+          }
+          return;
         }
-        await this.executeGroupModerationAction({
-          chatId: message.chat.id,
-          action: pendingTempMod.action,
-          target: {
-            id: pendingTempMod.targetId,
-            name: pendingTempMod.targetName,
-            username: pendingTempMod.targetUsername
-          },
-          durationToken: parts[0],
-          isPermanent: false,
-          reason: customReason,
-          editMessageId: pendingTempMod.promptMessageId,
-          replyToMessageId: pendingTempMod.promptMessageId ? undefined : pendingTempMod.replyToMessageId
-        });
-        return;
       }
     }
 
@@ -4600,6 +5032,12 @@ export class TelegramService {
         message.message_id,
         message.message_thread_id
       );
+      return;
+    }
+
+    // 1e. /setwelcome Command (Group Admins & Bot Owners)
+    if (/^\/setwelcome(?:@\w+)?(?:\s|$)/i.test(text)) {
+      await this.handleSetWelcomeCommand(message, false);
       return;
     }
 
@@ -5762,6 +6200,32 @@ export class TelegramService {
       return;
     }
 
+    // Free Fire Bancheck Info (/baninfo <uid>) in Groups
+    const groupBanInfoCmd = this.parseBanInfoCommand(text);
+    if (groupBanInfoCmd.matched) {
+      await this.handleBanInfoCommand(
+        message.chat.id,
+        groupBanInfoCmd.uid,
+        message.message_id,
+        true,
+        message.message_thread_id
+      );
+      return;
+    }
+
+    // Free Fire Profile Likes (/like <uid>) in Groups
+    const groupLikeCmd = this.parseFreeFireLikeCommand(text);
+    if (groupLikeCmd.matched) {
+      await this.handleFreeFireLikeCommand(
+        message.chat.id,
+        groupLikeCmd.uid,
+        message.message_id,
+        true,
+        message.message_thread_id
+      );
+      return;
+    }
+
     // Check /filters command in groups (strictly requires '/' prefix)
     const isFilters = /^\/(?:filters|filter)(?:@\w+)?$/i.test(text.trim());
     if (isFilters) {
@@ -5967,7 +6431,7 @@ export class TelegramService {
             fileName: up.fileName || (mediaType === 'video' ? 'welcome.mp4' : 'welcome.jpg'),
             mimeType: up.mimeType || (mediaType === 'video' ? 'video/mp4' : 'image/jpeg'),
             fileType: mediaType === 'video' ? 'video' : 'photo'
-          }, startMsg);
+          }, startMsg, undefined, { parseMode: 'HTML' });
           if (res && res.ok) {
             sent = true;
             const realFileId = (res.result?.photo && res.result.photo[res.result.photo.length - 1]?.file_id) ||
@@ -6834,9 +7298,41 @@ export class TelegramService {
       return;
     }
 
+    // 2e. Free Fire Bancheck Info command (/baninfo <uid>) in Private Chat
+    const privBanInfoCmd = this.parseBanInfoCommand(text);
+    if (privBanInfoCmd.matched) {
+      await this.handleBanInfoCommand(
+        chatId,
+        privBanInfoCmd.uid,
+        message.message_id,
+        false,
+        message.message_thread_id
+      );
+      return;
+    }
+
+    // 2f. Free Fire Profile Likes command (/like <uid>) in Private Chat
+    const privLikeCmd = this.parseFreeFireLikeCommand(text);
+    if (privLikeCmd.matched) {
+      await this.handleFreeFireLikeCommand(
+        chatId,
+        privLikeCmd.uid,
+        message.message_id,
+        false,
+        message.message_thread_id
+      );
+      return;
+    }
+
     // 3. Command: /setstartmsg or /startmsg
     if (/^\/(?:setstartmsg|startmsg)(?:@\w+)?(?:\s|$)/i.test(text)) {
       await this.handleSetStartMessageCommand(fromId, chatId, text, message);
+      return;
+    }
+
+    // 3a. Command: /setwelcome
+    if (/^\/setwelcome(?:@\w+)?(?:\s|$)/i.test(text)) {
+      await this.handleSetWelcomeCommand(message, true);
       return;
     }
 
@@ -8861,6 +9357,21 @@ export class TelegramService {
     return stripped || String(sig || '').trim();
   }
 
+  private static readonly FREE_FIRE_UID_REACTIONS: readonly string[] = [
+    '🔥',
+    '⚡',
+    '👍',
+    '❤️',
+    '🎉',
+    '🤩',
+    '💯'
+  ];
+
+  public static getRandomUidReactionEmoji(): string {
+    const idx = Math.floor(Math.random() * this.FREE_FIRE_UID_REACTIONS.length);
+    return this.FREE_FIRE_UID_REACTIONS[idx];
+  }
+
   private static async setBotReaction(chatId: number | string, messageId: number | undefined, emoji: string): Promise<void> {
     if (!messageId) return;
     try {
@@ -8869,7 +9380,9 @@ export class TelegramService {
         message_id: messageId,
         reaction: [{ type: 'emoji', emoji }]
       });
-    } catch {}
+    } catch {
+      // Silently skip if group reactions are disabled or restricted
+    }
   }
 
   private static buildLoadingProgressText(percent: number, statusText: string): string {
@@ -8877,11 +9390,134 @@ export class TelegramService {
     const totalBlocks = 10;
     const filledBlocks = Math.round((safePct / 100) * totalBlocks);
     const bar = '█'.repeat(filledBlocks) + '▒'.repeat(totalBlocks - filledBlocks);
-    return (
-      `🔄 <b>FETCHING INFO 📊</b>\n` +
-      `<code>${safePct}% [${bar}]</code>\n` +
-      `<i>${this.escapeHtml(statusText)}</i>`
-    );
+    const statusLine = safePct >= 100
+      ? `✅ <b>${this.escapeHtml(statusText || 'Profile Data Loaded Successfully!')}</b>`
+      : `⏳ <b>${this.escapeHtml(statusText)}</b>`;
+    return [
+      '<b>╭━━━ ⚡ 𝐅𝐄𝐓𝐂𝐇𝐈𝐍𝐆 𝐈𝐍𝐅𝐎 ⚡ ━━━╮</b>',
+      '',
+      '🔄 <b>FETCHING INFORMATION...</b>',
+      '',
+      `<code>${safePct}% [${bar}]</code>`,
+      '',
+      statusLine,
+      '',
+      '<b>╰━━━━ ⚡ 𝐃𝐀𝐑𝐊 𝐓𝐄𝐀𝐌 ⚡ ━━━━╯</b>'
+    ].join('\n');
+  }
+
+  public static buildBannerLoadingProgressText(percent: number, statusText: string): string {
+    const safePct = Math.min(100, Math.max(0, percent));
+    const totalBlocks = 10;
+    const filledBlocks = Math.round((safePct / 100) * totalBlocks);
+    const bar = '█'.repeat(filledBlocks) + '▒'.repeat(totalBlocks - filledBlocks);
+    const statusLine = safePct >= 100
+      ? `✅ <b>${this.escapeHtml(statusText || 'Banner Created Successfully!')}</b>`
+      : `⏳ <b>${this.escapeHtml(statusText)}</b>`;
+    return [
+      '<b>╭━━━ ⚡ 𝐂𝐑𝐄𝐀𝐓𝐈𝐍𝐆 𝐁𝐀𝐍𝐍𝐄𝐑 ⚡ ━━━╮</b>',
+      '',
+      '🔄 <b>CREATING BANNER...</b>',
+      '',
+      `<code>${safePct}% [${bar}]</code>`,
+      '',
+      statusLine,
+      '',
+      '<b>╰━━━━ ⚡ 𝐃𝐀𝐑𝐊 𝐓𝐄𝐀𝐌 ⚡ ━━━━╯</b>'
+    ].join('\n');
+  }
+
+  public static buildPlayerProfileReplyMarkup(uid: string) {
+    return {
+      inline_keyboard: [
+        // Temporarily hidden until a dedicated banner API is integrated:
+        // [{ text: '🖼 Banner', callback_data: `banner_${uid}`, style: 'primary' }],
+        [{ text: '🛡 Guild Info', callback_data: `guild_${uid}`, style: 'primary' }]
+      ]
+    };
+  }
+
+  public static formatBannerCaptionHtml(apiData: any, fallbackUid: string): string {
+    const p = apiData?.player && typeof apiData.player === 'object' && !apiData.player.error ? apiData.player : apiData;
+    const uid = String(p?.uid || apiData?.uid || fallbackUid).trim();
+    const name = this.isPresentValue(p?.name) ? String(p.name) : (this.isPresentValue(apiData?.name) ? String(apiData.name) : 'Unknown');
+    const level = this.isPresentValue(p?.level ?? apiData?.level) ? (p?.level ?? apiData?.level) : 0;
+    const likes = this.isPresentValue(p?.likes ?? apiData?.likes) ? (p?.likes ?? apiData?.likes) : 0;
+
+    const regionFlag = this.isPresentValue(p?.region_flag || apiData?.region_flag) ? String(p?.region_flag || apiData?.region_flag).trim() : '';
+    const regionName = this.isPresentValue(p?.region_name || apiData?.region_name) ? String(p?.region_name || apiData?.region_name).trim() : '';
+    const regionCode = this.isPresentValue(p?.region || apiData?.region) ? String(p?.region || apiData?.region).trim() : '';
+    const regionTextRaw = regionName && regionCode && regionName.toLowerCase() !== regionCode.toLowerCase()
+      ? `${regionName} (${regionCode})`
+      : (regionName || regionCode || 'Unknown');
+    const regionDisplay = `${regionFlag ? `${this.escapeHtml(regionFlag)} ` : ''}${this.escapeHtml(regionTextRaw)}`;
+
+    return [
+      '<b>╭━━━ 🔥 𝐅𝐑𝐄𝐄 𝐅𝐈𝐑𝐄 🔥 ━━━╮\n       🖼 𝐏𝐋𝐀𝐘𝐄𝐑 𝐁𝐀𝐍𝐍𝐄𝐑\n╰━━━━━━━━━━━━━━━━━━╯</b>',
+      '',
+      `🆔 <b>UID:</b> <code>${this.escapeHtml(uid)}</code>`,
+      `🏷 <b>Name:</b> ${this.escapeHtml(name)}`,
+      `🌍 <b>Region:</b> ${regionDisplay}`,
+      `⭐ <b>Level:</b> ${this.escapeHtml(String(level))}`,
+      `👍 <b>Likes:</b> ${this.escapeHtml(String(likes))}`,
+      '',
+      '<b>✨ 𝐏𝐨𝐰𝐞𝐫𝐞𝐝 𝐛𝐲 𝐃𝐚𝐫𝐤 𝐓𝐞𝐚𝐦</b> 🖤'
+    ].join('\n');
+  }
+
+  private static async sendPhotoBuffer(params: {
+    chatId: number | string;
+    photoBuffer: Buffer;
+    mimeType?: string;
+    fileName?: string;
+    caption?: string;
+    replyToMessageId?: number;
+    threadId?: number;
+    replyMarkup?: any;
+  }): Promise<any> {
+    const token = botTokenContext.getStore() || (await this.getBotToken());
+    if (!token) {
+      return { ok: false, description: 'Bot token not configured' };
+    }
+
+    const sendMultipart = async (useReply: boolean) => {
+      const formData = new FormData();
+      formData.append('chat_id', String(params.chatId));
+      if (params.caption) {
+        formData.append('caption', params.caption);
+        formData.append('parse_mode', 'HTML');
+      }
+      if (useReply && params.replyToMessageId) {
+        formData.append('reply_to_message_id', String(params.replyToMessageId));
+      }
+      if (params.threadId) {
+        formData.append('message_thread_id', String(params.threadId));
+      }
+      if (params.replyMarkup) {
+        formData.append('reply_markup', JSON.stringify(params.replyMarkup));
+      }
+
+      const blob = new Blob([new Uint8Array(params.photoBuffer)] as any, {
+        type: params.mimeType || 'image/png'
+      });
+      formData.append('photo', blob, params.fileName || 'ff_banner.png');
+
+      const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+        method: 'POST',
+        body: formData
+      });
+      return await res.json();
+    };
+
+    try {
+      let data = await sendMultipart(true);
+      if (!data?.ok && params.replyToMessageId) {
+        data = await sendMultipart(false);
+      }
+      return data;
+    } catch (err: any) {
+      return { ok: false, description: err?.message || 'Failed to upload photo' };
+    }
   }
 
   public static async fetchFreeFirePlayer(uid: string, forceRefresh: boolean = false): Promise<any | null> {
@@ -9159,7 +9795,7 @@ export class TelegramService {
   public static formatFreeFirePlayerMessage(
     apiData: any,
     fallbackUid: string,
-    headerTitle: string = '🔥 <b>FREE FIRE PLAYER PROFILE</b>'
+    headerTitle?: string
   ): string {
     const p = apiData?.player && typeof apiData.player === 'object' && !apiData.player.error ? apiData.player : apiData;
 
@@ -9176,7 +9812,7 @@ export class TelegramService {
     const regionTextRaw = regionName && regionCode && regionName.toLowerCase() !== regionCode.toLowerCase()
       ? `${regionName} (${regionCode})`
       : (regionName || regionCode || 'Unknown');
-    const regionDisplay = `${regionFlag ? `${regionFlag} ` : ''}${this.escapeHtml(regionTextRaw)}`;
+    const regionDisplay = `${regionFlag ? `${this.escapeHtml(regionFlag)} ` : ''}${this.escapeHtml(regionTextRaw)}`;
 
     const br = p?.battle_royale || apiData?.battle_royale;
     const cs = p?.clash_squad || apiData?.clash_squad;
@@ -9197,10 +9833,6 @@ export class TelegramService {
           : (this.isPresentValue(cs?.peak_points) ? cs.peak_points : 0));
 
     const honorScoreRaw = p?.honor_score ?? apiData?.honor_score ?? p?.credit_score ?? apiData?.credit_score ?? 100;
-    const rawAccountStatus = p?.account_status || apiData?.account_status || p?.status || apiData?.status_text;
-    const accountStatus = this.isPresentValue(rawAccountStatus)
-      ? String(rawAccountStatus)
-      : (Number(honorScoreRaw) >= 90 ? 'Active' : 'Restricted');
 
     const valuation = p?.valuation || apiData?.valuation;
     const accountTier = this.isPresentValue(valuation?.rarity_tier)
@@ -9225,7 +9857,7 @@ export class TelegramService {
     const valuationParts = [valBdt, valUsd].filter(Boolean);
     const valuationDisplay = valuationParts.length === 2
       ? `${valuationParts[0]} (${valuationParts[1]})`
-      : (valuationParts[0] || '');
+      : (valuationParts[0] || 'N/A');
 
     const gameVersion = this.isPresentValue(p?.release_version || apiData?.release_version || apiData?.most_recent_ob)
       ? String(p?.release_version || apiData?.release_version || apiData?.most_recent_ob)
@@ -9236,39 +9868,53 @@ export class TelegramService {
 
     const rawSig = this.isPresentValue(p?.signature || apiData?.signature) ? String(p?.signature || apiData?.signature) : '';
     const cleanBio = rawSig ? this.cleanFfSignature(rawSig).slice(0, 300) : 'No bio set';
-    const footerLine = this.extractFreeFireFooterLine(apiData);
+
+    const headerBlock = headerTitle
+      ? `<b>╭━━━ 🔥 𝐅𝐑𝐄𝐄 𝐅𝐈𝐑𝐄 🔥 ━━━╮</b>\n       ${headerTitle}\n<b>╰━━━━━━━━━━━━━━━━━━╯</b>`
+      : '<b>╭━━━ 🔥 𝐅𝐑𝐄𝐄 𝐅𝐈𝐑𝐄 🔥 ━━━╮\n       💎 𝐏𝐋𝐀𝐘𝐄𝐑 𝐏𝐑𝐎𝐅𝐈𝐋𝐄\n╰━━━━━━━━━━━━━━━━━━╯</b>';
 
     return [
-      headerTitle,
-      '━━━━━━━━━━━━━━━━━━━━',
-      '👤 <b>PLAYER IDENTITY</b>',
+      headerBlock,
+      '',
+      '<b>▸ 👤 PLAYER IDENTITY</b>',
+      '',
       `🆔 <b>UID:</b> <code>${this.escapeHtml(uid)}</code>`,
       `🏷 <b>Name:</b> ${this.escapeHtml(name)}`,
       `🌍 <b>Region:</b> ${regionDisplay}`,
-      `⭐ <b>Level:</b> ${this.escapeHtml(String(level))} <code>(${this.escapeHtml(exp)} EXP)</code>`,
+      `⭐ <b>Level:</b> ${this.escapeHtml(String(level))} (${this.escapeHtml(exp)} EXP)`,
       `👍 <b>Likes:</b> ${this.escapeHtml(String(likes))}`,
-      '━━━━━━━━━━━━━━━━━━━━',
-      '🏆 <b>RANK INFORMATION</b>',
+      '',
+      '<b>━━━━━━━━━━━━━━━━━━</b>',
+      '<b>▸ 🏆 RANK INFORMATION</b>',
+      '',
       `🔰 <b>Battle Royale:</b> ${this.escapeHtml(brRankRaw)}`,
-      `└ 💠 <b>Points:</b> ${this.escapeHtml(String(brPointsRaw))}`,
+      `└ 💠 Points: ${this.escapeHtml(String(brPointsRaw))}`,
+      '',
       `⚔️ <b>Clash Squad:</b> ${this.escapeHtml(csRankRaw)}`,
-      `└ 💠 <b>Points:</b> ${this.escapeHtml(String(csPointsRaw))}`,
-      '━━━━━━━━━━━━━━━━━━━━',
-      '💎 <b>ACCOUNT INFORMATION</b>',
-      `🟢 <b>Status:</b> ${this.escapeHtml(accountStatus)}`,
-      `🛡 <b>Honer score:</b> ${this.escapeHtml(String(honorScoreRaw))}/100`,
-      `💠 <b>Account Tier:</b> ${this.escapeHtml(accountTier)}`,
-      ...(valuationDisplay ? [`💰 <b>Account Price:</b> ${this.escapeHtml(valuationDisplay)}`] : []),
-      `📦 <b>Game Version:</b> ${this.escapeHtml(gameVersion)}`,
-      '━━━━━━━━━━━━━━━━━━━━',
+      `└ 💠 Points: ${this.escapeHtml(String(csPointsRaw))}`,
+      '',
+      '<b>━━━━━━━━━━━━━━━━━━</b>',
+      '<b>▸ 💎 ACCOUNT INFORMATION</b>',
+      '',
+      `🛡 <b>Honor Score:</b> ${this.escapeHtml(String(honorScoreRaw))}/100`,
+      `💠 <b>Tier:</b> ${this.escapeHtml(accountTier)}`,
+      `💰 <b>Price:</b> ${this.escapeHtml(valuationDisplay)}`,
+      `📦 <b>Version:</b> ${this.escapeHtml(gameVersion)}`,
+      '',
+      '<b>━━━━━━━━━━━━━━━━━━</b>',
+      '<b>▸ 📅 ACCOUNT TIMELINE</b>',
+      '',
       `📅 <b>Created:</b> ${this.escapeHtml(createdAt)}`,
       `🕒 <b>Last Login:</b> ${this.escapeHtml(lastLogin)}`,
-      '━━━━━━━━━━━━━━━━━━━━',
-      '💬 <b>PLAYER BIO</b>',
-      `<blockquote>${this.escapeHtml(cleanBio)}</blockquote>`,
-      '━━━━━━━━━━━━━━━━━━━━',
-      '⚡ <b>FREE FIRE PROFILE SYSTEM</b>',
-      footerLine
+      '',
+      '<b>━━━━━━━━━━━━━━━━━━</b>',
+      '<b>▸ 💬 PLAYER BIO</b>',
+      '',
+      `✨ ${this.escapeHtml(cleanBio)}`,
+      '',
+      '<b>╭━━━━━━━━━━━━━━━━━━╮\n   ⚡ 𝐅𝐑𝐄𝐄 𝐅𝐈𝐑𝐄 𝐏𝐑𝐎𝐅𝐈𝐋𝐄\n╰━━━━━━━━━━━━━━━━━━╯</b>',
+      '',
+      '<b>✨ 𝐏𝐨𝐰𝐞𝐫𝐞𝐝 𝐛𝐲 𝐃𝐚𝐫𝐤 𝐓𝐞𝐚𝐦</b> 🖤'
     ].join('\n');
   }
 
@@ -9295,8 +9941,9 @@ export class TelegramService {
       return;
     }
 
-    // 1. Immediately react to user's command message with thinking emoji (🤔)
-    this.setBotReaction(chatId, messageId, '🤔').catch(() => {});
+    // 1. Immediately react to user's /u <uid> message with a random valid Telegram emoji
+    const randomReaction = this.getRandomUidReactionEmoji();
+    this.setBotReaction(chatId, messageId, randomReaction).catch(() => {});
 
     // 2. Send initial 0% loading progress message immediately
     const loadingParams: any = {
@@ -9370,21 +10017,14 @@ export class TelegramService {
         await this.callTelegramApi('editMessageText', {
           chat_id: chatId,
           message_id: loadingMsgId,
-          text: this.buildLoadingProgressText(100, 'Profile data loaded!'),
+          text: this.buildLoadingProgressText(100, 'Profile Data Loaded Successfully!'),
           parse_mode: 'HTML'
         }).catch(() => {});
         await sleep(200);
       }
 
       const formattedText = this.formatFreeFirePlayerMessage(data, uid);
-      const replyMarkup = {
-        inline_keyboard: [
-          [{ text: '🛡 Check Guild Info', callback_data: `guild_${uid}`, style: 'primary' }]
-        ]
-      };
-
-      // Update reaction to success emoji (💯)
-      await this.setBotReaction(chatId, messageId, '💯');
+      const replyMarkup = this.buildPlayerProfileReplyMarkup(uid);
 
       if (loadingMsgId) {
         const editRes = await this.callTelegramApi('editMessageText', {
@@ -9414,6 +10054,996 @@ export class TelegramService {
       console.error('[FreeFireUID] Command handler error:', err?.message || err);
       await this.setBotReaction(chatId, messageId, '😢');
       const errHtml = '❌ <b>Player not found or API service is busy.</b> Please try again later.';
+      if (loadingMsgId) {
+        await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: loadingMsgId,
+          text: errHtml,
+          parse_mode: 'HTML'
+        }).catch(() => {});
+      } else {
+        const errParams: any = { chat_id: chatId, text: errHtml, parse_mode: 'HTML' };
+        if (isGroup && messageId) errParams.reply_to_message_id = messageId;
+        if (threadId) errParams.message_thread_id = threadId;
+        await this.callTelegramApi('sendMessage', errParams).catch(() => {});
+      }
+    }
+  }
+
+  // =========================================================================
+  // FREE FIRE BANCHECK INFO COMMAND (/baninfo <uid>)
+  // =========================================================================
+  private static mtprotoBancheckClient: any = null;
+
+  public static parseBanInfoCommand(rawText: string): { matched: boolean; uid: string | null } {
+    const cleaned = String(rawText || '')
+      .replace(/[\u200B-\u200F\u202A-\u202E\uFEFF\u00A0]/g, ' ')
+      .trim();
+    const match = cleaned.match(/^\/baninfo(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i);
+    if (!match) {
+      return { matched: false, uid: null };
+    }
+    const arg = (match[1] || '').trim();
+    const uidMatch = arg.match(/^(\d+)$/);
+    return {
+      matched: true,
+      uid: uidMatch ? uidMatch[1] : null
+    };
+  }
+
+  private static parseBanStatusBoolean(val: any): boolean | null {
+    if (typeof val === 'boolean') return val;
+    if (typeof val === 'number') {
+      if (val === 1) return true;
+      if (val === 0) return false;
+      return null;
+    }
+    if (typeof val === 'string') {
+      const s = val.trim().toLowerCase();
+      if (!s) return null;
+      if (/\b(not[\s_-]?banned|unbanned|clean|safe|no)\b/i.test(s) || s === '0' || s === 'false') {
+        return false;
+      }
+      if (/\b(banned|suspended|yes)\b/i.test(s) || s === '1' || s === 'true') {
+        return true;
+      }
+    }
+    return null;
+  }
+
+  private static extractBanDetailsFromObject(
+    json: any,
+    container: any,
+    pObj: any,
+    isBanned: boolean | null
+  ): { banType?: string; banTime?: string; banReason?: string } {
+    if (isBanned !== true) return {};
+
+    const rawBanType =
+      json?.ban_type ??
+      json?.banType ??
+      container?.ban_type ??
+      container?.banType ??
+      pObj?.ban_type ??
+      pObj?.banType;
+
+    const rawBanTime =
+      json?.ban_time ??
+      json?.banTime ??
+      json?.ban_duration ??
+      json?.banDuration ??
+      json?.remaining_time ??
+      json?.remainingTime ??
+      json?.ban_until ??
+      json?.banUntil ??
+      json?.expires_at ??
+      json?.expire_at ??
+      container?.ban_time ??
+      container?.banTime ??
+      container?.ban_duration ??
+      container?.banDuration ??
+      container?.remaining_time ??
+      container?.ban_until ??
+      container?.expires_at ??
+      pObj?.ban_time ??
+      pObj?.ban_duration ??
+      pObj?.ban_until;
+
+    const rawMsg =
+      typeof json?.msg === 'string' &&
+      json.msg.trim() &&
+      !/^(T_P_WRONG_ACCOUNT|success|ok)$/i.test(json.msg.trim())
+        ? json.msg
+        : undefined;
+
+    const rawBanReason =
+      json?.ban_reason ??
+      json?.banReason ??
+      json?.reason ??
+      container?.ban_reason ??
+      container?.banReason ??
+      container?.reason ??
+      pObj?.ban_reason ??
+      pObj?.banReason ??
+      pObj?.reason ??
+      rawMsg;
+
+    let banType = 'Permanent';
+    if (this.isPresentValue(rawBanType)) {
+      const s = String(rawBanType).trim();
+      banType = /temp/i.test(s) ? 'Temporary' : /perm/i.test(s) ? 'Permanent' : s;
+    } else if (this.isPresentValue(rawBanTime) && !/^(perm|permanent|forever|lifetime|0)$/i.test(String(rawBanTime).trim())) {
+      banType = 'Temporary';
+    }
+
+    let banTime = banType === 'Permanent' ? 'Permanent' : 'Unknown';
+    if (banType !== 'Permanent' && this.isPresentValue(rawBanTime)) {
+      const s = String(rawBanTime).trim();
+      if (/^\d{10}$/.test(s)) {
+        banTime = new Date(Number(s) * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+      } else if (/^\d{13}$/.test(s)) {
+        banTime = new Date(Number(s)).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+      } else {
+        banTime = s;
+      }
+    }
+
+    const banReason = this.isPresentValue(rawBanReason)
+      ? String(rawBanReason).trim()
+      : 'Not provided';
+
+    return { banType, banTime, banReason };
+  }
+
+  private static parseBanReplyText(replyText: string): {
+    isBanned: boolean | null;
+    name?: string;
+    region?: string;
+    level?: string;
+    likes?: string;
+    banType?: string;
+    banTime?: string;
+    banReason?: string;
+  } {
+    const text = String(replyText || '').trim();
+    if (!text) return { isBanned: null };
+    const statusLineMatch = text.match(/(?:ban\s*)?status\s*[:\-]\s*([^\n\r]+)/i);
+    const isBanned = statusLineMatch
+      ? this.parseBanStatusBoolean(statusLineMatch[1])
+      : this.parseBanStatusBoolean(text);
+    const nameMatch = text.match(/(?:username|nickname|name)\s*[:\-]\s*([^\n\r]+)/i);
+    const regionMatch = text.match(/region\s*[:\-]\s*([^\n\r]+)/i);
+    const levelMatch = text.match(/level\s*[:\-]\s*([^\n\r]+)/i);
+    const likesMatch = text.match(/likes\s*[:\-]\s*([^\n\r]+)/i);
+    const banTypeMatch = text.match(/ban\s*type\s*[:\-]\s*([^\n\r]+)/i);
+    const banTimeMatch = text.match(/(?:ban\s*time|duration)\s*[:\-]\s*([^\n\r]+)/i);
+    const banReasonMatch = text.match(/(?:ban\s*reason|reason)\s*[:\-]\s*([^\n\r]+)/i);
+    return {
+      isBanned,
+      name: nameMatch ? nameMatch[1].trim() : undefined,
+      region: regionMatch ? regionMatch[1].trim() : undefined,
+      level: levelMatch ? levelMatch[1].trim() : undefined,
+      likes: likesMatch ? likesMatch[1].trim() : undefined,
+      banType: banTypeMatch ? banTypeMatch[1].trim() : undefined,
+      banTime: banTimeMatch ? banTimeMatch[1].trim() : undefined,
+      banReason: banReasonMatch ? banReasonMatch[1].trim() : undefined
+    };
+  }
+
+  private static async fetchBancheckViaMtprotoBridge(uid: string): Promise<{
+    isBanned: boolean | null;
+    name?: string;
+    region?: string;
+    level?: string;
+    likes?: string;
+    banType?: string;
+    banTime?: string;
+    banReason?: string;
+  } | null> {
+    // Option A: External HTTP MTProto userbot bridge URL if configured
+    const bridgeUrl = (process.env.BANCHECK_MTPROTO_BRIDGE_URL || '').trim();
+    if (bridgeUrl) {
+      try {
+        const targetUrl = bridgeUrl.includes('{uid}')
+          ? bridgeUrl.replace(/\{uid\}/g, encodeURIComponent(uid))
+          : `${bridgeUrl}${bridgeUrl.includes('?') ? '&' : '?'}uid=${encodeURIComponent(uid)}`;
+        const headers: Record<string, string> = { Accept: 'application/json' };
+        const bridgeKey = (process.env.BANCHECK_MTPROTO_BRIDGE_KEY || '').trim();
+        if (bridgeKey) {
+          headers['x-api-key'] = bridgeKey;
+          headers.Authorization = `Bearer ${bridgeKey}`;
+        }
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 14000);
+        const res = await fetch(targetUrl, { method: 'GET', headers, signal: controller.signal });
+        clearTimeout(timer);
+        if (res.ok) {
+          const rawBody = await res.text();
+          try {
+            const json = JSON.parse(rawBody);
+            const rawStatus =
+              json?.is_banned ?? json?.isBanned ?? json?.banned ?? json?.data?.is_banned ?? json?.status;
+            const parsedBool = this.parseBanStatusBoolean(rawStatus);
+            if (parsedBool !== null) {
+              const container = json?.data && typeof json.data === 'object' ? json.data : json;
+              const meta = this.extractBanDetailsFromObject(json, container, container, parsedBool);
+              return {
+                isBanned: parsedBool,
+                name: json?.username || json?.name || json?.data?.name,
+                region: json?.region || json?.data?.region,
+                level: json?.level !== undefined ? String(json.level) : undefined,
+                likes: json?.likes !== undefined ? String(json.likes) : undefined,
+                banType: meta.banType,
+                banTime: meta.banTime,
+                banReason: meta.banReason
+              };
+            }
+            if (typeof json?.reply === 'string' || typeof json?.text === 'string') {
+              const parsedReply = this.parseBanReplyText(json.reply || json.text);
+              if (parsedReply.isBanned !== null) return parsedReply;
+            }
+          } catch {
+            const parsedReply = this.parseBanReplyText(rawBody);
+            if (parsedReply.isBanned !== null) return parsedReply;
+          }
+        }
+      } catch (err: any) {
+        console.warn('[BanInfo] MTProto HTTP bridge fetch failed:', err?.message || err);
+      }
+    }
+
+    // Option B: Native GramJS MTProto Userbot Client (only when BANCHECK_MTPROTO_BOT is explicitly configured)
+    const apiIdRaw = (process.env.TELEGRAM_MTPROTO_API_ID || process.env.MTPROTO_API_ID || '').trim();
+    const apiHash = (process.env.TELEGRAM_MTPROTO_API_HASH || process.env.MTPROTO_API_HASH || '').trim();
+    const sessionStr = (process.env.TELEGRAM_MTPROTO_SESSION || process.env.MTPROTO_SESSION || '').trim();
+    const targetBot = (process.env.BANCHECK_MTPROTO_BOT || '').trim();
+    if (!apiIdRaw || !apiHash || !sessionStr || !targetBot) {
+      return null;
+    }
+
+    const apiId = Number(apiIdRaw);
+    if (!Number.isFinite(apiId) || apiId <= 0) {
+      return null;
+    }
+
+    try {
+      const { TelegramClient, sessions } = await import('telegram');
+      if (!this.mtprotoBancheckClient) {
+        this.mtprotoBancheckClient = new TelegramClient(
+          new sessions.StringSession(sessionStr),
+          apiId,
+          apiHash,
+          { connectionRetries: 2 }
+        );
+      }
+      if (!this.mtprotoBancheckClient.connected) {
+        await this.mtprotoBancheckClient.connect();
+      }
+
+      const entity = await this.mtprotoBancheckClient.getEntity(targetBot);
+      const sentMsg = await this.mtprotoBancheckClient.sendMessage(entity, {
+        message: `/isbanned ${uid}`
+      });
+
+      const sentId = Number(sentMsg?.id || 0);
+      const deadline = Date.now() + 12000;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 900));
+        const messages = await this.mtprotoBancheckClient.getMessages(entity, { limit: 6 });
+        if (Array.isArray(messages)) {
+          const reply = messages.find((m: any) => !m?.out && Number(m?.id || 0) > sentId && (m?.message || m?.text));
+          if (reply) {
+            const replyText = String(reply.message || reply.text || '');
+            const parsed = this.parseBanReplyText(replyText);
+            if (parsed.isBanned !== null) {
+              return parsed;
+            }
+          }
+        }
+      }
+    } catch (err: any) {
+      console.warn('[BanInfo] MTProto userbot query failed:', err?.message || err);
+    }
+    return null;
+  }
+
+  public static async fetchFreeFireBanInfo(uid: string): Promise<{
+    uid: string;
+    name: string;
+    region: string;
+    level: string;
+    likes: string;
+    isBanned: boolean;
+    banType?: string;
+    banTime?: string;
+    banReason?: string;
+    errorMessage?: string;
+  } | null> {
+    const cleanUid = String(uid || '').trim();
+    if (!/^\d+$/.test(cleanUid)) return null;
+
+    // 0. Query Self-Hosted Guest Account API first (FF_BANCHECK_API_URL or local /api/bancheck?uid=<uid>)
+    const guestApiBase = (process.env.FF_BANCHECK_API_URL || '').trim();
+    const localPort = Number(process.env.LOCAL_FF_API_PORT || process.env.PORT || 3000);
+    const guestApiUrl = guestApiBase
+      ? (guestApiBase.includes('{uid}')
+          ? guestApiBase.replace(/\{uid\}/g, encodeURIComponent(cleanUid))
+          : `${guestApiBase}${guestApiBase.includes('?') ? '&' : '?'}uid=${encodeURIComponent(cleanUid)}`)
+      : `http://127.0.0.1:${Number.isFinite(localPort) && localPort > 0 ? localPort : 3000}/api/bancheck?uid=${encodeURIComponent(cleanUid)}`;
+
+    let guestApiResult: any = null;
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 14000);
+      const res = await fetch(guestApiUrl, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      guestApiResult = await res.json().catch(() => null);
+    } catch {
+      guestApiResult = null;
+    }
+
+    if (guestApiResult?.ok) {
+      const parsedBool = this.parseBanStatusBoolean(guestApiResult.is_banned ?? guestApiResult.status);
+      if (parsedBool !== null) {
+        const meta = this.extractBanDetailsFromObject(guestApiResult, guestApiResult, guestApiResult, parsedBool);
+        return {
+          uid: String(guestApiResult.uid || cleanUid),
+          name: String(guestApiResult.username || guestApiResult.nickname || 'Unknown'),
+          region: String(guestApiResult.region || 'Unknown'),
+          level: String(guestApiResult.level ?? 'Unknown'),
+          likes: String(guestApiResult.likes ?? '0'),
+          isBanned: parsedBool,
+          banType: meta.banType,
+          banTime: meta.banTime,
+          banReason: meta.banReason
+        };
+      }
+    } else if (guestApiResult?.code === 'INVALID_GUEST_CREDENTIALS') {
+      return {
+        uid: cleanUid,
+        name: 'Unknown',
+        region: 'Unknown',
+        level: 'Unknown',
+        likes: '0',
+        isBanned: false,
+        errorMessage: String(
+          guestApiResult.error ||
+            'Free Fire Guest account credentials are invalid. Check FF_GUEST_UID / FF_GUEST_PASSWORD or FF_GUEST_TOKEN.'
+        )
+      };
+    } else if (guestApiResult?.code === 'PLAYER_NOT_FOUND') {
+      return null;
+    }
+
+    let isBanned: boolean | null = null;
+    let customName: string | undefined;
+    let customRegion: string | undefined;
+    let customLevel: string | undefined;
+    let customLikes: string | undefined;
+    let banType: string | undefined;
+    let banTime: string | undefined;
+    let banReason: string | undefined;
+
+    // Start player profile fetch in parallel for rich UID details (Username, Region, Level, Likes)
+    const playerPromise = this.fetchFreeFirePlayer(cleanUid).catch(() => null);
+
+    // 1. Custom BANCHECK_API_URL env endpoint if configured
+    const customApiUrl = (process.env.BANCHECK_API_URL || '').trim();
+    if (customApiUrl) {
+      try {
+        const targetUrl = customApiUrl.includes('{uid}')
+          ? customApiUrl.replace(/\{uid\}/g, encodeURIComponent(cleanUid))
+          : `${customApiUrl}${customApiUrl.includes('?') ? '&' : '?'}uid=${encodeURIComponent(cleanUid)}`;
+        const headers: Record<string, string> = { Accept: 'application/json' };
+        const apiKey = (process.env.BANCHECK_API_KEY || '').trim();
+        if (apiKey) {
+          headers['x-api-key'] = apiKey;
+          headers.Authorization = `Bearer ${apiKey}`;
+        }
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 12000);
+        const res = await fetch(targetUrl, { method: 'GET', headers, signal: controller.signal });
+        clearTimeout(timer);
+        if (res.ok) {
+          const rawText = await res.text();
+          try {
+            const json: any = JSON.parse(rawText);
+            const container = json?.data && typeof json.data === 'object' ? json.data : json;
+            const rawStatus =
+              json?.is_banned ??
+              json?.isBanned ??
+              json?.banned ??
+              json?.ban_status ??
+              container?.is_banned ??
+              container?.isBanned ??
+              container?.banned ??
+              container?.ban_status ??
+              (json?.status !== 'success' && json?.status !== 'error' ? json?.status : undefined);
+            const parsedBool = this.parseBanStatusBoolean(rawStatus);
+            if (parsedBool !== null) {
+              isBanned = parsedBool;
+            }
+            const pObj = json?.player && typeof json.player === 'object' ? json.player : container;
+            const meta = this.extractBanDetailsFromObject(json, container, pObj, isBanned);
+            banType = meta.banType || banType;
+            banTime = meta.banTime || banTime;
+            banReason = meta.banReason || banReason;
+            if (this.isPresentValue(pObj?.username || pObj?.name || pObj?.nickname)) {
+              customName = String(pObj.username || pObj.name || pObj.nickname).trim();
+            }
+            if (this.isPresentValue(pObj?.region || pObj?.region_name)) {
+              customRegion = String(pObj.region_name || pObj.region).trim();
+            }
+            if (this.isPresentValue(pObj?.level)) {
+              customLevel = String(pObj.level).trim();
+            }
+            if (this.isPresentValue(pObj?.likes)) {
+              customLikes = String(pObj.likes).trim();
+            }
+          } catch {
+            const parsedText = this.parseBanReplyText(rawText);
+            if (parsedText.isBanned !== null) {
+              isBanned = parsedText.isBanned;
+              customName = parsedText.name || customName;
+              customRegion = parsedText.region || customRegion;
+              customLevel = parsedText.level || customLevel;
+              customLikes = parsedText.likes || customLikes;
+              banType = parsedText.banType || banType;
+              banTime = parsedText.banTime || banTime;
+              banReason = parsedText.banReason || banReason;
+            }
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[BanInfo] BANCHECK_API_URL error for UID ${cleanUid}:`, err?.message || err);
+      }
+    }
+
+    // 2. Optional MTProto bridge ONLY if explicitly configured in env (no default third-party bot)
+    if (isBanned === null) {
+      const mtprotoResult = await this.fetchBancheckViaMtprotoBridge(cleanUid);
+      if (mtprotoResult && mtprotoResult.isBanned !== null) {
+        isBanned = mtprotoResult.isBanned;
+        customName = mtprotoResult.name || customName;
+        customRegion = mtprotoResult.region || customRegion;
+        customLevel = mtprotoResult.level || customLevel;
+        customLikes = mtprotoResult.likes || customLikes;
+        banType = mtprotoResult.banType || banType;
+        banTime = mtprotoResult.banTime || banTime;
+        banReason = mtprotoResult.banReason || banReason;
+      }
+    }
+
+    // 3. Built-in Garena Official Bancheck API fallback
+    let garenaWrongAccount = false;
+    if (isBanned === null) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 12000);
+        const res = await fetch(
+          `https://ff.garena.com/api/antihack/check_banned?lang=en&uid=${encodeURIComponent(cleanUid)}`,
+          {
+            method: 'GET',
+            headers: {
+              Accept: 'application/json',
+              'User-Agent': 'Mozilla/5.0',
+              Referer: 'https://ff.garena.com/en/support/',
+              'x-requested-with': 'B6FksShzIgjfrYImLpTsadjS86sddhFH'
+            },
+            signal: controller.signal
+          }
+        );
+        clearTimeout(timer);
+        if (res.ok) {
+          const json: any = await res.json().catch(() => null);
+          if (json?.status === 'success' && json?.data && json.data.is_banned !== undefined) {
+            isBanned = Number(json.data.is_banned) === 1;
+            const meta = this.extractBanDetailsFromObject(json, json.data, json.data, isBanned);
+            banType = meta.banType || banType;
+            banTime = meta.banTime || banTime;
+            banReason = meta.banReason || banReason;
+          } else if (json?.msg === 'T_P_WRONG_ACCOUNT') {
+            garenaWrongAccount = true;
+          }
+        }
+      } catch (err: any) {
+        console.warn(`[BanInfo] Garena bancheck error for UID ${cleanUid}:`, err?.message || err);
+      }
+    }
+
+    const playerData = await playerPromise;
+    if (!playerData && (garenaWrongAccount || isBanned === null)) {
+      return null;
+    }
+
+    const p = playerData?.player && typeof playerData.player === 'object' && !playerData.player.error
+      ? playerData.player
+      : playerData;
+
+    const finalName = customName ||
+      (this.isPresentValue(p?.name) ? String(p.name).trim() : (this.isPresentValue(playerData?.name) ? String(playerData.name).trim() : 'Unknown'));
+
+    let finalRegion = customRegion || '';
+    if (!finalRegion) {
+      const regionFlag = this.isPresentValue(p?.region_flag || playerData?.region_flag)
+        ? String(p?.region_flag || playerData?.region_flag).trim()
+        : '';
+      const regionName = this.isPresentValue(p?.region_name || playerData?.region_name)
+        ? String(p?.region_name || playerData?.region_name).trim()
+        : '';
+      const regionCode = this.isPresentValue(p?.region || playerData?.region)
+        ? String(p?.region || playerData?.region).trim()
+        : '';
+      const regionText = regionName && regionCode && regionName.toLowerCase() !== regionCode.toLowerCase()
+        ? `${regionName} (${regionCode})`
+        : (regionName || regionCode || 'Unknown');
+      finalRegion = regionFlag ? `${regionFlag} ${regionText}` : regionText;
+    }
+
+    const finalLevel = customLevel ||
+      (this.isPresentValue(p?.level ?? playerData?.level) ? String(p?.level ?? playerData?.level) : 'Unknown');
+    const finalLikes = customLikes ||
+      (this.isPresentValue(p?.likes ?? playerData?.likes) ? String(p?.likes ?? playerData?.likes) : '0');
+
+    if (isBanned === null) {
+      return null;
+    }
+
+    if (isBanned) {
+      const fallbackMeta = this.extractBanDetailsFromObject(playerData, p, p, true);
+      banType = banType || fallbackMeta.banType || 'Permanent';
+      banTime = banType === 'Permanent'
+        ? 'Permanent'
+        : (banTime || fallbackMeta.banTime || 'Unknown');
+      banReason = banReason || fallbackMeta.banReason || 'Not provided';
+    }
+
+    return {
+      uid: cleanUid,
+      name: finalName,
+      region: finalRegion,
+      level: finalLevel,
+      likes: finalLikes,
+      isBanned,
+      ...(isBanned ? { banType, banTime, banReason } : {})
+    };
+  }
+
+  public static formatFreeFireBanInfoMessage(info: {
+    uid: string;
+    name: string;
+    region: string;
+    level: string;
+    likes: string;
+    isBanned: boolean;
+    banType?: string;
+    banTime?: string;
+    banReason?: string;
+  }): string {
+    const baseLines = [
+      '<b>╭━━━ 🛡️ 𝐁𝐀𝐍 𝐂𝐇𝐄𝐂𝐊 🛡️ ━━━╮</b>',
+      '',
+      '<b>▸ PLAYER INFORMATION</b>',
+      '',
+      `🆔 <b>UID:</b> <code>${this.escapeHtml(info.uid)}</code>`,
+      `👤 <b>Username:</b> ${this.escapeHtml(info.name)}`,
+      `🌍 <b>Region:</b> ${this.escapeHtml(info.region)}`,
+      `⭐ <b>Level:</b> ${this.escapeHtml(info.level)}`,
+      `👍 <b>Likes:</b> ${this.escapeHtml(info.likes)}`,
+      '',
+      '<b>━━━━━━━━━━━━━━━━━━</b>',
+      ''
+    ];
+
+    if (info.isBanned) {
+      const banTypeDisplay = this.isPresentValue(info.banType) ? String(info.banType).trim() : 'Permanent';
+      const banTimeDisplay = banTypeDisplay === 'Permanent'
+        ? 'Permanent'
+        : (this.isPresentValue(info.banTime) ? String(info.banTime).trim() : 'Unknown');
+      const banReasonDisplay = this.isPresentValue(info.banReason)
+        ? String(info.banReason).trim()
+        : 'Not provided';
+
+      return [
+        ...baseLines,
+        '🚨 <b>Ban Status:</b> 🚫 BANNED',
+        `📌 <b>Ban Type:</b> ${this.escapeHtml(banTypeDisplay)}`,
+        `⏳ <b>Ban Time:</b> ${this.escapeHtml(banTimeDisplay)}`,
+        `📝 <b>Ban Reason:</b> ${this.escapeHtml(banReasonDisplay)}`,
+        '',
+        '<b>╰━━━ ⚡ 𝐃𝐀𝐑𝐊 𝐓𝐄𝐀𝐌 ━━━╯</b>',
+        '<b>✨ Powered by Dark Team</b> 🖤'
+      ].join('\n');
+    }
+
+    return [
+      ...baseLines,
+      '🚨 <b>Ban Status:</b> ✅ NOT BANNED',
+      '',
+      '<b>╰━━━ ⚡ 𝐃𝐀𝐑𝐊 𝐓𝐄𝐀𝐌 ━━━╯</b>',
+      '<b>✨ Powered by Dark Team</b> 🖤'
+    ].join('\n');
+  }
+
+  private static async handleBanInfoCommand(
+    chatId: number | string,
+    uid: string | null,
+    messageId?: number,
+    isGroup: boolean = false,
+    threadId?: number
+  ): Promise<void> {
+    if (!uid) {
+      this.setBotReaction(chatId, messageId, '😢').catch(() => {});
+      const usageParams: any = {
+        chat_id: chatId,
+        text: '⚠️ <b>Please provide a valid Free Fire UID.</b>\nExample: <code>/baninfo 8674177274</code>',
+        parse_mode: 'HTML'
+      };
+      if (isGroup && messageId) usageParams.reply_to_message_id = messageId;
+      if (threadId) usageParams.message_thread_id = threadId;
+      const usageRes = await this.callTelegramApi('sendMessage', usageParams);
+      if (isGroup && usageRes?.ok && usageRes.result?.message_id) {
+        await this.trackAndLimitMessage(Number(chatId), usageRes.result.message_id);
+      }
+      return;
+    }
+
+    // Immediately react to user's /baninfo <uid> message with a random valid Telegram emoji
+    const randomReaction = this.getRandomUidReactionEmoji();
+    this.setBotReaction(chatId, messageId, randomReaction).catch(() => {});
+
+    const loadingParams: any = {
+      chat_id: chatId,
+      text: '🔍 <b>Checking Bancheck Information...</b>',
+      parse_mode: 'HTML'
+    };
+    if (isGroup && messageId) loadingParams.reply_to_message_id = messageId;
+    if (threadId) loadingParams.message_thread_id = threadId;
+
+    let loadingMsgId: number | undefined;
+    try {
+      const fetchPromise = this.fetchFreeFireBanInfo(uid);
+      const initRes = await this.callTelegramApi('sendMessage', loadingParams);
+      if (initRes?.ok && initRes.result?.message_id) {
+        loadingMsgId = initRes.result.message_id;
+        if (isGroup) {
+          this.trackAndLimitMessage(Number(chatId), loadingMsgId!).catch(() => {});
+        }
+      }
+
+      const banInfo = await fetchPromise;
+      if (!banInfo || banInfo.errorMessage) {
+        const errHtml = banInfo?.errorMessage
+          ? `⚠️ <b>Bancheck Service Error</b>\n<i>${this.escapeHtml(banInfo.errorMessage)}</i>`
+          : '❌ <b>Player not found or Bancheck service is unavailable.</b> Please verify the UID and try again.';
+        if (loadingMsgId) {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: loadingMsgId,
+            text: errHtml,
+            parse_mode: 'HTML'
+          }).catch(() => {});
+        } else {
+          const errParams: any = { chat_id: chatId, text: errHtml, parse_mode: 'HTML' };
+          if (isGroup && messageId) errParams.reply_to_message_id = messageId;
+          if (threadId) errParams.message_thread_id = threadId;
+          await this.callTelegramApi('sendMessage', errParams);
+        }
+        return;
+      }
+
+      const formatted = this.formatFreeFireBanInfoMessage(banInfo);
+      if (loadingMsgId) {
+        const editRes = await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: loadingMsgId,
+          text: formatted,
+          parse_mode: 'HTML'
+        });
+        if (editRes?.ok) return;
+      }
+
+      const sendParams: any = {
+        chat_id: chatId,
+        text: formatted,
+        parse_mode: 'HTML'
+      };
+      if (isGroup && messageId) sendParams.reply_to_message_id = messageId;
+      if (threadId) sendParams.message_thread_id = threadId;
+      const sentRes = await this.callTelegramApi('sendMessage', sendParams);
+      if (isGroup && sentRes?.ok && sentRes.result?.message_id) {
+        await this.trackAndLimitMessage(Number(chatId), sentRes.result.message_id);
+      }
+    } catch (err: any) {
+      console.error('[BanInfo] Command handler error:', err?.message || err);
+      const errHtml = '❌ <b>Failed to fetch Bancheck Information.</b> Please try again later.';
+      if (loadingMsgId) {
+        await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: loadingMsgId,
+          text: errHtml,
+          parse_mode: 'HTML'
+        }).catch(() => {});
+      } else {
+        const errParams: any = { chat_id: chatId, text: errHtml, parse_mode: 'HTML' };
+        if (isGroup && messageId) errParams.reply_to_message_id = messageId;
+        if (threadId) errParams.message_thread_id = threadId;
+        await this.callTelegramApi('sendMessage', errParams).catch(() => {});
+      }
+    }
+  }
+
+  // =========================================================================
+  // FREE FIRE LIKE COMMAND (/like <uid>)
+  // =========================================================================
+  public static parseFreeFireLikeCommand(rawText: string): { matched: boolean; uid: string | null } {
+    const cleaned = String(rawText || '')
+      .replace(/[\u200B-\u200F\u202A-\u202E\uFEFF\u00A0]/g, ' ')
+      .trim();
+    const match = cleaned.match(/^\/like(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i);
+    if (!match) {
+      return { matched: false, uid: null };
+    }
+    const arg = (match[1] || '').trim();
+    const uidMatch = arg.match(/^(\d+)$/);
+    return {
+      matched: true,
+      uid: uidMatch ? uidMatch[1] : null
+    };
+  }
+
+  public static buildLikeLoadingProgressText(percent: number, statusText: string): string {
+    const safePct = Math.min(100, Math.max(0, Math.round(percent)));
+    const totalBlocks = 10;
+    const filledBlocks = Math.round((safePct / 100) * totalBlocks);
+    const bar = '█'.repeat(filledBlocks) + '▒'.repeat(totalBlocks - filledBlocks);
+    const statusLine = safePct >= 100
+      ? `✅ <b>${this.escapeHtml(statusText || 'Likes Processed Successfully!')}</b>`
+      : `⏳ <b>${this.escapeHtml(statusText)}</b>`;
+    return [
+      '<b>╭━━━ ⚡ 𝐂𝐎𝐍𝐍𝐄𝐂𝐓𝐈𝐍𝐆 𝐓𝐎 𝐒𝐄𝐑𝐕𝐄𝐑 ⚡ ━━━╮</b>',
+      '',
+      '🔄 <b>CONNECTING TO SERVER...</b>',
+      '',
+      `<code>${safePct}% [${bar}]</code>`,
+      '',
+      statusLine,
+      '',
+      '<b>╰━━━━ ⚡ 𝐃𝐀𝐑𝐊 𝐓𝐄𝐀𝐌 ⚡ ━━━━╯</b>'
+    ].join('\n');
+  }
+
+  public static formatFreeFireLikeMessage(result: {
+    uid: string;
+    playerName: string;
+    region: string;
+    beforeLikes: number;
+    afterLikes: number;
+    likesGiven: number;
+    statusLabel: string;
+  }): string {
+    const lines = [
+      '<b>╭━━━ 👍 𝐋𝐈𝐊𝐄 𝐑𝐄𝐒𝐔𝐋𝐓 👍 ━━━╮</b>',
+      '',
+      '<b>▸ PLAYER INFORMATION</b>',
+      '',
+      `🆔 <b>UID:</b> <code>${this.escapeHtml(result.uid)}</code>`,
+      `👤 <b>Player Name:</b> ${this.escapeHtml(result.playerName || 'Unknown')}`
+    ];
+
+    if (result.region && result.region !== 'Unknown') {
+      lines.push(`🌍 <b>Region:</b> ${this.escapeHtml(result.region)}`);
+    }
+
+    lines.push(
+      '',
+      '<b>━━━━━━━━━━━━━━━━━━</b>',
+      '',
+      `⚡ <b>Given By API:</b> ${this.escapeHtml(result.statusLabel || 'Liked By API')}`,
+      `👍 <b>Likes Before:</b> <code>${result.beforeLikes}</code>`,
+      `🔥 <b>Likes Now:</b> <code>${result.afterLikes}</code>`,
+      `➕ <b>Likes Given by API:</b> <code>+${result.likesGiven}</code>`,
+      '',
+      '<b>╰━━━━ ⚡ 𝐃𝐀𝐑𝐊 𝐓𝐄𝐀𝐌 ⚡ ━━━━╯</b>',
+      '<b>✨ Powered by Dark Team</b> 🖤'
+    );
+
+    return lines.join('\n');
+  }
+
+  private static async handleFreeFireLikeCommand(
+    chatId: number | string,
+    uid: string | null,
+    messageId?: number,
+    isGroup: boolean = false,
+    threadId?: number
+  ): Promise<void> {
+    if (!uid) {
+      this.setBotReaction(chatId, messageId, '😢').catch(() => {});
+      const usageParams: any = {
+        chat_id: chatId,
+        text: '⚠️ <b>Please provide a valid Free Fire UID.</b>\nExample: <code>/like 8674177274</code>',
+        parse_mode: 'HTML'
+      };
+      if (isGroup && messageId) usageParams.reply_to_message_id = messageId;
+      if (threadId) usageParams.message_thread_id = threadId;
+      const usageRes = await this.callTelegramApi('sendMessage', usageParams);
+      if (isGroup && usageRes?.ok && usageRes.result?.message_id) {
+        await this.trackAndLimitMessage(Number(chatId), usageRes.result.message_id);
+      }
+      return;
+    }
+
+    const randomReaction = this.getRandomUidReactionEmoji();
+    this.setBotReaction(chatId, messageId, randomReaction).catch(() => {});
+
+    const [settings, allGuestAccounts] = await Promise.all([
+      storage.getSettings(),
+      storage.getGuestAccounts()
+    ]);
+
+    if (settings?.guestLikesEnabled === false) {
+      await this.setBotReaction(chatId, messageId, '😢').catch(() => {});
+      const offHtml = [
+        '<b>╭━━━ ⚠️ 𝐋𝐈𝐊𝐄 𝐀𝐏𝐈 𝐎𝐅𝐅 ⚠️ ━━━╮</b>',
+        '',
+        '❌ <b>Like API is currently disabled.</b>',
+        '',
+        '<b>╰━━━━ ⚡ 𝐃𝐀𝐑𝐊 𝐓𝐄𝐀𝐌 ⚡ ━━━━╯</b>'
+      ].join('\n');
+      const offParams: any = {
+        chat_id: chatId,
+        text: offHtml,
+        parse_mode: 'HTML'
+      };
+      if (isGroup && messageId) offParams.reply_to_message_id = messageId;
+      if (threadId) offParams.message_thread_id = threadId;
+      const offRes = await this.callTelegramApi('sendMessage', offParams);
+      if (isGroup && offRes?.ok && offRes.result?.message_id) {
+        await this.trackAndLimitMessage(Number(chatId), offRes.result.message_id);
+      }
+      return;
+    }
+
+    const guestAccounts = (allGuestAccounts || []).filter((acc) => acc.enabled !== false);
+    if (guestAccounts.length === 0) {
+      await this.setBotReaction(chatId, messageId, '😢').catch(() => {});
+      const emptyHtml = [
+        '<b>╭━━━ ⚠️ 𝐋𝐈𝐊𝐄 𝐀𝐏𝐈 ⚠️ ━━━╮</b>',
+        '',
+        '❌ <b>Like API is currently unavailable.</b>',
+        '',
+        '<b>╰━━━━ ⚡ 𝐃𝐀𝐑𝐊 𝐓𝐄𝐀𝐌 ⚡ ━━━━╯</b>'
+      ].join('\n');
+      const emptyParams: any = {
+        chat_id: chatId,
+        text: emptyHtml,
+        parse_mode: 'HTML'
+      };
+      if (isGroup && messageId) emptyParams.reply_to_message_id = messageId;
+      if (threadId) emptyParams.message_thread_id = threadId;
+      const emptyRes = await this.callTelegramApi('sendMessage', emptyParams);
+      if (isGroup && emptyRes?.ok && emptyRes.result?.message_id) {
+        await this.trackAndLimitMessage(Number(chatId), emptyRes.result.message_id);
+      }
+      return;
+    }
+
+    const loadingParams: any = {
+      chat_id: chatId,
+      text: this.buildLikeLoadingProgressText(0, 'Connecting to server...'),
+      parse_mode: 'HTML'
+    };
+    if (isGroup && messageId) loadingParams.reply_to_message_id = messageId;
+    if (threadId) loadingParams.message_thread_id = threadId;
+
+    let loadingMsgId: number | undefined;
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    try {
+      const initRes = await this.callTelegramApi('sendMessage', loadingParams);
+      if (initRes?.ok && initRes.result?.message_id) {
+        loadingMsgId = initRes.result.message_id;
+        if (isGroup) {
+          this.trackAndLimitMessage(Number(chatId), loadingMsgId!).catch(() => {});
+        }
+      }
+
+      let lastPctSent = 0;
+      const result = await FreeFireGuestService.processLikesForUid(
+        uid,
+        guestAccounts,
+        async (completed, total) => {
+          if (!loadingMsgId || total <= 0) return;
+          const pct = Math.min(90, Math.max(15, Math.round((completed / total) * 85)));
+          if (pct - lastPctSent >= 20 || completed === total) {
+            lastPctSent = pct;
+            await this.callTelegramApi('editMessageText', {
+              chat_id: chatId,
+              message_id: loadingMsgId,
+              text: this.buildLikeLoadingProgressText(pct, 'Processing Like API...'),
+              parse_mode: 'HTML'
+            }).catch(() => {});
+          }
+        }
+      );
+
+      if (!result.ok) {
+        await this.setBotReaction(chatId, messageId, '😢').catch(() => {});
+        const safeErrorText =
+          /guest|password|ff_guest/i.test(result.error || '')
+            ? 'Like API could not deliver likes right now. Please try again later.'
+            : result.error;
+        const errHtml = [
+          '<b>╭━━━ ❌ 𝐋𝐈𝐊𝐄 𝐅𝐀𝐈𝐋𝐄𝐃 ❌ ━━━╮</b>',
+          '',
+          `⚠️ <b>${this.escapeHtml(safeErrorText)}</b>`,
+          '',
+          '<b>╰━━━━ ⚡ 𝐃𝐀𝐑𝐊 𝐓𝐄𝐀𝐌 ⚡ ━━━━╯</b>'
+        ].join('\n');
+
+        if (loadingMsgId) {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: loadingMsgId,
+            text: errHtml,
+            parse_mode: 'HTML'
+          }).catch(async () => {
+            const errParams: any = { chat_id: chatId, text: errHtml, parse_mode: 'HTML' };
+            if (isGroup && messageId) errParams.reply_to_message_id = messageId;
+            if (threadId) errParams.message_thread_id = threadId;
+            await this.callTelegramApi('sendMessage', errParams);
+          });
+        } else {
+          const errParams: any = { chat_id: chatId, text: errHtml, parse_mode: 'HTML' };
+          if (isGroup && messageId) errParams.reply_to_message_id = messageId;
+          if (threadId) errParams.message_thread_id = threadId;
+          await this.callTelegramApi('sendMessage', errParams);
+        }
+        return;
+      }
+
+      if (loadingMsgId) {
+        await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: loadingMsgId,
+          text: this.buildLikeLoadingProgressText(100, 'Likes Processed Successfully!'),
+          parse_mode: 'HTML'
+        }).catch(() => {});
+        await sleep(250);
+      }
+
+      const finalHtml = this.formatFreeFireLikeMessage(result);
+      if (loadingMsgId) {
+        const editRes = await this.callTelegramApi('editMessageText', {
+          chat_id: chatId,
+          message_id: loadingMsgId,
+          text: finalHtml,
+          parse_mode: 'HTML'
+        });
+        if (editRes?.ok) return;
+      }
+
+      const sendParams: any = {
+        chat_id: chatId,
+        text: finalHtml,
+        parse_mode: 'HTML'
+      };
+      if (isGroup && messageId) sendParams.reply_to_message_id = messageId;
+      if (threadId) sendParams.message_thread_id = threadId;
+
+      const sentRes = await this.callTelegramApi('sendMessage', sendParams);
+      if (isGroup && sentRes?.ok && sentRes.result?.message_id) {
+        await this.trackAndLimitMessage(Number(chatId), sentRes.result.message_id);
+      }
+    } catch (err: any) {
+      console.error('[FreeFireLike] Command handler error:', err?.message || err);
+      await this.setBotReaction(chatId, messageId, '😢').catch(() => {});
+      const errHtml = '❌ <b>Failed to process likes right now.</b> Please try again later.';
       if (loadingMsgId) {
         await this.callTelegramApi('editMessageText', {
           chat_id: chatId,
@@ -12909,11 +14539,11 @@ export class TelegramService {
   // CALLBACK QUERY HANDLING (Inline Buttons)
   // =========================================================================
   private static async handleCallbackQuery(cb: any): Promise<void> {
-    const fromId = String(cb.from?.id || '');
+    const fromId = cb.from?.id !== undefined && cb.from?.id !== null ? String(cb.from.id).trim() : '';
     const data = cb.data;
     const chatId = cb.message?.chat?.id;
 
-    // FREE FIRE CHECK GUILD INFO CALLBACK (guild_<uid>) — No alert popups; toggles cleanly to Check Leader Info
+    // FREE FIRE CHECK GUILD INFO CALLBACK (guild_<uid>) — Shows Guild Info & toggles to Leader Info
     if (data && /^guild_(\d+)$/i.test(data)) {
       const uidMatch = data.match(/^guild_(\d+)$/i);
       const targetUid = uidMatch ? uidMatch[1] : '';
@@ -12945,11 +14575,7 @@ export class TelegramService {
               message_id: cb.message.message_id,
               text: noGuildText,
               parse_mode: 'HTML',
-              reply_markup: {
-                inline_keyboard: [
-                  [{ text: '🛡 Check Guild Info', callback_data: `guild_${targetUid}`, style: 'primary' }]
-                ]
-              }
+              reply_markup: this.buildPlayerProfileReplyMarkup(targetUid)
             }).catch(() => {});
           }
           return;
@@ -12970,7 +14596,7 @@ export class TelegramService {
             parse_mode: 'HTML',
             reply_markup: {
               inline_keyboard: [
-                [{ text: '👑 Check Leader Info', callback_data: `leader_${guildKey}`, style: 'primary' }]
+                [{ text: '👑 Leader Info', callback_data: `leader_${guildKey}`, style: 'primary' }]
               ]
             }
           }).catch(() => {});
@@ -12981,7 +14607,7 @@ export class TelegramService {
       return;
     }
 
-    // FREE FIRE CHECK GUILD LEADER INFO CALLBACK (leader_<guild_id>) — Fetches leader profile & toggles back to Check Guild Info
+    // FREE FIRE CHECK GUILD LEADER INFO CALLBACK (leader_<guild_id>) — Shows Leader Info & toggles to Player Info
     if (data && /^leader_(.+)$/i.test(data)) {
       const leaderMatch = data.match(/^leader_(.+)$/i);
       const guildKey = leaderMatch ? leaderMatch[1].trim() : '';
@@ -13014,12 +14640,14 @@ export class TelegramService {
           : null;
         const leaderPayload = liveLeaderData || guild.leaderFallback;
 
-        if (chatId && cb.message?.message_id && leaderPayload) {
-          const leaderProfileHtml = this.formatFreeFirePlayerMessage(
-            leaderPayload,
-            leaderUid,
-            '👑 <b>GUILD LEADER PROFILE</b>'
-          );
+        if (chatId && cb.message?.message_id) {
+          const leaderProfileHtml = leaderPayload
+            ? this.formatFreeFirePlayerMessage(
+                leaderPayload,
+                leaderUid,
+                '👑 <b>GUILD LEADER PROFILE</b>'
+              )
+            : '👑 <b>GUILD LEADER PROFILE</b>\n\nℹ️ <i>Leader details unavailable.</i>';
           await this.callTelegramApi('editMessageText', {
             chat_id: chatId,
             message_id: cb.message.message_id,
@@ -13027,13 +14655,215 @@ export class TelegramService {
             parse_mode: 'HTML',
             reply_markup: {
               inline_keyboard: [
-                [{ text: '🛡 Check Guild Info', callback_data: `guild_${sourceUid}`, style: 'primary' }]
+                [{ text: '👤 Player Info', callback_data: `player_${sourceUid}`, style: 'primary' }]
               ]
             }
           }).catch(() => {});
         }
       } catch (err: any) {
         console.warn('[FreeFireUID] Leader callback error:', err?.message || err);
+      }
+      return;
+    }
+
+    // FREE FIRE BANNER CALLBACK (banner_<uid>) — Fetches & sends the real player banner card image via sendPhoto
+    if (data && /^banner_(\d+)$/i.test(data)) {
+      const uidMatch = data.match(/^banner_(\d+)$/i);
+      const targetUid = uidMatch ? uidMatch[1] : '';
+      await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+
+      const msgId = cb.message?.message_id;
+      const threadId = cb.message?.message_thread_id;
+      const replyToMsgId = cb.message?.reply_to_message?.message_id;
+      const chatType = cb.message?.chat?.type;
+      const isGroup = chatType === 'group' || chatType === 'supergroup';
+      const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+      try {
+        if (chatId && msgId) {
+          const playerPromise = this.fetchFreeFirePlayer(targetUid);
+
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: msgId,
+            text: this.buildBannerLoadingProgressText(0, 'Fetching player equipment...'),
+            parse_mode: 'HTML'
+          }).catch(() => {});
+
+          await sleep(220);
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: msgId,
+            text: this.buildBannerLoadingProgressText(50, 'Fetching real player banner...'),
+            parse_mode: 'HTML'
+          }).catch(() => {});
+
+          const playerData = await playerPromise;
+          if (!playerData) {
+            await this.callTelegramApi('editMessageText', {
+              chat_id: chatId,
+              message_id: msgId,
+              text: '❌ <b>Player not found or API service is busy.</b> Please try again later.',
+              parse_mode: 'HTML',
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: '👤 Player Info', callback_data: `player_${targetUid}`, style: 'primary' }]
+                ]
+              }
+            }).catch(() => {});
+            return;
+          }
+
+          const realBanner = await resolveRealBannerImage(playerData, targetUid);
+          if (!realBanner) {
+            await this.callTelegramApi('editMessageText', {
+              chat_id: chatId,
+              message_id: msgId,
+              text: 'ℹ️ <b>Real banner image is unavailable for this player right now.</b>',
+              parse_mode: 'HTML',
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: '👤 Player Info', callback_data: `player_${targetUid}`, style: 'primary' }]
+                ]
+              }
+            }).catch(() => {});
+            return;
+          }
+
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: msgId,
+            text: this.buildBannerLoadingProgressText(100, 'Banner Loaded Successfully!'),
+            parse_mode: 'HTML'
+          }).catch(() => {});
+          await sleep(200);
+
+          const sentPhoto = await this.sendPhotoBuffer({
+            chatId,
+            photoBuffer: realBanner.buffer,
+            mimeType: realBanner.mimeType,
+            fileName: realBanner.fileName,
+            caption: this.formatBannerCaptionHtml(playerData, targetUid),
+            replyToMessageId: isGroup ? replyToMsgId : undefined,
+            threadId,
+            replyMarkup: {
+              inline_keyboard: [
+                [{ text: '👤 Player Info', callback_data: `player_${targetUid}`, style: 'primary' }]
+              ]
+            }
+          });
+
+          if (sentPhoto?.ok) {
+            if (isGroup && sentPhoto.result?.message_id) {
+              await this.trackAndLimitMessage(Number(chatId), sentPhoto.result.message_id).catch(() => {});
+            }
+            await this.callTelegramApi('deleteMessage', {
+              chat_id: chatId,
+              message_id: msgId
+            }).catch(() => {});
+          } else {
+            await this.callTelegramApi('editMessageText', {
+              chat_id: chatId,
+              message_id: msgId,
+              text: '❌ <b>Failed to send banner image.</b> Please try again later.',
+              parse_mode: 'HTML',
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: '👤 Player Info', callback_data: `player_${targetUid}`, style: 'primary' }]
+                ]
+              }
+            }).catch(() => {});
+          }
+        }
+      } catch (err: any) {
+        console.warn('[FreeFireUID] Banner callback error:', err?.message || err);
+        if (chatId && msgId) {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: msgId,
+            text: '❌ <b>Banner asset is not available right now.</b> Please try again later.',
+            parse_mode: 'HTML',
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '👤 Player Info', callback_data: `player_${targetUid}`, style: 'primary' }]
+              ]
+            }
+          }).catch(() => {});
+        }
+      }
+      return;
+    }
+
+    // FREE FIRE PLAYER INFO CALLBACK (player_<uid>) — Restores Player Info & toggles back to Banner + Guild Info
+    if (data && /^player_(\d+)$/i.test(data)) {
+      const uidMatch = data.match(/^player_(\d+)$/i);
+      const targetUid = uidMatch ? uidMatch[1] : '';
+      await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+      try {
+        const playerData = await this.fetchFreeFirePlayer(targetUid);
+        const isMediaMessage = Boolean(cb.message?.photo || !cb.message?.text);
+        const threadId = cb.message?.message_thread_id;
+        const replyToMsgId = cb.message?.reply_to_message?.message_id;
+        const chatType = cb.message?.chat?.type;
+        const isGroup = chatType === 'group' || chatType === 'supergroup';
+
+        if (!playerData) {
+          if (chatId && cb.message?.message_id) {
+            if (isMediaMessage) {
+              await this.callTelegramApi('sendMessage', {
+                chat_id: chatId,
+                text: '❌ <b>Player not found or API service is busy.</b> Please try again later.',
+                parse_mode: 'HTML',
+                ...(threadId ? { message_thread_id: threadId } : {})
+              }).catch(() => {});
+            } else {
+              await this.callTelegramApi('editMessageText', {
+                chat_id: chatId,
+                message_id: cb.message.message_id,
+                text: '❌ <b>Player not found or API service is busy.</b> Please try again later.',
+                parse_mode: 'HTML'
+              }).catch(() => {});
+            }
+          }
+          return;
+        }
+
+        const profileText = this.formatFreeFirePlayerMessage(playerData, targetUid);
+        const replyMarkup = this.buildPlayerProfileReplyMarkup(targetUid);
+
+        if (chatId && cb.message?.message_id) {
+          if (isMediaMessage) {
+            const sendParams: any = {
+              chat_id: chatId,
+              text: profileText,
+              parse_mode: 'HTML',
+              reply_markup: replyMarkup
+            };
+            if (isGroup && replyToMsgId) sendParams.reply_to_message_id = replyToMsgId;
+            if (threadId) sendParams.message_thread_id = threadId;
+
+            const sentRes = await this.callTelegramApi('sendMessage', sendParams);
+            if (sentRes?.ok) {
+              if (isGroup && sentRes.result?.message_id) {
+                await this.trackAndLimitMessage(Number(chatId), sentRes.result.message_id).catch(() => {});
+              }
+              await this.callTelegramApi('deleteMessage', {
+                chat_id: chatId,
+                message_id: cb.message.message_id
+              }).catch(() => {});
+            }
+          } else {
+            await this.callTelegramApi('editMessageText', {
+              chat_id: chatId,
+              message_id: cb.message.message_id,
+              text: profileText,
+              parse_mode: 'HTML',
+              reply_markup: replyMarkup
+            }).catch(() => {});
+          }
+        }
+      } catch (err: any) {
+        console.warn('[FreeFireUID] Player callback error:', err?.message || err);
       }
       return;
     }
@@ -13436,33 +15266,55 @@ export class TelegramService {
     }
 
     // =========================================================================
-    // GROUP MODERATION INTERACTIVE CALLBACKS (modp / moda / modt / modc)
+    // GROUP MODERATION INTERACTIVE CALLBACKS (modp / moda / modt / modk / modr / modc)
     // =========================================================================
-    if (data && (data.startsWith('modp:') || data.startsWith('moda:') || data.startsWith('modt:') || data.startsWith('modc:'))) {
-      const msgChatId = cb.message?.chat?.id;
-      const isMod = msgChatId
-        ? ((await this.isAuthorizedAdmin(fromId, cb.from?.username)) || (await this.isGroupAdminOrCreator(msgChatId, fromId)))
-        : (await this.isAuthorizedAdmin(fromId, cb.from?.username));
+    if (
+      data &&
+      (data.startsWith('modp:') ||
+        data.startsWith('moda:') ||
+        data.startsWith('modt:') ||
+        data.startsWith('modk:') ||
+        data.startsWith('modr:') ||
+        data.startsWith('modc:'))
+    ) {
+      const parts = data.split(':');
+      const token = parts[1];
+      let pending =
+        pendingGroupModerationMap.get(token) ||
+        (await storage.getPendingModeration(token).catch(() => null)) ||
+        undefined;
+      if (pending && !pendingGroupModerationMap.has(token)) {
+        pendingGroupModerationMap.set(token, pending);
+      }
 
-      if (!isMod) {
+      const msgChatId = cb.message?.chat?.id;
+      const effectiveChatId = pending?.chatId ?? msgChatId;
+      const isAllowedActor = await this.isAuthorizedModerationActor(
+        effectiveChatId,
+        fromId,
+        cb.from?.username
+      );
+
+      if (!isAllowedActor) {
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
-          text: 'Only group administrators can perform this action.',
+          text: pending
+            ? '⛔ Only the admin who initiated this action can interact with these buttons.'
+            : '⛔ Only group admins can use this command.',
           show_alert: true
         });
         return;
       }
 
-      const parts = data.split(':');
-      const token = parts[1];
-      const pending = pendingGroupModerationMap.get(token);
-
       if (data.startsWith('modc:')) {
         if (pending) {
           activeGroupTempModSessions.delete(`${String(pending.chatId)}:${fromId}`);
           activeGroupTempModSessions.delete(`${String(pending.chatId)}:${pending.adminId}`);
-          pendingGroupModerationMap.delete(token);
+        } else if (msgChatId) {
+          activeGroupTempModSessions.delete(`${String(msgChatId)}:${fromId}`);
         }
+        pendingGroupModerationMap.delete(token);
+        await storage.deletePendingModeration(token).catch(() => {});
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
           text: 'Cancelled.'
@@ -13480,6 +15332,10 @@ export class TelegramService {
       }
 
       if (!pending) {
+        pending = (await this.recoverPendingModerationFromCallback(cb, token, fromId)) || undefined;
+      }
+
+      if (!pending) {
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
           text: 'This moderation prompt has expired. Please run the command again.',
@@ -13488,50 +15344,168 @@ export class TelegramService {
         return;
       }
 
+      const prevAdminId = String(pending.adminId || '').trim();
+      if (prevAdminId && prevAdminId !== fromId) {
+        activeGroupTempModSessions.delete(`${String(pending.chatId)}:${prevAdminId}`);
+      }
+      pending.adminId = fromId || prevAdminId;
+
       if (data.startsWith('modt:')) {
+        pending.stage = 'custom_keypad';
+        pending.keypadDigits = '';
+        pending.keypadUnit = 'h';
         pending.promptMessageId = cb.message?.message_id || pending.promptMessageId;
-        activeGroupTempModSessions.set(`${String(pending.chatId)}:${fromId}`, pending);
+        activeGroupTempModSessions.delete(`${String(pending.chatId)}:${pending.adminId}`);
+        await storage.savePendingModeration(pending).catch(() => {});
+
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
-          text: 'Send duration in this chat (e.g. 2h, 3d, 30m).'
+          text: 'Enter custom duration using the keypad.'
         }).catch(() => {});
-        const userLink = this.formatUserProfileLink(pending.targetName, pending.targetUsername, pending.targetId);
-        const promptText =
-          `⏱ <b>Temporary ${pending.action === 'ban' ? 'Ban' : 'Mute'}</b>\n\n` +
-          `👤 <b>User:</b> ${userLink}\n` +
-          `Send the custom duration in this chat (e.g. <code>30m</code>, <code>2h</code>, <code>3d</code>, <code>1w</code>) or <code>/cancel</code>.`;
+
+        const keypadPayload = this.buildModerationKeypadPayload(pending);
         if (chatId && cb.message?.message_id) {
           await this.callTelegramApi('editMessageText', {
             chat_id: chatId,
             message_id: cb.message.message_id,
-            text: promptText,
+            text: keypadPayload.text,
             parse_mode: 'HTML',
-            reply_markup: {
-              inline_keyboard: [[{ text: '❌ Cancel', callback_data: `modc:${token}`, style: 'danger' }]]
-            }
+            reply_markup: keypadPayload.reply_markup
           }).catch(() => {});
         }
         return;
       }
 
+      if (data.startsWith('modk:')) {
+        const subCmd = parts[2];
+        const argVal = parts[3];
+
+        if (subCmd === 'ok') {
+          const numVal = pending.keypadDigits ? parseInt(pending.keypadDigits, 10) : 0;
+          if (!Number.isFinite(numVal) || numVal <= 0) {
+            await this.callTelegramApi('answerCallbackQuery', {
+              callback_query_id: cb.id,
+              text: '⚠️ Please enter a valid duration greater than 0.',
+              show_alert: true
+            });
+            return;
+          }
+          const durToken = `${numVal}${pending.keypadUnit}`;
+          const parsedDur = this.parseModerationDuration(durToken);
+          pending.durationToken = durToken;
+          pending.durationLabel = parsedDur.displayLabel || durToken;
+          pending.isPermanent = false;
+          pending.stage = 'awaiting_reason';
+          pending.promptMessageId = cb.message?.message_id || pending.promptMessageId;
+          activeGroupTempModSessions.set(`${String(pending.chatId)}:${pending.adminId}`, pending);
+          await storage.savePendingModeration(pending).catch(() => {});
+
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: `Duration set: ${pending.durationLabel}. Now send reason.`
+          }).catch(() => {});
+
+          const reasonPrompt = this.buildModerationReasonPromptPayload(pending);
+          if (chatId && cb.message?.message_id) {
+            await this.callTelegramApi('editMessageText', {
+              chat_id: chatId,
+              message_id: cb.message.message_id,
+              text: reasonPrompt.text,
+              parse_mode: 'HTML',
+              reply_markup: reasonPrompt.reply_markup
+            }).catch(() => {});
+          }
+          return;
+        }
+
+        let changed = false;
+        if (subCmd === 'd' && /^[0-9]$/.test(argVal || '')) {
+          if (pending.keypadDigits === '' && argVal === '0') {
+            await this.callTelegramApi('answerCallbackQuery', {
+              callback_query_id: cb.id,
+              text: 'Duration is already 0.'
+            }).catch(() => {});
+            return;
+          }
+          if ((pending.keypadDigits || '').length >= 4) {
+            await this.callTelegramApi('answerCallbackQuery', {
+              callback_query_id: cb.id,
+              text: 'Maximum 4 digits allowed.'
+            }).catch(() => {});
+            return;
+          }
+          pending.keypadDigits = `${pending.keypadDigits || ''}${argVal}`;
+          changed = true;
+        } else if (subCmd === 'bk') {
+          if (!pending.keypadDigits) {
+            await this.callTelegramApi('answerCallbackQuery', {
+              callback_query_id: cb.id,
+              text: 'Already 0.'
+            }).catch(() => {});
+            return;
+          }
+          pending.keypadDigits = pending.keypadDigits.slice(0, -1);
+          changed = true;
+        } else if (subCmd === 'clr') {
+          if (!pending.keypadDigits) {
+            await this.callTelegramApi('answerCallbackQuery', {
+              callback_query_id: cb.id,
+              text: 'Already cleared.'
+            }).catch(() => {});
+            return;
+          }
+          pending.keypadDigits = '';
+          changed = true;
+        } else if (subCmd === 'u' && (argVal === 'm' || argVal === 'h' || argVal === 'd')) {
+          if (pending.keypadUnit === argVal) {
+            await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+            return;
+          }
+          pending.keypadUnit = argVal;
+          changed = true;
+        }
+
+        if (changed) {
+          await storage.savePendingModeration(pending).catch(() => {});
+          await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+          const keypadPayload = this.buildModerationKeypadPayload(pending);
+          if (chatId && cb.message?.message_id) {
+            await this.callTelegramApi('editMessageText', {
+              chat_id: chatId,
+              message_id: cb.message.message_id,
+              text: keypadPayload.text,
+              parse_mode: 'HTML',
+              reply_markup: keypadPayload.reply_markup
+            }).catch(() => {});
+          }
+        }
+        return;
+      }
+
       if (data.startsWith('moda:')) {
-        pendingGroupModerationMap.delete(token);
+        pending.isPermanent = true;
+        pending.durationToken = undefined;
+        pending.durationLabel = 'Permanent';
+        pending.stage = 'awaiting_reason';
+        pending.promptMessageId = cb.message?.message_id || pending.promptMessageId;
+        activeGroupTempModSessions.set(`${String(pending.chatId)}:${pending.adminId}`, pending);
+        await storage.savePendingModeration(pending).catch(() => {});
+
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
-          text: pending.action === 'ban' ? 'Applying permanent ban...' : 'Applying permanent mute...'
+          text: 'Permanent selected. Please send the reason in chat.'
         }).catch(() => {});
-        await this.executeGroupModerationAction({
-          chatId: pending.chatId,
-          action: pending.action,
-          target: {
-            id: pending.targetId,
-            name: pending.targetName,
-            username: pending.targetUsername
-          },
-          isPermanent: true,
-          reason: pending.reason,
-          editMessageId: cb.message?.message_id
-        });
+
+        const reasonPrompt = this.buildModerationReasonPromptPayload(pending);
+        if (chatId && cb.message?.message_id) {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: reasonPrompt.text,
+            parse_mode: 'HTML',
+            reply_markup: reasonPrompt.reply_markup
+          }).catch(() => {});
+        }
         return;
       }
 
@@ -13550,11 +15524,44 @@ export class TelegramService {
           });
           return;
         }
-        pendingGroupModerationMap.delete(token);
+
+        pending.durationToken = chosen.value;
+        pending.durationLabel = chosen.label;
+        pending.isPermanent = false;
+        pending.stage = 'awaiting_reason';
+        pending.promptMessageId = cb.message?.message_id || pending.promptMessageId;
+        activeGroupTempModSessions.set(`${String(pending.chatId)}:${pending.adminId}`, pending);
+        await storage.savePendingModeration(pending).catch(() => {});
+
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
-          text: `Applying ${chosen.label}...`
+          text: `${chosen.label} selected. Please send the reason in chat.`
         }).catch(() => {});
+
+        const reasonPrompt = this.buildModerationReasonPromptPayload(pending);
+        if (chatId && cb.message?.message_id) {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: chatId,
+            message_id: cb.message.message_id,
+            text: reasonPrompt.text,
+            parse_mode: 'HTML',
+            reply_markup: reasonPrompt.reply_markup
+          }).catch(() => {});
+        }
+        return;
+      }
+
+      if (data.startsWith('modr:')) {
+        activeGroupTempModSessions.delete(`${String(pending.chatId)}:${fromId}`);
+        activeGroupTempModSessions.delete(`${String(pending.chatId)}:${pending.adminId}`);
+        pendingGroupModerationMap.delete(token);
+        await storage.deletePendingModeration(token).catch(() => {});
+
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: pending.action === 'ban' ? 'Executing ban...' : 'Executing mute...'
+        }).catch(() => {});
+
         await this.executeGroupModerationAction({
           chatId: pending.chatId,
           action: pending.action,
@@ -13563,10 +15570,10 @@ export class TelegramService {
             name: pending.targetName,
             username: pending.targetUsername
           },
-          durationToken: chosen.value,
-          isPermanent: false,
+          durationToken: pending.durationToken,
+          isPermanent: Boolean(pending.isPermanent),
           reason: pending.reason,
-          editMessageId: cb.message?.message_id
+          editMessageId: cb.message?.message_id || pending.promptMessageId
         });
         return;
       }
@@ -14850,6 +16857,269 @@ export class TelegramService {
   }
 
   // =========================================================================
+  // /setwelcome COMMAND (Group Welcome Message with Media & Placeholders)
+  // =========================================================================
+  private static convertTelegramEntitiesToHtml(
+    rawText: string,
+    entities: any[] = [],
+    sliceOffset: number = 0
+  ): string {
+    const body = rawText.slice(Math.max(0, sliceOffset)).replace(/\s+$/, '');
+    if (!body) return '';
+
+    const formattingTypes = new Set([
+      'bold',
+      'italic',
+      'underline',
+      'strikethrough',
+      'spoiler',
+      'code',
+      'pre',
+      'text_link',
+      'text_mention',
+      'blockquote',
+      'expandable_blockquote',
+      'custom_emoji'
+    ]);
+
+    const normalized = (Array.isArray(entities) ? entities : [])
+      .filter((e) => e && formattingTypes.has(String(e.type || '')))
+      .map((e, idx) => {
+        const start = Math.max(0, Number(e.offset) - sliceOffset);
+        const end = Math.min(body.length, Number(e.offset) + Number(e.length) - sliceOffset);
+        return {
+          idx,
+          type: String(e.type),
+          start,
+          end,
+          url: typeof e.url === 'string' ? e.url : undefined,
+          language: typeof e.language === 'string' ? e.language : undefined,
+          custom_emoji_id: typeof e.custom_emoji_id === 'string' ? e.custom_emoji_id : undefined,
+          userId: e.user?.id !== undefined ? String(e.user.id) : undefined
+        };
+      })
+      .filter((e) => e.end > e.start);
+
+    // If no Telegram formatting entities are present, preserve raw text (including explicit HTML tags)
+    if (normalized.length === 0) {
+      return body;
+    }
+
+    normalized.sort((a, b) => (a.start - b.start) || ((b.end - b.start) - (a.end - a.start)) || (a.idx - b.idx));
+
+    const openTag = (e: typeof normalized[number]): string => {
+      switch (e.type) {
+        case 'bold': return '<b>';
+        case 'italic': return '<i>';
+        case 'underline': return '<u>';
+        case 'strikethrough': return '<s>';
+        case 'spoiler': return '<tg-spoiler>';
+        case 'code': return '<code>';
+        case 'pre': return e.language ? `<pre><code class="language-${this.escapeHtml(e.language)}">` : '<pre>';
+        case 'text_link': return `<a href="${this.escapeHtml(e.url || '')}">`;
+        case 'text_mention': return `<a href="tg://user?id=${this.escapeHtml(e.userId || '')}">`;
+        case 'blockquote': return '<blockquote>';
+        case 'expandable_blockquote': return '<blockquote expandable>';
+        case 'custom_emoji': return `<tg-emoji emoji-id="${this.escapeHtml(e.custom_emoji_id || '')}">`;
+        default: return '';
+      }
+    };
+
+    const closeTag = (e: typeof normalized[number]): string => {
+      switch (e.type) {
+        case 'bold': return '</b>';
+        case 'italic': return '</i>';
+        case 'underline': return '</u>';
+        case 'strikethrough': return '</s>';
+        case 'spoiler': return '</tg-spoiler>';
+        case 'code': return '</code>';
+        case 'pre': return e.language ? '</code></pre>' : '</pre>';
+        case 'text_link': return '</a>';
+        case 'text_mention': return '</a>';
+        case 'blockquote': return '</blockquote>';
+        case 'expandable_blockquote': return '</blockquote>';
+        case 'custom_emoji': return '</tg-emoji>';
+        default: return '';
+      }
+    };
+
+    const boundaries = new Set<number>([0, body.length]);
+    for (const e of normalized) {
+      boundaries.add(e.start);
+      boundaries.add(e.end);
+    }
+    const points = Array.from(boundaries).sort((a, b) => a - b);
+
+    const stack: Array<typeof normalized[number]> = [];
+    let html = '';
+
+    for (let i = 0; i < points.length; i++) {
+      const pos = points[i];
+
+      // Close any active entities ending at pos (preserving proper nesting)
+      const lowestEndingIdx = stack.findIndex((item) => item.end <= pos);
+      if (lowestEndingIdx !== -1) {
+        const reopen: Array<typeof normalized[number]> = [];
+        while (stack.length > lowestEndingIdx) {
+          const popped = stack.pop()!;
+          html += closeTag(popped);
+          if (popped.end > pos) {
+            reopen.push(popped);
+          }
+        }
+        for (let r = reopen.length - 1; r >= 0; r--) {
+          stack.push(reopen[r]);
+          html += openTag(reopen[r]);
+        }
+      }
+
+      // Open entities starting at pos
+      for (const e of normalized) {
+        if (e.start === pos) {
+          stack.push(e);
+          html += openTag(e);
+        }
+      }
+
+      if (i < points.length - 1) {
+        const nextPos = points[i + 1];
+        if (nextPos > pos) {
+          html += this.escapeHtml(body.slice(pos, nextPos));
+        }
+      }
+    }
+
+    while (stack.length > 0) {
+      html += closeTag(stack.pop()!);
+    }
+
+    return html;
+  }
+
+  private static async extractWelcomeMediaFromMessage(
+    msg: any
+  ): Promise<{ mediaType: 'photo' | 'video'; mediaUrl: string } | null> {
+    if (!msg) return null;
+    if (Array.isArray(msg.photo) && msg.photo.length > 0) {
+      const bestPhoto = msg.photo[msg.photo.length - 1];
+      if (bestPhoto?.file_id) {
+        return { mediaType: 'photo', mediaUrl: bestPhoto.file_id };
+      }
+    }
+    if (msg.video?.file_id) {
+      return { mediaType: 'video', mediaUrl: msg.video.file_id };
+    }
+    if (msg.animation?.file_id) {
+      return { mediaType: 'video', mediaUrl: msg.animation.file_id };
+    }
+    if (msg.document?.file_id && typeof msg.document.mime_type === 'string') {
+      const mime = msg.document.mime_type.toLowerCase();
+      if (mime.startsWith('image/') || mime.startsWith('video/')) {
+        const fileType = mime.startsWith('video/') ? 'video' : 'photo';
+        const mirroredId = await this.mirrorTelegramFileToVpsStorage({
+          fileId: msg.document.file_id,
+          fileType,
+          fileName: msg.document.file_name,
+          mimeType: msg.document.mime_type,
+          fileSize: msg.document.file_size
+        });
+        if (mirroredId) {
+          return { mediaType: fileType, mediaUrl: mirroredId };
+        }
+      }
+    }
+    return null;
+  }
+
+  private static async handleSetWelcomeCommand(
+    message: any,
+    isPrivateChat: boolean = false
+  ): Promise<void> {
+    const chatId = message?.chat?.id;
+    if (!chatId) return;
+    const fromId = String(message?.from?.id || '').trim();
+    const threadId = message?.message_thread_id;
+
+    const hasPermission = isPrivateChat
+      ? await this.isAuthorizedAdmin(fromId, message?.from?.username)
+      : await this.isGroupModerator(message, fromId);
+
+    if (!hasPermission) {
+      await this.replyNonGroupAdmin(message);
+      return;
+    }
+
+    const replyWithThread = async (replyText: string, parseMode?: 'HTML') => {
+      const res = await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: replyText,
+        ...(parseMode ? { parse_mode: parseMode } : {}),
+        ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+        ...(threadId ? { message_thread_id: threadId } : {})
+      });
+      if (!res?.ok && message.message_id) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: replyText,
+          ...(parseMode ? { parse_mode: parseMode } : {}),
+          ...(threadId ? { message_thread_id: threadId } : {})
+        });
+      }
+    };
+
+    const isTextSource = typeof message?.text === 'string' && message.text.length > 0;
+    const ownRawText = isTextSource ? String(message.text) : String(message?.caption || '');
+    const ownEntities = isTextSource
+      ? (Array.isArray(message?.entities) ? message.entities : [])
+      : (Array.isArray(message?.caption_entities) ? message.caption_entities : []);
+
+    const cmdPrefixMatch = ownRawText.match(/^\s*\/setwelcome(?:@\w+)?(?:[ \t]*\r?\n|[ \t]+)?/i);
+    const prefixLen = cmdPrefixMatch ? cmdPrefixMatch[0].length : 0;
+    const ownBodyHtml = this.convertTelegramEntitiesToHtml(ownRawText, ownEntities, prefixLen);
+
+    let detectedMedia = await this.extractWelcomeMediaFromMessage(message);
+    if (!detectedMedia && message?.reply_to_message) {
+      detectedMedia = await this.extractWelcomeMediaFromMessage(message.reply_to_message);
+    }
+
+    let finalContent = ownBodyHtml;
+    if (!finalContent && message?.reply_to_message) {
+      const rep = message.reply_to_message;
+      const repIsText = typeof rep.text === 'string' && rep.text.length > 0;
+      const repRawText = repIsText ? String(rep.text) : String(rep.caption || '');
+      const repEntities = repIsText
+        ? (Array.isArray(rep.entities) ? rep.entities : [])
+        : (Array.isArray(rep.caption_entities) ? rep.caption_entities : []);
+      const repPrefixMatch = repRawText.match(/^\s*\/setwelcome(?:@\w+)?(?:[ \t]*\r?\n|[ \t]+)?/i);
+      const repSliceOffset = repPrefixMatch ? repPrefixMatch[0].length : 0;
+      finalContent = this.convertTelegramEntitiesToHtml(repRawText, repEntities, repSliceOffset);
+    }
+
+    if (!finalContent && !detectedMedia) {
+      await replyWithThread(
+        `ℹ️ <b>Group Welcome Message Setup</b>\n\n` +
+        `• Send <code>/setwelcome &lt;message text&gt;</code> for text-only welcome\n` +
+        `• Send a <b>Photo</b> or <b>Video</b> with caption <code>/setwelcome &lt;message text&gt;</code>\n` +
+        `• Reply to any Photo/Video with <code>/setwelcome &lt;message text&gt;</code>\n\n` +
+        `<b>Placeholders:</b>\n` +
+        `• <code>{first}</code> / <code>{first_name}</code> — First name\n` +
+        `• <code>{last}</code> / <code>{last_name}</code> — Last name\n` +
+        `• <code>{id}</code> / <code>{user_id}</code> — User ID\n` +
+        `• <code>{username}</code> — @username`,
+        'HTML'
+      );
+      return;
+    }
+
+    await storage.updateTemplate('GROUP_WELCOME_MESSAGE', finalContent, {
+      mediaType: detectedMedia ? detectedMedia.mediaType : 'none',
+      mediaUrl: detectedMedia ? detectedMedia.mediaUrl : ''
+    });
+
+    await replyWithThread('The new welcome message has been saved!');
+  }
+
+  // =========================================================================
   // /setstartmsg and /startmsg COMMAND (with Media Support)
   // =========================================================================
   private static async handleSetStartMessageCommand(
@@ -15168,7 +17438,8 @@ export class TelegramService {
     chatId: string | number,
     uploadedFile: { buffer: Buffer; fileName: string; mimeType: string; fileType: 'document' | 'photo' | 'video' | 'audio' },
     caption?: string,
-    replyMarkup?: any
+    replyMarkup?: any,
+    options?: { parseMode?: 'HTML' | 'MarkdownV2' | 'Markdown'; threadId?: number }
   ): Promise<any> {
     const token = await this.getBotToken();
     if (!token) {
@@ -15204,7 +17475,11 @@ export class TelegramService {
 
     const formData = new FormData();
     formData.append('chat_id', String(chatId));
-    if (caption) formData.append('caption', caption);
+    if (caption) {
+      formData.append('caption', caption);
+      if (options?.parseMode) formData.append('parse_mode', options.parseMode);
+    }
+    if (options?.threadId) formData.append('message_thread_id', String(options.threadId));
     if (replyMarkup) formData.append('reply_markup', typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup));
 
     const blob = new Blob([new Uint8Array(buf)] as any, { type: uploadedFile.mimeType || 'application/octet-stream' });
@@ -15222,7 +17497,11 @@ export class TelegramService {
         console.warn(`[Telegram] ${method} returned error (${data.description}), falling back to sendDocument...`);
         const docFormData = new FormData();
         docFormData.append('chat_id', String(chatId));
-        if (caption) docFormData.append('caption', caption);
+        if (caption) {
+          docFormData.append('caption', caption);
+          if (options?.parseMode) docFormData.append('parse_mode', options.parseMode);
+        }
+        if (options?.threadId) docFormData.append('message_thread_id', String(options.threadId));
         if (replyMarkup) docFormData.append('reply_markup', typeof replyMarkup === 'string' ? replyMarkup : JSON.stringify(replyMarkup));
         docFormData.append('document', blob, uploadedFile.fileName || 'file');
         const docRes = await fetch(`https://api.telegram.org/bot${token}/sendDocument`, {

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { 
-  AdminUser, MessageTemplate, BotSettings, ModerationDurationPreset, UserReportRecord, FraudKeywordRule, JoinRequestRecord, AllowedChatEntry, KeyPoolRecord, KeyPoolMode, KeyGeneratorCharType, api 
+  AdminUser, MessageTemplate, BotSettings, ModerationDurationPreset, UserReportRecord, FraudKeywordRule, JoinRequestRecord, AllowedChatEntry, KeyPoolRecord, KeyPoolMode, KeyGeneratorCharType, GuestAccountRecord, api 
 } from '../lib/api';
 import { toast } from '../lib/toast';
 import { 
@@ -9,7 +9,7 @@ import {
   ChevronRight, Edit2, Check, RefreshCw, Plus, Minus, Shield, Send, Sparkles, X, CheckCircle2, AlertCircle, Clock, Smile, Wifi,
   Megaphone, Image as ImageIcon, Video as VideoIcon, Music, Mic, Pin, Paperclip, Loader2, Radio,
   Flag, Ban, CheckCircle, ShieldAlert, ExternalLink, ShieldCheck,
-  Copy, Upload, Bot, VolumeX, Play, Square, RotateCcw, Key, Link2
+  Copy, Upload, Bot, VolumeX, Play, Square, RotateCcw, Key, Link2, UserPlus
 } from 'lucide-react';
 import { EmojiStore } from './EmojiStore';
 
@@ -40,7 +40,7 @@ interface MoreTabProps {
   onOpenBotSwitcher?: () => void;
 }
 
-type MoreSubView = 'menu' | 'templates' | 'admins' | 'settings' | 'sub_force' | 'group_management' | 'webhook' | 'broadcast' | 'emoji' | 'reports' | 'fraud' | 'whitelist' | 'key_generator';
+type MoreSubView = 'menu' | 'templates' | 'admins' | 'settings' | 'sub_force' | 'group_management' | 'webhook' | 'broadcast' | 'emoji' | 'reports' | 'fraud' | 'whitelist' | 'key_generator' | 'guest_accounts';
 
 export const MoreTab: React.FC<MoreTabProps> = ({
   currentUser,
@@ -135,6 +135,26 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   const [editKeyDurationValue, setEditKeyDurationValue] = useState<string>('24');
   const [editKeyResetClaims, setEditKeyResetClaims] = useState<boolean>(false);
   const [savingKeyPool, setSavingKeyPool] = useState<boolean>(false);
+
+  // More Guest Account state
+  const [guestLikesEnabled, setGuestLikesEnabled] = useState<boolean>(
+    settings?.guestLikesEnabled !== undefined ? Boolean(settings.guestLikesEnabled) : true
+  );
+  const [guestAccounts, setGuestAccounts] = useState<GuestAccountRecord[]>([]);
+  const [guestAccountsLoading, setGuestAccountsLoading] = useState<boolean>(false);
+  const [togglingGuestSystem, setTogglingGuestSystem] = useState<boolean>(false);
+  const [togglingGuestId, setTogglingGuestId] = useState<string | null>(null);
+  const [showAddGuestForm, setShowAddGuestForm] = useState<boolean>(false);
+  const [guestUidInput, setGuestUidInput] = useState<string>('');
+  const [guestPasswordInput, setGuestPasswordInput] = useState<string>('');
+  const [savingGuestAccount, setSavingGuestAccount] = useState<boolean>(false);
+  const [editingGuestId, setEditingGuestId] = useState<string | null>(null);
+  const [editGuestUidInput, setEditGuestUidInput] = useState<string>('');
+  const [editGuestPasswordInput, setEditGuestPasswordInput] = useState<string>('');
+  const [savingEditGuest, setSavingEditGuest] = useState<boolean>(false);
+  const [deletingGuestId, setDeletingGuestId] = useState<string | null>(null);
+  const [uploadingGuestFile, setUploadingGuestFile] = useState<boolean>(false);
+  const guestFileInputRef = useRef<HTMLInputElement | null>(null);
 
 
 
@@ -461,6 +481,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     banEnabled: settings?.banEnabled ?? true,
     muteEnabled: settings?.muteEnabled ?? true,
     cleanServiceEnabled: settings?.cleanServiceEnabled ?? false,
+    welcomeMessageEnabled: settings?.welcomeMessageEnabled !== false,
+    welcomeAutoDeleteEnabled: settings?.welcomeAutoDeleteEnabled ?? false,
+    welcomeAutoDeleteSeconds: Math.max(1, Math.round(Number(settings?.welcomeAutoDeleteSeconds) || 60)),
     moderationDurations: Array.isArray(settings?.moderationDurations)
       ? settings.moderationDurations
       : [{ label: '1 Day', value: '1d' }, { label: '5 Days', value: '5d' }],
@@ -470,10 +493,18 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     adminNewPassword: ''
   });
   const [warningLimitInput, setWarningLimitInput] = useState<number>(settings?.groupWarningLimit ?? 3);
+  const [welcomeDeleteUnit, setWelcomeDeleteUnit] = useState<'seconds' | 'minutes'>(() => {
+    const sec = Math.max(1, Math.round(Number(settings?.welcomeAutoDeleteSeconds) || 60));
+    return sec >= 60 && sec % 60 === 0 ? 'minutes' : 'seconds';
+  });
+  const [welcomeDeleteInput, setWelcomeDeleteInput] = useState<string>(() => {
+    const sec = Math.max(1, Math.round(Number(settings?.welcomeAutoDeleteSeconds) || 60));
+    return sec >= 60 && sec % 60 === 0 ? String(sec / 60) : String(sec);
+  });
   const [newDurationValue, setNewDurationValue] = useState('');
   const [newDurationLabel, setNewDurationLabel] = useState('');
   const [botStatusMsg, setBotStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [savingSection, setSavingSection] = useState<'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'ban' | 'mute' | 'cleanService' | 'moderationDurations' | 'warningLimit' | 'forceSub' | null>(null);
+  const [savingSection, setSavingSection] = useState<'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'ban' | 'mute' | 'cleanService' | 'welcomeMessage' | 'welcomeAutoDelete' | 'moderationDurations' | 'warningLimit' | 'forceSub' | null>(null);
   const [botRuntimeStatus, setBotRuntimeStatus] = useState<'active' | 'stopped'>(settings?.botStopped ? 'stopped' : 'active');
   const [botRuntimePolling, setBotRuntimePolling] = useState<boolean>(!settings?.botStopped);
   const [botLifecycleBusy, setBotLifecycleBusy] = useState<'start' | 'stop' | 'restart' | 'clean-memory' | null>(null);
@@ -526,6 +557,9 @@ export const MoreTab: React.FC<MoreTabProps> = ({
         syncIfChanged('banEnabled', settings.banEnabled ?? true);
         syncIfChanged('muteEnabled', settings.muteEnabled ?? true);
         syncIfChanged('cleanServiceEnabled', settings.cleanServiceEnabled ?? false);
+        syncIfChanged('welcomeMessageEnabled', settings.welcomeMessageEnabled !== false);
+        syncIfChanged('welcomeAutoDeleteEnabled', settings.welcomeAutoDeleteEnabled ?? false);
+        syncIfChanged('welcomeAutoDeleteSeconds', Math.max(1, Math.round(Number(settings.welcomeAutoDeleteSeconds) || 60)));
         syncIfChanged(
           'moderationDurations',
           Array.isArray(settings.moderationDurations)
@@ -539,6 +573,16 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       });
       if (!prevSrv || prevSrv.groupWarningLimit !== settings.groupWarningLimit) {
         setWarningLimitInput(Math.max(1, Math.min(100, Number(settings.groupWarningLimit) || 3)));
+      }
+      if (!prevSrv || prevSrv.welcomeAutoDeleteSeconds !== settings.welcomeAutoDeleteSeconds) {
+        const sec = Math.max(1, Math.round(Number(settings.welcomeAutoDeleteSeconds) || 60));
+        if (sec >= 60 && sec % 60 === 0) {
+          setWelcomeDeleteUnit('minutes');
+          setWelcomeDeleteInput(String(sec / 60));
+        } else {
+          setWelcomeDeleteUnit('seconds');
+          setWelcomeDeleteInput(String(sec));
+        }
       }
       if (!prevSrv || prevSrv.chatWhitelistEnabled !== settings.chatWhitelistEnabled) {
         setChatWhitelistEnabled(Boolean(settings.chatWhitelistEnabled));
@@ -583,6 +627,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       loadChatWhitelist();
     } else if (subView === 'key_generator') {
       loadKeyPools();
+    } else if (subView === 'guest_accounts') {
+      loadGuestAccounts();
     }
     // Refresh user count for broadcast
     api.getUsers().then(users => {
@@ -695,7 +741,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
   };
 
   const savePartialBotSetting = async (
-    section: 'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'ban' | 'mute' | 'cleanService' | 'moderationDurations' | 'warningLimit' | 'forceSub',
+    section: 'autoDelete' | 'maintenance' | 'antiForward' | 'linkDelete' | 'ban' | 'mute' | 'cleanService' | 'welcomeMessage' | 'welcomeAutoDelete' | 'moderationDurations' | 'warningLimit' | 'forceSub',
     partialPayload: Record<string, any>,
     successText: string,
     rollback?: () => void
@@ -733,11 +779,12 @@ export const MoreTab: React.FC<MoreTabProps> = ({
     );
   };
 
-  // Initial load for reports, fraud rules, and key pools
+  // Initial load for reports, fraud rules, key pools, and guest accounts
   useEffect(() => {
     loadReports();
     loadFraudRules();
     loadKeyPools();
+    loadGuestAccounts();
   }, []);
 
   useEffect(() => {
@@ -769,6 +816,157 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       if (!silent) console.warn('Failed to load key pools:', err);
     } finally {
       if (!silent) setKeyPoolsLoading(false);
+    }
+  };
+
+  const loadGuestAccounts = async (silent = false) => {
+    if (!silent) setGuestAccountsLoading(true);
+    try {
+      const res = await api.getGuestAccounts();
+      setGuestAccounts(Array.isArray(res.accounts) ? res.accounts : []);
+      if (res.enabled !== undefined) {
+        setGuestLikesEnabled(Boolean(res.enabled));
+      }
+    } catch (err: any) {
+      if (!silent) console.warn('Failed to load guest accounts:', err);
+    } finally {
+      if (!silent) setGuestAccountsLoading(false);
+    }
+  };
+
+  const handleToggleGuestSystem = async (nextEnabled: boolean) => {
+    const prev = guestLikesEnabled;
+    setGuestLikesEnabled(nextEnabled);
+    setTogglingGuestSystem(true);
+    try {
+      const res = await api.toggleGuestAccountsSystem(nextEnabled);
+      setGuestLikesEnabled(Boolean(res.enabled));
+      onRefreshSettings();
+      toast.success(res.enabled ? 'Guest Account system enabled' : 'Guest Account system disabled');
+    } catch (err: any) {
+      setGuestLikesEnabled(prev);
+      toast.error(err?.message || 'Failed to update setting');
+    } finally {
+      setTogglingGuestSystem(false);
+    }
+  };
+
+  const handleSaveGuestAccount = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanUid = guestUidInput.trim();
+    const cleanPass = guestPasswordInput.trim();
+    if (!cleanUid || !cleanPass) {
+      toast.error('Guest UID and Guest Password are required');
+      return;
+    }
+    setSavingGuestAccount(true);
+    try {
+      const res = await api.addGuestAccount(cleanUid, cleanPass);
+      setGuestUidInput('');
+      setGuestPasswordInput('');
+      setShowAddGuestForm(false);
+      await loadGuestAccounts(true);
+      toast.success(res.updatedExisting ? 'Guest account updated' : 'Guest account saved');
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to save guest account');
+    } finally {
+      setSavingGuestAccount(false);
+    }
+  };
+
+  const handleUploadGuestFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setUploadingGuestFile(true);
+    try {
+      const res = await api.uploadGuestAccountFile(file);
+      if (Array.isArray(res.accounts)) {
+        setGuestAccounts(res.accounts);
+      } else {
+        await loadGuestAccounts(true);
+      }
+      if (res.enabled !== undefined) {
+        setGuestLikesEnabled(Boolean(res.enabled));
+      }
+      setShowAddGuestForm(false);
+      toast.success(
+        `Detected ${res.detectedCount}: ${res.addedCount} added${res.updatedCount > 0 ? `, ${res.updatedCount} updated` : ''}`
+      );
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to upload guest file');
+    } finally {
+      setUploadingGuestFile(false);
+    }
+  };
+
+  const handleToggleIndividualGuestAccount = async (acc: GuestAccountRecord) => {
+    const nextEnabled = !(acc.enabled !== false);
+    setTogglingGuestId(acc.id);
+    setGuestAccounts((prev) =>
+      prev.map((item) => (item.id === acc.id ? { ...item, enabled: nextEnabled } : item))
+    );
+    try {
+      const res = await api.updateGuestAccount(acc.id, { enabled: nextEnabled });
+      setGuestAccounts((prev) =>
+        prev.map((item) => (item.id === acc.id ? res.account : item))
+      );
+      toast.success(nextEnabled ? `Guest account ${acc.guestUid} enabled` : `Guest account ${acc.guestUid} disabled`);
+    } catch (err: any) {
+      setGuestAccounts((prev) =>
+        prev.map((item) => (item.id === acc.id ? { ...item, enabled: acc.enabled } : item))
+      );
+      toast.error(err?.message || 'Failed to update guest account');
+    } finally {
+      setTogglingGuestId(null);
+    }
+  };
+
+  const handleStartEditGuestAccount = (acc: GuestAccountRecord) => {
+    setEditingGuestId(acc.id);
+    setEditGuestUidInput(acc.guestUid);
+    setEditGuestPasswordInput('');
+  };
+
+  const handleSaveEditGuestAccount = async (e: React.FormEvent, id: string) => {
+    e.preventDefault();
+    const cleanUid = editGuestUidInput.trim();
+    const cleanPass = editGuestPasswordInput.trim();
+    if (!cleanUid) {
+      toast.error('Guest UID cannot be empty');
+      return;
+    }
+    setSavingEditGuest(true);
+    try {
+      const updates: { guestUid: string; guestPassword?: string } = { guestUid: cleanUid };
+      if (cleanPass) updates.guestPassword = cleanPass;
+      await api.updateGuestAccount(id, updates);
+      setEditingGuestId(null);
+      setEditGuestUidInput('');
+      setEditGuestPasswordInput('');
+      await loadGuestAccounts(true);
+      toast.success('Guest account updated');
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to update guest account');
+    } finally {
+      setSavingEditGuest(false);
+    }
+  };
+
+  const handleDeleteGuestAccount = async (id: string) => {
+    setDeletingGuestId(id);
+    try {
+      await api.deleteGuestAccount(id);
+      if (editingGuestId === id) {
+        setEditingGuestId(null);
+      }
+      await loadGuestAccounts(true);
+      toast.success('Guest account removed');
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to delete guest account');
+    } finally {
+      setDeletingGuestId(null);
     }
   };
 
@@ -2006,6 +2204,33 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             </div>
             <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
           </button>
+
+          {/* More Guest Account */}
+          <button
+            onClick={() => setSubView('guest_accounts')}
+            className="more-menu-item tap w-full p-3.5 sm:p-4 flex items-center justify-between gap-2.5 hover:bg-white/[0.06] text-left transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="lg-tile shrink-0" style={{ background: 'color-mix(in srgb, #f59e0b 20%, rgba(255,255,255,.06))' }}>
+                <UserPlus className="w-4 h-4 text-amber-300" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>More Guest Account</span>
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded-md font-mono font-semibold tabular-nums border ${
+                      guestLikesEnabled
+                        ? 'bg-amber-500/20 text-amber-200 border-amber-400/25'
+                        : 'bg-white/10 text-white/70 border-white/15'
+                    }`}
+                  >
+                    {guestAccounts.length} {guestAccounts.length === 1 ? 'Account' : 'Accounts'} · {guestLikesEnabled ? 'On' : 'Off'}
+                  </span>
+                </div>
+              </div>
+            </div>
+            <ChevronRight className="w-4 h-4 text-white/50 shrink-0" />
+          </button>
         </div>
 
         {/* Logout */}
@@ -2156,7 +2381,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
 
               <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-zinc-400 pt-0.5">
                 <span className="text-zinc-500 font-medium">Placeholders:</span>
-                {(welcomeTemplate.variables || ['username', 'first_name', 'last_name', 'user_id']).map((v) => (
+                {(welcomeTemplate.variables || ['username', 'first_name', 'first', 'last_name', 'last', 'user_id', 'id']).map((v) => (
                   <span key={v} className="bg-zinc-800 border border-zinc-700/60 px-1.5 py-0.5 rounded text-emerald-300 font-mono">
                     {`{${v}}`}
                   </span>
@@ -3774,7 +3999,8 @@ export const MoreTab: React.FC<MoreTabProps> = ({
       Boolean(botSettings.antiForwardEnabled),
       botSettings.banEnabled !== false,
       botSettings.muteEnabled !== false,
-      Boolean(botSettings.cleanServiceEnabled)
+      Boolean(botSettings.cleanServiceEnabled),
+      botSettings.welcomeMessageEnabled !== false
     ].filter(Boolean).length;
 
     const currentModerationPresets: ModerationDurationPreset[] = Array.isArray(botSettings.moderationDurations)
@@ -3848,7 +4074,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </div>
 
           <span className="text-[11px] px-2.5 py-1 rounded-xl bg-sky-500/15 border border-sky-500/30 text-sky-300 font-semibold font-mono tabular-nums whitespace-nowrap shrink-0">
-            {activeGroupModsCount}/5 Active
+            {activeGroupModsCount}/6 Active
           </span>
         </div>
 
@@ -4074,6 +4300,181 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </div>
         </div>
 
+        {/* 5b. Welcome Message & Auto-Delete */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-teal-950/20 via-zinc-900/80 to-zinc-950/90 border border-teal-500/30 space-y-3">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+              <div className="w-9 h-9 rounded-xl bg-teal-500/20 border border-teal-500/30 flex items-center justify-center text-teal-400 shrink-0">
+                <MessageSquare className="w-4 h-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                  <span>Welcome Message</span>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                    botSettings.welcomeMessageEnabled !== false
+                      ? 'bg-teal-500/20 text-teal-300 border-teal-500/40'
+                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                  }`}>
+                    {botSettings.welcomeMessageEnabled !== false ? 'ON' : 'OFF'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={botSettings.welcomeMessageEnabled !== false}
+                disabled={savingSection === 'welcomeMessage'}
+                onChange={async (e) => {
+                  const nextEnabled = e.target.checked;
+                  const prevEnabled = botSettings.welcomeMessageEnabled !== false;
+                  setBotSettings((prev: any) => ({ ...prev, welcomeMessageEnabled: nextEnabled }));
+                  await savePartialBotSetting(
+                    'welcomeMessage',
+                    { welcomeMessageEnabled: nextEnabled },
+                    nextEnabled ? 'Welcome Message turned ON' : 'Welcome Message turned OFF',
+                    () => setBotSettings((prev: any) => ({ ...prev, welcomeMessageEnabled: prevEnabled }))
+                  );
+                }}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-teal-500"></div>
+            </label>
+          </div>
+
+          <div className="pt-2.5 border-t border-zinc-800/80 space-y-2.5">
+            <div className="flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-1.5 flex-wrap min-w-0">
+                <Clock className="w-3.5 h-3.5 text-teal-400 shrink-0" />
+                <span className="text-xs font-semibold text-zinc-200">Auto-Delete</span>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                  botSettings.welcomeAutoDeleteEnabled
+                    ? 'bg-teal-500/20 text-teal-300 border-teal-500/40'
+                    : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                }`}>
+                  {botSettings.welcomeAutoDeleteEnabled ? 'ON' : 'OFF'}
+                </span>
+                {botSettings.welcomeAutoDeleteEnabled && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded font-mono tabular-nums bg-zinc-900 border border-zinc-700 text-zinc-300">
+                    {(() => {
+                      const s = Math.max(1, Math.round(Number(botSettings.welcomeAutoDeleteSeconds) || 60));
+                      return s >= 60 && s % 60 === 0 ? `${s / 60}m` : `${s}s`;
+                    })()}
+                  </span>
+                )}
+              </div>
+
+              <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                <input
+                  type="checkbox"
+                  checked={Boolean(botSettings.welcomeAutoDeleteEnabled)}
+                  disabled={savingSection === 'welcomeAutoDelete'}
+                  onChange={async (e) => {
+                    const nextEnabled = e.target.checked;
+                    const prevEnabled = Boolean(botSettings.welcomeAutoDeleteEnabled);
+                    const prevSec = Math.max(1, Math.round(Number(botSettings.welcomeAutoDeleteSeconds) || 60));
+                    if (nextEnabled) {
+                      const rawNum = parseInt(welcomeDeleteInput.trim(), 10);
+                      if (!welcomeDeleteInput.trim() || !Number.isFinite(rawNum) || rawNum <= 0) {
+                        toast.error('Please enter a valid positive duration');
+                        return;
+                      }
+                      const nextSeconds = Math.min(86400, welcomeDeleteUnit === 'minutes' ? rawNum * 60 : rawNum);
+                      setBotSettings((prev: any) => ({
+                        ...prev,
+                        welcomeAutoDeleteEnabled: true,
+                        welcomeAutoDeleteSeconds: nextSeconds
+                      }));
+                      await savePartialBotSetting(
+                        'welcomeAutoDelete',
+                        { welcomeAutoDeleteEnabled: true, welcomeAutoDeleteSeconds: nextSeconds },
+                        `Welcome auto-delete ON (${rawNum} ${welcomeDeleteUnit})`,
+                        () => setBotSettings((prev: any) => ({
+                          ...prev,
+                          welcomeAutoDeleteEnabled: prevEnabled,
+                          welcomeAutoDeleteSeconds: prevSec
+                        }))
+                      );
+                    } else {
+                      setBotSettings((prev: any) => ({ ...prev, welcomeAutoDeleteEnabled: false }));
+                      await savePartialBotSetting(
+                        'welcomeAutoDelete',
+                        { welcomeAutoDeleteEnabled: false },
+                        'Welcome auto-delete OFF',
+                        () => setBotSettings((prev: any) => ({ ...prev, welcomeAutoDeleteEnabled: prevEnabled }))
+                      );
+                    }
+                  }}
+                  className="sr-only peer"
+                />
+                <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-teal-500"></div>
+              </label>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                inputMode="numeric"
+                value={welcomeDeleteInput}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (/^\d*$/.test(val)) {
+                    setWelcomeDeleteInput(val);
+                  }
+                }}
+                placeholder="Duration"
+                className="w-20 px-3 py-1.5 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-center text-white tabular-nums placeholder:text-zinc-600 focus:outline-none focus:border-teal-500"
+              />
+
+              <div className="inline-flex rounded-xl bg-zinc-950 border border-zinc-800 p-0.5">
+                {(['seconds', 'minutes'] as const).map((unit) => (
+                  <button
+                    key={unit}
+                    type="button"
+                    onClick={() => setWelcomeDeleteUnit(unit)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold cursor-pointer transition-colors ${
+                      welcomeDeleteUnit === unit
+                        ? 'bg-teal-500/20 text-teal-300'
+                        : 'text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {unit === 'seconds' ? 'Sec' : 'Min'}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                disabled={savingSection === 'welcomeAutoDelete'}
+                onClick={async () => {
+                  const rawNum = parseInt(welcomeDeleteInput.trim(), 10);
+                  if (!welcomeDeleteInput.trim() || !Number.isFinite(rawNum) || rawNum <= 0) {
+                    toast.error('Please enter a valid positive duration');
+                    return;
+                  }
+                  const maxForUnit = welcomeDeleteUnit === 'minutes' ? 1440 : 86400;
+                  const clampedUnitVal = Math.min(maxForUnit, rawNum);
+                  const nextSeconds = welcomeDeleteUnit === 'minutes' ? clampedUnitVal * 60 : clampedUnitVal;
+                  const prevSec = Math.max(1, Math.round(Number(botSettings.welcomeAutoDeleteSeconds) || 60));
+                  setWelcomeDeleteInput(String(clampedUnitVal));
+                  setBotSettings((prev: any) => ({ ...prev, welcomeAutoDeleteSeconds: nextSeconds }));
+                  await savePartialBotSetting(
+                    'welcomeAutoDelete',
+                    { welcomeAutoDeleteSeconds: nextSeconds },
+                    `Welcome auto-delete set to ${clampedUnitVal} ${welcomeDeleteUnit}`,
+                    () => setBotSettings((prev: any) => ({ ...prev, welcomeAutoDeleteSeconds: prevSec }))
+                  );
+                }}
+                className="ml-auto px-3.5 py-1.5 rounded-xl bg-teal-500 hover:bg-teal-400 text-zinc-950 text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>{savingSection === 'welcomeAutoDelete' ? 'Saving...' : 'Save'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
         {/* 6. Warning Limit */}
         <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-orange-950/20 via-zinc-900/80 to-zinc-950/90 border border-orange-500/30 space-y-3">
           <div className="flex items-center justify-between gap-2.5">
@@ -4244,6 +4645,7 @@ export const MoreTab: React.FC<MoreTabProps> = ({
             <div><code className="text-sky-300">/unmute &lt;id_or_@user&gt;</code></div>
             <div><code className="text-sky-300">/cleanservice [on|off]</code></div>
             <div><code className="text-sky-300">/linkdelete [on|off]</code></div>
+            <div><code className="text-sky-300">/setwelcome &lt;text&gt;</code></div>
             <div><code className="text-sky-300">/info</code></div>
           </div>
         </div>
@@ -6877,6 +7279,324 @@ export const MoreTab: React.FC<MoreTabProps> = ({
           </div>,
           document.body
         )}
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------
+  // SUB-VIEW: MORE GUEST ACCOUNT
+  // -------------------------------------------------------------
+  if (subView === 'guest_accounts') {
+    const activeCount = guestAccounts.filter((a) => a.enabled !== false).length;
+
+    return (
+      <div className="space-y-4 pb-28 md:pb-8 animate-tab-fade-in">
+        <input
+          ref={guestFileInputRef}
+          type="file"
+          accept=".dat,.json,.txt,.xml,application/json,text/plain"
+          onChange={handleUploadGuestFile}
+          className="hidden"
+        />
+
+        {/* Header */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            {renderSubViewBackButton('menu', 'Back to More')}
+            <div className="min-w-0">
+              <h2 className="text-base font-bold text-white flex items-center gap-1.5 truncate">
+                <UserPlus className="w-4 h-4 text-amber-400 shrink-0" />
+                <span className="truncate">More Guest Account</span>
+              </h2>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={uploadingGuestFile}
+              onClick={() => guestFileInputRef.current?.click()}
+              className="px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-amber-500/35 text-amber-300 text-xs font-bold flex items-center gap-1.5 whitespace-nowrap cursor-pointer disabled:opacity-50"
+            >
+              {uploadingGuestFile ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Upload className="w-3.5 h-3.5" />
+              )}
+              <span>Upload File</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowAddGuestForm((prev) => !prev)}
+              className="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-bold flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              {showAddGuestForm ? <X className="w-3.5 h-3.5" /> : <Plus className="w-3.5 h-3.5" />}
+              <span>{showAddGuestForm ? 'Close' : 'Add'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Master On / Off Card */}
+        <div className="glass-panel rounded-2xl p-4 bg-gradient-to-br from-amber-950/20 via-zinc-900/80 to-zinc-950/90 border border-amber-500/30">
+          <div className="flex items-center justify-between gap-2.5">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <div className="w-8 h-8 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400 shrink-0">
+                <UserPlus className="w-4 h-4" />
+              </div>
+              <div className="min-w-0 flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-bold text-white">Guest Account System</span>
+                <span
+                  className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                    guestLikesEnabled
+                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                      : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                  }`}
+                >
+                  {guestLikesEnabled ? 'ON' : 'OFF'}
+                </span>
+              </div>
+            </div>
+
+            <label className="relative inline-flex items-center cursor-pointer shrink-0">
+              <input
+                type="checkbox"
+                checked={guestLikesEnabled}
+                disabled={togglingGuestSystem}
+                onChange={(e) => handleToggleGuestSystem(e.target.checked)}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500"></div>
+            </label>
+          </div>
+        </div>
+
+        {/* + Add Form */}
+        {showAddGuestForm && (
+          <form onSubmit={handleSaveGuestAccount} className="p-4 rounded-2xl glass-panel border border-amber-500/25 space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              <div>
+                <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                  Guest UID
+                </label>
+                <input
+                  type="text"
+                  value={guestUidInput}
+                  onChange={(e) => setGuestUidInput(e.target.value)}
+                  placeholder="Guest UID"
+                  required
+                  className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-amber-400"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                  Guest Password
+                </label>
+                <input
+                  type="password"
+                  value={guestPasswordInput}
+                  onChange={(e) => setGuestPasswordInput(e.target.value)}
+                  placeholder="Guest Password"
+                  required
+                  className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-amber-400"
+                />
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <button
+                type="button"
+                disabled={uploadingGuestFile}
+                onClick={() => guestFileInputRef.current?.click()}
+                className="px-3.5 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-amber-500/35 text-amber-300 text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {uploadingGuestFile ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Upload className="w-3.5 h-3.5" />
+                )}
+                <span>Upload File</span>
+              </button>
+
+              <div className="flex items-center gap-2 ml-auto">
+                <button
+                  type="button"
+                  onClick={() => setShowAddGuestForm(false)}
+                  className="px-3.5 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-bold text-white cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingGuestAccount}
+                  className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  {savingGuestAccount && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Save</span>
+                </button>
+              </div>
+            </div>
+          </form>
+        )}
+
+        {/* Added Guest Accounts Counter & List */}
+        <div className="space-y-2.5">
+          <div className="flex items-center justify-between px-1">
+            <span className="text-xs font-bold text-white tabular-nums">
+              Added Guest Accounts: {guestAccounts.length}
+            </span>
+            <span className="text-[11px] font-mono text-zinc-400 tabular-nums">
+              Active: {activeCount}/{guestAccounts.length}
+            </span>
+          </div>
+
+          {guestAccountsLoading ? (
+            <div className="p-6 text-center text-xs text-zinc-400 flex items-center justify-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+            </div>
+          ) : guestAccounts.length === 0 ? (
+            <div className="p-6 rounded-2xl glass-panel border border-zinc-800 text-center space-y-2">
+              <UserPlus className="w-7 h-7 text-amber-400 mx-auto" />
+              <div className="text-xs font-semibold text-white">No guest accounts added</div>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {guestAccounts.map((acc) => {
+                const isAccountOn = acc.enabled !== false;
+                const isEditing = editingGuestId === acc.id;
+                return (
+                  <div
+                    key={acc.id}
+                    className="p-3.5 rounded-2xl glass-panel border border-zinc-800 space-y-2.5"
+                  >
+                    <div className="flex items-center justify-between gap-2.5">
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-xs font-mono font-bold text-white truncate">
+                            {acc.guestUid}
+                          </span>
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded font-semibold border ${
+                              isAccountOn
+                                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+                            }`}
+                          >
+                            {isAccountOn ? 'ON' : 'OFF'}
+                          </span>
+                          {acc.lastStatus && (
+                            <span
+                              className={`text-[10px] px-1.5 py-0.5 rounded font-semibold uppercase ${
+                                acc.lastStatus === 'ok'
+                                  ? 'bg-emerald-500/20 text-emerald-300'
+                                  : 'bg-rose-500/20 text-rose-300'
+                              }`}
+                            >
+                              {acc.lastStatus === 'ok' ? 'OK' : 'Error'}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] font-mono text-zinc-400">
+                          {acc.maskedPassword}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <label className="relative inline-flex items-center cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={isAccountOn}
+                            disabled={togglingGuestId === acc.id}
+                            onChange={() => handleToggleIndividualGuestAccount(acc)}
+                            className="sr-only peer"
+                          />
+                          <div className="w-8 h-4.5 bg-zinc-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-3.5 peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-zinc-300 after:border after:rounded-full after:h-3.5 after:w-3.5 after:transition-all peer-checked:bg-emerald-500"></div>
+                        </label>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            isEditing
+                              ? setEditingGuestId(null)
+                              : handleStartEditGuestAccount(acc)
+                          }
+                          aria-label={`Edit guest account ${acc.guestUid}`}
+                          className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 hover:text-white cursor-pointer"
+                        >
+                          <Edit2 className="w-3.5 h-3.5" />
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteGuestAccount(acc.id)}
+                          disabled={deletingGuestId === acc.id}
+                          aria-label={`Delete guest account ${acc.guestUid}`}
+                          className="p-2 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 hover:bg-rose-500/20 cursor-pointer disabled:opacity-50"
+                        >
+                          {deletingGuestId === acc.id ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Trash2 className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    {isEditing && (
+                      <form
+                        onSubmit={(e) => handleSaveEditGuestAccount(e, acc.id)}
+                        className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 space-y-2.5"
+                      >
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                          <div>
+                            <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                              Guest UID
+                            </label>
+                            <input
+                              type="text"
+                              value={editGuestUidInput}
+                              onChange={(e) => setEditGuestUidInput(e.target.value)}
+                              required
+                              className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-amber-400"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                              New Guest Password
+                            </label>
+                            <input
+                              type="password"
+                              value={editGuestPasswordInput}
+                              onChange={(e) => setEditGuestPasswordInput(e.target.value)}
+                              placeholder="Leave blank to keep"
+                              className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-white focus:outline-none focus:border-amber-400"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setEditingGuestId(null)}
+                            className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-bold text-white cursor-pointer"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={savingEditGuest}
+                            className="px-3.5 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                          >
+                            {savingEditGuest && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                            <span>Save</span>
+                          </button>
+                        </div>
+                      </form>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     );
   }

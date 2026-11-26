@@ -177,11 +177,15 @@ export interface BotSettings {
   banEnabled?: boolean;
   muteEnabled?: boolean;
   cleanServiceEnabled?: boolean;
+  welcomeMessageEnabled?: boolean;
+  welcomeAutoDeleteEnabled?: boolean;
+  welcomeAutoDeleteSeconds?: number;
   moderationDurations?: ModerationDurationPreset[];
   groupWarningLimit?: number;
   botMode?: BotOperationalMode;
   chatWhitelistEnabled?: boolean;
   allowedChats?: AllowedChatEntry[];
+  guestLikesEnabled?: boolean;
   botStopped?: boolean;
 }
 
@@ -299,6 +303,18 @@ export interface KeyPoolRecord {
   isExpired: boolean;
   isSoldOut: boolean;
   deepLink: string;
+}
+
+export interface GuestAccountRecord {
+  id: string;
+  guestUid: string;
+  maskedPassword: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt?: string;
+  lastStatus?: 'ok' | 'auth_failed' | 'like_failed';
+  lastMessage?: string;
 }
 
 const TOKEN_KEY = 'tg_admin_token';
@@ -1436,6 +1452,88 @@ export const api = {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to delete key link');
+    return data;
+  },
+
+  // Free Fire Guest Accounts Manager
+  async getGuestAccounts(): Promise<{
+    success: boolean;
+    enabled: boolean;
+    total: number;
+    activeCount: number;
+    accounts: GuestAccountRecord[];
+  }> {
+    const res = await authFetch('/api/guest-accounts');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to load guest accounts');
+    return data;
+  },
+
+  async toggleGuestAccountsSystem(enabled?: boolean): Promise<{ success: boolean; enabled: boolean }> {
+    const res = await authFetch('/api/guest-accounts/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(enabled === undefined ? {} : { enabled })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to toggle guest accounts');
+    return data;
+  },
+
+  async addGuestAccount(
+    guestUid: string,
+    guestPassword: string
+  ): Promise<{ success: boolean; enabled?: boolean; updatedExisting?: boolean; total: number; account: GuestAccountRecord }> {
+    const res = await authFetch('/api/guest-accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ guestUid, guestPassword })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to save guest account');
+    return data;
+  },
+
+  async uploadGuestAccountFile(file: File): Promise<{
+    success: boolean;
+    enabled?: boolean;
+    detectedCount: number;
+    addedCount: number;
+    updatedCount: number;
+    total: number;
+    accounts: GuestAccountRecord[];
+  }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await authFetch('/api/guest-accounts/upload', {
+      method: 'POST',
+      body: formData
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to upload guest file');
+    return data;
+  },
+
+  async updateGuestAccount(
+    id: string,
+    updates: { guestUid?: string; guestPassword?: string; enabled?: boolean }
+  ): Promise<{ success: boolean; account: GuestAccountRecord }> {
+    const res = await authFetch(`/api/guest-accounts/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates)
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to update guest account');
+    return data;
+  },
+
+  async deleteGuestAccount(id: string): Promise<{ success: boolean; total: number }> {
+    const res = await authFetch(`/api/guest-accounts/${encodeURIComponent(id)}`, {
+      method: 'DELETE'
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to delete guest account');
     return data;
   }
 };

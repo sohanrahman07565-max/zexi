@@ -242,10 +242,14 @@ export interface BotSettings {
   banEnabled?: boolean;
   muteEnabled?: boolean;
   cleanServiceEnabled?: boolean;
+  welcomeMessageEnabled?: boolean;
+  welcomeAutoDeleteEnabled?: boolean;
+  welcomeAutoDeleteSeconds?: number;
   moderationDurations?: ModerationDurationPreset[];
   groupWarningLimit?: number;
   chatWhitelistEnabled?: boolean;
   allowedChats?: AllowedChatEntry[];
+  guestLikesEnabled?: boolean;
   botStopped?: boolean;
 }
 
@@ -449,6 +453,38 @@ export interface KeyPoolRecord {
   totalClaims: number;
 }
 
+export interface FreeFireGuestAccountRecord {
+  id: string;
+  guestUid: string;
+  guestPassword: string;
+  enabled?: boolean;
+  createdAt: string;
+  updatedAt: string;
+  lastUsedAt?: string;
+  lastStatus?: 'ok' | 'auth_failed' | 'like_failed';
+  lastMessage?: string;
+}
+
+export interface PendingModerationActionRecord {
+  token: string;
+  chatId: string | number;
+  action: 'ban' | 'mute';
+  targetId: string;
+  targetName: string;
+  targetUsername: string;
+  reason?: string;
+  adminId: string;
+  stage: 'select_duration' | 'custom_keypad' | 'awaiting_reason' | 'confirm_reason';
+  keypadDigits: string;
+  keypadUnit: 'm' | 'h' | 'd';
+  durationToken?: string;
+  durationLabel?: string;
+  isPermanent?: boolean;
+  replyToMessageId?: number;
+  promptMessageId?: number;
+  createdAt: number;
+}
+
 export interface AppDatabase {
   items: ItemRecord[];
   templates: Record<string, MessageTemplate>;
@@ -462,6 +498,7 @@ export interface AppDatabase {
   backupServer?: BackupServerConfig;
   clonedBots?: ClonedBotRecord[];
   addSessions?: Record<string, any>;
+  pendingModerationActions?: Record<string, PendingModerationActionRecord>;
   botUsers?: Record<string, BotUserRecord>;
   groupModeration?: Record<string, Record<string, GroupMemberModerationState>>;
   reports?: UserReportRecord[];
@@ -473,6 +510,7 @@ export interface AppDatabase {
   postBotPublishedPosts?: Record<string, any>;
   imageUrlBotData?: ImageUrlBotStoreData;
   keyPools?: KeyPoolRecord[];
+  guestAccounts?: FreeFireGuestAccountRecord[];
   hourlyDeliveries?: Record<string, number>;
   uploadedFilesIndex?: Record<string, {
     id: string;
@@ -498,9 +536,9 @@ export const DEFAULT_TEMPLATES: Record<string, MessageTemplate> = {
   GROUP_WELCOME_MESSAGE: {
     key: 'GROUP_WELCOME_MESSAGE',
     name: 'Welcome Message',
-    description: 'Automatic welcome message sent in groups when a new member joins',
+    description: 'Automatic welcome message sent in groups when a new member joins (or configured via /setwelcome)',
     content: "👋 <b>Welcome to the group, {first_name}!</b>\n\n👤 <b>Username:</b> {username}\n🆔 <b>User ID:</b> <code>{user_id}</code>",
-    variables: ['username', 'first_name', 'last_name', 'user_id'],
+    variables: ['username', 'first_name', 'first', 'last_name', 'last', 'user_id', 'id'],
     mediaType: 'none',
     mediaUrl: ''
   },
@@ -715,11 +753,15 @@ export const DEFAULT_SETTINGS: BotSettings = {
   banEnabled: true,
   muteEnabled: true,
   cleanServiceEnabled: false,
+  welcomeMessageEnabled: true,
+  welcomeAutoDeleteEnabled: false,
+  welcomeAutoDeleteSeconds: 60,
   moderationDurations: DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d })),
   groupWarningLimit: 3,
   requiredChannels: [],
   chatWhitelistEnabled: false,
   allowedChats: [],
+  guestLikesEnabled: true,
   botStopped: false
 };
 
@@ -815,6 +857,7 @@ export class SharedStorageService {
       joinRequests: {},
       postBotPublishedPosts: {},
       keyPools: [],
+      guestAccounts: [],
       hourlyDeliveries: {},
       design: { ...DEFAULT_DESIGN },
       settings: { ...DEFAULT_SETTINGS },
@@ -1227,6 +1270,13 @@ export class SharedStorageService {
 
     const cleanedLoadedTemplates = { ...(loadedData.templates || {}) };
     delete cleanedLoadedTemplates.WEB_CODE_MESSAGE;
+    if (cleanedLoadedTemplates.GROUP_WELCOME_MESSAGE) {
+      cleanedLoadedTemplates.GROUP_WELCOME_MESSAGE = {
+        ...DEFAULT_TEMPLATES.GROUP_WELCOME_MESSAGE,
+        ...cleanedLoadedTemplates.GROUP_WELCOME_MESSAGE,
+        variables: DEFAULT_TEMPLATES.GROUP_WELCOME_MESSAGE.variables
+      };
+    }
 
     this.db = {
       items: Array.isArray(loadedData.items) ? loadedData.items : [],
@@ -1257,6 +1307,9 @@ export class SharedStorageService {
       keyPools: Array.isArray(loadedData.keyPools)
         ? loadedData.keyPools
         : (Array.isArray(this.db.keyPools) ? this.db.keyPools : []),
+      guestAccounts: Array.isArray(loadedData.guestAccounts)
+        ? loadedData.guestAccounts
+        : (Array.isArray(this.db.guestAccounts) ? this.db.guestAccounts : []),
       hourlyDeliveries: (() => {
         const merged: Record<string, number> = {};
         const sources = [loadedData.hourlyDeliveries, this.db.hourlyDeliveries];
@@ -1301,13 +1354,17 @@ export class SharedStorageService {
         banEnabled: loadedData.settings?.banEnabled !== undefined ? Boolean(loadedData.settings.banEnabled) : true,
         muteEnabled: loadedData.settings?.muteEnabled !== undefined ? Boolean(loadedData.settings.muteEnabled) : true,
         cleanServiceEnabled: loadedData.settings?.cleanServiceEnabled ?? false,
+        welcomeMessageEnabled: loadedData.settings?.welcomeMessageEnabled !== undefined ? Boolean(loadedData.settings.welcomeMessageEnabled) : true,
+        welcomeAutoDeleteEnabled: loadedData.settings?.welcomeAutoDeleteEnabled ?? false,
+        welcomeAutoDeleteSeconds: Math.max(1, Math.min(86400, Math.round(Number(loadedData.settings?.welcomeAutoDeleteSeconds) || 60))),
         moderationDurations: Array.isArray(loadedData.settings?.moderationDurations)
           ? sanitizeModerationDurations(loadedData.settings.moderationDurations)
           : DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d })),
         groupWarningLimit: Math.max(1, Math.min(100, Math.round(Number(loadedData.settings?.groupWarningLimit) || 3))),
         requiredChannels: Array.isArray(loadedData.settings?.requiredChannels) ? loadedData.settings.requiredChannels : [],
         chatWhitelistEnabled: loadedData.settings?.chatWhitelistEnabled ?? false,
-        allowedChats: Array.isArray(loadedData.settings?.allowedChats) ? loadedData.settings.allowedChats : []
+        allowedChats: Array.isArray(loadedData.settings?.allowedChats) ? loadedData.settings.allowedChats : [],
+        guestLikesEnabled: loadedData.settings?.guestLikesEnabled !== undefined ? Boolean(loadedData.settings.guestLikesEnabled) : true
       },
       backupServer: {
         ...DEFAULT_BACKUP_SERVER_CONFIG,
@@ -2534,6 +2591,15 @@ export class SharedStorageService {
     if (this.db.settings.cleanServiceEnabled === undefined) {
       this.db.settings.cleanServiceEnabled = false;
     }
+    if (this.db.settings.welcomeMessageEnabled === undefined) {
+      this.db.settings.welcomeMessageEnabled = true;
+    }
+    if (this.db.settings.welcomeAutoDeleteEnabled === undefined) {
+      this.db.settings.welcomeAutoDeleteEnabled = false;
+    }
+    if (this.db.settings.welcomeAutoDeleteSeconds === undefined || !Number.isFinite(Number(this.db.settings.welcomeAutoDeleteSeconds))) {
+      this.db.settings.welcomeAutoDeleteSeconds = 60;
+    }
     if (!Array.isArray(this.db.settings.moderationDurations)) {
       this.db.settings.moderationDurations = DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d }));
     }
@@ -2575,6 +2641,11 @@ export class SharedStorageService {
       banEnabled: settings.banEnabled !== undefined ? Boolean(settings.banEnabled) : (this.db.settings.banEnabled ?? true),
       muteEnabled: settings.muteEnabled !== undefined ? Boolean(settings.muteEnabled) : (this.db.settings.muteEnabled ?? true),
       cleanServiceEnabled: settings.cleanServiceEnabled !== undefined ? Boolean(settings.cleanServiceEnabled) : (this.db.settings.cleanServiceEnabled ?? false),
+      welcomeMessageEnabled: settings.welcomeMessageEnabled !== undefined ? Boolean(settings.welcomeMessageEnabled) : (this.db.settings.welcomeMessageEnabled ?? true),
+      welcomeAutoDeleteEnabled: settings.welcomeAutoDeleteEnabled !== undefined ? Boolean(settings.welcomeAutoDeleteEnabled) : (this.db.settings.welcomeAutoDeleteEnabled ?? false),
+      welcomeAutoDeleteSeconds: settings.welcomeAutoDeleteSeconds !== undefined
+        ? Math.max(1, Math.min(86400, Math.round(Number(settings.welcomeAutoDeleteSeconds) || 60)))
+        : Math.max(1, Math.min(86400, Math.round(Number(this.db.settings.welcomeAutoDeleteSeconds) || 60))),
       moderationDurations: settings.moderationDurations !== undefined && Array.isArray(settings.moderationDurations)
         ? sanitizeModerationDurations(settings.moderationDurations)
         : (Array.isArray(this.db.settings.moderationDurations)
@@ -3036,6 +3107,7 @@ export class SharedStorageService {
     messageId: number;
     companionNoticeId?: number;
     timeoutMinutes?: number;
+    timeoutSeconds?: number;
     itemTitle?: string;
   }): Promise<ScheduledDeletion> {
     await this.loadLatest(true);
@@ -3043,14 +3115,16 @@ export class SharedStorageService {
     const timeoutMins = (typeof data.timeoutMinutes === 'number' && data.timeoutMinutes > 0)
       ? data.timeoutMinutes
       : ((typeof configuredTimeout === 'number' && configuredTimeout > 0) ? configuredTimeout : 10);
-    const deleteAt = Date.now() + timeoutMins * 60 * 1000;
+    const hasSecondDelay = typeof data.timeoutSeconds === 'number' && data.timeoutSeconds > 0;
+    const delayMs = hasSecondDelay ? Math.round(data.timeoutSeconds! * 1000) : timeoutMins * 60 * 1000;
+    const deleteAt = Date.now() + delayMs;
     const record: ScheduledDeletion = {
       id: `sd_${Date.now().toString(36)}_${crypto.randomBytes(4).toString('hex')}`,
       chatId: String(data.chatId),
       messageId: data.messageId,
       companionNoticeId: data.companionNoticeId,
       deleteAt,
-      timeoutMinutes: timeoutMins,
+      timeoutMinutes: hasSecondDelay ? Number((data.timeoutSeconds! / 60).toFixed(2)) : timeoutMins,
       itemTitle: data.itemTitle || 'File',
       createdAt: new Date().toISOString()
     };
@@ -5104,6 +5178,321 @@ export class SharedStorageService {
       remainingCount: remainingCountAfter,
       totalCount
     };
+  }
+
+  // =========================================================================
+  // FREE FIRE GUEST ACCOUNTS MANAGER (PERSISTED IN DATA_DIR)
+  // =========================================================================
+  public async getGuestAccounts(): Promise<FreeFireGuestAccountRecord[]> {
+    await this.loadLatest(false);
+    const list = Array.isArray(this.db.guestAccounts) ? this.db.guestAccounts : [];
+    return list.map((acc) => ({
+      ...acc,
+      enabled: acc.enabled !== false
+    }));
+  }
+
+  public async addGuestAccount(
+    guestUid: string,
+    guestPassword: string
+  ): Promise<{ account: FreeFireGuestAccountRecord; updatedExisting: boolean; total: number }> {
+    await this.loadLatest(false);
+    if (!Array.isArray(this.db.guestAccounts)) {
+      this.db.guestAccounts = [];
+    }
+
+    const cleanUid = String(guestUid || '').trim();
+    const cleanPassword = String(guestPassword || '').trim();
+    if (!cleanUid || !cleanPassword) {
+      throw new Error('Guest UID and Guest Password are required');
+    }
+
+    const nowIso = new Date().toISOString();
+    const existingIdx = this.db.guestAccounts.findIndex(
+      (a) => String(a.guestUid || '').trim() === cleanUid
+    );
+
+    if (existingIdx >= 0) {
+      const existing = this.db.guestAccounts[existingIdx];
+      existing.guestUid = cleanUid;
+      existing.guestPassword = cleanPassword;
+      existing.enabled = existing.enabled !== false;
+      existing.updatedAt = nowIso;
+      delete existing.lastStatus;
+      delete existing.lastMessage;
+      await this.persist(true);
+      return {
+        account: { ...existing, enabled: existing.enabled !== false },
+        updatedExisting: true,
+        total: this.db.guestAccounts.length
+      };
+    }
+
+    let id = '';
+    do {
+      const rand = Math.random().toString(36).substring(2, 7);
+      const timePart = Date.now().toString(36).slice(-4);
+      id = `ga_${rand}${timePart}`;
+    } while (this.db.guestAccounts.some((a) => a.id === id));
+
+    const record: FreeFireGuestAccountRecord = {
+      id,
+      guestUid: cleanUid,
+      guestPassword: cleanPassword,
+      enabled: true,
+      createdAt: nowIso,
+      updatedAt: nowIso
+    };
+
+    this.db.guestAccounts.push(record);
+    await this.persist(true);
+    return {
+      account: { ...record },
+      updatedExisting: false,
+      total: this.db.guestAccounts.length
+    };
+  }
+
+  public async addGuestAccountsBatch(
+    entries: Array<{ guestUid: string; guestPassword: string }>
+  ): Promise<{
+    addedCount: number;
+    updatedCount: number;
+    total: number;
+    accounts: FreeFireGuestAccountRecord[];
+  }> {
+    await this.loadLatest(false);
+    if (!Array.isArray(this.db.guestAccounts)) {
+      this.db.guestAccounts = [];
+    }
+
+    const deduped = new Map<string, string>();
+    for (const entry of entries || []) {
+      const cleanUid = String(entry?.guestUid || '').trim();
+      const cleanPassword = String(entry?.guestPassword || '').trim();
+      if (!cleanUid || !cleanPassword) continue;
+      deduped.set(cleanUid, cleanPassword);
+    }
+
+    if (deduped.size === 0) {
+      throw new Error('No valid guest_uid and guest_password entries found');
+    }
+
+    const nowIso = new Date().toISOString();
+    let addedCount = 0;
+    let updatedCount = 0;
+    const touchedAccounts: FreeFireGuestAccountRecord[] = [];
+
+    for (const [cleanUid, cleanPassword] of deduped.entries()) {
+      const existing = this.db.guestAccounts.find(
+        (a) => String(a.guestUid || '').trim() === cleanUid
+      );
+
+      if (existing) {
+        existing.guestUid = cleanUid;
+        existing.guestPassword = cleanPassword;
+        existing.enabled = existing.enabled !== false;
+        existing.updatedAt = nowIso;
+        delete existing.lastStatus;
+        delete existing.lastMessage;
+        updatedCount++;
+        touchedAccounts.push({ ...existing, enabled: existing.enabled !== false });
+      } else {
+        let id = '';
+        do {
+          const rand = Math.random().toString(36).substring(2, 7);
+          const timePart = Date.now().toString(36).slice(-4);
+          id = `ga_${rand}${timePart}`;
+        } while (this.db.guestAccounts.some((a) => a.id === id));
+
+        const record: FreeFireGuestAccountRecord = {
+          id,
+          guestUid: cleanUid,
+          guestPassword: cleanPassword,
+          enabled: true,
+          createdAt: nowIso,
+          updatedAt: nowIso
+        };
+        this.db.guestAccounts.push(record);
+        addedCount++;
+        touchedAccounts.push({ ...record });
+      }
+    }
+
+    await this.persist(true);
+    return {
+      addedCount,
+      updatedCount,
+      total: this.db.guestAccounts.length,
+      accounts: touchedAccounts
+    };
+  }
+
+  public async updateGuestAccount(
+    id: string,
+    updates: {
+      guestUid?: string;
+      guestPassword?: string;
+      enabled?: boolean;
+    }
+  ): Promise<FreeFireGuestAccountRecord | null> {
+    await this.loadLatest(false);
+    if (!Array.isArray(this.db.guestAccounts)) return null;
+    const cleanId = String(id || '').trim();
+    const target = this.db.guestAccounts.find((a) => a.id === cleanId);
+    if (!target) return null;
+
+    const nowIso = new Date().toISOString();
+    if (updates.guestUid !== undefined) {
+      const cleanUid = String(updates.guestUid || '').trim();
+      if (!cleanUid) {
+        throw new Error('Guest UID cannot be empty');
+      }
+      const dup = this.db.guestAccounts.find(
+        (a) => a.id !== cleanId && String(a.guestUid || '').trim() === cleanUid
+      );
+      if (dup) {
+        throw new Error('Another guest account with this UID already exists');
+      }
+      target.guestUid = cleanUid;
+    }
+    if (updates.guestPassword !== undefined) {
+      const cleanPass = String(updates.guestPassword || '').trim();
+      if (cleanPass) {
+        target.guestPassword = cleanPass;
+        delete target.lastStatus;
+        delete target.lastMessage;
+      }
+    }
+    if (updates.enabled !== undefined) {
+      target.enabled = Boolean(updates.enabled);
+    }
+    target.updatedAt = nowIso;
+    await this.persist(true);
+    return {
+      ...target,
+      enabled: target.enabled !== false
+    };
+  }
+
+  public async deleteGuestAccount(id: string): Promise<{ deleted: boolean; total: number }> {
+    await this.loadLatest(false);
+    if (!Array.isArray(this.db.guestAccounts)) {
+      return { deleted: false, total: 0 };
+    }
+    const cleanId = String(id || '').trim();
+    const prevLen = this.db.guestAccounts.length;
+    this.db.guestAccounts = this.db.guestAccounts.filter((a) => a.id !== cleanId);
+    if (this.db.guestAccounts.length === prevLen) {
+      return { deleted: false, total: this.db.guestAccounts.length };
+    }
+    await this.persist(true);
+    return { deleted: true, total: this.db.guestAccounts.length };
+  }
+
+  public async updateGuestAccountStatuses(
+    updates: Array<{
+      id: string;
+      status: 'ok' | 'auth_failed' | 'like_failed';
+      message?: string;
+      usedAt?: string;
+    }>
+  ): Promise<void> {
+    if (!Array.isArray(updates) || updates.length === 0) return;
+    await this.loadLatest(false);
+    if (!Array.isArray(this.db.guestAccounts) || this.db.guestAccounts.length === 0) return;
+    let changed = false;
+    const nowIso = new Date().toISOString();
+    for (const u of updates) {
+      const target = this.db.guestAccounts.find((a) => a.id === u.id);
+      if (target) {
+        target.lastUsedAt = u.usedAt || nowIso;
+        target.lastStatus = u.status;
+        if (u.message) {
+          target.lastMessage = u.message;
+        } else {
+          delete target.lastMessage;
+        }
+        changed = true;
+      }
+    }
+    if (changed) {
+      await this.persist(false);
+    }
+  }
+
+  // =========================================================================
+  // PERSISTENT MODERATION PICKER SESSIONS (SURVIVES SERVER / BOT RESTARTS)
+  // =========================================================================
+  public async savePendingModeration(record: PendingModerationActionRecord): Promise<void> {
+    await this.loadLatest(false);
+    if (!this.db.pendingModerationActions || typeof this.db.pendingModerationActions !== 'object') {
+      this.db.pendingModerationActions = {};
+    }
+    const now = Date.now();
+    for (const [k, v] of Object.entries(this.db.pendingModerationActions)) {
+      if (!v || !v.createdAt || now - v.createdAt > 30 * 60 * 1000) {
+        delete this.db.pendingModerationActions[k];
+      }
+    }
+    this.db.pendingModerationActions[record.token] = { ...record };
+    await this.persist(true);
+  }
+
+  public async getPendingModeration(token: string): Promise<PendingModerationActionRecord | null> {
+    const cleanToken = String(token || '').trim();
+    if (!cleanToken) return null;
+    await this.loadLatest(false);
+    const map = this.db.pendingModerationActions;
+    if (!map || typeof map !== 'object') return null;
+    const found = map[cleanToken];
+    if (!found) return null;
+    if (!found.createdAt || Date.now() - found.createdAt > 30 * 60 * 1000) {
+      delete map[cleanToken];
+      await this.persist(false).catch(() => {});
+      return null;
+    }
+    return { ...found };
+  }
+
+  public async getAwaitingReasonModeration(
+    chatId: string | number,
+    adminId?: string | number,
+    replyToMessageId?: number
+  ): Promise<PendingModerationActionRecord | null> {
+    await this.loadLatest(false);
+    const map = this.db.pendingModerationActions;
+    if (!map || typeof map !== 'object') return null;
+    const cleanChatId = String(chatId ?? '').trim();
+    const cleanAdminId = adminId !== undefined && adminId !== null ? String(adminId).trim() : '';
+    const now = Date.now();
+    let best: PendingModerationActionRecord | null = null;
+
+    for (const entry of Object.values(map)) {
+      if (!entry || !entry.createdAt || now - entry.createdAt > 30 * 60 * 1000) continue;
+      if (entry.stage !== 'awaiting_reason') continue;
+      if (String(entry.chatId ?? '').trim() !== cleanChatId) continue;
+
+      if (replyToMessageId && entry.promptMessageId && Number(entry.promptMessageId) === Number(replyToMessageId)) {
+        return { ...entry };
+      }
+      if (cleanAdminId && String(entry.adminId ?? '').trim() === cleanAdminId) {
+        if (!best || entry.createdAt > best.createdAt) {
+          best = { ...entry };
+        }
+      }
+    }
+    return best;
+  }
+
+  public async deletePendingModeration(token: string): Promise<void> {
+    const cleanToken = String(token || '').trim();
+    if (!cleanToken) return;
+    await this.loadLatest(false);
+    if (this.db.pendingModerationActions && this.db.pendingModerationActions[cleanToken]) {
+      delete this.db.pendingModerationActions[cleanToken];
+      await this.persist(true);
+    }
   }
 }
 

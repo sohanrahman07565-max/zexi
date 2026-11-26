@@ -4,9 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import multer from 'multer';
 import dotenv from 'dotenv';
-import { storage, StorageManager, storageContext, AdminUser, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ClonedBotRecord, SharedStorageService, KeyPoolRecord, DEFAULT_MODERATION_DURATIONS, sanitizeModerationDurations } from './storage';
+import { storage, StorageManager, storageContext, AdminUser, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ClonedBotRecord, SharedStorageService, KeyPoolRecord, FreeFireGuestAccountRecord, DEFAULT_MODERATION_DURATIONS, sanitizeModerationDurations } from './storage';
 import { TelegramService, TelegramBotManager, BotSingletonLock, getItemPayload } from './telegram';
 import { hashPassword, verifyPassword, signSessionToken, verifySessionToken } from './auth';
+import { FreeFireGuestService } from './ffGuestApi';
 
 dotenv.config({ override: true });
 
@@ -61,6 +62,48 @@ apiRouter.get('/health', async (_req: Request, res: Response) => {
       conflicts: BotSingletonLock.getAllConflicts()
     }
   });
+});
+
+// Self-hosted Free Fire Guest Account Bancheck API
+apiRouter.get('/bancheck/status', (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(200).json(FreeFireGuestService.getStatus());
+});
+
+apiRouter.get('/bancheck', async (req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const rawUid = String(req.query.uid || '').trim();
+  if (!/^\d{5,20}$/.test(rawUid)) {
+    return res.status(400).json({
+      ok: false,
+      code: 'INVALID_UID',
+      error: 'Valid numeric Free Fire UID is required (?uid=<uid>).'
+    });
+  }
+
+  try {
+    const result = await FreeFireGuestService.checkBanStatus(rawUid);
+    if (!result.ok) {
+      const statusCode =
+        result.code === 'GUEST_CREDENTIALS_MISSING'
+          ? 503
+          : result.code === 'INVALID_GUEST_CREDENTIALS'
+            ? 401
+            : result.code === 'PLAYER_NOT_FOUND'
+              ? 404
+              : result.code === 'INVALID_UID'
+                ? 400
+                : 502;
+      return res.status(statusCode).json(result);
+    }
+    return res.status(200).json(result);
+  } catch (err: any) {
+    return res.status(500).json({
+      ok: false,
+      code: 'UPSTREAM_ERROR',
+      error: err?.message || 'Failed to check Free Fire ban status.'
+    });
+  }
 });
 
 // Multer upload middleware for direct binary/multipart file streaming (up to 500MB)
@@ -2034,6 +2077,456 @@ apiRouter.delete('/keys/:id', authenticate, async (req: Request, res: Response) 
   }
 });
 
+// =========================================================================
+// FREE FIRE GUEST ACCOUNTS MANAGER ROUTES
+// =========================================================================
+function maskGuestPassword(rawPassword: string): string {
+  const s = String(rawPassword || '');
+  if (!s) return '••••••••';
+  if (s.length <= 4) return '•'.repeat(Math.max(6, s.length));
+  return `${s.slice(0, 2)}${'•'.repeat(Math.min(10, Math.max(4, s.length - 4)))}${s.slice(-2)}`;
+}
+
+function sanitizeGuestAccountResponse(acc: FreeFireGuestAccountRecord) {
+  return {
+    id: acc.id,
+    guestUid: acc.guestUid,
+    maskedPassword: maskGuestPassword(acc.guestPassword),
+    enabled: acc.enabled !== false,
+    createdAt: acc.createdAt,
+    updatedAt: acc.updatedAt,
+    ...(acc.lastUsedAt ? { lastUsedAt: acc.lastUsedAt } : {}),
+    ...(acc.lastStatus ? { lastStatus: acc.lastStatus } : {}),
+    ...(acc.lastMessage ? { lastMessage: acc.lastMessage } : {})
+  };
+}
+
+// GET /api/guest-accounts
+apiRouter.get('/guest-accounts', authenticate, async (_req: Request, res: Response) => {
+  try {
+    const [accounts, settings] = await Promise.all([
+      storage.getGuestAccounts(),
+      storage.getSettings()
+    ]);
+    return res.json({
+      success: true,
+      enabled: settings?.guestLikesEnabled !== false,
+      total: accounts.length,
+      activeCount: accounts.filter((a) => a.enabled !== false).length,
+      accounts: accounts.map(sanitizeGuestAccountResponse)
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to load guest accounts' });
+  }
+});
+
+// POST /api/guest-accounts/toggle
+apiRouter.post('/guest-accounts/toggle', authenticate, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).admin as AdminUser;
+    if (admin.role !== 'owner' && !admin.permissions?.settings_edit) {
+      return res.status(403).json({ error: 'Insufficient permissions to toggle guest accounts' });
+    }
+
+    const currentSettings = await storage.getSettings();
+    const nextEnabled =
+      req.body?.enabled !== undefined
+        ? Boolean(req.body.enabled)
+        : !(currentSettings?.guestLikesEnabled !== false);
+
+    await storage.updateSettings({ guestLikesEnabled: nextEnabled });
+    return res.json({
+      success: true,
+      enabled: nextEnabled
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to toggle guest accounts' });
+  }
+});
+
+// POST /api/guest-accounts
+apiRouter.post('/guest-accounts', authenticate, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).admin as AdminUser;
+    if (admin.role !== 'owner' && !admin.permissions?.settings_edit) {
+      return res.status(403).json({ error: 'Insufficient permissions to manage guest accounts' });
+    }
+
+    const guestUid = String(req.body?.guestUid ?? req.body?.guest_uid ?? req.body?.uid ?? '').trim();
+    const guestPassword = String(req.body?.guestPassword ?? req.body?.guest_password ?? req.body?.password ?? '').trim();
+
+    if (!guestUid) {
+      return res.status(400).json({ error: 'Guest UID is required' });
+    }
+    if (!guestPassword) {
+      return res.status(400).json({ error: 'Guest Password is required' });
+    }
+
+    const result = await storage.addGuestAccount(guestUid, guestPassword);
+    const settings = await storage.getSettings();
+    return res.json({
+      success: true,
+      enabled: settings?.guestLikesEnabled !== false,
+      updatedExisting: result.updatedExisting,
+      total: result.total,
+      account: sanitizeGuestAccountResponse(result.account)
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to save guest account' });
+  }
+});
+
+export function parseGuestCredentialsFromBuffer(
+  rawBuffer: Buffer
+): Array<{ guestUid: string; guestPassword: string }> {
+  if (!rawBuffer || rawBuffer.length === 0) return [];
+
+  let text = '';
+  if (rawBuffer.length >= 2 && rawBuffer[0] === 0xff && rawBuffer[1] === 0xfe) {
+    text = rawBuffer.slice(2).toString('utf16le');
+  } else if (rawBuffer.length >= 2 && rawBuffer[0] === 0xfe && rawBuffer[1] === 0xff) {
+    const swapped = Buffer.alloc(rawBuffer.length - 2);
+    for (let i = 2; i + 1 < rawBuffer.length; i += 2) {
+      swapped[i - 2] = rawBuffer[i + 1];
+      swapped[i - 1] = rawBuffer[i];
+    }
+    text = swapped.toString('utf16le');
+  } else {
+    let nulCount = 0;
+    const sampleLen = Math.min(rawBuffer.length, 512);
+    for (let i = 0; i < sampleLen; i++) {
+      if (rawBuffer[i] === 0) nulCount++;
+    }
+    text = nulCount > sampleLen * 0.25 ? rawBuffer.toString('utf16le') : rawBuffer.toString('utf8');
+  }
+
+  text = text.replace(/^\uFEFF/, '').replace(/\0+/g, '');
+
+  const results = new Map<string, string>();
+  const addPair = (uidRaw: unknown, passRaw: unknown) => {
+    const uid = String(uidRaw ?? '').trim();
+    const pass = String(passRaw ?? '').trim();
+    if (!uid || !pass) return;
+    if (/[\r\n\0]/.test(uid) || /[\r\n\0]/.test(pass)) return;
+    if (uid.length > 128 || pass.length > 512) return;
+    results.set(uid, pass);
+  };
+
+  const UID_KEYS = [
+    'com.garena.msdk.guest_uid',
+    'guest_uid',
+    'guestuid',
+    'account_uid',
+    'accountuid',
+    'uid'
+  ];
+  const PASS_KEYS = [
+    'com.garena.msdk.guest_password',
+    'guest_password',
+    'guestpassword',
+    'guest_pass',
+    'guestpass',
+    'password',
+    'pass',
+    'pwd'
+  ];
+
+  const findCaseInsensitiveValue = (obj: Record<string, any>, candidateKeys: string[]): string | undefined => {
+    const entries = Object.entries(obj);
+    for (const candidate of candidateKeys) {
+      for (const [k, v] of entries) {
+        if (k.toLowerCase() === candidate) {
+          if (typeof v === 'string' || typeof v === 'number') {
+            const trimmed = String(v).trim();
+            if (trimmed) return trimmed;
+          }
+        }
+      }
+    }
+    return undefined;
+  };
+
+  const walkJson = (node: unknown) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      let pendingUid: string | undefined;
+      let pendingPass: string | undefined;
+      for (const item of node) {
+        if (item && typeof item === 'object' && !Array.isArray(item)) {
+          const itemObj = item as Record<string, any>;
+          const keyName = String(itemObj.key ?? itemObj.name ?? '').trim().toLowerCase();
+          const valStr =
+            itemObj.value !== undefined && itemObj.value !== null ? String(itemObj.value).trim() : '';
+          if (keyName && valStr) {
+            if (UID_KEYS.includes(keyName)) pendingUid = valStr;
+            if (PASS_KEYS.includes(keyName)) pendingPass = valStr;
+            if (pendingUid && pendingPass) {
+              addPair(pendingUid, pendingPass);
+              pendingUid = undefined;
+              pendingPass = undefined;
+            }
+          }
+        }
+        walkJson(item);
+      }
+      return;
+    }
+
+    const obj = node as Record<string, any>;
+    const directUid = findCaseInsensitiveValue(obj, UID_KEYS);
+    const directPass = findCaseInsensitiveValue(obj, PASS_KEYS);
+    if (directUid && directPass) {
+      addPair(directUid, directPass);
+    }
+
+    for (const val of Object.values(obj)) {
+      if (val && typeof val === 'object') {
+        walkJson(val);
+      }
+    }
+  };
+
+  // Strategy 1: Whole-document JSON
+  const trimmedText = text.trim();
+  if (trimmedText.startsWith('{') || trimmedText.startsWith('[')) {
+    try {
+      walkJson(JSON.parse(trimmedText));
+    } catch {
+      // Fall through to block & regex extraction
+    }
+  }
+
+  // Strategy 2: Balanced JSON objects/arrays embedded in .dat or multi-JSON files
+  if (results.size === 0) {
+    let i = 0;
+    while (i < text.length) {
+      const ch = text[i];
+      if (ch === '{' || ch === '[') {
+        const openChar = ch;
+        const closeChar = ch === '{' ? '}' : ']';
+        let depth = 0;
+        let inStr = false;
+        let escaped = false;
+        let endIdx = -1;
+        for (let j = i; j < text.length; j++) {
+          const c = text[j];
+          if (inStr) {
+            if (escaped) {
+              escaped = false;
+            } else if (c === '\\') {
+              escaped = true;
+            } else if (c === '"') {
+              inStr = false;
+            }
+          } else {
+            if (c === '"') {
+              inStr = true;
+            } else if (c === openChar) {
+              depth++;
+            } else if (c === closeChar) {
+              depth--;
+              if (depth === 0) {
+                endIdx = j;
+                break;
+              }
+            }
+          }
+        }
+        if (endIdx > i) {
+          const candidate = text.slice(i, endIdx + 1);
+          if (/guest_?uid|guest_?password|uid/i.test(candidate)) {
+            try {
+              walkJson(JSON.parse(candidate));
+            } catch {
+              // Ignore malformed JSON slice
+            }
+          }
+          i = endIdx + 1;
+          continue;
+        }
+      }
+      i++;
+    }
+  }
+
+  // Strategy 3: Key/value or XML extraction across raw text / .dat strings
+  if (results.size === 0) {
+    const tokens: Array<{ type: 'uid' | 'pass'; value: string; index: number }> = [];
+    const kvRegex =
+      /(?:["']?(?:com\.garena\.msdk\.)?(guest_?uid|guestuid|guest_?password|guestpassword)["']?\s*[:=]\s*["']?([^\s"',}\]]+)["']?|<string\s+name=["'](?:com\.garena\.msdk\.)?(guest_?uid|guestuid|guest_?password|guestpassword)["'][^>]*>([^<]+)<\/string>)/gi;
+
+    let m: RegExpExecArray | null;
+    while ((m = kvRegex.exec(text)) !== null) {
+      const key = (m[1] || m[3] || '').toLowerCase();
+      const val = (m[2] || m[4] || '').trim();
+      if (!val) continue;
+      if (key.includes('uid')) {
+        tokens.push({ type: 'uid', value: val, index: m.index });
+      } else if (key.includes('pass')) {
+        tokens.push({ type: 'pass', value: val, index: m.index });
+      }
+    }
+
+    let pendingUid: string | null = null;
+    let pendingPass: string | null = null;
+    for (const tok of tokens) {
+      if (tok.type === 'uid') {
+        if (pendingPass !== null) {
+          addPair(tok.value, pendingPass);
+          pendingUid = null;
+          pendingPass = null;
+        } else {
+          pendingUid = tok.value;
+        }
+      } else {
+        if (pendingUid !== null) {
+          addPair(pendingUid, tok.value);
+          pendingUid = null;
+          pendingPass = null;
+        } else {
+          pendingPass = tok.value;
+        }
+      }
+    }
+  }
+
+  // Strategy 4: Delimited plain-text lines (uid:password / uid|password / uid,password)
+  if (results.size === 0) {
+    const lines = text.split(/\r?\n/);
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#') || line.startsWith('//')) continue;
+      const lineMatch = line.match(/^(\d{5,25})\s*[:|,;\t]\s*([^\s|,;]+)$/);
+      if (lineMatch) {
+        addPair(lineMatch[1], lineMatch[2]);
+      }
+    }
+  }
+
+  return Array.from(results.entries())
+    .slice(0, 5000)
+    .map(([guestUid, guestPassword]) => ({ guestUid, guestPassword }));
+}
+
+// POST /api/guest-accounts/upload
+apiRouter.post(
+  '/guest-accounts/upload',
+  authenticate,
+  (req: Request, res: Response, next: NextFunction) => {
+    const admin = (req as any).admin as AdminUser;
+    if (admin.role !== 'owner' && !admin.permissions?.settings_edit) {
+      return res.status(403).json({ error: 'Insufficient permissions to upload guest accounts' });
+    }
+    return next();
+  },
+  handleMulterSingle('file'),
+  async (req: Request, res: Response) => {
+    try {
+      const maxUploadBytes = 10 * 1024 * 1024;
+      let rawBuffer: Buffer | null = null;
+
+      if (req.file?.buffer) {
+        if (req.file.size > maxUploadBytes) {
+          return res.status(413).json({ error: 'Uploaded file exceeds 10MB limit' });
+        }
+        rawBuffer = req.file.buffer;
+      } else if (typeof req.body?.content === 'string' && req.body.content.trim()) {
+        rawBuffer = Buffer.from(req.body.content, 'utf8');
+      }
+
+      if (!rawBuffer || rawBuffer.length === 0) {
+        return res.status(400).json({ error: 'Please select a valid guest file' });
+      }
+
+      const detected = parseGuestCredentialsFromBuffer(rawBuffer);
+      if (detected.length === 0) {
+        return res.status(400).json({
+          error: 'Could not detect guest_uid and guest_password in the uploaded file'
+        });
+      }
+
+      const saved = await storage.addGuestAccountsBatch(detected);
+      const [allAccounts, settings] = await Promise.all([
+        storage.getGuestAccounts(),
+        storage.getSettings()
+      ]);
+
+      return res.json({
+        success: true,
+        enabled: settings?.guestLikesEnabled !== false,
+        detectedCount: detected.length,
+        addedCount: saved.addedCount,
+        updatedCount: saved.updatedCount,
+        total: saved.total,
+        accounts: allAccounts.map(sanitizeGuestAccountResponse)
+      });
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message || 'Failed to parse uploaded guest file' });
+    }
+  }
+);
+
+// PUT / PATCH /api/guest-accounts/:id
+const handleUpdateGuestAccount = async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).admin as AdminUser;
+    if (admin.role !== 'owner' && !admin.permissions?.settings_edit) {
+      return res.status(403).json({ error: 'Insufficient permissions to update guest accounts' });
+    }
+
+    const { guestUid, guest_uid, uid, guestPassword, guest_password, password, enabled } = req.body || {};
+    const updates: { guestUid?: string; guestPassword?: string; enabled?: boolean } = {};
+    if (guestUid !== undefined || guest_uid !== undefined || uid !== undefined) {
+      updates.guestUid = String(guestUid ?? guest_uid ?? uid ?? '').trim();
+    }
+    if (guestPassword !== undefined || guest_password !== undefined || password !== undefined) {
+      const nextPass = String(guestPassword ?? guest_password ?? password ?? '').trim();
+      if (nextPass) {
+        updates.guestPassword = nextPass;
+      }
+    }
+    if (enabled !== undefined) {
+      updates.enabled = Boolean(enabled);
+    }
+
+    const updated = await storage.updateGuestAccount(req.params.id, updates);
+    if (!updated) {
+      return res.status(404).json({ error: 'Guest account not found' });
+    }
+
+    return res.json({
+      success: true,
+      account: sanitizeGuestAccountResponse(updated)
+    });
+  } catch (err: any) {
+    return res.status(400).json({ error: err.message || 'Failed to update guest account' });
+  }
+};
+apiRouter.put('/guest-accounts/:id', authenticate, handleUpdateGuestAccount);
+apiRouter.patch('/guest-accounts/:id', authenticate, handleUpdateGuestAccount);
+
+// DELETE /api/guest-accounts/:id
+apiRouter.delete('/guest-accounts/:id', authenticate, async (req: Request, res: Response) => {
+  try {
+    const admin = (req as any).admin as AdminUser;
+    if (admin.role !== 'owner' && !admin.permissions?.settings_edit) {
+      return res.status(403).json({ error: 'Insufficient permissions to delete guest accounts' });
+    }
+
+    const result = await storage.deleteGuestAccount(req.params.id);
+    if (!result.deleted) {
+      return res.status(404).json({ error: 'Guest account not found' });
+    }
+
+    return res.json({
+      success: true,
+      total: result.total
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to delete guest account' });
+  }
+});
+
 // POST /api/items
 apiRouter.post('/items', authenticate, async (req: Request, res: Response) => {
   const admin = (req as any).admin as AdminUser;
@@ -2993,6 +3486,9 @@ apiRouter.get('/settings', authenticate, async (_req: Request, res: Response) =>
     banEnabled: settings.banEnabled ?? true,
     muteEnabled: settings.muteEnabled ?? true,
     cleanServiceEnabled: settings.cleanServiceEnabled ?? false,
+    welcomeMessageEnabled: settings.welcomeMessageEnabled !== undefined ? Boolean(settings.welcomeMessageEnabled) : true,
+    welcomeAutoDeleteEnabled: settings.welcomeAutoDeleteEnabled ?? false,
+    welcomeAutoDeleteSeconds: Math.max(1, Math.min(86400, Math.round(Number(settings.welcomeAutoDeleteSeconds) || 60))),
     moderationDurations: Array.isArray(settings.moderationDurations)
       ? sanitizeModerationDurations(settings.moderationDurations)
       : DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d })),
@@ -3002,6 +3498,7 @@ apiRouter.get('/settings', authenticate, async (_req: Request, res: Response) =>
     forceJoinMode: settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
     requiredChannels: Array.isArray(settings.requiredChannels) ? settings.requiredChannels : [],
     chatWhitelistEnabled: settings.chatWhitelistEnabled ?? false,
+    guestLikesEnabled: settings.guestLikesEnabled !== undefined ? Boolean(settings.guestLikesEnabled) : true,
     allowedChats: (Array.isArray(settings.allowedChats) ? settings.allowedChats : []).map((entry: any) => ({
       ...entry,
       chatId: entry.chatId || entry.id || ''
@@ -3049,6 +3546,15 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
   if (req.body.banEnabled !== undefined) updates.banEnabled = Boolean(req.body.banEnabled);
   if (req.body.muteEnabled !== undefined) updates.muteEnabled = Boolean(req.body.muteEnabled);
   if (req.body.cleanServiceEnabled !== undefined) updates.cleanServiceEnabled = Boolean(req.body.cleanServiceEnabled);
+  if (req.body.welcomeMessageEnabled !== undefined) updates.welcomeMessageEnabled = Boolean(req.body.welcomeMessageEnabled);
+  if (req.body.welcomeAutoDeleteEnabled !== undefined) updates.welcomeAutoDeleteEnabled = Boolean(req.body.welcomeAutoDeleteEnabled);
+  if (req.body.welcomeAutoDeleteSeconds !== undefined) {
+    const parsedSec = Math.round(Number(req.body.welcomeAutoDeleteSeconds));
+    if (!Number.isFinite(parsedSec) || parsedSec <= 0) {
+      return res.status(400).json({ error: 'Welcome auto-delete duration must be a positive number of seconds.' });
+    }
+    updates.welcomeAutoDeleteSeconds = Math.max(1, Math.min(86400, parsedSec));
+  }
   if (req.body.moderationDurations !== undefined) {
     updates.moderationDurations = Array.isArray(req.body.moderationDurations)
       ? sanitizeModerationDurations(req.body.moderationDurations)
@@ -3058,6 +3564,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
     updates.groupWarningLimit = Math.max(1, Math.min(100, Math.round(Number(req.body.groupWarningLimit) || 3)));
   }
   if (req.body.chatWhitelistEnabled !== undefined) updates.chatWhitelistEnabled = Boolean(req.body.chatWhitelistEnabled);
+  if (req.body.guestLikesEnabled !== undefined) updates.guestLikesEnabled = Boolean(req.body.guestLikesEnabled);
   if (req.body.botMode !== undefined) updates.botMode = normalizeBotMode(req.body.botMode);
   if (requiredChannels !== undefined) {
     if (Array.isArray(requiredChannels)) {
@@ -3110,6 +3617,9 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
       banEnabled: newSettings.banEnabled ?? true,
       muteEnabled: newSettings.muteEnabled ?? true,
       cleanServiceEnabled: newSettings.cleanServiceEnabled ?? false,
+      welcomeMessageEnabled: newSettings.welcomeMessageEnabled !== undefined ? Boolean(newSettings.welcomeMessageEnabled) : true,
+      welcomeAutoDeleteEnabled: newSettings.welcomeAutoDeleteEnabled ?? false,
+      welcomeAutoDeleteSeconds: Math.max(1, Math.min(86400, Math.round(Number(newSettings.welcomeAutoDeleteSeconds) || 60))),
       moderationDurations: Array.isArray(newSettings.moderationDurations)
         ? sanitizeModerationDurations(newSettings.moderationDurations)
         : DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d })),
@@ -3120,6 +3630,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
       autoApproveJoinRequests: newSettings.autoApproveJoinRequests ?? true,
       requiredChannels: Array.isArray(newSettings.requiredChannels) ? newSettings.requiredChannels : [],
       chatWhitelistEnabled: newSettings.chatWhitelistEnabled ?? false,
+      guestLikesEnabled: newSettings.guestLikesEnabled !== undefined ? Boolean(newSettings.guestLikesEnabled) : true,
       allowedChats: (Array.isArray(newSettings.allowedChats) ? newSettings.allowedChats : []).map((entry: any) => ({
         ...entry,
         chatId: entry.chatId || entry.id || ''
