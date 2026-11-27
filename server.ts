@@ -59,21 +59,40 @@ async function initBackgroundServices() {
     const envBotToken = rawEnvBotToken && !rawEnvBotToken.includes('your_telegram_bot_token') ? rawEnvBotToken : '';
     const envAdminId = (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '').trim().replace(/^["']|["']$/g, '');
 
-    if (envBotToken) {
-      console.log('🤖 Telegram Bot Token detected from environment. Synchronizing and verifying connection...');
-      const settingsUpdate: any = { botToken: envBotToken };
+    const currentSettings = await storage.getSettings().catch(() => ({} as any));
+    const storedBotToken = String(currentSettings?.botToken || '').trim().replace(/^["']|["']$/g, '');
+    const validStoredToken = storedBotToken && !storedBotToken.includes('your_telegram_bot_token') ? storedBotToken : '';
+    const isEnvTokenChanged = Boolean(envBotToken && (!validStoredToken || currentSettings?.lastEnvBotToken !== envBotToken));
+    const activeMainToken = isEnvTokenChanged ? envBotToken : (validStoredToken || envBotToken);
+
+    if (isEnvTokenChanged) {
+      console.log('🤖 Telegram Bot Token detected from environment. Synchronizing File Bot connection...');
+      const settingsUpdate: any = {
+        botToken: envBotToken,
+        lastEnvBotToken: envBotToken,
+        botMode: 'file_bot',
+        ...(envBotToken !== validStoredToken ? { botUsername: '', botStopped: false } : {})
+      };
       if (envAdminId) settingsUpdate.rootAdminId = envAdminId;
       await storage.updateSettings(settingsUpdate);
+    } else if (currentSettings?.botMode !== 'file_bot' || (envAdminId && !currentSettings?.rootAdminId)) {
+      await storage.updateSettings({
+        botMode: 'file_bot',
+        ...(envAdminId && !currentSettings?.rootAdminId ? { rootAdminId: envAdminId } : {})
+      });
+    }
 
+    if (activeMainToken) {
       try {
-        const me = await TelegramService.callTelegramApi('getMe', {});
+        const me = await TelegramService.callTelegramApi('getMe', {}, activeMainToken);
         if (me?.ok && me.result) {
           const botUsername = me.result.username || '';
           const botName = me.result.first_name || 'Bot';
-          console.log(`✅ [Telegram Connected] Bot: "${botName}" (@${botUsername}) | ID: ${me.result.id}`);
+          console.log(`✅ [Telegram Connected] File Bot: "${botName}" (@${botUsername}) | ID: ${me.result.id}`);
           await storage.updateSettings({
-            botToken: envBotToken,
-            botUsername: botUsername
+            botToken: activeMainToken,
+            botUsername,
+            botMode: 'file_bot'
           });
         } else {
           console.warn('⚠️ [Telegram] Connection verification returned unconfirmed:', me?.description || me);

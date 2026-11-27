@@ -1,6 +1,6 @@
 export type TriggerType = 'hashtag' | 'slash' | 'normal';
 export type OpenMode = 'browser' | 'webapp';
-export type BotOperationalMode = 'file_bot' | 'post_bot' | 'image_url_bot';
+export type BotOperationalMode = 'file_bot';
 
 export interface AdminUser {
   id: string;
@@ -1468,17 +1468,6 @@ export const api = {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to clone bot');
     return data.bot;
-  },
-
-  async changeBotMode(id: string, botMode: BotOperationalMode): Promise<{ ok: boolean; botId: string; botMode: BotOperationalMode; message: string }> {
-    const res = await authFetch(`/api/bots/${encodeURIComponent(id)}/mode`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ botMode })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to change bot mode');
-    return data;
   },
 
   async deleteClonedBot(id: string): Promise<boolean> {

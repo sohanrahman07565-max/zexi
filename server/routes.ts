@@ -261,13 +261,6 @@ function getSessionCookieOptions(req: Request, maxAge: number = 12 * 60 * 60 * 1
 // AUTHENTICATION
 // ============================================================================
 
-type BotModeValue = 'file_bot' | 'post_bot' | 'image_url_bot';
-function normalizeBotMode(mode: any): BotModeValue {
-  if (mode === 'post_bot') return 'post_bot';
-  if (mode === 'image_url_bot') return 'image_url_bot';
-  return 'file_bot';
-}
-
 // Helper to look up cloned bot sub-admin credentials strictly scoped to requestedBotId
 async function findClonedBotAuth(cleanId: string, requestedBotId?: string): Promise<{
   clonedBot: ClonedBotRecord;
@@ -888,7 +881,10 @@ apiRouter.get('/auth/login-design', async (req: Request, res: Response) => {
     botUsername = await TelegramService.getBotUsername();
   } catch {}
 
-  const botToken = process.env.TELEGRAM_CLIENT_SECRET || process.env.TELEGRAM_BOT_TOKEN || settings.botToken || '';
+  const activeBotToken = await TelegramService.getBotToken().catch(() => '');
+  const rawClientSecret = String(process.env.TELEGRAM_CLIENT_SECRET || '').trim();
+  const validClientSecret = rawClientSecret && !rawClientSecret.includes('your_telegram_bot_token') ? rawClientSecret : '';
+  const botToken = validClientSecret || activeBotToken || settings.botToken || '';
   const clientId = process.env.TELEGRAM_CLIENT_ID || process.env.TELEGRAM_BOT_ID || (botToken.includes(':') ? botToken.split(':')[0] : '');
 
   const host = req.get('host') || 'localhost:3000';
@@ -1010,7 +1006,13 @@ async function verifyAndAuthorizeTelegramUser(
   }
 
   const settings = await activeStorage.getSettings();
-  const botToken = matchedClonedBot?.token || process.env.TELEGRAM_CLIENT_SECRET || process.env.TELEGRAM_BOT_TOKEN || settings.botToken || '';
+  const rawClientSecret = String(process.env.TELEGRAM_CLIENT_SECRET || '').trim();
+  const validClientSecret = rawClientSecret && !rawClientSecret.includes('your_telegram_bot_token') ? rawClientSecret : '';
+  const rawStoredTok = String(settings.botToken || '').trim();
+  const validStoredTok = rawStoredTok && !rawStoredTok.includes('your_telegram_bot_token') ? rawStoredTok : '';
+  const rawEnvTok = String(process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '').trim();
+  const validEnvTok = rawEnvTok && !rawEnvTok.includes('your_telegram_bot_token') ? rawEnvTok : '';
+  const botToken = matchedClonedBot?.token || validClientSecret || validStoredTok || validEnvTok || '';
 
   // 1. Verify Telegram Login Widget cryptographic hash signature if provided and not already verified via TMA initData
   if (!skipWidgetHashCheck && tgUser.hash && botToken) {
@@ -1270,12 +1272,13 @@ apiRouter.post('/auth/tma', async (req: Request, res: Response) => {
   const mainStorage = StorageManager.getMainStorage();
   await mainStorage.loadLatest(true);
   const mainSettings = await mainStorage.getSettings();
-  const mainBotToken = (
-    process.env.TELEGRAM_BOT_TOKEN ||
-    process.env.TELEGRAM_CLIENT_SECRET ||
-    mainSettings.botToken ||
-    ''
-  ).trim();
+  const rawClientSecret = String(process.env.TELEGRAM_CLIENT_SECRET || '').trim();
+  const validClientSecret = rawClientSecret && !rawClientSecret.includes('your_telegram_bot_token') ? rawClientSecret : '';
+  const rawStoredTok = String(mainSettings.botToken || '').trim();
+  const validStoredTok = rawStoredTok && !rawStoredTok.includes('your_telegram_bot_token') ? rawStoredTok : '';
+  const rawEnvTok = String(process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '').trim();
+  const validEnvTok = rawEnvTok && !rawEnvTok.includes('your_telegram_bot_token') ? rawEnvTok : '';
+  const mainBotToken = (validStoredTok || validClientSecret || validEnvTok || '').trim();
   const clonedBots = await mainStorage.getClonedBots().catch(() => []);
 
   let verifiedUser: any = null;
@@ -3617,15 +3620,15 @@ apiRouter.put('/design', authenticate, requirePermission('design_edit'), async (
 // GET /api/settings
 apiRouter.get('/settings', authenticate, async (_req: Request, res: Response) => {
   const settings = await storage.getSettings();
-  const token = (process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || settings.botToken || '').trim().replace(/^["']|["']$/g, '');
+  const token = (await TelegramService.getBotToken().catch(() => '')) || '';
 
   let botUsername = settings.botUsername || '';
   if (token && !botUsername) {
     try {
-      const me = await TelegramService.callTelegramApi('getMe', {});
+      const me = await TelegramService.callTelegramApi('getMe', {}, token);
       if (me?.ok && me.result?.username) {
         botUsername = me.result.username;
-        await storage.updateSettings({ botUsername, botToken: token });
+        await storage.updateSettings({ botUsername, botToken: token, botMode: 'file_bot' });
       }
     } catch {}
   }
@@ -3648,7 +3651,7 @@ apiRouter.get('/settings', authenticate, async (_req: Request, res: Response) =>
       ? sanitizeModerationDurations(settings.moderationDurations)
       : DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d })),
     groupWarningLimit: Math.max(1, Math.min(100, Math.round(Number(settings.groupWarningLimit) || 3))),
-    botMode: normalizeBotMode(settings.botMode),
+    botMode: 'file_bot',
     forceSubEnabled: settings.forceSubEnabled ?? false,
     forceJoinMode: settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
     requiredChannels: Array.isArray(settings.requiredChannels) ? settings.requiredChannels : [],
@@ -3686,9 +3689,42 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
     forceJoinMode,
     requiredChannels
   } = req.body;
-  const updates: any = {};
-  if (botToken !== undefined && botToken.trim() !== '') updates.botToken = botToken.trim();
-  if (botUsername !== undefined) updates.botUsername = botUsername.trim();
+  const updates: any = { botMode: 'file_bot' };
+  const activeBotId = String((storage as any)?.botId || 'main').trim() || 'main';
+  let tokenChanged = false;
+  let verifiedNewBotName = '';
+  let cleanNewToken = '';
+
+  if (typeof botToken === 'string' && botToken.trim() !== '') {
+    const rawTok = botToken.trim().replace(/^["']|["']$/g, '');
+    const tokMatch = rawTok.match(/\b(\d{5,16}:[A-Za-z0-9_-]{20,})\b/);
+    cleanNewToken = tokMatch ? tokMatch[1] : rawTok;
+    const previousToken = await TelegramService.getBotToken().catch(() => '');
+    if (cleanNewToken && cleanNewToken !== previousToken) {
+      const me = await TelegramService.callTelegramApi('getMe', {}, cleanNewToken);
+      if (!me?.ok || !me.result) {
+        return res.status(400).json({ error: me?.description || 'Invalid Telegram bot token.' });
+      }
+      if (activeBotId === 'main') {
+        const clonedList = await StorageManager.getMainStorage().getClonedBots().catch(() => []);
+        if (clonedList.some((b) => String(b.token || '').trim() === cleanNewToken)) {
+          return res.status(400).json({ error: 'This bot token is already running as a cloned bot.' });
+        }
+        await TelegramService.stopBot(false);
+      } else {
+        const mainToken = (await StorageManager.getMainStorage().getSettings().catch(() => null))?.botToken || '';
+        if (mainToken && mainToken.trim() === cleanNewToken) {
+          return res.status(400).json({ error: 'This bot token is already used by the main bot.' });
+        }
+      }
+      updates.botToken = cleanNewToken;
+      updates.botUsername = String(me.result.username || '').replace(/^@+/, '').trim();
+      updates.botStopped = false;
+      verifiedNewBotName = String(me.result.first_name || '').trim();
+      tokenChanged = true;
+    }
+  }
+  if (botUsername !== undefined && !tokenChanged) updates.botUsername = botUsername.trim();
   if (rootAdminId !== undefined) updates.rootAdminId = rootAdminId.trim();
   if (maxBotMessagesPerChat !== undefined) updates.maxBotMessagesPerChat = Number(maxBotMessagesPerChat) || 10;
   if (dailyCleanupEnabled !== undefined) updates.dailyCleanupEnabled = Boolean(dailyCleanupEnabled);
@@ -3725,7 +3761,6 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
   }
   if (req.body.chatWhitelistEnabled !== undefined) updates.chatWhitelistEnabled = Boolean(req.body.chatWhitelistEnabled);
   if (req.body.guestLikesEnabled !== undefined) updates.guestLikesEnabled = Boolean(req.body.guestLikesEnabled);
-  if (req.body.botMode !== undefined) updates.botMode = normalizeBotMode(req.body.botMode);
   if (req.body.customEmojiRules !== undefined) {
     const sanitizedRules = sanitizeCustomEmojiRules(req.body.customEmojiRules);
     updates.customEmojiRules = sanitizedRules;
@@ -3767,8 +3802,31 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
     }
   }
 
-  cachedBotInfoPayload = null;
+  invalidateBotInfoCache(activeBotId);
   const newSettings = await storage.updateSettings(updates);
+  if (tokenChanged) {
+    if (activeBotId === 'main') {
+      await TelegramService.cleanBotMemory().catch(() => {});
+      await TelegramService.startBot().catch(() => false);
+      invalidateBotInfoCache('main');
+    } else {
+      const mainStorage = StorageManager.getMainStorage();
+      const cloned = await mainStorage.getClonedBots().catch(() => []);
+      const targetClone = cloned.find((b) => b.id === activeBotId);
+      if (targetClone) {
+        await mainStorage.saveClonedBot({
+          ...targetClone,
+          token: cleanNewToken,
+          username: updates.botUsername ?? targetClone.username,
+          name: verifiedNewBotName || targetClone.name,
+          status: 'active',
+          botMode: 'file_bot'
+        });
+      }
+      await TelegramBotManager.restartBot(activeBotId).catch(() => false);
+      invalidateBotInfoCache(activeBotId);
+    }
+  }
   if (
     forceSubEnabled !== undefined ||
     forceJoinMode !== undefined ||
@@ -3793,7 +3851,7 @@ apiRouter.put('/settings', authenticate, requirePermission('settings_edit'), asy
         ? sanitizeModerationDurations(newSettings.moderationDurations)
         : DEFAULT_MODERATION_DURATIONS.map((d) => ({ ...d })),
       groupWarningLimit: Math.max(1, Math.min(100, Math.round(Number(newSettings.groupWarningLimit) || 3))),
-      botMode: normalizeBotMode(newSettings.botMode),
+      botMode: 'file_bot',
       forceSubEnabled: newSettings.forceSubEnabled ?? false,
       forceJoinMode: newSettings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
       autoApproveJoinRequests: newSettings.autoApproveJoinRequests ?? true,
@@ -4261,12 +4319,9 @@ apiRouter.post('/bots/clone', authenticate, requirePermission('settings_edit'), 
       return res.status(403).json({ error: 'Cloned bot panels are not permitted to clone additional bots.' });
     }
 
-    const { token, owner, ownerId, ownerUsername, botMode } = req.body;
+    const { token, owner, ownerId, ownerUsername } = req.body;
     if (!token || typeof token !== 'string' || !token.trim()) {
       return res.status(400).json({ error: 'Valid Telegram bot token is required' });
-    }
-    if (botMode && botMode !== 'file_bot') {
-      return res.status(400).json({ error: 'Cloned bots only support File Bot mode.' });
     }
     const normalizedMode = 'file_bot';
 
@@ -4429,44 +4484,6 @@ apiRouter.post('/bots/:id/clean-memory', authenticate, requirePermission('settin
     return res.status(500).json({ error: err?.message || 'Failed to clean bot memory' });
   }
 });
-
-// POST & PATCH /api/bots/:id/mode - Dynamically switch bot operational mode ('file_bot' | 'post_bot' | 'image_url_bot')
-const handleBotModeChange = async (req: Request, res: Response) => {
-  try {
-    const targetId = String(req.params.id || '').trim() || 'main';
-    if (!canControlBotTarget(req, targetId)) {
-      return res.status(403).json({ error: 'Not authorized to change mode for this bot instance.' });
-    }
-    const rawMode = String(req.body?.botMode || req.body?.mode || '').trim();
-    if (rawMode !== 'file_bot' && rawMode !== 'post_bot' && rawMode !== 'image_url_bot') {
-      return res.status(400).json({ error: 'Invalid botMode. Must be "file_bot", "post_bot", or "image_url_bot".' });
-    }
-    if (targetId !== 'main' && rawMode !== 'file_bot') {
-      return res.status(400).json({ error: 'Cloned bots only support File Bot mode.' });
-    }
-    const result = await TelegramBotManager.setBotMode(targetId, rawMode);
-    if (!result.ok) {
-      return res.status(400).json({ error: result.error || 'Bot instance not found.' });
-    }
-    invalidateBotInfoCache(targetId);
-    const label =
-      result.botMode === 'post_bot'
-        ? 'Post Bot'
-        : result.botMode === 'image_url_bot'
-          ? 'Image URL Bot'
-          : 'File Bot';
-    return res.json({
-      ok: true,
-      botId: targetId,
-      botMode: result.botMode,
-      message: `Switched bot operational mode to ${label}.`
-    });
-  } catch (err: any) {
-    return res.status(500).json({ error: err?.message || 'Failed to switch bot mode' });
-  }
-};
-apiRouter.post('/bots/:id/mode', authenticate, requirePermission('settings_edit'), handleBotModeChange);
-apiRouter.patch('/bots/:id/mode', authenticate, requirePermission('settings_edit'), handleBotModeChange);
 
 // GET /api/bot/info - Dynamic bot status & profile strictly isolated per activeBotId
 apiRouter.get('/bot/info', async (req: Request, res: Response) => {
@@ -4646,7 +4663,7 @@ apiRouter.get('/bot/info', async (req: Request, res: Response) => {
     ok: isConnected,
     isMain: true,
     botId: 'main',
-    botMode: normalizeBotMode(settings?.botMode),
+    botMode: 'file_bot',
     hasToken: Boolean(token),
     isConnected: isManuallyStopped ? false : isConnected,
     botStatus: isManuallyStopped ? 'stopped' : 'active',

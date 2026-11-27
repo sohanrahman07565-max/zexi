@@ -3,10 +3,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { storage, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord, SharedStorageService, AdminUser, BotOperationalMode, UserReportRecord, AdminReportMessageRef, TelegramMessageEntityRecord, DEFAULT_MODERATION_DURATIONS, sanitizeModerationDurations, FraudKeywordRule, MessageTemplate } from './storage';
+import { storage, ItemRecord, ItemFileEntry, TriggerType, OpenMode, ScheduledDeletion, ForceSubChannel, StorageManager, storageContext, ClonedBotRecord, SharedStorageService, AdminUser, BotOperationalMode, UserReportRecord, AdminReportMessageRef, TelegramMessageEntityRecord, DEFAULT_MODERATION_DURATIONS, sanitizeModerationDurations, FraudKeywordRule, MessageTemplate, GroupWarningConfig } from './storage';
 import { hashPassword, signSessionToken } from './auth';
-import { PostBotEngine } from './postBot';
-import { ImageUrlBotEngine } from './imageUrlBot';
 import { resolveRealBannerImage } from './ffBannerGenerator';
 import { FreeFireGuestService, parseGuestCredentialsFromBuffer } from './ffGuestApi';
 import {
@@ -172,6 +170,7 @@ interface PendingModerationAction {
   targetUsername: string;
   reason?: string;
   adminId: string;
+  initiatedAnonymously?: boolean;
   stage: 'select_duration' | 'custom_keypad' | 'awaiting_reason' | 'confirm_reason';
   keypadDigits: string;
   keypadUnit: 'm' | 'h' | 'd';
@@ -244,6 +243,9 @@ const activeCloneSessions: Map<string, CloneSession> = new Map();
 const activeAddKeySessions: Map<string, KeyCreationSession> = new Map();
 const pendingGroupModerationMap: Map<string, PendingModerationAction> = new Map();
 const activeGroupTempModSessions: Map<string, PendingModerationAction> = new Map();
+const activeDashboardLookupSessions: Map<string, { chatId: string | number; adminId: string; initiatedAnonymously?: boolean; promptMessageId?: number; createdAt: number }> = new Map();
+const recentGroupModerationSyncAt: Map<string, number> = new Map();
+const activeWarningModeKeypads: Map<string, { digits: string; unit: 'm' | 'h' | 'd'; createdAt: number }> = new Map();
 const activeUpdateSessions: Map<string, UpdateItemSession> = new Map();
 const activeEmojiIdSessions: Map<string, EmojiIdSession> = new Map();
 const activeMoreSessions: Map<string, MoreSession> = new Map();
@@ -863,7 +865,13 @@ export class TelegramService {
       return '';
     }
 
-    const envToken = (
+    const settings = await storage.getSettings().catch(() => ({} as any));
+    const storedToken = String(settings?.botToken || '').trim().replace(/^["']|["']$/g, '');
+    if (storedToken && !storedToken.includes('your_telegram_bot_token')) {
+      return storedToken;
+    }
+
+    const rawEnvToken = (
       process.env.BOT_TOKEN ||
       process.env.TELEGRAM_BOT_TOKEN ||
       process.env.TG_BOT_TOKEN ||
@@ -871,9 +879,7 @@ export class TelegramService {
       process.env.TOKEN ||
       ''
     ).trim().replace(/^["']|["']$/g, '');
-    if (envToken) return envToken;
-    const settings = await storage.getSettings().catch(() => ({} as any));
-    return (settings?.botToken || '').trim().replace(/^["']|["']$/g, '');
+    return rawEnvToken && !rawEnvToken.includes('your_telegram_bot_token') ? rawEnvToken : '';
   }
 
   public static async callTelegramApi(
@@ -1704,8 +1710,16 @@ export class TelegramService {
     let targetName = '';
     let targetUsername = '';
 
-    if (message?.reply_to_message?.from) {
-      const targetUser = message.reply_to_message.from;
+    const replyMsg = message?.reply_to_message;
+    const isTopicRootReply = Boolean(
+      replyMsg &&
+      (replyMsg.forum_topic_created ||
+        (message?.is_topic_message &&
+          message?.message_thread_id &&
+          Number(replyMsg.message_id) === Number(message.message_thread_id)))
+    );
+    if (replyMsg?.from && !isTopicRootReply) {
+      const targetUser = replyMsg.from;
       targetId = String(targetUser.id);
       const fullName = [targetUser.first_name, targetUser.last_name].filter(Boolean).join(' ').trim();
       targetName = fullName || targetUser.username || `User ${targetId}`;
@@ -1740,16 +1754,15 @@ export class TelegramService {
       targetUsername = query.startsWith('@') ? query : '';
     }
 
-    if (chatId && /^\d+$/.test(targetId) && (!targetName || targetName === targetId)) {
+    if (chatId && /^\d+$/.test(targetId)) {
       try {
-        const memRes = await this.callTelegramApi('getChatMember', {
-          chat_id: chatId,
-          user_id: Number(targetId)
-        });
-        const u = memRes?.ok ? memRes.result?.user : null;
+        const { memberInfo } = await this.syncGroupMemberFromTelegram(chatId, targetId);
+        const u = memberInfo?.user;
         if (u) {
           const fullName = [u.first_name, u.last_name].filter(Boolean).join(' ').trim();
-          if (fullName) targetName = fullName;
+          if (fullName && (!targetName || targetName === targetId || targetName.startsWith('@'))) {
+            targetName = fullName;
+          }
           if (!targetUsername && u.username) {
             targetUsername = `@${String(u.username).replace(/^@/, '')}`;
           }
@@ -1808,6 +1821,42 @@ export class TelegramService {
     return { valid: true, isPermanent: false, durationSec, displayLabel };
   }
 
+  private static extractModerationDurationAndReason(input: string): {
+    durationToken: string;
+    reason: string;
+  } {
+    const trimmed = String(input || '').trim();
+    if (!trimmed) {
+      return { durationToken: '', reason: '' };
+    }
+
+    const singleMatch = trimmed.match(/^([^\s]+)(?:\s+([\s\S]+))?$/);
+    if (singleMatch) {
+      const firstTok = singleMatch[1].trim();
+      if (this.parseModerationDuration(firstTok).valid) {
+        return {
+          durationToken: firstTok,
+          reason: (singleMatch[2] || '').trim()
+        };
+      }
+    }
+
+    const spacedMatch = trimmed.match(
+      /^(\d+(?:\.\d+)?)\s+(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)(?:\s+([\s\S]+))?$/i
+    );
+    if (spacedMatch) {
+      const combinedTok = `${spacedMatch[1]}${spacedMatch[2]}`;
+      if (this.parseModerationDuration(combinedTok).valid) {
+        return {
+          durationToken: combinedTok,
+          reason: (spacedMatch[3] || '').trim()
+        };
+      }
+    }
+
+    return { durationToken: '', reason: trimmed };
+  }
+
   private static async parseModerationCommandArgs(
     chatId: number | string,
     message: any,
@@ -1819,46 +1868,40 @@ export class TelegramService {
     reason: string;
   }> {
     const trimmed = String(rawArg || '').trim();
+    const replyMsg = message?.reply_to_message;
+    const isTopicRootReply = Boolean(
+      replyMsg &&
+      (replyMsg.forum_topic_created ||
+        (message?.is_topic_message &&
+          message?.message_thread_id &&
+          Number(replyMsg.message_id) === Number(message.message_thread_id)))
+    );
 
-    if (message?.reply_to_message?.from) {
+    if (replyMsg?.from && !isTopicRootReply) {
       const target = await this.resolveModerationTarget(chatId, message, '');
       if (!trimmed) {
         return { target, targetQuery: '', durationToken: '', reason: '' };
       }
-      const parts = trimmed.split(/\s+/);
-      const dur = this.parseModerationDuration(parts[0]);
-      if (dur.valid) {
-        return {
-          target,
-          targetQuery: '',
-          durationToken: parts[0],
-          reason: parts.slice(1).join(' ').trim()
-        };
-      }
-      return { target, targetQuery: '', durationToken: '', reason: trimmed };
+      const { durationToken, reason } = this.extractModerationDurationAndReason(trimmed);
+      return { target, targetQuery: '', durationToken, reason };
     }
 
     const textMention = Array.isArray(message?.entities)
       ? message.entities.find((e: any) => e?.type === 'text_mention' && e.user?.id && Number(e.offset) > 0)
       : null;
 
-    if (textMention?.user && typeof message?.text === 'string') {
+    const rawSourceText = typeof message?.text === 'string'
+      ? message.text
+      : (typeof message?.caption === 'string' ? message.caption : '');
+
+    if (textMention?.user && rawSourceText) {
       const target = await this.resolveModerationTarget(chatId, message, '');
-      const afterMention = message.text.slice(Number(textMention.offset) + Number(textMention.length)).trim();
+      const afterMention = rawSourceText.slice(Number(textMention.offset) + Number(textMention.length)).trim();
       if (!afterMention) {
         return { target, targetQuery: target.name, durationToken: '', reason: '' };
       }
-      const parts = afterMention.split(/\s+/);
-      const dur = this.parseModerationDuration(parts[0]);
-      if (dur.valid) {
-        return {
-          target,
-          targetQuery: target.name,
-          durationToken: parts[0],
-          reason: parts.slice(1).join(' ').trim()
-        };
-      }
-      return { target, targetQuery: target.name, durationToken: '', reason: afterMention };
+      const { durationToken, reason } = this.extractModerationDurationAndReason(afterMention);
+      return { target, targetQuery: target.name, durationToken, reason };
     }
 
     if (!trimmed) {
@@ -1870,8 +1913,10 @@ export class TelegramService {
       };
     }
 
-    const parts = trimmed.split(/\s+/);
-    const firstPart = parts[0].trim();
+    const firstTokenMatch = trimmed.match(/^([^\s]+)(?:\s+([\s\S]+))?$/);
+    const firstPart = firstTokenMatch ? firstTokenMatch[1].trim() : trimmed;
+    const remainder = firstTokenMatch ? (firstTokenMatch[2] || '').trim() : '';
+
     if (this.parseModerationDuration(firstPart).valid) {
       return {
         target: { id: '', name: '', username: '' },
@@ -1882,30 +1927,28 @@ export class TelegramService {
     }
 
     const target = await this.resolveModerationTarget(chatId, message, firstPart);
-    const rest = parts.slice(1);
-    if (rest.length === 0) {
+    if (!remainder) {
       return { target, targetQuery: firstPart, durationToken: '', reason: '' };
     }
-    const maybeDur = this.parseModerationDuration(rest[0]);
-    if (maybeDur.valid) {
-      return {
-        target,
-        targetQuery: firstPart,
-        durationToken: rest[0],
-        reason: rest.slice(1).join(' ').trim()
-      };
-    }
+    const { durationToken, reason } = this.extractModerationDurationAndReason(remainder);
     return {
       target,
       targetQuery: firstPart,
-      durationToken: '',
-      reason: rest.join(' ').trim()
+      durationToken,
+      reason
     };
   }
 
   private static async isGroupModerator(message: any, fromId: string | number): Promise<boolean> {
     const cleanFromId = fromId !== undefined && fromId !== null ? String(fromId).trim() : '';
-    if (message?.sender_chat?.id && message?.chat?.id && String(message.sender_chat.id) === String(message.chat.id)) {
+    const cleanChatId = message?.chat?.id !== undefined && message?.chat?.id !== null ? String(message.chat.id).trim() : '';
+    const cleanSenderChatId = message?.sender_chat?.id !== undefined && message?.sender_chat?.id !== null
+      ? String(message.sender_chat.id).trim()
+      : '';
+    if (cleanChatId && cleanSenderChatId && cleanSenderChatId === cleanChatId) {
+      return true;
+    }
+    if (cleanFromId === '1087968824' && (!cleanSenderChatId || (cleanChatId && cleanSenderChatId === cleanChatId))) {
       return true;
     }
     if (cleanFromId && (await this.isOwnerAdmin(cleanFromId, message?.from?.username))) {
@@ -1981,6 +2024,143 @@ export class TelegramService {
     return `${trimmedName} • ${dur}`;
   }
 
+  private static formatModerationTimestamp(iso?: string): string {
+    if (!iso) return 'Unknown';
+    const dt = new Date(iso);
+    if (!Number.isFinite(dt.getTime())) return 'Unknown';
+    const yyyy = dt.getUTCFullYear();
+    const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(dt.getUTCDate()).padStart(2, '0');
+    const hh = String(dt.getUTCHours()).padStart(2, '0');
+    const mi = String(dt.getUTCMinutes()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi} UTC`;
+  }
+
+  private static isTelegramMemberMuted(memberInfo: any): boolean {
+    if (!memberInfo) return false;
+    const status = String(memberInfo.status || '').toLowerCase();
+    if (status !== 'restricted') return false;
+    return (
+      memberInfo.can_send_messages === false ||
+      memberInfo.can_send_media_messages === false ||
+      memberInfo.can_send_audios === false ||
+      memberInfo.can_send_documents === false ||
+      memberInfo.can_send_photos === false ||
+      memberInfo.can_send_videos === false ||
+      memberInfo.can_send_video_notes === false ||
+      memberInfo.can_send_voice_notes === false ||
+      memberInfo.can_send_polls === false ||
+      memberInfo.can_send_other_messages === false ||
+      memberInfo.can_add_web_page_previews === false
+    );
+  }
+
+  private static async applyTelegramMemberModerationState(
+    chatId: string | number,
+    memberInfo: any,
+    fallbackUser?: any
+  ): Promise<'ban' | 'mute' | 'none'> {
+    const userObj = memberInfo?.user || fallbackUser;
+    const userId = userObj?.id !== undefined && userObj?.id !== null ? String(userObj.id).trim() : '';
+    if (!userId || !/^\d+$/.test(userId) || userObj?.is_bot) {
+      return 'none';
+    }
+
+    const fullName = [userObj?.first_name, userObj?.last_name].filter(Boolean).join(' ').trim();
+    const cleanUsername = userObj?.username ? String(userObj.username).replace(/^@+/, '').trim() : undefined;
+
+    storage.trackGroupMember(chatId, {
+      id: userId,
+      username: cleanUsername,
+      firstName: userObj?.first_name,
+      lastName: userObj?.last_name
+    });
+
+    const status = String(memberInfo?.status || '').toLowerCase();
+    const rawUntilSec = Number(memberInfo?.until_date || 0);
+    const untilMs =
+      Number.isFinite(rawUntilSec) && rawUntilSec > 0 && rawUntilSec * 1000 > Date.now()
+        ? rawUntilSec * 1000
+        : undefined;
+
+    if (status === 'kicked') {
+      await storage.setGroupMemberBanned(chatId, userId, true, {
+        untilMs,
+        preserveExistingReason: true,
+        name: fullName || undefined,
+        username: cleanUsername
+      }).catch(() => {});
+      return 'ban';
+    }
+
+    if (this.isTelegramMemberMuted(memberInfo)) {
+      await storage.setGroupMemberMuted(chatId, userId, true, {
+        untilMs,
+        preserveExistingReason: true,
+        name: fullName || undefined,
+        username: cleanUsername
+      }).catch(() => {});
+      return 'mute';
+    }
+
+    const existing = await storage.getGroupMemberModeration(chatId, userId).catch(() => null);
+    if (existing?.isBanned) {
+      await storage.setGroupMemberBanned(chatId, userId, false).catch(() => {});
+      if (!storage.hasActiveBanInAnyGroup(userId)) {
+        await storage.setBotUserBanned(userId, false).catch(() => {});
+      }
+    }
+    if (existing?.isMuted) {
+      await storage.setGroupMemberMuted(chatId, userId, false).catch(() => {});
+      await storage.setBotUserMuted(userId, false).catch(() => {});
+    }
+    return 'none';
+  }
+
+  private static async syncGroupMemberFromTelegram(
+    chatId: string | number,
+    userId: string | number
+  ): Promise<{ memberInfo: any | null; kind: 'ban' | 'mute' | 'none' }> {
+    const cleanUid = String(userId || '').trim();
+    if (!chatId || !/^\d+$/.test(cleanUid)) {
+      return { memberInfo: null, kind: 'none' };
+    }
+    const res = await this.callTelegramApi('getChatMember', {
+      chat_id: chatId,
+      user_id: Number(cleanUid)
+    }).catch(() => null);
+    if (!res?.ok || !res.result) {
+      return { memberInfo: null, kind: 'none' };
+    }
+    const kind = await this.applyTelegramMemberModerationState(chatId, res.result, res.result.user);
+    return { memberInfo: res.result, kind };
+  }
+
+  private static async syncTrackedGroupMembersFromTelegram(
+    chatId: string | number,
+    force = false
+  ): Promise<void> {
+    const botScopeId = String((storage as any)?.botId || 'main').trim() || 'main';
+    const syncKey = `${botScopeId}:${String(chatId).trim()}`;
+    const now = Date.now();
+    const lastSync = recentGroupModerationSyncAt.get(syncKey) || 0;
+    if (!force && now - lastSync < 8000) {
+      return;
+    }
+    recentGroupModerationSyncAt.set(syncKey, now);
+
+    const candidateIds = await storage.getTrackedGroupMemberIdsForSync(chatId, 48).catch(() => []);
+    if (candidateIds.length === 0) return;
+
+    const batchSize = 8;
+    for (let i = 0; i < candidateIds.length; i += batchSize) {
+      const batch = candidateIds.slice(i, i + batchSize);
+      await Promise.all(
+        batch.map((uid) => this.syncGroupMemberFromTelegram(chatId, uid).catch(() => null))
+      );
+    }
+  }
+
   private static async sendOrEditOwnerDashboardMessage(
     chatId: string | number,
     text: string,
@@ -2026,8 +2206,10 @@ export class TelegramService {
     chatId: string | number,
     editMessageId?: number,
     replyToMessageId?: number,
-    threadId?: number
+    threadId?: number,
+    forceSync = false
   ): Promise<void> {
+    await this.syncTrackedGroupMembersFromTelegram(chatId, forceSync).catch(() => {});
     const [countRes, summary] = await Promise.all([
       this.callTelegramApi('getChatMemberCount', { chat_id: chatId }).catch(() => null),
       storage.getGroupModerationSummary(chatId)
@@ -2052,7 +2234,8 @@ export class TelegramService {
         { text: `🔇 Muted Users (${summary.mutedUsers.length})`, callback_data: 'adm_list:mute:0', style: 'primary' }
       ],
       [
-        { text: '🔄 Refresh', callback_data: 'adm_dash' },
+        { text: '🔍 Check User', callback_data: 'adm_lookup' },
+        { text: '🔄 Refresh', callback_data: 'adm_refresh' },
         { text: '✖️ Close', callback_data: 'adm_close' }
       ]
     ];
@@ -2066,6 +2249,7 @@ export class TelegramService {
     kind: 'ban' | 'mute',
     page: number
   ): Promise<void> {
+    await this.syncTrackedGroupMembersFromTelegram(chatId, false).catch(() => {});
     const summary = await storage.getGroupModerationSummary(chatId);
     const list = kind === 'ban' ? summary.bannedUsers : summary.mutedUsers;
 
@@ -2078,9 +2262,20 @@ export class TelegramService {
       ? `🚫 <b>Banned Users (${list.length})</b>`
       : `🔇 <b>Muted Users (${list.length})</b>`;
 
+    const listLines = slice.map((u, idx) => {
+      const num = safePage * perPage + idx + 1;
+      const untilIso = kind === 'ban' ? u.banUntil : u.muteUntil;
+      const dur = this.formatRemainingModerationDuration(untilIso);
+      const rawReason = String((kind === 'ban' ? u.banReason : u.muteReason) || '').trim() || 'No reason';
+      const shortReason = rawReason.length > 64 ? `${rawReason.slice(0, 61)}...` : rawReason;
+      const displayName = u.firstName || u.username || u.userId;
+      const profileLink = this.formatUserProfileLink(displayName, u.username, u.userId);
+      return `${num}. ${profileLink} • <code>${this.escapeHtml(dur)}</code>\n   📝 <i>${this.escapeHtml(shortReason)}</i>`;
+    });
+
     const text = list.length === 0
       ? `${header}\n\n<i>No active ${kind === 'ban' ? 'banned' : 'muted'} users in this group.</i>`
-      : `${header}${totalPages > 1 ? ` • Page ${safePage + 1}/${totalPages}` : ''}\n\n<i>Select a user to manage:</i>`;
+      : `${header}${totalPages > 1 ? ` • Page ${safePage + 1}/${totalPages}` : ''}\n\n${listLines.join('\n')}\n\n<i>Select a user to manage:</i>`;
 
     const keyboard: any[][] = [];
     for (const u of slice) {
@@ -2096,10 +2291,11 @@ export class TelegramService {
       if (safePage > 0) {
         navRow.push({ text: '◀️ Prev', callback_data: `adm_list:${kind}:${safePage - 1}` });
       }
+      navRow.push({ text: `📄 ${safePage + 1}/${totalPages}`, callback_data: 'adm_noop' });
       if (safePage < totalPages - 1) {
         navRow.push({ text: 'Next ▶️', callback_data: `adm_list:${kind}:${safePage + 1}` });
       }
-      if (navRow.length > 0) keyboard.push(navRow);
+      keyboard.push(navRow);
     }
 
     keyboard.push([
@@ -2112,21 +2308,28 @@ export class TelegramService {
 
   private static async renderOwnerModerationUserDetail(
     chatId: string | number,
-    editMessageId: number,
+    editMessageId: number | undefined,
     kind: 'ban' | 'mute',
     userId: string,
-    page: number
+    page: number,
+    replyToMessageId?: number,
+    threadId?: number
   ): Promise<void> {
+    await this.syncGroupMemberFromTelegram(chatId, userId).catch(() => {});
     const user = await storage.getGroupMemberModeration(chatId, userId);
     const isActive = kind === 'ban' ? Boolean(user?.isBanned) : Boolean(user?.isMuted);
     if (!user || !isActive) {
-      await this.renderOwnerModerationList(chatId, editMessageId, kind, page);
+      if (editMessageId) {
+        await this.renderOwnerModerationList(chatId, editMessageId, kind, page);
+      }
       return;
     }
 
     const untilIso = kind === 'ban' ? user.banUntil : user.muteUntil;
-    const reason = kind === 'ban' ? user.banReason : user.muteReason;
+    const timestampIso = kind === 'ban' ? user.bannedAt : user.mutedAt;
+    const reason = String((kind === 'ban' ? user.banReason : user.muteReason) || '').trim() || 'No reason';
     const durationText = this.formatRemainingModerationDuration(untilIso);
+    const sinceText = this.formatModerationTimestamp(timestampIso);
     const displayName = user.firstName || user.username || user.userId;
     const profileLink = this.formatUserProfileLink(displayName, user.username, user.userId);
     const title = kind === 'ban' ? '🚫 <b>Banned User</b>' : '🔇 <b>Muted User</b>';
@@ -2135,30 +2338,65 @@ export class TelegramService {
       `${title}\n\n` +
       `👤 <b>User:</b> ${profileLink}\n` +
       `🆔 <b>ID:</b> <code>${this.escapeHtml(String(user.userId))}</code>\n` +
-      `⏱ <b>Duration:</b> <code>${this.escapeHtml(durationText)}</code>` +
-      (reason ? `\n📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>` : '');
+      `⏱ <b>Duration:</b> <code>${this.escapeHtml(durationText)}</code>\n` +
+      `🕒 <b>Since:</b> <code>${this.escapeHtml(sinceText)}</code>\n` +
+      `📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>`;
 
     const isTemp = Boolean(untilIso);
+    const liftBtn = {
+      text: kind === 'ban' ? '✅ Unban' : '🔊 Unmute',
+      callback_data: `adm_un:${kind}:${user.userId}:${page}`,
+      style: 'success'
+    };
+    const keyboard: any[][] = isTemp
+      ? [
+          [
+            { text: '➖ Decrease', callback_data: `adm_adj:${kind}:${user.userId}:dec:${page}` },
+            { text: '➕ Increase', callback_data: `adm_adj:${kind}:${user.userId}:inc:${page}` }
+          ],
+          [
+            liftBtn,
+            { text: '♾️ Permanent', callback_data: `adm_adj:${kind}:${user.userId}:perm:${page}`, style: 'danger' }
+          ],
+          [
+            { text: '⬅️ Back', callback_data: `adm_list:${kind}:${page}` },
+            { text: '🏠 Dashboard', callback_data: 'adm_dash' }
+          ]
+        ]
+      : [
+          [
+            liftBtn,
+            { text: '➖ 24h Temp', callback_data: `adm_adj:${kind}:${user.userId}:dec:${page}` }
+          ],
+          [
+            { text: '⬅️ Back', callback_data: `adm_list:${kind}:${page}` },
+            { text: '🏠 Dashboard', callback_data: 'adm_dash' }
+          ]
+        ];
+
+    await this.sendOrEditOwnerDashboardMessage(chatId, text, keyboard, editMessageId, replyToMessageId, threadId);
+  }
+
+  private static async renderOwnerUserStatusCard(
+    chatId: string | number,
+    target: { id: string; name: string; username?: string },
+    editMessageId?: number,
+    replyToMessageId?: number,
+    threadId?: number
+  ): Promise<void> {
+    const profileLink = this.formatUserProfileLink(target.name, target.username, target.id);
+    const text =
+      `🔍 <b>User Status</b>\n\n` +
+      `👤 <b>User:</b> ${profileLink}\n` +
+      `🆔 <b>ID:</b> <code>${this.escapeHtml(String(target.id))}</code>\n` +
+      `✅ <b>Status:</b> <code>Active (Not Banned / Not Muted)</code>`;
     const keyboard: any[][] = [
       [
-        { text: '➖ Decrease', callback_data: `adm_adj:${kind}:${user.userId}:dec:${page}` },
-        { text: '➕ Increase', callback_data: `adm_adj:${kind}:${user.userId}:inc:${page}` }
-      ],
-      isTemp
-        ? [
-            { text: kind === 'ban' ? '✅ Unban' : '🔊 Unmute', callback_data: `adm_un:${kind}:${user.userId}:${page}`, style: 'success' },
-            { text: '♾️ Permanent', callback_data: `adm_adj:${kind}:${user.userId}:perm:${page}`, style: 'danger' }
-          ]
-        : [
-            { text: kind === 'ban' ? '✅ Unban' : '🔊 Unmute', callback_data: `adm_un:${kind}:${user.userId}:${page}`, style: 'success' }
-          ],
-      [
-        { text: '⬅️ Back', callback_data: `adm_list:${kind}:${page}` },
-        { text: '🏠 Dashboard', callback_data: 'adm_dash' }
+        { text: '🏠 Dashboard', callback_data: 'adm_dash' },
+        { text: '✖️ Close', callback_data: 'adm_close' }
       ]
     ];
-
-    await this.sendOrEditOwnerDashboardMessage(chatId, text, keyboard, editMessageId);
+    await this.sendOrEditOwnerDashboardMessage(chatId, text, keyboard, editMessageId, replyToMessageId, threadId);
   }
 
   private static async handleOwnerModerationDurationAdjust(
@@ -2439,9 +2677,27 @@ export class TelegramService {
     isPermanent?: boolean;
     reason?: string;
     replyToMessageId?: number;
+    threadId?: number;
     editMessageId?: number;
   }): Promise<{ ok: boolean; error?: string }> {
-    const { chatId, action, target, durationToken, reason, replyToMessageId, editMessageId } = params;
+    const { chatId, action, target, durationToken, reason, replyToMessageId, threadId, editMessageId } = params;
+    const sendCardWithFallback = async (htmlText: string) => {
+      const res = await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: htmlText,
+        parse_mode: 'HTML',
+        ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
+        ...(threadId ? { message_thread_id: threadId } : {})
+      }).catch(() => null);
+      if (!res?.ok && replyToMessageId) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: htmlText,
+          parse_mode: 'HTML',
+          ...(threadId ? { message_thread_id: threadId } : {})
+        }).catch(() => {});
+      }
+    };
     if (!target.id || !/^\d+$/.test(target.id)) {
       const errText = `❌ <b>User Not Found</b>\n<i>Could not resolve a Telegram User ID for <code>${this.escapeHtml(target.name || target.id || 'target')}</code>. Reply to their message or pass their numeric User ID.</i>`;
       if (editMessageId) {
@@ -2453,12 +2709,7 @@ export class TelegramService {
           reply_markup: { inline_keyboard: [] }
         }).catch(() => {});
       } else {
-        await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text: errText,
-          parse_mode: 'HTML',
-          ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
-        });
+        await sendCardWithFallback(errText);
       }
       return { ok: false, error: 'Invalid user ID' };
     }
@@ -2475,12 +2726,7 @@ export class TelegramService {
           reply_markup: { inline_keyboard: [] }
         }).catch(() => {});
       } else {
-        await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text: selfText,
-          parse_mode: 'HTML',
-          ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
-        });
+        await sendCardWithFallback(selfText);
       }
       return { ok: false, error: 'Cannot target self' };
     }
@@ -2497,12 +2743,7 @@ export class TelegramService {
           reply_markup: { inline_keyboard: [] }
         }).catch(() => {});
       } else {
-        await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text: adminSkipText,
-          parse_mode: 'HTML',
-          ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
-        });
+        await sendCardWithFallback(adminSkipText);
       }
       return { ok: false, error: 'Target is admin' };
     }
@@ -2555,28 +2796,24 @@ export class TelegramService {
           reply_markup: { inline_keyboard: [] }
         }).catch(() => {});
       } else {
-        await this.callTelegramApi('sendMessage', {
-          chat_id: chatId,
-          text: failText,
-          parse_mode: 'HTML',
-          ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
-        });
+        await sendCardWithFallback(failText);
       }
       return { ok: false, error: apiRes?.description || 'API failed' };
     }
 
+    const effectiveReason = String(reason || '').trim() || 'No reason';
     const untilMs = untilDate ? untilDate * 1000 : undefined;
     if (action === 'ban') {
       await storage.setGroupMemberBanned(chatId, target.id, true, {
         untilMs,
-        reason,
+        reason: effectiveReason,
         name: target.name,
         username: target.username
       });
       if (isPermanent) {
         await storage.setBotUserBanned(target.id, true, {
           chatId: String(chatId),
-          reason,
+          reason: effectiveReason,
           name: target.name,
           username: target.username
         }).catch(() => {});
@@ -2584,7 +2821,7 @@ export class TelegramService {
     } else {
       await storage.setGroupMemberMuted(chatId, target.id, true, {
         untilMs,
-        reason,
+        reason: effectiveReason,
         name: target.name,
         username: target.username
       });
@@ -2597,8 +2834,8 @@ export class TelegramService {
 
     const confirmationText =
       `${title}\n\n` +
-      `👤 <b>User:</b> ${userProfileLink}` +
-      (reason ? `\n📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>` : '');
+      `👤 <b>User:</b> ${userProfileLink}\n` +
+      `📝 <b>Reason:</b> <i>${this.escapeHtml(effectiveReason)}</i>`;
 
     if (editMessageId) {
       await this.callTelegramApi('editMessageText', {
@@ -2609,15 +2846,292 @@ export class TelegramService {
         reply_markup: { inline_keyboard: [] }
       }).catch(() => {});
     } else {
-      await this.callTelegramApi('sendMessage', {
-        chat_id: chatId,
-        text: confirmationText,
-        parse_mode: 'HTML',
-        ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
-      });
+      await sendCardWithFallback(confirmationText);
     }
 
     return { ok: true };
+  }
+
+  private static buildRemoveWarningKeyboard(
+    userId: string | number,
+    fraudRuleId?: string
+  ): { inline_keyboard: any[][] } {
+    const cleanUid = String(userId ?? '').trim();
+    let callbackData = `warnrm:g:${cleanUid}`;
+    if (fraudRuleId) {
+      const shortHash = crypto.createHash('md5').update(String(fraudRuleId)).digest('hex').slice(0, 8);
+      callbackData = `warnrm:f:${cleanUid}:${shortHash}`;
+    }
+    return {
+      inline_keyboard: [[{ text: 'Remove Warning (Admin Only)', callback_data: callbackData }]]
+    };
+  }
+
+  private static async executeWarningLimitPunishment(params: {
+    chatId: string | number;
+    target: { id: string; name: string; username: string };
+    reason: string;
+    warningLimit: number;
+    useBanNoticeTemplate?: boolean;
+    replyToMessageId?: number;
+    threadId?: number;
+  }): Promise<void> {
+    const { chatId, target, reason, warningLimit, useBanNoticeTemplate, replyToMessageId, threadId } = params;
+    const groupSettings = await storage.getSettings();
+    const warnConfig = await storage.getGroupWarningConfig(chatId);
+    const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
+
+    const sendNotice = async (htmlText: string) => {
+      const res = await this.callTelegramApi('sendMessage', {
+        chat_id: chatId,
+        text: htmlText,
+        parse_mode: 'HTML',
+        ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
+        ...(threadId ? { message_thread_id: threadId } : {})
+      }).catch(() => null);
+      if (!res?.ok && replyToMessageId) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: chatId,
+          text: htmlText,
+          parse_mode: 'HTML',
+          ...(threadId ? { message_thread_id: threadId } : {})
+        }).catch(() => {});
+      }
+    };
+
+    const actionEnabled =
+      warnConfig.action === 'mute'
+        ? groupSettings.muteEnabled !== false
+        : groupSettings.banEnabled !== false;
+
+    await storage.resetUserLinkWarning(chatId, target.id);
+
+    if (!actionEnabled) {
+      await sendNotice(
+        `⚠️ <b>Warning ${warningLimit}/${warningLimit}</b>\n\n` +
+        `👤 <b>User:</b> ${userProfileLink}\n` +
+        `🚫 <b>Reason:</b> ${this.escapeHtml(reason)}`
+      );
+      return;
+    }
+
+    const untilDate =
+      !warnConfig.isPermanent && warnConfig.durationSec >= 30
+        ? Math.floor(Date.now() / 1000) + warnConfig.durationSec
+        : undefined;
+    const untilMs = untilDate ? untilDate * 1000 : undefined;
+
+    if (warnConfig.action === 'mute') {
+      try {
+        await this.callTelegramApi('restrictChatMember', {
+          chat_id: chatId,
+          user_id: Number(target.id) || target.id,
+          permissions: {
+            can_send_messages: false,
+            can_send_audios: false,
+            can_send_documents: false,
+            can_send_photos: false,
+            can_send_videos: false,
+            can_send_video_notes: false,
+            can_send_voice_notes: false,
+            can_send_polls: false,
+            can_send_other_messages: false,
+            can_add_web_page_previews: false
+          },
+          ...(untilDate ? { until_date: untilDate } : {})
+        });
+      } catch (muteErr) {
+        console.warn('[Warning Limit] restrictChatMember error:', muteErr);
+      }
+
+      await storage.setGroupMemberMuted(chatId, target.id, true, {
+        untilMs,
+        reason,
+        name: target.name,
+        username: target.username
+      });
+
+      const title = warnConfig.isPermanent
+        ? '🔇 <b>Muted Permanently</b>'
+        : `🔇 <b>Muted for ${this.escapeHtml(warnConfig.durationLabel)}</b>`;
+      await sendNotice(
+        `${title}\n\n` +
+        `👤 <b>User:</b> ${userProfileLink}\n` +
+        `⚠️ <b>Reason:</b> ${this.escapeHtml(reason)} (${warningLimit}/${warningLimit})`
+      );
+      return;
+    }
+
+    // Default / configured 'ban'
+    try {
+      await this.callTelegramApi('banChatMember', {
+        chat_id: chatId,
+        user_id: Number(target.id) || target.id,
+        ...(untilDate ? { until_date: untilDate } : {})
+      });
+    } catch (banErr) {
+      console.warn('[Warning Limit] banChatMember error:', banErr);
+    }
+
+    await storage.setGroupMemberBanned(chatId, target.id, true, {
+      untilMs,
+      reason,
+      name: target.name,
+      username: target.username
+    });
+    if (warnConfig.isPermanent) {
+      await storage.setBotUserBanned(target.id, true, {
+        chatId: String(chatId),
+        reason,
+        name: target.name,
+        username: target.username
+      }).catch(() => {});
+    }
+
+    if (useBanNoticeTemplate && warnConfig.isPermanent) {
+      const templates = await storage.getTemplates();
+      const banTemplate = templates.BAN_NOTICE?.content ||
+        '🚫 <b>Banned permanently</b>\n\n👤 <b>User:</b> {name}\n⚠️ <b>Reason:</b> Reached warning limit ({strikes}/{strikes}).';
+      const cleanUsername = target.username ? target.username.replace(/^@+/, '') : '';
+      const banNotice = banTemplate
+        .replace(/<code>\s*{(?:name|user_name)}\s*<\/code>/gi, userProfileLink)
+        .replace(/{name}/g, userProfileLink)
+        .replace(/{user_name}/g, userProfileLink)
+        .replace(/{username}/g, cleanUsername ? TelegramService.escapeHtml(cleanUsername) : 'N/A')
+        .replace(/{user_id}/g, TelegramService.escapeHtml(String(target.id)))
+        .replace(/{strikes}/g, String(warningLimit));
+      await sendNotice(banNotice);
+      return;
+    }
+
+    const title = warnConfig.isPermanent
+      ? '🚫 <b>Banned Permanently</b>'
+      : `🚫 <b>Banned for ${this.escapeHtml(warnConfig.durationLabel)}</b>`;
+    await sendNotice(
+      `${title}\n\n` +
+      `👤 <b>User:</b> ${userProfileLink}\n` +
+      `⚠️ <b>Reason:</b> ${this.escapeHtml(reason)} (${warningLimit}/${warningLimit})`
+    );
+  }
+
+  private static async buildWarningModeMenuPayload(
+    chatId: string | number,
+    keypadState?: { digits: string; unit: 'm' | 'h' | 'd' }
+  ): Promise<{ text: string; reply_markup: { inline_keyboard: any[][] } }> {
+    const config = await storage.getGroupWarningConfig(chatId);
+    const settings = await storage.getSettings();
+    const warnLimit = Math.max(1, Math.min(100, Math.round(Number(settings.groupWarningLimit) || 3)));
+    const actionDisplay = config.action === 'mute' ? 'Mute' : 'Ban';
+    const durDisplay = config.isPermanent ? 'Permanent' : config.durationLabel;
+
+    if (keypadState) {
+      const numVal = keypadState.digits ? parseInt(keypadState.digits, 10) : 0;
+      const unitWord = keypadState.unit === 'm'
+        ? (numVal === 1 ? 'Minute' : 'Minutes')
+        : keypadState.unit === 'd'
+          ? (numVal === 1 ? 'Day' : 'Days')
+          : (numVal === 1 ? 'Hour' : 'Hours');
+      const unitButton = (unit: 'm' | 'h' | 'd', label: string) => ({
+        text: keypadState.unit === unit ? `[ ${label} ]` : label,
+        callback_data: `wm:k:u:${unit}`,
+        ...(keypadState.unit === unit ? { style: 'primary' } : {})
+      });
+      return {
+        text:
+          `⏱ <b>Warning Mode — Custom Duration</b>\n\n` +
+          `🛡️ <b>Action on ${warnLimit}/${warnLimit}:</b> <code>${actionDisplay}</code>\n` +
+          `🕒 <b>Selected Duration:</b> <code>${numVal} ${unitWord}</code>`,
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '1', callback_data: 'wm:k:d:1' },
+              { text: '2', callback_data: 'wm:k:d:2' },
+              { text: '3', callback_data: 'wm:k:d:3' }
+            ],
+            [
+              { text: '4', callback_data: 'wm:k:d:4' },
+              { text: '5', callback_data: 'wm:k:d:5' },
+              { text: '6', callback_data: 'wm:k:d:6' }
+            ],
+            [
+              { text: '7', callback_data: 'wm:k:d:7' },
+              { text: '8', callback_data: 'wm:k:d:8' },
+              { text: '9', callback_data: 'wm:k:d:9' }
+            ],
+            [
+              { text: 'Clear', callback_data: 'wm:k:clr' },
+              { text: '0', callback_data: 'wm:k:d:0' },
+              { text: '⌫', callback_data: 'wm:k:bk' }
+            ],
+            [
+              unitButton('m', 'Minutes'),
+              unitButton('h', 'Hours'),
+              unitButton('d', 'Days')
+            ],
+            [
+              { text: '✅ Save Duration', callback_data: 'wm:k:ok', style: 'success' },
+              { text: '⬅️ Back', callback_data: 'wm:k:back', style: 'secondary' }
+            ]
+          ]
+        }
+      };
+    }
+
+    const is30m = !config.isPermanent && config.durationSec === 1800;
+    const is12h = !config.isPermanent && config.durationSec === 43200;
+    const is7d = !config.isPermanent && config.durationSec === 604800;
+    const isPerm = config.isPermanent;
+
+    return {
+      text:
+        `⚙️ <b>Warning Mode Settings</b>\n\n` +
+        `🛡️ <b>Action on ${warnLimit}/${warnLimit} Warnings:</b> <code>${actionDisplay}</code>\n` +
+        `⏱ <b>Duration:</b> <code>${this.escapeHtml(durDisplay)}</code>`,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: config.action === 'ban' ? '✅ Ban' : 'Ban',
+              callback_data: 'wm:act:ban',
+              ...(config.action === 'ban' ? { style: 'primary' } : {})
+            },
+            {
+              text: config.action === 'mute' ? '✅ Mute' : 'Mute',
+              callback_data: 'wm:act:mute',
+              ...(config.action === 'mute' ? { style: 'primary' } : {})
+            }
+          ],
+          [
+            {
+              text: is30m ? '✅ 30 Minutes' : '30 Minutes',
+              callback_data: 'wm:dur:30m',
+              ...(is30m ? { style: 'primary' } : {})
+            },
+            {
+              text: is12h ? '✅ 12 Hours' : '12 Hours',
+              callback_data: 'wm:dur:12h',
+              ...(is12h ? { style: 'primary' } : {})
+            }
+          ],
+          [
+            {
+              text: is7d ? '✅ 7 Days' : '7 Days',
+              callback_data: 'wm:dur:7d',
+              ...(is7d ? { style: 'primary' } : {})
+            },
+            {
+              text: isPerm ? '✅ Permanent' : 'Permanent',
+              callback_data: 'wm:dur:perm',
+              ...(isPerm ? { style: 'primary' } : {})
+            }
+          ],
+          [
+            { text: '⏱ Custom', callback_data: 'wm:custom', style: 'secondary' },
+            { text: '✖️ Close', callback_data: 'wm:close', style: 'danger' }
+          ]
+        ]
+      }
+    };
   }
 
   private static async sendModerationPickerPrompt(params: {
@@ -2649,7 +3163,8 @@ export class TelegramService {
       targetName: target.name,
       targetUsername: target.username,
       reason: reason || undefined,
-      adminId,
+      adminId: String(adminId ?? '').trim(),
+      initiatedAnonymously: String(adminId ?? '').trim() === '1087968824',
       stage: 'select_duration',
       keypadDigits: '',
       keypadUnit: 'h',
@@ -2660,22 +3175,20 @@ export class TelegramService {
     await storage.savePendingModeration(pending).catch(() => {});
 
     const inlineKeyboard: any[][] = [];
-    for (let i = 0; i < presets.length; i += 2) {
+    const presetCols = presets.length > 0 && presets.length % 3 === 0 ? 3 : 2;
+    for (let i = 0; i < presets.length; i += presetCols) {
       const row: any[] = [];
-      row.push({ text: presets[i].label, callback_data: `modp:${token}:${i}`, style: 'primary' });
-      if (presets[i + 1]) {
-        row.push({ text: presets[i + 1].label, callback_data: `modp:${token}:${i + 1}`, style: 'primary' });
+      for (let j = 0; j < presetCols && i + j < presets.length; j++) {
+        row.push({ text: presets[i + j].label, callback_data: `modp:${token}:${i + j}`, style: 'primary' });
       }
       inlineKeyboard.push(row);
     }
     const modTempBtn = this.buildManagedButton('mod_temp', { callback_data: `modt:${token}` });
     const modPermBtn = this.buildManagedButton('mod_perm', { callback_data: `moda:${token}:perm` });
     const modCancelBtn = this.buildManagedButton('mod_cancel', { callback_data: `modc:${token}` });
-    if (modTempBtn || modPermBtn) {
-      inlineKeyboard.push([modTempBtn, modPermBtn].filter(Boolean) as any[]);
-    }
-    if (modCancelBtn) {
-      inlineKeyboard.push([modCancelBtn]);
+    const controlRow = [modTempBtn, modPermBtn, modCancelBtn].filter(Boolean) as any[];
+    if (controlRow.length > 0) {
+      inlineKeyboard.push(controlRow);
     }
 
     const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
@@ -2684,7 +3197,7 @@ export class TelegramService {
       `${header}\n\n` +
       `👤 <b>User:</b> ${userProfileLink}` +
       (reason ? `\n📝 <b>Reason:</b> <i>${this.escapeHtml(reason)}</i>` : '') +
-      `\n\n<i>Select duration below:</i>`;
+      `\n\n<i>Select duration:</i>`;
 
     const sent = await this.callTelegramApi('sendMessage', {
       chat_id: chatId,
@@ -2718,8 +3231,7 @@ export class TelegramService {
     const text =
       `${header}\n\n` +
       `👤 <b>User:</b> ${userLink}\n` +
-      `🕒 <b>Selected Duration:</b> <code>${numVal} ${unitWord}</code>\n\n` +
-      `<i>Tap the keypad below to set a duration, then tap Confirm.</i>`;
+      `🕒 <b>Selected Duration:</b> <code>${numVal} ${unitWord}</code>`;
 
     const token = pending.token;
     const unitButton = (unit: 'm' | 'h' | 'd', label: string) => ({
@@ -2728,6 +3240,7 @@ export class TelegramService {
       ...(pending.keypadUnit === unit ? { style: 'primary' } : {})
     });
 
+    const cancelBtn = this.buildManagedButton('mod_cancel', { callback_data: `modc:${token}` });
     const inline_keyboard: any[][] = [
       [
         { text: '1', callback_data: `modk:${token}:d:1` },
@@ -2756,9 +3269,7 @@ export class TelegramService {
       ],
       [
         { text: '✅ Confirm', callback_data: `modk:${token}:ok`, style: 'success' },
-        ...(this.buildManagedButton('mod_cancel', { callback_data: `modc:${token}` })
-          ? [this.buildManagedButton('mod_cancel', { callback_data: `modc:${token}` })!]
-          : [])
+        ...(cancelBtn ? [cancelBtn] : [])
       ]
     ];
 
@@ -2784,14 +3295,19 @@ export class TelegramService {
       `${header}\n\n` +
       `👤 <b>User:</b> ${userLink}\n` +
       `⏱ <b>Duration:</b> <code>${this.escapeHtml(durDisplay)}</code>\n\n` +
-      `📝 <i>Please type and send the reason in this chat.</i>\n` +
-      `<i>(Only messages from the initiating admin will be accepted, or tap Cancel.)</i>`;
+      `📝 <i>Send the reason in this chat, or tap No Reason.</i>`;
 
+    const skipBtn = this.buildManagedButton('mod_skip_reason', { callback_data: `mods:${pending.token}` }) || {
+      text: '⏭️ No Reason',
+      callback_data: `mods:${pending.token}`,
+      style: 'primary'
+    };
     const cancelBtn = this.buildManagedButton('mod_cancel', { callback_data: `modc:${pending.token}` });
+    const row = [skipBtn, cancelBtn].filter(Boolean) as any[];
     return {
       text,
       reply_markup: {
-        inline_keyboard: cancelBtn ? [[cancelBtn]] : []
+        inline_keyboard: row.length > 0 ? [row] : []
       }
     };
   }
@@ -2813,8 +3329,7 @@ export class TelegramService {
       `👤 <b>User:</b> ${userLink}\n` +
       `⏱ <b>Duration:</b> <code>${this.escapeHtml(durDisplay)}</code>\n` +
       `📝 <b>Reason:</b>\n` +
-      `<blockquote>${this.escapeHtml(pending.reason || 'No reason provided')}</blockquote>\n\n` +
-      `<i>Tap Confirm Reason to execute, or Cancel to abort.</i>`;
+      `<blockquote>${this.escapeHtml(pending.reason || 'No reason')}</blockquote>`;
 
     const confirmBtn = this.buildManagedButton('mod_confirm_reason', { callback_data: `modr:${pending.token}` });
     const cancelBtn = this.buildManagedButton('mod_cancel', { callback_data: `modc:${pending.token}` });
@@ -2963,7 +3478,7 @@ export class TelegramService {
     const reasonBlockMatch = rawText.match(/📝\s*Reason:\s*\n([\s\S]+?)(?:\n\nTap Confirm Reason|\s*$)/i);
     if (reasonBlockMatch) {
       const extractedReason = reasonBlockMatch[1].trim();
-      if (extractedReason && extractedReason !== 'No reason provided') {
+      if (extractedReason && extractedReason !== 'No reason' && extractedReason !== 'No reason provided') {
         reason = extractedReason;
       }
       stage = 'confirm_reason';
@@ -2971,11 +3486,13 @@ export class TelegramService {
       const inlineReasonMatch = rawText.match(/📝\s*Reason:\s*([^\n]+)/i);
       if (inlineReasonMatch) {
         const extractedInline = inlineReasonMatch[1].trim();
-        if (extractedInline) reason = extractedInline;
+        if (extractedInline && extractedInline !== 'No reason' && extractedInline !== 'No reason provided') {
+          reason = extractedInline;
+        }
       }
     }
 
-    if (/Please type and send the reason/i.test(rawText)) {
+    if (/Send the reason in this chat|Please type and send the reason/i.test(rawText)) {
       stage = 'awaiting_reason';
     }
 
@@ -3247,27 +3764,7 @@ export class TelegramService {
     }
 
     try {
-      // Operational Mode Isolation Gate:
-      // Post Bot & Image URL Bot run purely as isolated Telegram bots BEFORE any File Bot
-      // middlewares (whitelist, force-sub, scheduled file deletion, join requests, ban checks, maintenance).
       const settings = await storage.getSettings();
-      if (canonicalBotId === 'main') {
-        if (settings.botMode === 'post_bot') {
-          await PostBotEngine.handleUpdate(update, canonicalBotId, {
-            callTelegramApi: (method, body, tkn) => this.callTelegramApi(method, body, tkn),
-            isAuthorizedAdmin: (uid, uname) => this.isAuthorizedAdmin(uid, uname)
-          });
-          return;
-        }
-        if (settings.botMode === 'image_url_bot') {
-          await ImageUrlBotEngine.handleUpdate(update, canonicalBotId, {
-            callTelegramApi: (method, body, tkn) => this.callTelegramApi(method, body, tkn),
-            getBotToken: () => this.getBotToken(),
-            isAuthorizedAdmin: (uid, uname) => this.isAuthorizedAdmin(uid, uname)
-          });
-          return;
-        }
-      }
 
       // Ignore edited messages for commands and general replies to prevent double replies on edit
       if (update.edited_message && !update.message) {
@@ -3376,36 +3873,58 @@ export class TelegramService {
         if (settings.maintenanceMode) {
           const isAdmin = await this.isAuthorizedAdmin(fromId, senderUname);
           if (!isAdmin) {
-            const rawNotice = settings.maintenanceNotice?.trim() || '⚠️ Bot is currently under maintenance. Please try again later.';
-            const botUsername = await this.getBotUsername();
-            const parsedNotice = this.resolveMaintenanceNotice(rawNotice, userPayload, fromId, botUsername);
-
-            if (update.callback_query) {
-              await this.callTelegramApi('answerCallbackQuery', {
-                callback_query_id: update.callback_query.id,
-                text: parsedNotice.replace(/<[^>]+>/g, '').slice(0, 200), // strip HTML tags for alert popup (max 200 chars)
-                show_alert: true
-              });
-              return;
-            }
-
             const msg = update.message || update.edited_message;
-            if (msg?.chat) {
-              if (msg.chat.type === 'private') {
-                await this.callTelegramApi('sendMessage', {
-                  chat_id: msg.chat.id,
-                  text: parsedNotice,
-                  parse_mode: 'HTML'
-                });
-              } else if (msg.chat.type === 'group' || msg.chat.type === 'supergroup') {
-                const txt = (msg.text || msg.caption || '').trim();
-                // In groups, only respond if someone addressed the bot or used a slash command
-                if (txt.startsWith('/') || (botUsername && txt.toLowerCase().includes(`@${botUsername.toLowerCase()}`))) {
-                  await this.sendAutoDeletingNotice(msg.chat.id, parsedNotice, 6000, msg.message_id);
+            let allowPendingModReason = false;
+            if (msg?.chat && (msg.chat.type === 'group' || msg.chat.type === 'supergroup')) {
+              const txt = (msg.text || msg.caption || '').trim();
+              if (txt && !txt.startsWith('/')) {
+                const cleanMsgChatId = String(msg.chat.id ?? '').trim();
+                const cleanSenderChatId = msg?.sender_chat?.id !== undefined && msg?.sender_chat?.id !== null
+                  ? String(msg.sender_chat.id).trim()
+                  : '';
+                const isAnonAdmin =
+                  (Boolean(cleanSenderChatId) && Boolean(cleanMsgChatId) && cleanSenderChatId === cleanMsgChatId) ||
+                  (fromId === '1087968824' && (!cleanSenderChatId || cleanSenderChatId === cleanMsgChatId));
+                const awaiting = await storage
+                  .getAwaitingReasonModeration(cleanMsgChatId, fromId, msg?.reply_to_message?.message_id, isAnonAdmin)
+                  .catch(() => null);
+                if (awaiting) {
+                  allowPendingModReason = true;
                 }
               }
             }
-            return;
+
+            if (!allowPendingModReason) {
+              const rawNotice = settings.maintenanceNotice?.trim() || '⚠️ Bot is currently under maintenance. Please try again later.';
+              const botUsername = await this.getBotUsername();
+              const parsedNotice = this.resolveMaintenanceNotice(rawNotice, userPayload, fromId, botUsername);
+
+              if (update.callback_query) {
+                await this.callTelegramApi('answerCallbackQuery', {
+                  callback_query_id: update.callback_query.id,
+                  text: parsedNotice.replace(/<[^>]+>/g, '').slice(0, 200), // strip HTML tags for alert popup (max 200 chars)
+                  show_alert: true
+                });
+                return;
+              }
+
+              if (msg?.chat) {
+                if (msg.chat.type === 'private') {
+                  await this.callTelegramApi('sendMessage', {
+                    chat_id: msg.chat.id,
+                    text: parsedNotice,
+                    parse_mode: 'HTML'
+                  });
+                } else if (msg.chat.type === 'group' || msg.chat.type === 'supergroup') {
+                  const txt = (msg.text || msg.caption || '').trim();
+                  // In groups, only respond if someone addressed the bot or used a slash command
+                  if (txt.startsWith('/') || (botUsername && txt.toLowerCase().includes(`@${botUsername.toLowerCase()}`))) {
+                    await this.sendAutoDeletingNotice(msg.chat.id, parsedNotice, 6000, msg.message_id);
+                  }
+                }
+              }
+              return;
+            }
           }
         }
 
@@ -3481,17 +4000,26 @@ export class TelegramService {
   public static async isAuthorizedModerationActor(
     chatId: string | number | undefined,
     userId: string | number,
-    username?: string
+    username?: string,
+    senderChatId?: string | number
   ): Promise<boolean> {
+    const cleanChatId = chatId !== undefined && chatId !== null ? String(chatId).trim() : '';
     const cleanUserId = userId !== undefined && userId !== null ? String(userId).trim() : '';
+    const cleanSenderChatId = senderChatId !== undefined && senderChatId !== null ? String(senderChatId).trim() : '';
+
+    if (cleanChatId && cleanSenderChatId && cleanSenderChatId === cleanChatId) {
+      return true;
+    }
     if (!cleanUserId) return false;
+    if (cleanUserId === '1087968824' && (!cleanSenderChatId || (cleanChatId && cleanSenderChatId === cleanChatId))) {
+      return true;
+    }
     if (await this.isOwnerAdmin(cleanUserId, username)) {
       return true;
     }
     if (await this.isAuthorizedAdmin(cleanUserId, username)) {
       return true;
     }
-    const cleanChatId = chatId !== undefined && chatId !== null ? String(chatId).trim() : '';
     if (cleanChatId && (await this.isTelegramGroupAdmin(cleanChatId, cleanUserId))) {
       return true;
     }
@@ -3985,6 +4513,10 @@ export class TelegramService {
       if ((chat.type === 'group' || chat.type === 'supergroup') && !wasMember && !memberUser.is_bot) {
         await this.sendGroupWelcomeMessage(chat.id, memberUser).catch(() => {});
       }
+    }
+
+    if ((chat.type === 'group' || chat.type === 'supergroup') && !memberUser.is_bot) {
+      await this.applyTelegramMemberModerationState(chat.id, memberInfo, memberUser).catch(() => {});
     }
   }
 
@@ -5512,73 +6044,36 @@ export class TelegramService {
               : 'forwarded messages';
 
           if (warningCount < warningLimit) {
+            const warnConfig = await storage.getGroupWarningConfig(message.chat.id);
+            const punishmentWord = warnConfig.action === 'mute' ? 'mute' : 'ban';
             const remaining = warningLimit - warningCount;
             const warningText =
               `⚠️ <b>Warning ${warningCount}/${warningLimit}</b>\n\n` +
               `👤 <b>User:</b> ${userProfileLink}\n` +
               `🚫 <b>Reason:</b> Sharing ${this.escapeHtml(violationType)} is not allowed.\n` +
               (remaining === 1
-                ? `🚨 <i>Final warning — next violation will result in an automatic ban.</i>`
-                : `📌 <i>${remaining} warnings remaining before automatic ban.</i>`);
+                ? `🚨 <i>Final warning — next violation will result in an automatic ${punishmentWord}.</i>`
+                : `📌 <i>${remaining} warnings remaining before automatic ${punishmentWord}.</i>`);
             await this.callTelegramApi('sendMessage', {
               chat_id: message.chat.id,
               text: warningText,
-              parse_mode: 'HTML'
+              parse_mode: 'HTML',
+              ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
+              reply_markup: this.buildRemoveWarningKeyboard(fromId)
             });
           } else {
-            // Reached configured warning limit: auto-ban if Ban / Unban is enabled
-            if (groupSettings.banEnabled !== false) {
-              try {
-                await this.callTelegramApi('banChatMember', {
-                  chat_id: message.chat.id,
-                  user_id: Number(fromId) || fromId
-                });
-              } catch (banErr) {
-                console.warn('[Anti-Spam] banChatMember error on warning limit:', banErr);
-              }
-
-              await storage.setGroupMemberBanned(message.chat.id, fromId, true, {
-                reason: 'Reached warning limit',
+            await this.executeWarningLimitPunishment({
+              chatId: message.chat.id,
+              target: {
+                id: fromId,
                 name: realName,
-                username: userObj.username
-              });
-              await storage.setBotUserBanned(fromId, true, {
-                chatId: String(message.chat.id),
-                reason: 'Reached warning limit',
-                name: realName,
-                username: userObj.username
-              }).catch(() => {});
-              await storage.resetUserLinkWarning(message.chat.id, fromId);
-
-              const templates = await storage.getTemplates();
-              const banTemplate = templates.BAN_NOTICE?.content ||
-                '🚫 <b>Banned permanently</b>\n\n👤 <b>User:</b> {name}\n⚠️ <b>Reason:</b> Reached warning limit ({strikes}/{strikes}).';
-
-              const cleanUsername = userObj.username ? userObj.username.replace(/^@+/, '') : '';
-              const banNotice = banTemplate
-                .replace(/<code>\s*{(?:name|user_name)}\s*<\/code>/gi, userProfileLink)
-                .replace(/{name}/g, userProfileLink)
-                .replace(/{user_name}/g, userProfileLink)
-                .replace(/{username}/g, cleanUsername ? TelegramService.escapeHtml(cleanUsername) : 'N/A')
-                .replace(/{user_id}/g, TelegramService.escapeHtml(String(fromId)))
-                .replace(/{strikes}/g, String(warningLimit));
-
-              await this.callTelegramApi('sendMessage', {
-                chat_id: message.chat.id,
-                text: banNotice,
-                parse_mode: 'HTML'
-              });
-            } else {
-              await storage.resetUserLinkWarning(message.chat.id, fromId);
-              await this.callTelegramApi('sendMessage', {
-                chat_id: message.chat.id,
-                text:
-                  `⚠️ <b>Warning ${warningLimit}/${warningLimit}</b>\n\n` +
-                  `👤 <b>User:</b> ${userProfileLink}\n` +
-                  `🚫 <b>Reason:</b> Sharing ${this.escapeHtml(violationType)} is not allowed.`,
-                parse_mode: 'HTML'
-              });
-            }
+                username: userObj.username || ''
+              },
+              reason: 'Reached warning limit',
+              warningLimit,
+              useBanNoticeTemplate: true,
+              threadId: message.message_thread_id
+            });
           }
         }
         return;
@@ -5612,6 +6107,259 @@ export class TelegramService {
         message.message_thread_id
       );
       return;
+    }
+
+    // 1a-mod. Check if the initiating or authorized moderator (including Anonymous Admin) is typing a Ban/Mute Reason in this group
+    // Runs BEFORE generic session/text filters so non-command reason messages are never dropped or hijacked.
+    if (text) {
+      const cleanChatId = String(message.chat.id ?? '').trim();
+      const cleanFromId = fromId !== undefined && fromId !== null ? String(fromId).trim() : '';
+      const cleanSenderChatId =
+        message?.sender_chat?.id !== undefined && message?.sender_chat?.id !== null
+          ? String(message.sender_chat.id).trim()
+          : '';
+      const isAnonGroupAdmin =
+        (Boolean(cleanSenderChatId) && Boolean(cleanChatId) && cleanSenderChatId === cleanChatId) ||
+        (cleanFromId === '1087968824' && (!cleanSenderChatId || cleanSenderChatId === cleanChatId));
+      const isAllowedHumanOrAnonSender = !message?.from?.is_bot || isAnonGroupAdmin;
+
+      if (isAllowedHumanOrAnonSender) {
+        const replyMsgId = message?.reply_to_message?.message_id;
+        const trimmedText = text.trim();
+        const isCancelCmd = /^\/cancel(?:@\w+)?(?:\s|$)/i.test(trimmedText);
+        const isNonCommandReason = !trimmedText.startsWith('/');
+
+        if (isCancelCmd || isNonCommandReason) {
+          let pendingTempMod: PendingModerationAction | undefined;
+          let matchedViaReply = false;
+          const candidates = new Map<string, PendingModerationAction>();
+
+          const directSession = cleanFromId
+            ? activeGroupTempModSessions.get(`${cleanChatId}:${cleanFromId}`)
+            : undefined;
+          if (directSession && directSession.stage === 'awaiting_reason') {
+            candidates.set(directSession.token, directSession);
+          }
+          for (const v of activeGroupTempModSessions.values()) {
+            if (v && String(v.chatId ?? '').trim() === cleanChatId && v.stage === 'awaiting_reason') {
+              candidates.set(v.token, v);
+            }
+          }
+          for (const v of pendingGroupModerationMap.values()) {
+            if (v && String(v.chatId ?? '').trim() === cleanChatId && v.stage === 'awaiting_reason') {
+              candidates.set(v.token, v);
+            }
+          }
+
+          // First prioritize explicit reply to a moderation prompt message
+          if (replyMsgId) {
+            for (const v of candidates.values()) {
+              if (v.promptMessageId && Number(replyMsgId) === Number(v.promptMessageId)) {
+                pendingTempMod = v;
+                matchedViaReply = true;
+                break;
+              }
+            }
+          }
+
+          // Next pick the most recent matching awaiting_reason session for the initiating or anonymous admin
+          if (!pendingTempMod) {
+            for (const v of candidates.values()) {
+              const vAdminId = String(v.adminId ?? '').trim();
+              const matchesUser = Boolean(cleanFromId) && vAdminId === cleanFromId;
+              const matchesAnon = isAnonGroupAdmin;
+              if (matchesUser || matchesAnon) {
+                if (!pendingTempMod || Number(v.createdAt || 0) > Number(pendingTempMod.createdAt || 0)) {
+                  pendingTempMod = v;
+                }
+              }
+            }
+          }
+
+          // Fallback to persistent DATA_DIR storage (survives restarts or cross-map misses)
+          if (!pendingTempMod) {
+            const restored = await storage
+              .getAwaitingReasonModeration(cleanChatId, cleanFromId, replyMsgId, isAnonGroupAdmin)
+              .catch(() => null);
+            if (restored) {
+              pendingTempMod = restored;
+              pendingGroupModerationMap.set(restored.token, restored);
+              const restoredAdminId = String(restored.adminId ?? '').trim();
+              if (restoredAdminId) {
+                activeGroupTempModSessions.set(`${cleanChatId}:${restoredAdminId}`, restored);
+              }
+              matchedViaReply = Boolean(
+                replyMsgId && restored.promptMessageId && Number(replyMsgId) === Number(restored.promptMessageId)
+              );
+            }
+          }
+
+          if (pendingTempMod && pendingTempMod.stage === 'awaiting_reason') {
+            const pendingAdminId = String(pendingTempMod.adminId ?? '').trim();
+            const matchesInitiator =
+              (Boolean(cleanFromId) && pendingAdminId === cleanFromId) ||
+              isAnonGroupAdmin;
+            const matchesReplyByAuthorizedMod =
+              matchedViaReply &&
+              (await this.isAuthorizedModerationActor(
+                message.chat.id,
+                cleanFromId,
+                message.from?.username,
+                message.sender_chat?.id
+              ));
+
+            if (matchesInitiator || matchesReplyByAuthorizedMod) {
+              const deleteSessionsByToken = (targetToken: string) => {
+                for (const [k, v] of activeGroupTempModSessions.entries()) {
+                  if (v?.token === targetToken) {
+                    activeGroupTempModSessions.delete(k);
+                  }
+                }
+                if (cleanFromId) activeGroupTempModSessions.delete(`${cleanChatId}:${cleanFromId}`);
+                if (pendingAdminId) activeGroupTempModSessions.delete(`${cleanChatId}:${pendingAdminId}`);
+              };
+
+              if (isCancelCmd) {
+                deleteSessionsByToken(pendingTempMod.token);
+                pendingGroupModerationMap.delete(pendingTempMod.token);
+                await storage.deletePendingModeration(pendingTempMod.token).catch(() => {});
+                if (pendingTempMod.promptMessageId) {
+                  await this.callTelegramApi('editMessageText', {
+                    chat_id: message.chat.id,
+                    message_id: pendingTempMod.promptMessageId,
+                    text: '❌ <b>Moderation Action Cancelled</b>',
+                    parse_mode: 'HTML',
+                    reply_markup: { inline_keyboard: [] }
+                  }).catch(() => {});
+                }
+                if (!isOfficial && message.message_id) {
+                  await this.deleteUserMessage(message.chat.id, message.message_id);
+                }
+                return;
+              }
+
+              if (isNonCommandReason) {
+                const reasonText = trimmedText.slice(0, 500);
+                pendingTempMod.reason = reasonText;
+                pendingTempMod.stage = 'confirm_reason';
+                if (cleanFromId && cleanFromId !== '1087968824') {
+                  pendingTempMod.adminId = cleanFromId;
+                } else if (!pendingAdminId) {
+                  pendingTempMod.adminId = cleanFromId || '1087968824';
+                }
+                if (isAnonGroupAdmin) {
+                  pendingTempMod.initiatedAnonymously = true;
+                }
+
+                deleteSessionsByToken(pendingTempMod.token);
+                pendingGroupModerationMap.set(pendingTempMod.token, pendingTempMod);
+                await storage.savePendingModeration(pendingTempMod).catch(() => {});
+
+                if (message.message_id) {
+                  this.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
+                }
+
+                const previewPayload = this.buildModerationReasonPreviewPayload(pendingTempMod);
+                let edited = false;
+                if (pendingTempMod.promptMessageId) {
+                  const editRes = await this.callTelegramApi('editMessageText', {
+                    chat_id: message.chat.id,
+                    message_id: pendingTempMod.promptMessageId,
+                    text: previewPayload.text,
+                    parse_mode: 'HTML',
+                    reply_markup: previewPayload.reply_markup
+                  }).catch(() => null);
+                  edited = Boolean(editRes?.ok);
+                }
+                if (!edited) {
+                  const sentPreview = await this.callTelegramApi('sendMessage', {
+                    chat_id: message.chat.id,
+                    text: previewPayload.text,
+                    parse_mode: 'HTML',
+                    reply_markup: previewPayload.reply_markup,
+                    ...(pendingTempMod.replyToMessageId ? { reply_to_message_id: pendingTempMod.replyToMessageId } : {})
+                  }).catch(() => null);
+                  if (sentPreview?.ok && sentPreview.result?.message_id) {
+                    pendingTempMod.promptMessageId = sentPreview.result.message_id;
+                    pendingGroupModerationMap.set(pendingTempMod.token, pendingTempMod);
+                    await storage.savePendingModeration(pendingTempMod).catch(() => {});
+                  }
+                }
+                return;
+              }
+            }
+          }
+
+          // Check if an admin is replying/sending a user lookup inside Group Moderation Dashboard (adm_lookup)
+          const lookupKey = `${cleanChatId}:${cleanFromId}`;
+          let pendingLookup = cleanFromId ? activeDashboardLookupSessions.get(lookupKey) : undefined;
+          if (!pendingLookup && isAnonGroupAdmin) {
+            for (const sess of activeDashboardLookupSessions.values()) {
+              if (String(sess.chatId ?? '').trim() === cleanChatId && Date.now() - sess.createdAt < 10 * 60 * 1000) {
+                pendingLookup = sess;
+                break;
+              }
+            }
+          }
+          if (pendingLookup && Date.now() - pendingLookup.createdAt < 10 * 60 * 1000) {
+            const actorAllowed =
+              (Boolean(cleanFromId) && String(pendingLookup.adminId) === cleanFromId) ||
+              isAnonGroupAdmin ||
+              (await this.canOpenGroupDashboard(message.chat.id, cleanFromId, message.from?.username, message.sender_chat?.id));
+            if (actorAllowed) {
+              for (const [k, v] of activeDashboardLookupSessions.entries()) {
+                if (String(v.chatId ?? '').trim() === cleanChatId) activeDashboardLookupSessions.delete(k);
+              }
+              if (isCancelCmd) {
+                if (pendingLookup.promptMessageId) {
+                  await this.renderOwnerAdminDashboard(message.chat.id, pendingLookup.promptMessageId);
+                }
+                if (!isOfficial && message.message_id) {
+                  await this.deleteUserMessage(message.chat.id, message.message_id);
+                }
+                return;
+              }
+              if (isNonCommandReason) {
+                const lookupTarget = await this.resolveModerationTarget(message.chat.id, message, trimmedText);
+                if (!isOfficial && message.message_id) {
+                  this.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
+                }
+                if (lookupTarget.id && /^\d+$/.test(lookupTarget.id)) {
+                  const { kind } = await this.syncGroupMemberFromTelegram(message.chat.id, lookupTarget.id);
+                  if (kind === 'ban' || kind === 'mute') {
+                    await this.renderOwnerModerationUserDetail(
+                      message.chat.id,
+                      pendingLookup.promptMessageId,
+                      kind,
+                      lookupTarget.id,
+                      0,
+                      undefined,
+                      message.message_thread_id
+                    );
+                  } else {
+                    await this.renderOwnerUserStatusCard(
+                      message.chat.id,
+                      lookupTarget,
+                      pendingLookup.promptMessageId,
+                      undefined,
+                      message.message_thread_id
+                    );
+                  }
+                } else {
+                  const errText = `❌ <b>User Not Found</b>\n<i>Could not resolve a Telegram User ID for <code>${this.escapeHtml(trimmedText)}</code>.</i>`;
+                  await this.sendOrEditOwnerDashboardMessage(
+                    message.chat.id,
+                    errText,
+                    [[{ text: '🏠 Dashboard', callback_data: 'adm_dash' }, { text: '✖️ Close', callback_data: 'adm_close' }]],
+                    pendingLookup.promptMessageId
+                  );
+                }
+                return;
+              }
+            }
+          }
+        }
+      }
     }
 
     // 1. Check if user is inside an active /add session in group
@@ -5661,113 +6409,6 @@ export class TelegramService {
       }
     }
 
-    // 1b. Check if the initiating or authorized moderator is typing a Ban/Mute Reason in this group
-    let tempModSessionKey = `${String(message.chat.id)}:${fromId}`;
-    let pendingTempMod = activeGroupTempModSessions.get(tempModSessionKey);
-    if (!pendingTempMod) {
-      const replyMsgId = message?.reply_to_message?.message_id;
-      for (const [k, v] of activeGroupTempModSessions.entries()) {
-        if (String(v.chatId) !== String(message.chat.id) || v.stage !== 'awaiting_reason') continue;
-        if (
-          String(v.adminId) === String(fromId) ||
-          (Boolean(message?.sender_chat?.id) &&
-            String(message.sender_chat.id) === String(message.chat.id) &&
-            v.adminId === '1087968824') ||
-          (replyMsgId && v.promptMessageId && Number(replyMsgId) === Number(v.promptMessageId))
-        ) {
-          tempModSessionKey = k;
-          pendingTempMod = v;
-          break;
-        }
-      }
-    }
-    if (!pendingTempMod) {
-      const restored = await storage
-        .getAwaitingReasonModeration(message.chat.id, fromId, message?.reply_to_message?.message_id)
-        .catch(() => null);
-      if (restored) {
-        pendingTempMod = restored;
-        pendingGroupModerationMap.set(restored.token, restored);
-        tempModSessionKey = `${String(restored.chatId)}:${restored.adminId}`;
-        activeGroupTempModSessions.set(tempModSessionKey, restored);
-      }
-    }
-    if (pendingTempMod && pendingTempMod.stage === 'awaiting_reason' && text) {
-      const matchesInitiator =
-        String(pendingTempMod.adminId) === String(fromId) ||
-        (Boolean(message?.sender_chat?.id) &&
-          String(message.sender_chat.id) === String(message.chat.id) &&
-          pendingTempMod.adminId === '1087968824');
-      const matchesReplyByAuthorizedMod =
-        Boolean(message?.reply_to_message?.message_id) &&
-        Boolean(pendingTempMod.promptMessageId) &&
-        Number(message.reply_to_message.message_id) === Number(pendingTempMod.promptMessageId) &&
-        (await this.isAuthorizedModerationActor(message.chat.id, fromId, message.from?.username));
-
-      if (matchesInitiator || matchesReplyByAuthorizedMod) {
-        if (/^\/cancel(?:@\w+)?(?:\s|$)/i.test(text.trim())) {
-          activeGroupTempModSessions.delete(tempModSessionKey);
-          activeGroupTempModSessions.delete(`${String(pendingTempMod.chatId)}:${fromId}`);
-          pendingGroupModerationMap.delete(pendingTempMod.token);
-          await storage.deletePendingModeration(pendingTempMod.token).catch(() => {});
-          if (pendingTempMod.promptMessageId) {
-            await this.callTelegramApi('editMessageText', {
-              chat_id: message.chat.id,
-              message_id: pendingTempMod.promptMessageId,
-              text: '❌ <b>Moderation Action Cancelled</b>',
-              parse_mode: 'HTML',
-              reply_markup: { inline_keyboard: [] }
-            }).catch(() => {});
-          }
-          if (!isOfficial && message.message_id) {
-            await this.deleteUserMessage(message.chat.id, message.message_id);
-          }
-          return;
-        }
-
-        if (!text.trim().startsWith('/')) {
-          const reasonText = text.trim().slice(0, 500);
-          pendingTempMod.reason = reasonText;
-          pendingTempMod.stage = 'confirm_reason';
-          pendingTempMod.adminId = fromId || pendingTempMod.adminId;
-          activeGroupTempModSessions.delete(tempModSessionKey);
-          activeGroupTempModSessions.delete(`${String(pendingTempMod.chatId)}:${fromId}`);
-          await storage.savePendingModeration(pendingTempMod).catch(() => {});
-
-          if (message.message_id) {
-            this.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
-          }
-
-          const previewPayload = this.buildModerationReasonPreviewPayload(pendingTempMod);
-          let edited = false;
-          if (pendingTempMod.promptMessageId) {
-            const editRes = await this.callTelegramApi('editMessageText', {
-              chat_id: message.chat.id,
-              message_id: pendingTempMod.promptMessageId,
-              text: previewPayload.text,
-              parse_mode: 'HTML',
-              reply_markup: previewPayload.reply_markup
-            }).catch(() => null);
-            edited = Boolean(editRes?.ok);
-          }
-          if (!edited) {
-            const sentPreview = await this.callTelegramApi('sendMessage', {
-              chat_id: message.chat.id,
-              text: previewPayload.text,
-              parse_mode: 'HTML',
-              reply_markup: previewPayload.reply_markup,
-              ...(pendingTempMod.replyToMessageId ? { reply_to_message_id: pendingTempMod.replyToMessageId } : {})
-            }).catch(() => null);
-            if (sentPreview?.ok && sentPreview.result?.message_id) {
-              pendingTempMod.promptMessageId = sentPreview.result.message_id;
-              await storage.savePendingModeration(pendingTempMod).catch(() => {});
-            }
-          }
-          return;
-        }
-      }
-    }
-
     // 1c. /cleanservice on|off directly in group
     if (/^\/cleanservice(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
       const canModerate = await this.isGroupModerator(message, fromId);
@@ -5779,8 +6420,9 @@ export class TelegramService {
       return;
     }
 
-    // 1d. /admin Group Moderation Dashboard (Group Admins & Bot Owners)
-    if (/^\/admin(?:@\w+)?(?:\s+.*)?$/i.test(text)) {
+    // 1d. /admin Group Moderation Dashboard & Live User Lookup (Group Admins & Bot Owners)
+    const adminCmdMatch = text.match(/^\/admin(?:@\w+)?(?:\s+([\s\S]+))?$/i);
+    if (adminCmdMatch) {
       const canAccess = await this.canOpenGroupDashboard(
         message.chat.id,
         fromId,
@@ -5791,11 +6433,48 @@ export class TelegramService {
         await this.replyOwnerDashboardDenied(message);
         return;
       }
+      const rawAdminArg = (adminCmdMatch[1] || '').trim();
+      const replyMsg = message?.reply_to_message;
+      const isTopicRootReply = Boolean(
+        replyMsg &&
+        (replyMsg.forum_topic_created ||
+          (message?.is_topic_message &&
+            message?.message_thread_id &&
+            Number(replyMsg.message_id) === Number(message.message_thread_id)))
+      );
+      const hasLookupTarget = Boolean(rawAdminArg || (replyMsg?.from && !replyMsg.from.is_bot && !isTopicRootReply));
+      if (hasLookupTarget) {
+        const lookupTarget = await this.resolveModerationTarget(message.chat.id, message, rawAdminArg);
+        if (lookupTarget.id && /^\d+$/.test(lookupTarget.id)) {
+          const { kind } = await this.syncGroupMemberFromTelegram(message.chat.id, lookupTarget.id);
+          if (kind === 'ban' || kind === 'mute') {
+            await this.renderOwnerModerationUserDetail(
+              message.chat.id,
+              undefined,
+              kind,
+              lookupTarget.id,
+              0,
+              message.message_id,
+              message.message_thread_id
+            );
+            return;
+          }
+          await this.renderOwnerUserStatusCard(
+            message.chat.id,
+            lookupTarget,
+            undefined,
+            message.message_id,
+            message.message_thread_id
+          );
+          return;
+        }
+      }
       await this.renderOwnerAdminDashboard(
         message.chat.id,
         undefined,
         message.message_id,
-        message.message_thread_id
+        message.message_thread_id,
+        true
       );
       return;
     }
@@ -6373,12 +7052,16 @@ export class TelegramService {
       }
 
       if (!parsed.durationToken) {
+        const isAnonInitiator = Boolean(
+          (message?.sender_chat?.id && String(message.sender_chat.id) === String(message.chat.id)) ||
+          fromId === '1087968824'
+        );
         await this.sendModerationPickerPrompt({
           chatId: message.chat.id,
           action: 'ban',
           target: parsed.target,
           reason: parsed.reason,
-          adminId: fromId,
+          adminId: fromId || (isAnonInitiator ? '1087968824' : ''),
           replyToMessageId: message.message_id
         });
         return;
@@ -6389,8 +7072,9 @@ export class TelegramService {
         action: 'ban',
         target: parsed.target,
         durationToken: parsed.durationToken,
-        reason: parsed.reason,
-        replyToMessageId: message.message_id
+        reason: parsed.reason || 'No reason',
+        replyToMessageId: message.message_id,
+        threadId: message.message_thread_id
       });
       if (!isOfficial && message.message_id) {
         setTimeout(() => {
@@ -6511,12 +7195,15 @@ export class TelegramService {
       }
 
       if (!parsed.durationToken) {
+        const isAnonInitiator = Boolean(
+          message?.sender_chat?.id && String(message.sender_chat.id) === String(message.chat.id)
+        );
         await this.sendModerationPickerPrompt({
           chatId: message.chat.id,
           action: 'mute',
           target: parsed.target,
           reason: parsed.reason,
-          adminId: fromId,
+          adminId: fromId || (isAnonInitiator ? '1087968824' : ''),
           replyToMessageId: message.message_id
         });
         return;
@@ -6551,26 +7238,91 @@ export class TelegramService {
           chat_id: message.chat.id,
           text: '🔇 <b>Mute / Unmute Disabled</b>\n<i>Mute / Unmute moderation is currently turned OFF in Group Management.</i>',
           parse_mode: 'HTML',
-          reply_to_message_id: message.message_id
+          ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+          ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
         });
         return;
       }
 
-      const target = await this.resolveModerationTarget(message.chat.id, message, unmuteMatch[1]);
+      const rawUnmuteArg = (unmuteMatch[1] || '').trim();
+      const target = await this.resolveModerationTarget(message.chat.id, message, rawUnmuteArg);
       if (!target.id) {
         await this.callTelegramApi('sendMessage', {
           chat_id: message.chat.id,
           text: `ℹ️ <b>How to Unmute</b>\nReply to any user's message with <code>/unmute</code>, or run <code>/unmute &lt;user_id_or_username&gt;</code>.`,
           parse_mode: 'HTML',
-          reply_to_message_id: message.message_id
+          ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+          ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
         });
         return;
       }
 
-      try {
-        await this.callTelegramApi('restrictChatMember', {
+      if (!/^\d+$/.test(target.id)) {
+        await this.callTelegramApi('sendMessage', {
           chat_id: message.chat.id,
-          user_id: Number(target.id) || target.id,
+          text: `❌ <b>User Not Found</b>\n<i>Could not resolve a Telegram User ID for <code>${this.escapeHtml(rawUnmuteArg || target.name)}</code>. Reply to their message or pass their numeric User ID.</i>`,
+          parse_mode: 'HTML',
+          ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+          ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+        });
+        return;
+      }
+
+      const sendUnmuteReply = async (htmlText: string) => {
+        const res = await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: htmlText,
+          parse_mode: 'HTML',
+          ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+          ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+        }).catch(() => null);
+        if (!res?.ok && message.message_id) {
+          await this.callTelegramApi('sendMessage', {
+            chat_id: message.chat.id,
+            text: htmlText,
+            parse_mode: 'HTML',
+            ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+          }).catch(() => {});
+        }
+      };
+
+      const memberRes = await this.callTelegramApi('getChatMember', {
+        chat_id: message.chat.id,
+        user_id: Number(target.id)
+      }).catch((err: any) => ({ ok: false, description: err?.message || 'Telegram API error' }));
+
+      if (!memberRes?.ok || !memberRes.result) {
+        await sendUnmuteReply(
+          `❌ <b>Unmute Failed</b>\n<i>${this.escapeHtml(memberRes?.description || 'Could not check user status in this group.')}</i>`
+        );
+        return;
+      }
+
+      const memberInfo = memberRes.result;
+      if (memberInfo.user) {
+        const fullName = [memberInfo.user.first_name, memberInfo.user.last_name].filter(Boolean).join(' ').trim();
+        if (fullName) target.name = fullName;
+        if (!target.username && memberInfo.user.username) {
+          target.username = `@${String(memberInfo.user.username).replace(/^@+/, '')}`;
+        }
+      }
+
+      const isCurrentlyMuted = this.isTelegramMemberMuted(memberInfo);
+
+      const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
+
+      if (!isCurrentlyMuted) {
+        await storage.setGroupMemberMuted(message.chat.id, target.id, false);
+        await storage.setBotUserMuted(target.id, false).catch(() => {});
+        await sendUnmuteReply(`ℹ️ <b>User is already unmuted.</b>\n\n👤 <b>User:</b> ${userProfileLink}`);
+        return;
+      }
+
+      let restrictRes: any;
+      try {
+        restrictRes = await this.callTelegramApi('restrictChatMember', {
+          chat_id: message.chat.id,
+          user_id: Number(target.id),
           permissions: {
             can_send_messages: true,
             can_send_audios: true,
@@ -6584,8 +7336,16 @@ export class TelegramService {
             can_add_web_page_previews: true
           }
         });
-      } catch (e) {
+      } catch (e: any) {
         console.warn('[Telegram] restrictChatMember (/unmute) error:', e);
+        restrictRes = { ok: false, description: e?.message || 'Telegram API error' };
+      }
+
+      if (!restrictRes?.ok) {
+        await sendUnmuteReply(
+          `❌ <b>Unmute Failed</b>\n<i>${this.escapeHtml(restrictRes?.description || 'Please verify that the bot is a group administrator with restriction permissions.')}</i>`
+        );
+        return;
       }
 
       await storage.setGroupMemberMuted(message.chat.id, target.id, false);
@@ -6593,18 +7353,203 @@ export class TelegramService {
       await storage.resetUserLinkWarning(message.chat.id, target.id);
       await storage.resetUserFraudWarning(message.chat.id, target.id);
 
-      const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
-      await this.callTelegramApi('sendMessage', {
-        chat_id: message.chat.id,
-        text: `🔊 <b>User Unmuted</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
-        parse_mode: 'HTML',
-        reply_to_message_id: message.message_id
-      });
+      await sendUnmuteReply(`🔊 <b>User Unmuted</b>\n\n👤 <b>User:</b> ${userProfileLink}`);
       if (!isOfficial && message.message_id) {
         setTimeout(() => {
           TelegramService.deleteUserMessage(message.chat.id, message.message_id).catch(() => {});
         }, 3000);
       }
+      return;
+    }
+
+    // 2c-warn. /warning Command (Admins Only): Reply to a user's message with /warning [reason]
+    const warningCmdMatch = text.match(/^\/warning(?:@\w+)?(?:\s+([\s\S]+))?$/i);
+    if (warningCmdMatch) {
+      const canModerate = await this.isGroupModerator(message, fromId);
+      if (!canModerate) {
+        await this.replyNonGroupAdmin(message);
+        return;
+      }
+
+      const replyMsg = message?.reply_to_message;
+      const isTopicRootReply = Boolean(
+        replyMsg &&
+        (replyMsg.forum_topic_created ||
+          (message?.is_topic_message &&
+            message?.message_thread_id &&
+            Number(replyMsg.message_id) === Number(message.message_thread_id)))
+      );
+      const targetUser = replyMsg && !isTopicRootReply ? replyMsg.from : null;
+      if (!targetUser || !targetUser.id) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: 'ℹ️ <b>How to Warn</b>\nReply to a user\'s message with <code>/warning</code> or <code>/warning &lt;reason&gt;</code>.',
+          parse_mode: 'HTML',
+          ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+          ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+        });
+        return;
+      }
+
+      const targetId = String(targetUser.id).trim();
+      const targetName = [targetUser.first_name, targetUser.last_name].filter(Boolean).join(' ').trim() || targetUser.username || `User ${targetId}`;
+      const targetUsername = targetUser.username ? `@${String(targetUser.username).replace(/^@/, '')}` : '';
+
+      const meRes = await this.callTelegramApi('getMe', {}).catch(() => null);
+      if (meRes?.ok && meRes.result?.id && String(meRes.result.id) === targetId) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: '⚠️ <b>Action Skipped</b>\n<i>The bot cannot warn itself.</i>',
+          parse_mode: 'HTML',
+          ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+          ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+        });
+        return;
+      }
+
+      if (await this.isGroupAdminOrCreator(message.chat.id, targetId)) {
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: '⚠️ <b>Action Skipped</b>\n<i>Administrators cannot be warned.</i>',
+          parse_mode: 'HTML',
+          ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+          ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {})
+        });
+        return;
+      }
+
+      storage.trackGroupMember(message.chat.id, {
+        id: targetId,
+        username: targetUser.username,
+        firstName: targetUser.first_name,
+        lastName: targetUser.last_name
+      });
+
+      const warnReason = (warningCmdMatch[1] || '').trim().slice(0, 500);
+      const warningLimit = Math.max(1, Math.min(100, Math.round(Number(groupSettings.groupWarningLimit) || 3)));
+      const warningCount = await storage.incrementUserLinkWarning(message.chat.id, targetId);
+
+      if (warningCount < warningLimit) {
+        const userProfileLink = this.formatUserProfileLink(targetName, targetUsername, targetId);
+        const warningText =
+          `⚠️ <b>Warning ${warningCount}/${warningLimit}</b>\n\n` +
+          `👤 <b>User:</b> ${userProfileLink}` +
+          (warnReason ? `\n📝 <b>Reason:</b> <i>${this.escapeHtml(warnReason)}</i>` : '');
+        const sentWarn = await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: warningText,
+          parse_mode: 'HTML',
+          reply_to_message_id: replyMsg.message_id,
+          ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
+          reply_markup: this.buildRemoveWarningKeyboard(targetId)
+        }).catch(() => null);
+        if (!sentWarn?.ok) {
+          await this.callTelegramApi('sendMessage', {
+            chat_id: message.chat.id,
+            text: warningText,
+            parse_mode: 'HTML',
+            ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
+            reply_markup: this.buildRemoveWarningKeyboard(targetId)
+          }).catch(() => {});
+        }
+      } else {
+        await this.executeWarningLimitPunishment({
+          chatId: message.chat.id,
+          target: {
+            id: targetId,
+            name: targetName,
+            username: targetUsername
+          },
+          reason: warnReason || 'Reached warning limit',
+          warningLimit,
+          useBanNoticeTemplate: false,
+          replyToMessageId: replyMsg.message_id,
+          threadId: message.message_thread_id
+        });
+      }
+      return;
+    }
+
+    // 2c-mode. /warningmode Command (Admins Only): Configure ban/mute and duration on reaching warning limit
+    const warnModeMatch = text.match(/^\/warningmode(?:@\w+)?(?:\s+([\s\S]+))?$/i);
+    if (warnModeMatch) {
+      const canModerate = await this.isGroupModerator(message, fromId);
+      if (!canModerate) {
+        await this.replyNonGroupAdmin(message);
+        return;
+      }
+
+      const rawModeArg = (warnModeMatch[1] || '').trim();
+      if (rawModeArg) {
+        const parts = rawModeArg.match(/^([^\s]+)(?:\s+([\s\S]+))?$/);
+        const actionWord = (parts?.[1] || '').trim().toLowerCase();
+        const durWord = (parts?.[2] || '').trim();
+
+        if (actionWord !== 'ban' && actionWord !== 'mute') {
+          const menuPayload = await this.buildWarningModeMenuPayload(message.chat.id);
+          await this.callTelegramApi('sendMessage', {
+            chat_id: message.chat.id,
+            text: `⚠️ <b>Invalid Warning Mode</b>\n<i>Usage: <code>/warningmode &lt;ban|mute&gt; &lt;duration|perm&gt;</code></i>\n\n${menuPayload.text}`,
+            parse_mode: 'HTML',
+            ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+            ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
+            reply_markup: menuPayload.reply_markup
+          });
+          return;
+        }
+
+        let nextConfig: GroupWarningConfig;
+        if (!durWord) {
+          nextConfig = {
+            action: actionWord,
+            durationSec: 0,
+            isPermanent: true,
+            durationLabel: 'Permanent'
+          };
+        } else {
+          const parsedDur = this.parseModerationDuration(durWord.replace(/\s+/g, ''));
+          if (!parsedDur.valid) {
+            const menuPayload = await this.buildWarningModeMenuPayload(message.chat.id);
+            await this.callTelegramApi('sendMessage', {
+              chat_id: message.chat.id,
+              text: `⚠️ <b>Invalid Duration</b>\n<i>Examples: <code>30m</code>, <code>12h</code>, <code>7d</code>, <code>perm</code></i>\n\n${menuPayload.text}`,
+              parse_mode: 'HTML',
+              ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+              ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
+              reply_markup: menuPayload.reply_markup
+            });
+            return;
+          }
+          nextConfig = {
+            action: actionWord,
+            durationSec: parsedDur.isPermanent ? 0 : parsedDur.durationSec,
+            isPermanent: parsedDur.isPermanent,
+            durationLabel: parsedDur.displayLabel
+          };
+        }
+
+        await storage.setGroupWarningConfig(message.chat.id, nextConfig);
+        const menuPayload = await this.buildWarningModeMenuPayload(message.chat.id);
+        await this.callTelegramApi('sendMessage', {
+          chat_id: message.chat.id,
+          text: `✅ <b>Warning Mode Updated</b>\n\n${menuPayload.text}`,
+          parse_mode: 'HTML',
+          ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+          ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
+          reply_markup: menuPayload.reply_markup
+        });
+        return;
+      }
+
+      const menuPayload = await this.buildWarningModeMenuPayload(message.chat.id);
+      await this.callTelegramApi('sendMessage', {
+        chat_id: message.chat.id,
+        text: menuPayload.text,
+        parse_mode: 'HTML',
+        ...(message.message_id ? { reply_to_message_id: message.message_id } : {}),
+        ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
+        reply_markup: menuPayload.reply_markup
+      });
       return;
     }
 
@@ -6911,6 +7856,12 @@ export class TelegramService {
               // Quote-reply directly to the user's message whenever it wasn't deleted (e.g. reply_only or warn)
               const quoteReplyId = !shouldDeleteMessage && message.message_id ? Number(message.message_id) : undefined;
               const threadId = message.message_thread_id ? Number(message.message_thread_id) : undefined;
+              const shouldAttachRemoveWarnBtn =
+                !isReplyOnly &&
+                (!isFinalThreshold || (action !== 'ban' && action !== 'mute'));
+              const warnReplyMarkup = shouldAttachRemoveWarnBtn
+                ? this.buildRemoveWarningKeyboard(fromId, rule.id)
+                : undefined;
 
               if (hasMedia && rule.mediaUrl) {
                 const mediaRes = await TelegramService.sendBroadcastMessage({
@@ -6919,7 +7870,8 @@ export class TelegramService {
                   mediaType: rule.mediaType as any,
                   mediaUrl: rule.mediaUrl,
                   replyToMessageId: quoteReplyId,
-                  threadId
+                  threadId,
+                  replyMarkup: warnReplyMarkup
                 });
 
                 // Cache newly assigned Telegram file_id back to rule for instant future replies
@@ -6935,7 +7887,8 @@ export class TelegramService {
                     text: formattedReply,
                     parse_mode: 'HTML',
                     ...(quoteReplyId ? { reply_to_message_id: quoteReplyId } : {}),
-                    ...(threadId ? { message_thread_id: threadId } : {})
+                    ...(threadId ? { message_thread_id: threadId } : {}),
+                    ...(warnReplyMarkup ? { reply_markup: warnReplyMarkup } : {})
                   });
                 }
               } else if (formattedReply) {
@@ -6944,14 +7897,16 @@ export class TelegramService {
                   text: formattedReply,
                   parse_mode: 'HTML',
                   ...(quoteReplyId ? { reply_to_message_id: quoteReplyId } : {}),
-                  ...(threadId ? { message_thread_id: threadId } : {})
+                  ...(threadId ? { message_thread_id: threadId } : {}),
+                  ...(warnReplyMarkup ? { reply_markup: warnReplyMarkup } : {})
                 });
                 if (!sendRes?.ok && quoteReplyId) {
                   await this.callTelegramApi('sendMessage', {
                     chat_id: message.chat.id,
                     text: formattedReply,
                     parse_mode: 'HTML',
-                    ...(threadId ? { message_thread_id: threadId } : {})
+                    ...(threadId ? { message_thread_id: threadId } : {}),
+                    ...(warnReplyMarkup ? { reply_markup: warnReplyMarkup } : {})
                   });
                 }
               }
@@ -7298,10 +8253,6 @@ export class TelegramService {
         reply_markup: replyMarkup
       });
     }
-  }
-
-  private static formatBotModeDisplay(mode?: BotOperationalMode): string {
-    return '📁 File Bot';
   }
 
   private static async finalizeFileBotClone(
@@ -7797,7 +8748,7 @@ export class TelegramService {
     }
 
     // Admin /ban command in private chat
-    const privBanMatch = text.match(/^\/ban(?:@\w+)?(?:\s+(.+))?$/i);
+    const privBanMatch = text.match(/^\/ban(?:@\w+)?(?:\s+([\s\S]+))?$/i);
     if (privBanMatch) {
       const isAdmin = await this.isAuthorizedAdmin(fromId, message.from?.username);
       if (!isAdmin) {
@@ -7817,20 +8768,31 @@ export class TelegramService {
         });
         return;
       }
-      if (!privBanMatch[1]?.trim()) {
+      const privBanArg = privBanMatch[1]?.trim() || '';
+      if (!privBanArg) {
         await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
-          text: `ℹ️ <b>How to Ban</b>\nSend <code>/ban &lt;user_id_or_username&gt;</code>`,
+          text: `ℹ️ <b>How to Ban</b>\nSend <code>/ban &lt;user_id_or_username&gt; [reason]</code>`,
           parse_mode: 'HTML'
         });
         return;
       }
-      const target = await this.resolveModerationTarget(null, message, privBanMatch[1]);
-      await storage.setBotUserBanned(target.id, true);
+      const privParts = privBanArg.match(/^([^\s]+)(?:\s+([\s\S]+))?$/);
+      const privQuery = privParts ? privParts[1].trim() : privBanArg;
+      const privReason = (privParts?.[2] || '').trim() || 'No reason';
+      const target = await this.resolveModerationTarget(null, message, privQuery);
+      await storage.setBotUserBanned(target.id, true, {
+        reason: privReason,
+        name: target.name,
+        username: target.username
+      });
       const userProfileLink = this.formatUserProfileLink(target.name, target.username, target.id);
       await this.callTelegramApi('sendMessage', {
         chat_id: chatId,
-        text: `🚫 <b>Banned permanently</b>\n\n👤 <b>User:</b> ${userProfileLink}`,
+        text:
+          `🚫 <b>Banned permanently</b>\n\n` +
+          `👤 <b>User:</b> ${userProfileLink}\n` +
+          `📝 <b>Reason:</b> <i>${this.escapeHtml(privReason)}</i>`,
         parse_mode: 'HTML'
       });
       return;
@@ -9984,6 +10946,7 @@ export class TelegramService {
     pinMessage?: boolean;
     replyToMessageId?: number;
     threadId?: number;
+    replyMarkup?: any;
   }): Promise<{ ok: boolean; messageId?: number; fileId?: string; description?: string }> {
     const token = await this.getBotToken();
     if (!token) return { ok: false, description: 'No bot token configured' };
@@ -9994,6 +10957,7 @@ export class TelegramService {
     const mediaType = params.mediaType || 'text';
     const replyToMessageId = params.replyToMessageId ? Number(params.replyToMessageId) : undefined;
     const threadId = params.threadId ? Number(params.threadId) : undefined;
+    const replyMarkup = params.replyMarkup;
 
     // 1. Text-Only Message
     if (mediaType === 'text') {
@@ -10002,14 +10966,16 @@ export class TelegramService {
         text: params.message || '',
         parse_mode: 'HTML',
         ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
-        ...(threadId ? { message_thread_id: threadId } : {})
+        ...(threadId ? { message_thread_id: threadId } : {}),
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {})
       });
       if ((!res || !res.ok) && replyToMessageId) {
         res = await this.callTelegramApi('sendMessage', {
           chat_id: chatId,
           text: params.message || '',
           parse_mode: 'HTML',
-          ...(threadId ? { message_thread_id: threadId } : {})
+          ...(threadId ? { message_thread_id: threadId } : {}),
+          ...(replyMarkup ? { reply_markup: replyMarkup } : {})
         });
       }
       if (res && res.ok && params.pinMessage && res.result?.message_id) {
@@ -10065,7 +11031,8 @@ export class TelegramService {
         [field]: params.mediaUrl,
         ...(caption ? { caption, parse_mode: 'HTML' } : {}),
         ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {}),
-        ...(threadId ? { message_thread_id: threadId } : {})
+        ...(threadId ? { message_thread_id: threadId } : {}),
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {})
       };
 
       let res = await this.callTelegramApi(method, basePayload);
@@ -10160,6 +11127,9 @@ export class TelegramService {
         }
         if (threadId) {
           formData.append('message_thread_id', String(threadId));
+        }
+        if (replyMarkup) {
+          formData.append('reply_markup', JSON.stringify(replyMarkup));
         }
 
         const blob = new Blob([new Uint8Array(normalizedBuf)] as any, {
@@ -16265,15 +17235,16 @@ export class TelegramService {
       }
 
       try {
+        const reportReason = String(existingReport?.reason || '').trim() || 'No reason';
         await storage.setBotUserBanned(targetUserId, true, {
           chatId: existingReport?.chatId ? String(existingReport.chatId) : undefined,
-          reason: existingReport?.reason,
+          reason: reportReason,
           name: existingReport?.reportedUserName,
           username: existingReport?.reportedUserUsername
         });
         if (existingReport?.chatId) {
           await storage.setGroupMemberBanned(existingReport.chatId, targetUserId, true, {
-            reason: existingReport.reason,
+            reason: reportReason,
             name: existingReport.reportedUserName,
             username: existingReport.reportedUserUsername
           }).catch(() => {});
@@ -16391,7 +17362,300 @@ export class TelegramService {
     }
 
     // =========================================================================
-    // GROUP MODERATION INTERACTIVE CALLBACKS (modp / moda / modt / modk / modr / modc)
+    // GROUP WARNING REMOVAL BUTTON (warnrm:g:<uid> / warnrm:f:<uid>:<hash>)
+    // =========================================================================
+    if (data && data.startsWith('warnrm:')) {
+      const msgChatId = cb.message?.chat?.id ?? chatId;
+      const isAllowedActor = await this.isAuthorizedModerationActor(
+        msgChatId,
+        fromId,
+        cb.from?.username
+      );
+      if (!isAllowedActor) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Only group admins can use this button.',
+          show_alert: true
+        }).catch(() => {});
+        return;
+      }
+
+      const parts = data.split(':');
+      const kind = parts[1];
+      const targetUid = parts[2] || '';
+      const ruleHash = parts[3] || '';
+      if (!msgChatId || !targetUid) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Warning record not found.',
+          show_alert: true
+        }).catch(() => {});
+        return;
+      }
+
+      const res = kind === 'f'
+        ? await storage.decrementUserFraudWarningByHash(msgChatId, targetUid, ruleHash)
+        : await storage.decrementUserLinkWarning(msgChatId, targetUid);
+
+      const settings = await storage.getSettings();
+      const warnLimit = Math.max(1, Math.min(100, Math.round(Number(settings.groupWarningLimit) || 3)));
+      const foundUser = await storage.findUserByIdOrUsername(targetUid).catch(() => null);
+      const targetName = foundUser
+        ? ([foundUser.firstName, foundUser.lastName].filter(Boolean).join(' ').trim() || foundUser.username || `User ${targetUid}`)
+        : `User ${targetUid}`;
+      const targetUsername = foundUser?.username ? `@${String(foundUser.username).replace(/^@+/, '')}` : '';
+      const userLink = this.formatUserProfileLink(targetName, targetUsername, targetUid);
+
+      await this.callTelegramApi('answerCallbackQuery', {
+        callback_query_id: cb.id,
+        text: `Warning removed (${res.current}/${warnLimit}).`
+      }).catch(() => {});
+
+      const updatedText =
+        `✅ <b>Warning Removed</b>\n\n` +
+        `👤 <b>User:</b> ${userLink}\n` +
+        `⚠️ <b>Active Warnings:</b> <code>${res.current}/${warnLimit}</code>`;
+
+      if (cb.message?.message_id) {
+        if (cb.message.caption !== undefined && cb.message.text === undefined) {
+          await this.callTelegramApi('editMessageCaption', {
+            chat_id: msgChatId,
+            message_id: cb.message.message_id,
+            caption: updatedText,
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: [] }
+          }).catch(() => {});
+        } else {
+          await this.callTelegramApi('editMessageText', {
+            chat_id: msgChatId,
+            message_id: cb.message.message_id,
+            text: updatedText,
+            parse_mode: 'HTML',
+            reply_markup: { inline_keyboard: [] }
+          }).catch(() => {});
+        }
+      }
+      return;
+    }
+
+    // =========================================================================
+    // GROUP WARNING MODE INTERACTIVE CALLBACKS (wm:*)
+    // =========================================================================
+    if (data && data.startsWith('wm:')) {
+      const msgChatId = cb.message?.chat?.id ?? chatId;
+      const isAllowedActor = await this.isAuthorizedModerationActor(
+        msgChatId,
+        fromId,
+        cb.from?.username
+      );
+      if (!isAllowedActor) {
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: 'Only group admins can use this button.',
+          show_alert: true
+        }).catch(() => {});
+        return;
+      }
+      if (!msgChatId || !cb.message?.message_id) {
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+        return;
+      }
+
+      const cleanChatId = String(msgChatId).trim();
+      const keypadKey = `${cleanChatId}:${cb.message.message_id}`;
+      const parts = data.split(':');
+      const subCmd = parts[1];
+
+      if (subCmd === 'close') {
+        activeWarningModeKeypads.delete(keypadKey);
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+        await this.callTelegramApi('deleteMessage', {
+          chat_id: msgChatId,
+          message_id: cb.message.message_id
+        }).catch(() => {});
+        return;
+      }
+
+      const curConfig = await storage.getGroupWarningConfig(msgChatId);
+
+      if (subCmd === 'act') {
+        const nextAct = parts[2] === 'mute' ? 'mute' : 'ban';
+        await storage.setGroupWarningConfig(msgChatId, { ...curConfig, action: nextAct });
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: `Action set to ${nextAct === 'mute' ? 'Mute' : 'Ban'}.`
+        }).catch(() => {});
+        const payload = await this.buildWarningModeMenuPayload(msgChatId);
+        await this.callTelegramApi('editMessageText', {
+          chat_id: msgChatId,
+          message_id: cb.message.message_id,
+          text: payload.text,
+          parse_mode: 'HTML',
+          reply_markup: payload.reply_markup
+        }).catch(() => {});
+        return;
+      }
+
+      if (subCmd === 'dur') {
+        const durArg = parts[2] || 'perm';
+        const parsedDur = this.parseModerationDuration(durArg);
+        await storage.setGroupWarningConfig(msgChatId, {
+          action: curConfig.action,
+          durationSec: parsedDur.isPermanent ? 0 : parsedDur.durationSec,
+          isPermanent: parsedDur.isPermanent,
+          durationLabel: parsedDur.displayLabel || 'Permanent'
+        });
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: `Duration set to ${parsedDur.displayLabel || 'Permanent'}.`
+        }).catch(() => {});
+        const payload = await this.buildWarningModeMenuPayload(msgChatId);
+        await this.callTelegramApi('editMessageText', {
+          chat_id: msgChatId,
+          message_id: cb.message.message_id,
+          text: payload.text,
+          parse_mode: 'HTML',
+          reply_markup: payload.reply_markup
+        }).catch(() => {});
+        return;
+      }
+
+      if (subCmd === 'custom') {
+        const draft = { digits: '', unit: 'h' as 'm' | 'h' | 'd', createdAt: Date.now() };
+        activeWarningModeKeypads.set(keypadKey, draft);
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+        const payload = await this.buildWarningModeMenuPayload(msgChatId, draft);
+        await this.callTelegramApi('editMessageText', {
+          chat_id: msgChatId,
+          message_id: cb.message.message_id,
+          text: payload.text,
+          parse_mode: 'HTML',
+          reply_markup: payload.reply_markup
+        }).catch(() => {});
+        return;
+      }
+
+      if (subCmd === 'k') {
+        const kCmd = parts[2];
+        const kArg = parts[3];
+        if (kCmd === 'back') {
+          activeWarningModeKeypads.delete(keypadKey);
+          await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+          const payload = await this.buildWarningModeMenuPayload(msgChatId);
+          await this.callTelegramApi('editMessageText', {
+            chat_id: msgChatId,
+            message_id: cb.message.message_id,
+            text: payload.text,
+            parse_mode: 'HTML',
+            reply_markup: payload.reply_markup
+          }).catch(() => {});
+          return;
+        }
+
+        let draft = activeWarningModeKeypads.get(keypadKey);
+        if (!draft) {
+          const rawTxt = String(cb.message?.text || '');
+          const m = rawTxt.match(/Selected Duration:\s*(\d+)\s*(Minute|Minutes|Hour|Hours|Day|Days)/i);
+          const valNum = m ? parseInt(m[1], 10) : 0;
+          const unitLetter = m?.[2]?.toLowerCase().startsWith('m')
+            ? 'm'
+            : m?.[2]?.toLowerCase().startsWith('d')
+              ? 'd'
+              : 'h';
+          draft = {
+            digits: Number.isFinite(valNum) && valNum > 0 ? String(valNum) : '',
+            unit: unitLetter,
+            createdAt: Date.now()
+          };
+          activeWarningModeKeypads.set(keypadKey, draft);
+        }
+
+        if (kCmd === 'ok') {
+          const numVal = draft.digits ? parseInt(draft.digits, 10) : 0;
+          if (!Number.isFinite(numVal) || numVal <= 0) {
+            await this.callTelegramApi('answerCallbackQuery', {
+              callback_query_id: cb.id,
+              text: '⚠️ Please enter a valid duration greater than 0.',
+              show_alert: true
+            }).catch(() => {});
+            return;
+          }
+          const parsedDur = this.parseModerationDuration(`${numVal}${draft.unit}`);
+          activeWarningModeKeypads.delete(keypadKey);
+          await storage.setGroupWarningConfig(msgChatId, {
+            action: curConfig.action,
+            durationSec: parsedDur.durationSec,
+            isPermanent: false,
+            durationLabel: parsedDur.displayLabel
+          });
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: `Duration saved: ${parsedDur.displayLabel}.`
+          }).catch(() => {});
+          const payload = await this.buildWarningModeMenuPayload(msgChatId);
+          await this.callTelegramApi('editMessageText', {
+            chat_id: msgChatId,
+            message_id: cb.message.message_id,
+            text: payload.text,
+            parse_mode: 'HTML',
+            reply_markup: payload.reply_markup
+          }).catch(() => {});
+          return;
+        }
+
+        let changed = false;
+        if (kCmd === 'd' && /^[0-9]$/.test(kArg || '')) {
+          if (draft.digits === '' && kArg === '0') {
+            await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Duration is already 0.' }).catch(() => {});
+            return;
+          }
+          if (draft.digits.length >= 4) {
+            await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Maximum 4 digits allowed.' }).catch(() => {});
+            return;
+          }
+          draft.digits = `${draft.digits}${kArg}`;
+          changed = true;
+        } else if (kCmd === 'bk') {
+          if (!draft.digits) {
+            await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Already 0.' }).catch(() => {});
+            return;
+          }
+          draft.digits = draft.digits.slice(0, -1);
+          changed = true;
+        } else if (kCmd === 'clr') {
+          if (!draft.digits) {
+            await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id, text: 'Already cleared.' }).catch(() => {});
+            return;
+          }
+          draft.digits = '';
+          changed = true;
+        } else if (kCmd === 'u' && (kArg === 'm' || kArg === 'h' || kArg === 'd')) {
+          if (draft.unit === kArg) {
+            await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+            return;
+          }
+          draft.unit = kArg;
+          changed = true;
+        }
+
+        if (changed) {
+          await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+          const payload = await this.buildWarningModeMenuPayload(msgChatId, draft);
+          await this.callTelegramApi('editMessageText', {
+            chat_id: msgChatId,
+            message_id: cb.message.message_id,
+            text: payload.text,
+            parse_mode: 'HTML',
+            reply_markup: payload.reply_markup
+          }).catch(() => {});
+        }
+        return;
+      }
+      return;
+    }
+
+    // =========================================================================
+    // GROUP MODERATION INTERACTIVE CALLBACKS (modp / moda / modt / modk / modr / mods / modc)
     // =========================================================================
     if (
       data &&
@@ -16400,6 +17664,7 @@ export class TelegramService {
         data.startsWith('modt:') ||
         data.startsWith('modk:') ||
         data.startsWith('modr:') ||
+        data.startsWith('mods:') ||
         data.startsWith('modc:'))
     ) {
       const parts = data.split(':');
@@ -16432,11 +17697,14 @@ export class TelegramService {
       }
 
       if (data.startsWith('modc:')) {
+        for (const [k, v] of activeGroupTempModSessions.entries()) {
+          if (v?.token === token) activeGroupTempModSessions.delete(k);
+        }
         if (pending) {
-          activeGroupTempModSessions.delete(`${String(pending.chatId)}:${fromId}`);
-          activeGroupTempModSessions.delete(`${String(pending.chatId)}:${pending.adminId}`);
+          activeGroupTempModSessions.delete(`${String(pending.chatId).trim()}:${fromId}`);
+          activeGroupTempModSessions.delete(`${String(pending.chatId).trim()}:${String(pending.adminId ?? '').trim()}`);
         } else if (msgChatId) {
-          activeGroupTempModSessions.delete(`${String(msgChatId)}:${fromId}`);
+          activeGroupTempModSessions.delete(`${String(msgChatId).trim()}:${fromId}`);
         }
         pendingGroupModerationMap.delete(token);
         await storage.deletePendingModeration(token).catch(() => {});
@@ -16470,17 +17738,22 @@ export class TelegramService {
       }
 
       const prevAdminId = String(pending.adminId || '').trim();
+      if (prevAdminId === '1087968824') {
+        pending.initiatedAnonymously = true;
+      }
       if (prevAdminId && prevAdminId !== fromId) {
-        activeGroupTempModSessions.delete(`${String(pending.chatId)}:${prevAdminId}`);
+        activeGroupTempModSessions.delete(`${String(pending.chatId).trim()}:${prevAdminId}`);
       }
       pending.adminId = fromId || prevAdminId;
+      pendingGroupModerationMap.set(token, pending);
 
       if (data.startsWith('modt:')) {
         pending.stage = 'custom_keypad';
         pending.keypadDigits = '';
         pending.keypadUnit = 'h';
         pending.promptMessageId = cb.message?.message_id || pending.promptMessageId;
-        activeGroupTempModSessions.delete(`${String(pending.chatId)}:${pending.adminId}`);
+        activeGroupTempModSessions.delete(`${String(pending.chatId).trim()}:${pending.adminId}`);
+        pendingGroupModerationMap.set(token, pending);
         await storage.savePendingModeration(pending).catch(() => {});
 
         await this.callTelegramApi('answerCallbackQuery', {
@@ -16520,14 +17793,38 @@ export class TelegramService {
           pending.durationToken = durToken;
           pending.durationLabel = parsedDur.displayLabel || durToken;
           pending.isPermanent = false;
-          pending.stage = 'awaiting_reason';
           pending.promptMessageId = cb.message?.message_id || pending.promptMessageId;
-          activeGroupTempModSessions.set(`${String(pending.chatId)}:${pending.adminId}`, pending);
+
+          if (pending.reason && pending.reason.trim()) {
+            for (const [k, v] of activeGroupTempModSessions.entries()) {
+              if (v?.token === token) activeGroupTempModSessions.delete(k);
+            }
+            pendingGroupModerationMap.delete(token);
+            await storage.deletePendingModeration(token).catch(() => {});
+            await this.callTelegramApi('answerCallbackQuery', {
+              callback_query_id: cb.id,
+              text: pending.action === 'ban' ? 'Executing ban...' : 'Executing mute...'
+            }).catch(() => {});
+            await this.executeGroupModerationAction({
+              chatId: pending.chatId,
+              action: pending.action,
+              target: { id: pending.targetId, name: pending.targetName, username: pending.targetUsername },
+              durationToken: pending.durationToken,
+              isPermanent: false,
+              reason: pending.reason,
+              editMessageId: pending.promptMessageId
+            });
+            return;
+          }
+
+          pending.stage = 'awaiting_reason';
+          activeGroupTempModSessions.set(`${String(pending.chatId).trim()}:${pending.adminId}`, pending);
+          pendingGroupModerationMap.set(token, pending);
           await storage.savePendingModeration(pending).catch(() => {});
 
           await this.callTelegramApi('answerCallbackQuery', {
             callback_query_id: cb.id,
-            text: `Duration set: ${pending.durationLabel}. Now send reason.`
+            text: `Duration set: ${pending.durationLabel}. Send reason or tap No Reason.`
           }).catch(() => {});
 
           const reasonPrompt = this.buildModerationReasonPromptPayload(pending);
@@ -16591,6 +17888,7 @@ export class TelegramService {
         }
 
         if (changed) {
+          pendingGroupModerationMap.set(token, pending);
           await storage.savePendingModeration(pending).catch(() => {});
           await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
           const keypadPayload = this.buildModerationKeypadPayload(pending);
@@ -16611,14 +17909,37 @@ export class TelegramService {
         pending.isPermanent = true;
         pending.durationToken = undefined;
         pending.durationLabel = 'Permanent';
-        pending.stage = 'awaiting_reason';
         pending.promptMessageId = cb.message?.message_id || pending.promptMessageId;
-        activeGroupTempModSessions.set(`${String(pending.chatId)}:${pending.adminId}`, pending);
+
+        if (pending.reason && pending.reason.trim()) {
+          for (const [k, v] of activeGroupTempModSessions.entries()) {
+            if (v?.token === token) activeGroupTempModSessions.delete(k);
+          }
+          pendingGroupModerationMap.delete(token);
+          await storage.deletePendingModeration(token).catch(() => {});
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: pending.action === 'ban' ? 'Executing ban...' : 'Executing mute...'
+          }).catch(() => {});
+          await this.executeGroupModerationAction({
+            chatId: pending.chatId,
+            action: pending.action,
+            target: { id: pending.targetId, name: pending.targetName, username: pending.targetUsername },
+            isPermanent: true,
+            reason: pending.reason,
+            editMessageId: pending.promptMessageId
+          });
+          return;
+        }
+
+        pending.stage = 'awaiting_reason';
+        activeGroupTempModSessions.set(`${String(pending.chatId).trim()}:${pending.adminId}`, pending);
+        pendingGroupModerationMap.set(token, pending);
         await storage.savePendingModeration(pending).catch(() => {});
 
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
-          text: 'Permanent selected. Please send the reason in chat.'
+          text: 'Permanent selected. Send reason or tap No Reason.'
         }).catch(() => {});
 
         const reasonPrompt = this.buildModerationReasonPromptPayload(pending);
@@ -16653,14 +17974,38 @@ export class TelegramService {
         pending.durationToken = chosen.value;
         pending.durationLabel = chosen.label;
         pending.isPermanent = false;
-        pending.stage = 'awaiting_reason';
         pending.promptMessageId = cb.message?.message_id || pending.promptMessageId;
-        activeGroupTempModSessions.set(`${String(pending.chatId)}:${pending.adminId}`, pending);
+
+        if (pending.reason && pending.reason.trim()) {
+          for (const [k, v] of activeGroupTempModSessions.entries()) {
+            if (v?.token === token) activeGroupTempModSessions.delete(k);
+          }
+          pendingGroupModerationMap.delete(token);
+          await storage.deletePendingModeration(token).catch(() => {});
+          await this.callTelegramApi('answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: pending.action === 'ban' ? 'Executing ban...' : 'Executing mute...'
+          }).catch(() => {});
+          await this.executeGroupModerationAction({
+            chatId: pending.chatId,
+            action: pending.action,
+            target: { id: pending.targetId, name: pending.targetName, username: pending.targetUsername },
+            durationToken: pending.durationToken,
+            isPermanent: false,
+            reason: pending.reason,
+            editMessageId: pending.promptMessageId
+          });
+          return;
+        }
+
+        pending.stage = 'awaiting_reason';
+        activeGroupTempModSessions.set(`${String(pending.chatId).trim()}:${pending.adminId}`, pending);
+        pendingGroupModerationMap.set(token, pending);
         await storage.savePendingModeration(pending).catch(() => {});
 
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
-          text: `${chosen.label} selected. Please send the reason in chat.`
+          text: `${chosen.label} selected. Send reason or tap No Reason.`
         }).catch(() => {});
 
         const reasonPrompt = this.buildModerationReasonPromptPayload(pending);
@@ -16676,9 +18021,13 @@ export class TelegramService {
         return;
       }
 
-      if (data.startsWith('modr:')) {
-        activeGroupTempModSessions.delete(`${String(pending.chatId)}:${fromId}`);
-        activeGroupTempModSessions.delete(`${String(pending.chatId)}:${pending.adminId}`);
+      if (data.startsWith('modr:') || data.startsWith('mods:')) {
+        const isSkip = data.startsWith('mods:');
+        for (const [k, v] of activeGroupTempModSessions.entries()) {
+          if (v?.token === token) activeGroupTempModSessions.delete(k);
+        }
+        activeGroupTempModSessions.delete(`${String(pending.chatId).trim()}:${fromId}`);
+        activeGroupTempModSessions.delete(`${String(pending.chatId).trim()}:${String(pending.adminId ?? '').trim()}`);
         pendingGroupModerationMap.delete(token);
         await storage.deletePendingModeration(token).catch(() => {});
 
@@ -16697,7 +18046,7 @@ export class TelegramService {
           },
           durationToken: pending.durationToken,
           isPermanent: Boolean(pending.isPermanent),
-          reason: pending.reason,
+          reason: isSkip ? 'No reason' : (pending.reason || 'No reason'),
           editMessageId: cb.message?.message_id || pending.promptMessageId
         });
         return;
@@ -16712,14 +18061,29 @@ export class TelegramService {
       if (!canAccess) {
         await this.callTelegramApi('answerCallbackQuery', {
           callback_query_id: cb.id,
-          text: '⛔ Only bot owners can open the dashboard.',
+          text: '⛔ Only group admins and bot owners can open the dashboard.',
           show_alert: true
         }).catch(() => {});
         return;
       }
 
       const msgId = cb.message?.message_id;
+      const clearChatLookup = () => {
+        const cleanCid = String(chatId ?? '').trim();
+        for (const [k, v] of activeDashboardLookupSessions.entries()) {
+          if (String(v.chatId ?? '').trim() === cleanCid) {
+            activeDashboardLookupSessions.delete(k);
+          }
+        }
+      };
+
+      if (data === 'adm_noop') {
+        await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
+        return;
+      }
+
       if (data === 'adm_close') {
+        clearChatLookup();
         await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
         if (chatId && msgId) {
           await this.callTelegramApi('deleteMessage', {
@@ -16738,15 +18102,42 @@ export class TelegramService {
         return;
       }
 
-      if (data === 'adm_dash') {
+      if (data === 'adm_dash' || data === 'adm_refresh') {
+        clearChatLookup();
+        await this.callTelegramApi('answerCallbackQuery', {
+          callback_query_id: cb.id,
+          text: data === 'adm_refresh' ? 'Refreshing...' : undefined
+        }).catch(() => {});
+        if (chatId && msgId) {
+          await this.renderOwnerAdminDashboard(chatId, msgId, undefined, undefined, data === 'adm_refresh');
+        }
+        return;
+      }
+
+      if (data === 'adm_lookup') {
+        clearChatLookup();
+        const lookupKey = `${String(chatId).trim()}:${fromId}`;
+        activeDashboardLookupSessions.set(lookupKey, {
+          chatId,
+          adminId: fromId,
+          initiatedAnonymously: fromId === '1087968824',
+          promptMessageId: msgId,
+          createdAt: Date.now()
+        });
         await this.callTelegramApi('answerCallbackQuery', { callback_query_id: cb.id }).catch(() => {});
         if (chatId && msgId) {
-          await this.renderOwnerAdminDashboard(chatId, msgId);
+          await this.sendOrEditOwnerDashboardMessage(
+            chatId,
+            `🔍 <b>Check Group User</b>\n\n<i>Send a User ID or @username (or reply to a user) to check their live ban/mute status.</i>`,
+            [[{ text: '⬅️ Back', callback_data: 'adm_dash' }, { text: '✖️ Close', callback_data: 'adm_close' }]],
+            msgId
+          );
         }
         return;
       }
 
       if (data.startsWith('adm_list:')) {
+        clearChatLookup();
         const [, rawKind, rawPage] = data.split(':');
         const kind: 'ban' | 'mute' = rawKind === 'mute' ? 'mute' : 'ban';
         const page = Math.max(0, parseInt(rawPage || '0', 10) || 0);
@@ -16758,6 +18149,7 @@ export class TelegramService {
       }
 
       if (data.startsWith('adm_u:')) {
+        clearChatLookup();
         const [, rawKind, userId, rawPage] = data.split(':');
         const kind: 'ban' | 'mute' = rawKind === 'mute' ? 'mute' : 'ban';
         const page = Math.max(0, parseInt(rawPage || '0', 10) || 0);
@@ -18919,10 +20311,6 @@ export class TelegramService {
 
   public static async processDueScheduledDeletions(): Promise<number> {
     try {
-      const currentSettings = await storage.getSettings().catch(() => null);
-      if (currentSettings?.botMode && currentSettings.botMode !== 'file_bot') {
-        return 0;
-      }
       const due = await storage.popDueScheduledDeletions();
       let count = 0;
       for (const sched of due) {
@@ -20605,21 +21993,15 @@ export class TelegramService {
       ]);
     } else if (view === 'fleet' && isMain) {
       const allBots = await TelegramBotManager.getAllBots().catch(() => []);
-      const mainMode = settings.botMode === 'post_bot' ? 'post_bot' : (settings.botMode === 'image_url_bot' ? 'image_url_bot' : 'file_bot');
       const clones = allBots.filter((b) => !b.isMain);
 
       text =
         `🤖 <b>Switch Bot &amp; Fleet</b>\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
-        `• Main Bot Mode: <code>${mainMode}</code>\n` +
+        `• Mode: <code>📁 File Bot</code>\n` +
         `• Cloned Bots: <code>${clones.length}</code>` +
         noticeBlock;
 
-      rows.push([
-        { text: mainMode === 'file_bot' ? '• 📁 File •' : '📁 File', callback_data: 'more:flt:mode:file_bot', style: mainMode === 'file_bot' ? 'primary' : 'secondary' },
-        { text: mainMode === 'post_bot' ? '• 📰 Post •' : '📰 Post', callback_data: 'more:flt:mode:post_bot', style: mainMode === 'post_bot' ? 'primary' : 'secondary' },
-        { text: mainMode === 'image_url_bot' ? '• 🖼️ ImgURL •' : '🖼️ ImgURL', callback_data: 'more:flt:mode:image_url_bot', style: mainMode === 'image_url_bot' ? 'primary' : 'secondary' }
-      ]);
       rows.push([{ text: '🤖 Clone File Bot', callback_data: 'more:flt:clone', style: 'success' }]);
       clones.slice(0, 10).forEach((b, idx) => {
         const running = b.status === 'active';
@@ -21488,12 +22870,6 @@ export class TelegramService {
     if (data.startsWith('more:flt:') && this.isMainBotContext()) {
       const sub = data.slice(9);
       const clones = (await TelegramBotManager.getAllBots().catch(() => [])).filter((b) => !b.isMain);
-      if (sub.startsWith('mode:')) {
-        const mode = sub.slice(5) as BotOperationalMode;
-        await TelegramBotManager.setBotMode('main', mode);
-        await answer(`Mode: ${mode}`);
-        return this.renderMoreView(fromId, chatId, 'fleet', session);
-      }
       if (sub === 'clone') {
         await answer();
         this.clearMoreSession(fromId);
@@ -22389,7 +23765,6 @@ export class TelegramBotManager {
         }
       }
       this.startWatchdog();
-      ImageUrlBotEngine.startExpiryCron((method, body, tkn) => TelegramService.callTelegramApi(method, body, tkn));
     } catch (err: any) {
       console.error('[TelegramBotManager] Error initializing cloned bots:', err?.message || err);
     }
@@ -22722,44 +24097,6 @@ export class TelegramBotManager {
     return { success: true, bot: newBot };
   }
 
-  public static async setBotMode(id: string, mode: BotOperationalMode): Promise<{ ok: boolean; botMode: BotOperationalMode; error?: string }> {
-    const cleanId = String(id || '').trim() || 'main';
-    const nextMode: BotOperationalMode =
-      mode === 'post_bot' ? 'post_bot' : (mode === 'image_url_bot' ? 'image_url_bot' : 'file_bot');
-
-    if (cleanId === 'main') {
-      const mainStorage = StorageManager.getMainStorage();
-      await mainStorage.updateSettings({ botMode: nextMode });
-      return { ok: true, botMode: nextMode };
-    }
-
-    if (this.isBotDeleted(cleanId)) {
-      return { ok: false, botMode: 'file_bot', error: 'Cloned bot has been deleted.' };
-    }
-
-    if (nextMode !== 'file_bot') {
-      return { ok: false, botMode: 'file_bot', error: 'Cloned bots run strictly in File Bot mode.' };
-    }
-
-    const mainStorage = StorageManager.getMainStorage();
-    const cloned = await mainStorage.getClonedBots().catch(() => []);
-    const cleanNorm = this.normalizeBotKey(cleanId);
-    const target = cloned.find(b => b.id === cleanId || this.normalizeBotKey(b.id) === cleanNorm);
-    if (!target) {
-      return { ok: false, botMode: 'file_bot', error: 'Cloned bot not found.' };
-    }
-
-    target.botMode = 'file_bot';
-    await mainStorage.saveClonedBot({ ...target, botMode: 'file_bot' });
-
-    const botStorage = StorageManager.getStorage(target.id);
-    await botStorage.init().catch(() => {});
-    await botStorage.updateSettings({ botMode: 'file_bot' });
-
-    console.info(`[TelegramBotManager] Cloned bot ${target.id} (@${target.username}) ensured in file_bot mode`);
-    return { ok: true, botMode: 'file_bot' };
-  }
-
   public static async deleteClonedBot(id: string): Promise<boolean> {
     if (!id || id === 'main') return false;
     const cleanId = String(id).trim();
@@ -22830,7 +24167,7 @@ export class TelegramBotManager {
       username: mainSettings.botUsername || '',
       isMain: true,
       status: mainStopped ? 'stopped' : 'active',
-      botMode: mainSettings.botMode === 'post_bot' ? 'post_bot' : (mainSettings.botMode === 'image_url_bot' ? 'image_url_bot' : 'file_bot'),
+      botMode: 'file_bot',
       filesCount: mainItems.length,
       usersCount: mainUsers.length
     }];

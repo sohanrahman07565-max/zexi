@@ -201,43 +201,7 @@ export interface AllowedChatEntry {
   addedBy?: string;
 }
 
-export type BotOperationalMode = 'file_bot' | 'post_bot' | 'image_url_bot';
-
-export interface ImageUrlBotLinkRecord {
-  id: number;
-  imageId: string;
-  url: string;
-  ownerTelegramId: number;
-  caption: string | null;
-  category: string;
-  expiresAt: string | null;
-  fileSize: number | null;
-  createdAt: string;
-  isDeleted: boolean;
-}
-
-export interface ImageUrlBotStoreData {
-  nextLinkId: number;
-  adminTelegramId?: string;
-  adminUsername?: string;
-  users: Record<string, {
-    telegramId: number;
-    username: string | null;
-    firstName: string | null;
-    joinedAt: string;
-    lastActiveAt: string;
-  }>;
-  links: ImageUrlBotLinkRecord[];
-  userSettings: Record<string, {
-    defaultExpiry: string;
-    notifyExpiry: boolean;
-  }>;
-  sessions: Record<string, {
-    activeMessageId: number | null;
-    state: string;
-    tempData: Record<string, any>;
-  }>;
-}
+export type BotOperationalMode = 'file_bot';
 
 export interface ModerationDurationPreset {
   label: string;
@@ -246,10 +210,10 @@ export interface ModerationDurationPreset {
 
 export interface BotSettings {
   botToken: string;
+  lastEnvBotToken?: string;
   botUsername: string;
   rootAdminId: string;
   botMode?: BotOperationalMode;
-  postBotChannelId?: string;
   maxBotMessagesPerChat: number;
   dailyCleanupEnabled: boolean;
   cleanupAgeHours: number;
@@ -278,6 +242,14 @@ export interface BotSettings {
   customEmojiMap?: Record<string, string>;
   customEmojiRules?: CustomEmojiRule[];
   botStopped?: boolean;
+}
+
+export interface GroupWarningConfig {
+  action: 'ban' | 'mute';
+  durationSec: number; // 0 = permanent
+  isPermanent: boolean;
+  durationLabel: string;
+  updatedAt?: string;
 }
 
 export interface JoinRequestRecord {
@@ -507,6 +479,7 @@ export interface PendingModerationActionRecord {
   targetUsername: string;
   reason?: string;
   adminId: string;
+  initiatedAnonymously?: boolean;
   stage: 'select_duration' | 'custom_keypad' | 'awaiting_reason' | 'confirm_reason';
   keypadDigits: string;
   keypadUnit: 'm' | 'h' | 'd';
@@ -539,10 +512,9 @@ export interface AppDatabase {
   fraudRules?: FraudKeywordRule[];
   linkWarnings?: Record<string, number>;
   fraudWarnings?: Record<string, number>;
+  groupWarningConfigs?: Record<string, GroupWarningConfig>;
   detectedChannels?: ForceSubChannel[];
   joinRequests?: Record<string, JoinRequestRecord>;
-  postBotPublishedPosts?: Record<string, any>;
-  imageUrlBotData?: ImageUrlBotStoreData;
   keyPools?: KeyPoolRecord[];
   guestAccounts?: FreeFireGuestAccountRecord[];
   hourlyDeliveries?: Record<string, number>;
@@ -771,7 +743,6 @@ export const DEFAULT_SETTINGS: BotSettings = {
   botUsername: '',
   rootAdminId: process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || '',
   botMode: 'file_bot',
-  postBotChannelId: '',
   maxBotMessagesPerChat: 10,
   dailyCleanupEnabled: true,
   cleanupAgeHours: 24,
@@ -888,9 +859,9 @@ export class SharedStorageService {
       fraudRules: [],
       linkWarnings: {},
       fraudWarnings: {},
+      groupWarningConfigs: {},
       detectedChannels: [],
       joinRequests: {},
-      postBotPublishedPosts: {},
       keyPools: [],
       guestAccounts: [],
       hourlyDeliveries: {},
@@ -1356,6 +1327,7 @@ export class SharedStorageService {
       fraudRules: Array.isArray(loadedData.fraudRules) ? loadedData.fraudRules : [],
       linkWarnings: loadedData.linkWarnings || {},
       fraudWarnings: loadedData.fraudWarnings || {},
+      groupWarningConfigs: loadedData.groupWarningConfigs || {},
       detectedChannels: Array.isArray(loadedData.detectedChannels) ? loadedData.detectedChannels : [],
       joinRequests: (() => {
         const merged = { ...(loadedData.joinRequests || {}), ...(this.db.joinRequests || {}) };
@@ -1364,8 +1336,6 @@ export class SharedStorageService {
         }
         return merged;
       })(),
-      postBotPublishedPosts: { ...(loadedData.postBotPublishedPosts || {}), ...(this.db.postBotPublishedPosts || {}) },
-      imageUrlBotData: loadedData.imageUrlBotData || this.db.imageUrlBotData,
       keyPools: Array.isArray(loadedData.keyPools)
         ? loadedData.keyPools
         : (Array.isArray(this.db.keyPools) ? this.db.keyPools : []),
@@ -1391,22 +1361,24 @@ export class SharedStorageService {
         ...(loadedData.settings || {}),
         botToken: isMainBot
           ? ((() => {
-              const envTok = String(process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN || '').trim().replace(/^["']|["']$/g, '');
+              const envTok = String(
+                process.env.BOT_TOKEN ||
+                process.env.TELEGRAM_BOT_TOKEN ||
+                process.env.TG_BOT_TOKEN ||
+                process.env.BOT_API_TOKEN ||
+                process.env.TOKEN ||
+                ''
+              ).trim().replace(/^["']|["']$/g, '');
               const validEnvTok = envTok && !envTok.includes('your_telegram_bot_token') ? envTok : '';
-              return validEnvTok || loadedData.settings?.botToken || '';
+              const storedTok = String(loadedData.settings?.botToken || '').trim().replace(/^["']|["']$/g, '');
+              const validStoredTok = storedTok && !storedTok.includes('your_telegram_bot_token') ? storedTok : '';
+              return validStoredTok || validEnvTok || '';
             })())
           : (loadedData.settings?.botToken || this.db.settings?.botToken || ''),
         rootAdminId: isMainBot
           ? (process.env.ADMIN_ID || process.env.ROOT_ADMIN_ID || loadedData.settings?.rootAdminId || '')
           : (loadedData.settings?.rootAdminId || this.db.settings?.rootAdminId || ''),
-        botMode: (
-          loadedData.settings?.botMode === 'post_bot' || loadedData.settings?.botMode === 'image_url_bot'
-            ? loadedData.settings.botMode
-            : (this.db.settings?.botMode === 'post_bot' || this.db.settings?.botMode === 'image_url_bot'
-                ? this.db.settings.botMode
-                : 'file_bot')
-        ),
-        postBotChannelId: loadedData.settings?.postBotChannelId || this.db.settings?.postBotChannelId || '',
+        botMode: 'file_bot',
         autoDeleteNoticeEnabled: loadedData.settings?.autoDeleteNoticeEnabled ?? false,
         forceSubEnabled: loadedData.settings?.forceSubEnabled ?? false,
         forceJoinMode: loadedData.settings?.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join',
@@ -2974,11 +2946,7 @@ export class SharedStorageService {
   // --- Settings ---
   public async getSettings(): Promise<BotSettings> {
     await this.loadLatest(false);
-    if (
-      this.db.settings.botMode !== 'file_bot' &&
-      this.db.settings.botMode !== 'post_bot' &&
-      this.db.settings.botMode !== 'image_url_bot'
-    ) {
+    if (this.db.settings.botMode !== 'file_bot') {
       this.db.settings.botMode = 'file_bot';
     }
     if (this.db.settings.forceSubEnabled === undefined) {
@@ -3035,12 +3003,7 @@ export class SharedStorageService {
       settings.forceJoinMode !== undefined
         ? (settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join')
         : (this.db.settings.forceJoinMode === 'request_only' ? 'request_only' : 'auto_join');
-    const normalizeMode = (m: any): BotOperationalMode =>
-      m === 'post_bot' ? 'post_bot' : (m === 'image_url_bot' ? 'image_url_bot' : 'file_bot');
-    const nextBotMode: BotOperationalMode =
-      settings.botMode !== undefined
-        ? normalizeMode(settings.botMode)
-        : normalizeMode(this.db.settings.botMode);
+    const nextBotMode: BotOperationalMode = 'file_bot';
     this.db.settings = { 
       ...this.db.settings, 
       ...settings,
@@ -3448,33 +3411,6 @@ export class SharedStorageService {
       }
     }
     return false;
-  }
-
-  // --- Post Bot Published Posts Persistence ---
-  public async getPostBotPublishedPosts(): Promise<Record<string, any>> {
-    await this.loadLatest(false);
-    return this.db.postBotPublishedPosts || {};
-  }
-
-  public async savePostBotPublishedPost(postId: string | number, postRecord: any): Promise<void> {
-    await this.loadLatest(false);
-    if (!this.db.postBotPublishedPosts) {
-      this.db.postBotPublishedPosts = {};
-    }
-    this.db.postBotPublishedPosts[String(postId)] = postRecord;
-    await this.persist();
-  }
-
-  // --- Image URL Bot Persistence ---
-  public async getImageUrlBotData(): Promise<ImageUrlBotStoreData | undefined> {
-    await this.loadLatest(false);
-    return this.db.imageUrlBotData;
-  }
-
-  public async saveImageUrlBotData(data: ImageUrlBotStoreData): Promise<void> {
-    await this.loadLatest(false);
-    this.db.imageUrlBotData = data;
-    await this.persist();
   }
 
   public async getJoinRequests(): Promise<JoinRequestRecord[]> {
@@ -4022,20 +3958,92 @@ export class SharedStorageService {
     if (!this.db.linkWarnings) {
       this.db.linkWarnings = {};
     }
-    const key = maybeUserId !== undefined ? `${chatOrUserId}_${maybeUserId}` : String(chatOrUserId);
+    const cleanFirst = String(chatOrUserId ?? '').trim();
+    const cleanSecond = maybeUserId !== undefined ? String(maybeUserId).trim() : undefined;
+    const key = cleanSecond !== undefined ? `${cleanFirst}_${cleanSecond}` : cleanFirst;
     const nextVal = (this.db.linkWarnings[key] || 0) + 1;
     this.db.linkWarnings[key] = nextVal;
-    await this.persist();
+    await this.persist(true);
     return nextVal;
+  }
+
+  public async decrementUserLinkWarning(
+    chatOrUserId: string | number,
+    maybeUserId?: string | number
+  ): Promise<{ previous: number; current: number }> {
+    await this.loadLatest(true);
+    if (!this.db.linkWarnings) {
+      this.db.linkWarnings = {};
+    }
+    const cleanFirst = String(chatOrUserId ?? '').trim();
+    const cleanSecond = maybeUserId !== undefined ? String(maybeUserId).trim() : undefined;
+    const key = cleanSecond !== undefined ? `${cleanFirst}_${cleanSecond}` : cleanFirst;
+    const prevVal = Number(this.db.linkWarnings[key] || 0);
+    const nextVal = Math.max(0, prevVal - 1);
+    if (nextVal <= 0) {
+      delete this.db.linkWarnings[key];
+    } else {
+      this.db.linkWarnings[key] = nextVal;
+    }
+    await this.persist(true);
+    return { previous: prevVal, current: nextVal };
   }
 
   public async resetUserLinkWarning(chatOrUserId: string | number, maybeUserId?: string | number): Promise<void> {
     await this.loadLatest(true);
     if (this.db.linkWarnings) {
-      const key = maybeUserId !== undefined ? `${chatOrUserId}_${maybeUserId}` : String(chatOrUserId);
+      const cleanFirst = String(chatOrUserId ?? '').trim();
+      const cleanSecond = maybeUserId !== undefined ? String(maybeUserId).trim() : undefined;
+      const key = cleanSecond !== undefined ? `${cleanFirst}_${cleanSecond}` : cleanFirst;
       delete this.db.linkWarnings[key];
       await this.persist();
     }
+  }
+
+  // --- Per-Group Warning Mode Configuration ---
+  public async getGroupWarningConfig(chatId: string | number): Promise<GroupWarningConfig> {
+    await this.loadLatest(false);
+    const cleanChatId = String(chatId ?? '').trim();
+    const saved = cleanChatId ? this.db.groupWarningConfigs?.[cleanChatId] : undefined;
+    if (saved && (saved.action === 'ban' || saved.action === 'mute')) {
+      const isPerm = Boolean(saved.isPermanent || !saved.durationSec || saved.durationSec <= 0);
+      return {
+        action: saved.action,
+        durationSec: isPerm ? 0 : Math.max(30, Math.round(Number(saved.durationSec))),
+        isPermanent: isPerm,
+        durationLabel: saved.durationLabel || (isPerm ? 'Permanent' : `${Math.round(Number(saved.durationSec))} Seconds`),
+        updatedAt: saved.updatedAt
+      };
+    }
+    return {
+      action: 'ban',
+      durationSec: 0,
+      isPermanent: true,
+      durationLabel: 'Permanent'
+    };
+  }
+
+  public async setGroupWarningConfig(
+    chatId: string | number,
+    config: GroupWarningConfig
+  ): Promise<GroupWarningConfig> {
+    const cleanChatId = String(chatId ?? '').trim();
+    const isPerm = Boolean(config.isPermanent || !config.durationSec || config.durationSec <= 0);
+    const normalized: GroupWarningConfig = {
+      action: config.action === 'mute' ? 'mute' : 'ban',
+      durationSec: isPerm ? 0 : Math.max(30, Math.round(Number(config.durationSec))),
+      isPermanent: isPerm,
+      durationLabel: config.durationLabel || (isPerm ? 'Permanent' : `${Math.round(Number(config.durationSec))} Seconds`),
+      updatedAt: new Date().toISOString()
+    };
+    if (!cleanChatId) return normalized;
+    await this.loadLatest(true);
+    if (!this.db.groupWarningConfigs || typeof this.db.groupWarningConfigs !== 'object') {
+      this.db.groupWarningConfigs = {};
+    }
+    this.db.groupWarningConfigs[cleanChatId] = normalized;
+    await this.persist(true);
+    return normalized;
   }
 
   // --- Fraud & Keyword Rule Warnings ---
@@ -4055,6 +4063,49 @@ export class SharedStorageService {
     this.db.fraudWarnings[key] = nextVal;
     await this.persist();
     return nextVal;
+  }
+
+  public async decrementUserFraudWarningByHash(
+    chatId: string | number,
+    userId: string | number,
+    ruleIdOrHash?: string
+  ): Promise<{ previous: number; current: number }> {
+    await this.loadLatest(true);
+    if (!this.db.fraudWarnings) {
+      this.db.fraudWarnings = {};
+    }
+    const cleanChat = String(chatId ?? '').trim();
+    const cleanUser = String(userId ?? '').trim();
+    const prefix = `${cleanChat}_${cleanUser}_`;
+    let targetKey = '';
+    if (ruleIdOrHash) {
+      const exactKey = `${prefix}${ruleIdOrHash}`;
+      if (this.db.fraudWarnings[exactKey] !== undefined) {
+        targetKey = exactKey;
+      } else {
+        for (const k of Object.keys(this.db.fraudWarnings)) {
+          if (!k.startsWith(prefix)) continue;
+          const rId = k.slice(prefix.length);
+          const shortHash = crypto.createHash('md5').update(rId).digest('hex').slice(0, 8);
+          if (shortHash === ruleIdOrHash) {
+            targetKey = k;
+            break;
+          }
+        }
+      }
+    }
+    if (!targetKey) {
+      targetKey = `${cleanChat}_${cleanUser}`;
+    }
+    const prevVal = Number(this.db.fraudWarnings[targetKey] || 0);
+    const nextVal = Math.max(0, prevVal - 1);
+    if (nextVal <= 0) {
+      delete this.db.fraudWarnings[targetKey];
+    } else {
+      this.db.fraudWarnings[targetKey] = nextVal;
+    }
+    await this.persist(true);
+    return { previous: prevVal, current: nextVal };
   }
 
   public async resetUserFraudWarning(chatOrUserId: string | number, maybeUserId?: string | number, ruleId?: string): Promise<void> {
@@ -4102,13 +4153,33 @@ export class SharedStorageService {
         isAdmin: true
       };
     }
+    const groupModMap = this.db.groupModeration || {};
+    for (const chatMembers of Object.values(groupModMap)) {
+      if (!chatMembers || typeof chatMembers !== 'object') continue;
+      for (const m of Object.values(chatMembers)) {
+        if (!m) continue;
+        const mId = String(m.userId || '').trim();
+        const mUser = m.username ? m.username.replace(/^@+/, '').toLowerCase() : '';
+        if ((mId && (mId === clean || mId === query.trim())) || (mUser && mUser === clean)) {
+          return {
+            id: mId,
+            username: m.username ? m.username.replace(/^@+/, '') : undefined,
+            firstName: m.firstName,
+            lastName: m.lastName,
+            firstSeenAt: m.lastSeenAt || new Date().toISOString(),
+            lastActiveAt: m.lastSeenAt || new Date().toISOString(),
+            interactionCount: 1
+          };
+        }
+      }
+    }
     return null;
   }
 
   public async setBotUserBanned(
     userId: string | number,
     isBanned: boolean,
-    opts?: { chatId?: string; untilMs?: number; reason?: string; name?: string; username?: string }
+    opts?: { chatId?: string; untilMs?: number; reason?: string; name?: string; username?: string; preserveExistingReason?: boolean }
   ): Promise<BotUserRecord | null> {
     if (!userId) return null;
     const cleanId = String(userId).trim();
@@ -4143,6 +4214,7 @@ export class SharedStorageService {
     const formattedOptUsername = opts?.username
       ? `@${String(opts.username).replace(/^@+/, '').trim()}`
       : undefined;
+    const cleanOptReason = typeof opts?.reason === 'string' ? opts.reason.trim() : '';
     let user: BotUserRecord | null = null;
 
     if (matchingKeys.length === 0) {
@@ -4157,23 +4229,28 @@ export class SharedStorageService {
         bannedAt: isBanned ? now : undefined,
         ...(banUntilIso ? { banUntil: banUntilIso } : {}),
         ...(isBanned && opts?.chatId ? { banChatId: String(opts.chatId) } : {}),
-        ...(isBanned && opts?.reason ? { banReason: opts.reason } : {})
+        ...(isBanned ? { banReason: cleanOptReason || 'No reason' } : {})
       };
       this.db.botUsers[cleanId] = user;
     } else {
       for (const k of matchingKeys) {
         const u = this.db.botUsers[k];
-        if (!u.firstName && opts?.name) u.firstName = opts.name;
-        if (!u.username && formattedOptUsername) u.username = formattedOptUsername;
+        if (opts?.name && (!u.firstName || /^(?:User\s+)?\d+$/i.test(u.firstName.trim()))) u.firstName = opts.name;
+        if (formattedOptUsername && !u.username) u.username = formattedOptUsername;
+        const wasAlreadyBanned = Boolean(u.isBanned);
         u.isBanned = Boolean(isBanned);
         if (isBanned) {
-          u.bannedAt = now;
+          if (!(wasAlreadyBanned && opts?.preserveExistingReason && u.bannedAt)) {
+            u.bannedAt = now;
+          }
           if (banUntilIso) u.banUntil = banUntilIso;
           else delete u.banUntil;
           if (opts?.chatId) u.banChatId = String(opts.chatId);
-          if (opts?.reason !== undefined) {
-            if (opts.reason) u.banReason = opts.reason;
-            else delete u.banReason;
+          if (opts?.preserveExistingReason) {
+            if (cleanOptReason) u.banReason = cleanOptReason;
+            else if (!u.banReason || !u.banReason.trim()) u.banReason = 'No reason';
+          } else {
+            u.banReason = cleanOptReason || 'No reason';
           }
         } else {
           delete u.bannedAt;
@@ -4221,7 +4298,7 @@ export class SharedStorageService {
   public async setBotUserMuted(
     userId: string | number,
     isMuted: boolean,
-    opts?: { chatId?: string; untilMs?: number; reason?: string; name?: string; username?: string }
+    opts?: { chatId?: string; untilMs?: number; reason?: string; name?: string; username?: string; preserveExistingReason?: boolean }
   ): Promise<BotUserRecord | null> {
     if (!userId) return null;
     const cleanId = String(userId).trim();
@@ -4256,6 +4333,7 @@ export class SharedStorageService {
     const formattedOptUsername = opts?.username
       ? `@${String(opts.username).replace(/^@+/, '').trim()}`
       : undefined;
+    const cleanOptReason = typeof opts?.reason === 'string' ? opts.reason.trim() : '';
     let user: BotUserRecord | null = null;
 
     if (matchingKeys.length === 0) {
@@ -4270,23 +4348,28 @@ export class SharedStorageService {
         mutedAt: isMuted ? now : undefined,
         ...(muteUntilIso ? { muteUntil: muteUntilIso } : {}),
         ...(isMuted && opts?.chatId ? { muteChatId: String(opts.chatId) } : {}),
-        ...(isMuted && opts?.reason ? { muteReason: opts.reason } : {})
+        ...(isMuted ? { muteReason: cleanOptReason || 'No reason' } : {})
       };
       this.db.botUsers[cleanId] = user;
     } else {
       for (const k of matchingKeys) {
         const u = this.db.botUsers[k];
-        if (!u.firstName && opts?.name) u.firstName = opts.name;
-        if (!u.username && formattedOptUsername) u.username = formattedOptUsername;
+        if (opts?.name && (!u.firstName || /^(?:User\s+)?\d+$/i.test(u.firstName.trim()))) u.firstName = opts.name;
+        if (formattedOptUsername && !u.username) u.username = formattedOptUsername;
+        const wasAlreadyMuted = Boolean(u.isMuted);
         u.isMuted = Boolean(isMuted);
         if (isMuted) {
-          u.mutedAt = now;
+          if (!(wasAlreadyMuted && opts?.preserveExistingReason && u.mutedAt)) {
+            u.mutedAt = now;
+          }
           if (muteUntilIso) u.muteUntil = muteUntilIso;
           else delete u.muteUntil;
           if (opts?.chatId) u.muteChatId = String(opts.chatId);
-          if (opts?.reason !== undefined) {
-            if (opts.reason) u.muteReason = opts.reason;
-            else delete u.muteReason;
+          if (opts?.preserveExistingReason) {
+            if (cleanOptReason) u.muteReason = cleanOptReason;
+            else if (!u.muteReason || !u.muteReason.trim()) u.muteReason = 'No reason';
+          } else {
+            u.muteReason = cleanOptReason || 'No reason';
           }
         } else {
           delete u.mutedAt;
@@ -4401,7 +4484,7 @@ export class SharedStorageService {
     chatId: string | number,
     userId: string | number,
     isBanned: boolean,
-    opts?: { untilMs?: number; reason?: string; name?: string; username?: string }
+    opts?: { untilMs?: number; reason?: string; name?: string; username?: string; preserveExistingReason?: boolean }
   ): Promise<GroupMemberModerationState | null> {
     const cleanChatId = String(chatId || '').trim();
     const cleanUserId = String(userId || '').trim();
@@ -4416,23 +4499,37 @@ export class SharedStorageService {
       ? new Date(opts.untilMs).toISOString()
       : undefined;
     const cleanUsername = opts?.username ? `@${String(opts.username).replace(/^@+/, '').trim()}` : undefined;
+    const cleanName = opts?.name ? String(opts.name).trim() : '';
+    const cleanOptReason = typeof opts?.reason === 'string' ? opts.reason.trim() : '';
 
     const existing = this.db.groupModeration[cleanChatId][cleanUserId] || {
       userId: cleanUserId,
       lastSeenAt: now
     };
-    if (opts?.name && !existing.firstName) existing.firstName = opts.name;
-    if (cleanUsername && !existing.username) existing.username = cleanUsername;
+    if (cleanName && (!existing.firstName || /^(?:User\s+)?\d+$/i.test(existing.firstName.trim()) || !/^(?:User\s+)?\d+$/i.test(cleanName))) {
+      existing.firstName = cleanName;
+    }
+    if (cleanUsername) {
+      existing.username = cleanUsername;
+    }
 
+    const wasAlreadyBanned = Boolean(existing.isBanned);
     existing.isBanned = Boolean(isBanned);
     if (isBanned) {
-      existing.bannedAt = now;
+      if (!(wasAlreadyBanned && opts?.preserveExistingReason && existing.bannedAt)) {
+        existing.bannedAt = now;
+      }
       delete existing.unbannedAt;
       if (banUntilIso) existing.banUntil = banUntilIso;
       else delete existing.banUntil;
-      if (opts?.reason !== undefined) {
-        if (opts.reason) existing.banReason = opts.reason;
-        else delete existing.banReason;
+      if (opts?.preserveExistingReason) {
+        if (cleanOptReason) {
+          existing.banReason = cleanOptReason;
+        } else if (!existing.banReason || !existing.banReason.trim()) {
+          existing.banReason = 'No reason';
+        }
+      } else {
+        existing.banReason = cleanOptReason || 'No reason';
       }
     } else {
       delete existing.bannedAt;
@@ -4450,7 +4547,7 @@ export class SharedStorageService {
     chatId: string | number,
     userId: string | number,
     isMuted: boolean,
-    opts?: { untilMs?: number; reason?: string; name?: string; username?: string }
+    opts?: { untilMs?: number; reason?: string; name?: string; username?: string; preserveExistingReason?: boolean }
   ): Promise<GroupMemberModerationState | null> {
     const cleanChatId = String(chatId || '').trim();
     const cleanUserId = String(userId || '').trim();
@@ -4465,22 +4562,36 @@ export class SharedStorageService {
       ? new Date(opts.untilMs).toISOString()
       : undefined;
     const cleanUsername = opts?.username ? `@${String(opts.username).replace(/^@+/, '').trim()}` : undefined;
+    const cleanName = opts?.name ? String(opts.name).trim() : '';
+    const cleanOptReason = typeof opts?.reason === 'string' ? opts.reason.trim() : '';
 
     const existing = this.db.groupModeration[cleanChatId][cleanUserId] || {
       userId: cleanUserId,
       lastSeenAt: now
     };
-    if (opts?.name && !existing.firstName) existing.firstName = opts.name;
-    if (cleanUsername && !existing.username) existing.username = cleanUsername;
+    if (cleanName && (!existing.firstName || /^(?:User\s+)?\d+$/i.test(existing.firstName.trim()) || !/^(?:User\s+)?\d+$/i.test(cleanName))) {
+      existing.firstName = cleanName;
+    }
+    if (cleanUsername) {
+      existing.username = cleanUsername;
+    }
 
+    const wasAlreadyMuted = Boolean(existing.isMuted);
     existing.isMuted = Boolean(isMuted);
     if (isMuted) {
-      existing.mutedAt = now;
+      if (!(wasAlreadyMuted && opts?.preserveExistingReason && existing.mutedAt)) {
+        existing.mutedAt = now;
+      }
       if (muteUntilIso) existing.muteUntil = muteUntilIso;
       else delete existing.muteUntil;
-      if (opts?.reason !== undefined) {
-        if (opts.reason) existing.muteReason = opts.reason;
-        else delete existing.muteReason;
+      if (opts?.preserveExistingReason) {
+        if (cleanOptReason) {
+          existing.muteReason = cleanOptReason;
+        } else if (!existing.muteReason || !existing.muteReason.trim()) {
+          existing.muteReason = 'No reason';
+        }
+      } else {
+        existing.muteReason = cleanOptReason || 'No reason';
       }
     } else {
       delete existing.mutedAt;
@@ -4504,7 +4615,49 @@ export class SharedStorageService {
     if (this.pruneExpiredGroupModeration(cleanChatId)) {
       this.persist().catch(() => {});
     }
-    return this.db.groupModeration?.[cleanChatId]?.[cleanUserId] || null;
+    const rec = this.db.groupModeration?.[cleanChatId]?.[cleanUserId] || null;
+    if (rec) {
+      if (rec.isBanned && (!rec.banReason || !rec.banReason.trim())) rec.banReason = 'No reason';
+      if (rec.isMuted && (!rec.muteReason || !rec.muteReason.trim())) rec.muteReason = 'No reason';
+    }
+    return rec;
+  }
+
+  public async getTrackedGroupMemberIdsForSync(
+    chatId: string | number,
+    limit = 60
+  ): Promise<string[]> {
+    const cleanChatId = String(chatId || '').trim();
+    if (!cleanChatId) return [];
+    await this.loadLatest(false);
+
+    const priorityIds = new Set<string>();
+    const recentMembers = Object.values(this.db.groupModeration?.[cleanChatId] || {})
+      .filter((m) => m && /^\d+$/.test(String(m.userId || '').trim()))
+      .sort((a, b) => {
+        const aActive = (a.isBanned ? 2 : 0) + (a.isMuted ? 1 : 0);
+        const bActive = (b.isBanned ? 2 : 0) + (b.isMuted ? 1 : 0);
+        if (aActive !== bActive) return bActive - aActive;
+        return new Date(b.lastSeenAt || b.bannedAt || b.mutedAt || 0).getTime() -
+          new Date(a.lastSeenAt || a.bannedAt || a.mutedAt || 0).getTime();
+      });
+
+    for (const m of recentMembers) {
+      priorityIds.add(String(m.userId).trim());
+      if (priorityIds.size >= limit) break;
+    }
+
+    if (priorityIds.size < limit && this.db.botUsers) {
+      for (const u of Object.values(this.db.botUsers)) {
+        if (!u || !/^\d+$/.test(String(u.id || '').trim())) continue;
+        if (String(u.banChatId || '').trim() === cleanChatId || String(u.muteChatId || '').trim() === cleanChatId) {
+          priorityIds.add(String(u.id).trim());
+          if (priorityIds.size >= limit) break;
+        }
+      }
+    }
+
+    return Array.from(priorityIds);
   }
 
   public async getGroupModerationSummary(chatId: string | number): Promise<{
@@ -4521,9 +4674,11 @@ export class SharedStorageService {
     const members = Object.values((cleanChatId && this.db.groupModeration?.[cleanChatId]) || {});
     const bannedUsers = members
       .filter((m) => Boolean(m && m.isBanned))
+      .map((m) => (!m.banReason || !m.banReason.trim() ? { ...m, banReason: 'No reason' } : m))
       .sort((a, b) => new Date(b.bannedAt || b.lastSeenAt || 0).getTime() - new Date(a.bannedAt || a.lastSeenAt || 0).getTime());
     const mutedUsers = members
       .filter((m) => Boolean(m && m.isMuted))
+      .map((m) => (!m.muteReason || !m.muteReason.trim() ? { ...m, muteReason: 'No reason' } : m))
       .sort((a, b) => new Date(b.mutedAt || b.lastSeenAt || 0).getTime() - new Date(a.mutedAt || a.lastSeenAt || 0).getTime());
     const unbannedCount = members.filter((m) => Boolean(m) && !m.isBanned).length;
 
@@ -5991,7 +6146,8 @@ export class SharedStorageService {
   public async getAwaitingReasonModeration(
     chatId: string | number,
     adminId?: string | number,
-    replyToMessageId?: number
+    replyToMessageId?: number,
+    isAnonymousAdmin: boolean = false
   ): Promise<PendingModerationActionRecord | null> {
     await this.loadLatest(false);
     const map = this.db.pendingModerationActions;
@@ -6009,7 +6165,8 @@ export class SharedStorageService {
       if (replyToMessageId && entry.promptMessageId && Number(entry.promptMessageId) === Number(replyToMessageId)) {
         return { ...entry };
       }
-      if (cleanAdminId && String(entry.adminId ?? '').trim() === cleanAdminId) {
+      const entryAdminId = String(entry.adminId ?? '').trim();
+      if ((cleanAdminId && entryAdminId === cleanAdminId) || isAnonymousAdmin) {
         if (!best || entry.createdAt > best.createdAt) {
           best = { ...entry };
         }

@@ -504,6 +504,17 @@ export const DEFAULT_INLINE_BUTTONS: Record<string, InlineButtonConfig> = {
     'success',
     'Confirms moderation reason and executes ban/mute'
   ),
+  mod_skip_reason: defBtn(
+    'mod_skip_reason',
+    'Moderation: Skip Reason',
+    'No Reason',
+    '⏭️',
+    'callback',
+    'mods:{token}',
+    'Moderation & Clone',
+    'primary',
+    'Skips entering a reason and applies ban/mute with No reason'
+  ),
   report_ban_user: defBtn(
     'report_ban_user',
     'Report Alert: Ban User',
